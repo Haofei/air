@@ -4,10 +4,12 @@ use air_runtime::{
     write_trace_jsonl_with_options, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
 };
 mod models;
+mod profile;
 mod tools;
 use crate::models::{call_openai_model, ModelProviderChoice};
+use crate::profile::{read_json_object, read_run_plan_profile, resolve_profile_path};
 use crate::tools::ToolProviderChoice;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -2476,48 +2478,6 @@ struct ReplayOptions {
     identity_out: Option<PathBuf>,
 }
 
-#[derive(Debug, Deserialize)]
-struct RunPlanProfile {
-    plan: PathBuf,
-    store: PathBuf,
-
-    #[serde(default)]
-    input_file: Option<PathBuf>,
-
-    #[serde(default)]
-    inputs: Option<BTreeMap<String, Value>>,
-
-    #[serde(default)]
-    model_config: Option<PathBuf>,
-
-    #[serde(default)]
-    tool_config: Option<PathBuf>,
-
-    #[serde(default)]
-    trace_out: Option<PathBuf>,
-
-    #[serde(default)]
-    trace_redact: Option<bool>,
-
-    #[serde(default)]
-    state_out: Option<PathBuf>,
-
-    #[serde(default)]
-    checkpoint_out: Option<PathBuf>,
-
-    #[serde(default)]
-    jit_cache: Option<PathBuf>,
-
-    #[serde(default)]
-    parallel: Option<bool>,
-
-    #[serde(default)]
-    log: Option<bool>,
-
-    #[serde(default)]
-    example_tools: Option<bool>,
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct PlanStateFile {
     status: air_linker::RunStatus,
@@ -3215,37 +3175,6 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&result.outputs)?);
 
     Ok(())
-}
-
-fn read_json_object(path: PathBuf, label: &str) -> Result<serde_json::Map<String, Value>> {
-    let input = fs::read_to_string(&path)
-        .with_context(|| format!("failed to read {label} JSON file {}", path.display()))?;
-    let Value::Object(inputs) = serde_json::from_str::<Value>(&input)
-        .with_context(|| format!("failed to parse {label} JSON file {}", path.display()))?
-    else {
-        anyhow::bail!(
-            "{label} JSON file {} must contain a JSON object",
-            path.display()
-        );
-    };
-    Ok(inputs)
-}
-
-fn read_run_plan_profile(path: &PathBuf) -> Result<RunPlanProfile> {
-    let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read run profile {}", path.display()))?;
-    serde_yaml::from_str(&source)
-        .with_context(|| format!("failed to parse run profile YAML {}", path.display()))
-}
-
-fn resolve_profile_path(profile_path: &std::path::Path, path: &PathBuf) -> PathBuf {
-    if path.is_absolute() {
-        return path.clone();
-    }
-    profile_path
-        .parent()
-        .map(|parent| parent.join(path))
-        .unwrap_or_else(|| path.clone())
 }
 
 fn parse_output_override(spec: &str) -> Result<(String, Value)> {
