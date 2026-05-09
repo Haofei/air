@@ -270,6 +270,23 @@ fn rejects_state_machine_dangerous_capability_without_approval() {
 }
 
 #[test]
+fn rejects_state_machine_dangerous_capability_without_approval_on_one_branch() {
+    let module =
+        parse_air_file("../../tests/fixtures-invalid-state-machine-approval-branch.air.yaml")
+            .unwrap();
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR073"),
+        "expected AIR073, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn rejects_state_machine_phase_values_outside_schema() {
     let module =
         parse_air_file("../../tests/fixtures-invalid-state-machine-phase.air.yaml").unwrap();

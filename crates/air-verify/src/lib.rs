@@ -1,6 +1,6 @@
 use air_core::{
     AirModule, DagWorkflow, DetailedTypeKind, Diagnostic, NodeKind, Severity, StateAction,
-    StateMachineWorkflow, TypeSpec, Workflow, WorkflowNode,
+    StateMachineWorkflow, StateRule, TypeSpec, Workflow, WorkflowNode,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -428,7 +428,6 @@ impl Verifier {
         }
 
         let mut seen_rules = BTreeSet::new();
-        let mut approved_capabilities = BTreeSet::new();
         let tools_by_name: BTreeMap<_, _> = module
             .tools
             .iter()
@@ -468,26 +467,21 @@ impl Verifier {
             }
 
             for action in &rule.actions {
-                self.verify_state_action(
-                    module,
-                    &tools_by_name,
-                    &mut approved_capabilities,
-                    &rule.id,
-                    action,
-                );
+                self.verify_state_action(module, &tools_by_name, &rule.id, action);
             }
         }
 
         if workflow.rules.is_empty() {
             self.error("AIR068", "state_machine.rules must not be empty");
         }
+
+        self.verify_state_machine_approval_paths(module, workflow, &tools_by_name);
     }
 
     fn verify_state_action(
         &mut self,
         module: &AirModule,
         tools_by_name: &BTreeMap<&str, &air_core::ToolSpec>,
-        approved_capabilities: &mut BTreeSet<String>,
         rule_id: &str,
         action: &StateAction,
     ) {
@@ -539,7 +533,7 @@ impl Verifier {
                 timeout_seconds,
                 retry,
             } => {
-                let Some(tool_spec) = tools_by_name.get(tool.as_str()) else {
+                let Some(_tool_spec) = tools_by_name.get(tool.as_str()) else {
                     self.error(
                         "AIR072",
                         format!(
@@ -557,19 +551,6 @@ impl Verifier {
                 self.verify_state_ref(rule_id, "tool_call output", output, module);
                 self.verify_timeout(rule_id, "tool_call", *timeout_seconds);
                 self.verify_retry(rule_id, retry);
-
-                if let Some(capability) = &tool_spec.capability {
-                    if module.policy.require_approval.contains(capability)
-                        && !approved_capabilities.contains(capability)
-                    {
-                        self.error(
-                            "AIR073",
-                            format!(
-                                "tool_call action in rule {rule_id} calls capability {capability}, but no approval action appears before it in state_machine order"
-                            ),
-                        );
-                    }
-                }
             }
             StateAction::Approval { approval_for } => {
                 if approval_for.is_empty() {
@@ -588,7 +569,6 @@ impl Verifier {
                         );
                     }
                 }
-                approved_capabilities.extend(approval_for.iter().cloned());
             }
             StateAction::Return { output } => {
                 if !module.outputs.contains_key(output) {
@@ -598,6 +578,89 @@ impl Verifier {
                             "return action in rule {rule_id} references unknown output {output}"
                         ),
                     );
+                }
+            }
+        }
+    }
+
+    fn verify_state_machine_approval_paths(
+        &mut self,
+        module: &AirModule,
+        workflow: &StateMachineWorkflow,
+        tools_by_name: &BTreeMap<&str, &air_core::ToolSpec>,
+    ) {
+        let required: BTreeSet<_> = module.policy.require_approval.iter().cloned().collect();
+        if required.is_empty() || workflow.rules.is_empty() {
+            return;
+        }
+
+        let phases = enum_values(module.state.get("phase")).unwrap_or_else(|| {
+            let mut phases = BTreeSet::new();
+            phases.insert(workflow.initial.clone());
+            phases.extend(workflow.terminal.iter().cloned());
+            phases
+        });
+        let terminal: BTreeSet<_> = workflow.terminal.iter().cloned().collect();
+        let mut visited = BTreeSet::new();
+        let mut reported = BTreeSet::new();
+        let mut stack = vec![StateMachineApprovalState {
+            phase: workflow.initial.clone(),
+            approved: BTreeSet::new(),
+        }];
+
+        while let Some(state) = stack.pop() {
+            if !visited.insert(state.key()) {
+                continue;
+            }
+
+            for rule in workflow
+                .rules
+                .iter()
+                .filter(|rule| condition_may_match_phase(&rule.when, &state.phase))
+            {
+                let mut approved = state.approved.clone();
+                for action in &rule.actions {
+                    match action {
+                        StateAction::Approval { approval_for } => {
+                            approved.extend(
+                                approval_for
+                                    .iter()
+                                    .filter(|capability| required.contains(*capability))
+                                    .cloned(),
+                            );
+                        }
+                        StateAction::ToolCall { tool, .. } => {
+                            if let Some(capability) = tools_by_name
+                                .get(tool.as_str())
+                                .and_then(|tool_spec| tool_spec.capability.as_ref())
+                            {
+                                if required.contains(capability)
+                                    && !approved.contains(capability)
+                                    && reported.insert((rule.id.clone(), capability.clone()))
+                                {
+                                    self.error(
+                                        "AIR073",
+                                        format!(
+                                            "tool_call action in rule {} calls capability {}, but not every reachable state_machine path includes approval first",
+                                            rule.id, capability
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+
+                if terminal.contains(&state.phase) {
+                    continue;
+                }
+
+                for next_phase in next_phases_after_rule(rule, &state.phase, &phases) {
+                    stack.push(StateMachineApprovalState {
+                        phase: next_phase,
+                        approved: approved.clone(),
+                    });
                 }
             }
         }
@@ -841,6 +904,83 @@ fn enum_values(spec: Option<&TypeSpec>) -> Option<BTreeSet<String>> {
     }
 
     Some(detailed.enum_values.iter().cloned().collect())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StateMachineApprovalState {
+    phase: String,
+    approved: BTreeSet<String>,
+}
+
+impl StateMachineApprovalState {
+    fn key(&self) -> (String, Vec<String>) {
+        (
+            self.phase.clone(),
+            self.approved.iter().cloned().collect::<Vec<_>>(),
+        )
+    }
+}
+
+fn condition_may_match_phase(condition: &str, phase: &str) -> bool {
+    condition.split("||").any(|group| {
+        group
+            .split("&&")
+            .all(|clause| condition_clause_may_match_phase(clause.trim(), phase))
+    })
+}
+
+fn condition_clause_may_match_phase(clause: &str, phase: &str) -> bool {
+    let (left, right, expected_equal) = if let Some((left, right)) = clause.split_once("==") {
+        (left, right, true)
+    } else if let Some((left, right)) = clause.split_once("!=") {
+        (left, right, false)
+    } else {
+        return true;
+    };
+
+    if normalize_path(left.trim()) != "phase" {
+        return true;
+    }
+
+    let Some(expected) = parse_condition_literal(right.trim()) else {
+        return true;
+    };
+    let serde_json::Value::String(expected_phase) = expected else {
+        return true;
+    };
+
+    (expected_phase == phase) == expected_equal
+}
+
+fn parse_condition_literal(raw: &str) -> Option<serde_json::Value> {
+    if raw.is_empty() {
+        return None;
+    }
+    if (raw.starts_with('"') && raw.ends_with('"'))
+        || (raw.starts_with('\'') && raw.ends_with('\''))
+    {
+        return Some(serde_json::Value::String(raw[1..raw.len() - 1].to_string()));
+    }
+    serde_json::from_str(raw).ok()
+}
+
+fn next_phases_after_rule(
+    rule: &StateRule,
+    current_phase: &str,
+    phases: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut next = None;
+    for action in &rule.actions {
+        if let StateAction::Set { values } = action {
+            if let Some(value) = values.get("phase") {
+                next = match value {
+                    serde_json::Value::String(phase) => Some(BTreeSet::from_iter([phase.clone()])),
+                    _ => Some(phases.clone()),
+                };
+            }
+        }
+    }
+    next.unwrap_or_else(|| BTreeSet::from_iter([current_phase.to_string()]))
 }
 
 fn is_array_type(spec: Option<&TypeSpec>) -> bool {

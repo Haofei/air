@@ -1,0 +1,74 @@
+agent:
+  name: invalid-state-machine-approval-branch
+  version: 0.1.0
+
+inputs:
+  route: string
+
+outputs:
+  result: string
+
+state:
+  phase:
+    type: enum
+    enum: [start, approved_path, danger_path, done]
+  route: string
+  result: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: state_machine
+  initial: start
+  max_steps: 5
+  terminal: [done]
+  rules:
+    - id: choose-approved-path
+      when: phase == "start" && route == "approved"
+      actions:
+        - kind: set
+          values:
+            phase: approved_path
+    - id: choose-danger-path
+      when: phase == "start" && route == "danger"
+      actions:
+        - kind: set
+          values:
+            phase: danger_path
+    - id: approved-path
+      when: phase == "approved_path"
+      actions:
+        - kind: approval
+          approval_for: [production.deploy]
+        - kind: set
+          values:
+            result: approved
+            phase: done
+    - id: danger-path
+      when: phase == "danger_path"
+      actions:
+        - kind: tool_call
+          tool: deploy.production
+          input: route
+          output: result
+          timeout_seconds: 60
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: result
+
+policy:
+  require_approval:
+    - production.deploy
