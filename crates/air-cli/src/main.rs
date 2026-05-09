@@ -1,26 +1,25 @@
 use air_core::Severity;
-use air_runtime::{
-    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl,
-    write_trace_jsonl_with_options, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
-};
+use air_runtime::{system_return_event, Vm};
 mod models;
 mod planner;
 mod profile;
+mod run_plan;
 mod tools;
 use crate::models::ModelProviderChoice;
 use crate::planner::{
     module_base_dir_for_modules, module_base_dir_for_store, plan_task, PlanOptions,
     ValidatePlanOptions,
 };
-use crate::profile::{read_json_object, read_run_plan_profile, resolve_profile_path};
+use crate::profile::{read_run_plan_profile, resolve_profile_path};
+use crate::run_plan::{
+    observe_event, replay, resume_plan, run_plan, write_partial_trace, write_trace, ReplayOptions,
+    ResumePlanOptions, RunPlanOptions,
+};
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
-use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use serde_json::Value;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -596,11 +595,233 @@ fn validate(file: PathBuf) -> Result<()> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+fn run(
+    file: PathBuf,
+    input: PathBuf,
+    model_config: Option<PathBuf>,
+    trace_out: Option<PathBuf>,
+    trace_redact: bool,
+    log: bool,
+    example_tools: bool,
+    tool_config: Option<PathBuf>,
+) -> Result<()> {
+    let module = air_parser::parse_air_file(&file)?;
+    let report = air_verify::verify(&module);
+    if !report.is_success() {
+        for diagnostic in &report.diagnostics {
+            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
+        }
+        std::process::exit(1);
+    }
+
+    let input = fs::read_to_string(input)?;
+    let Value::Object(inputs) = serde_json::from_str::<Value>(&input)? else {
+        anyhow::bail!("--input must be a JSON object");
+    };
+
+    let observe = log || trace_out.is_some();
+    let mut observed_trace = Vec::new();
+    let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
+    let result = if let Some(model_config) = model_config {
+        let config = air_backend_openai::parse_config_file(model_config)?;
+        let mut vm = Vm {
+            tools,
+            models: ModelProviderChoice::openai(config)?,
+        };
+        if observe {
+            let result = vm.run_with_observer(&module, inputs, |event| {
+                observe_event(event, log, &mut observed_trace)
+            });
+            if result.is_err() {
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
+            }
+            result?
+        } else {
+            vm.run(&module, inputs)?
+        }
+    } else {
+        let mut vm = Vm {
+            tools,
+            models: ModelProviderChoice::echo(),
+        };
+        if observe {
+            let result = vm.run_with_observer(&module, inputs, |event| {
+                observe_event(event, log, &mut observed_trace)
+            });
+            if result.is_err() {
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
+            }
+            result?
+        } else {
+            vm.run(&module, inputs)?
+        }
+    };
+    if let Some(trace_out) = trace_out {
+        let mut trace = result.trace.clone();
+        trace.push(system_return_event(result.outputs.clone()));
+        write_trace(trace_out, &trace, trace_redact)?;
+    }
+    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
+
+    Ok(())
+}
+#[allow(clippy::too_many_arguments)]
+fn run_system(
+    file: PathBuf,
+    input: PathBuf,
+    model_config: Option<PathBuf>,
+    trace_out: Option<PathBuf>,
+    trace_redact: bool,
+    log: bool,
+    example_tools: bool,
+    tool_config: Option<PathBuf>,
+) -> Result<()> {
+    let system = air_linker::parse_system_file(&file)?;
+    let base_dir = module_base_dir_for_modules(&system.modules)?;
+    let report = air_linker::validate_system(&system, &base_dir);
+    if !report.is_success() {
+        for diagnostic in &report.diagnostics {
+            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
+        }
+        std::process::exit(1);
+    }
+
+    let input = fs::read_to_string(input)?;
+    let Value::Object(inputs) = serde_json::from_str::<Value>(&input)? else {
+        anyhow::bail!("--input must be a JSON object");
+    };
+
+    let observe = log || trace_out.is_some();
+    let mut observed_trace = Vec::new();
+    let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
+    let result = if let Some(model_config) = model_config {
+        let config = air_backend_openai::parse_config_file(model_config)?;
+        if observe {
+            let result = air_linker::run_system_with_observer(
+                &system,
+                base_dir,
+                inputs,
+                tools,
+                ModelProviderChoice::openai(config)?,
+                |event| observe_event(event, log, &mut observed_trace),
+            );
+            if result.is_err() {
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
+            }
+            result?
+        } else {
+            air_linker::run_system(
+                &system,
+                base_dir,
+                inputs,
+                tools,
+                ModelProviderChoice::openai(config)?,
+            )?
+        }
+    } else if observe {
+        let result = air_linker::run_system_with_observer(
+            &system,
+            base_dir,
+            inputs,
+            tools,
+            ModelProviderChoice::echo(),
+            |event| observe_event(event, log, &mut observed_trace),
+        );
+        if result.is_err() {
+            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
+        }
+        result?
+    } else {
+        air_linker::run_system(
+            &system,
+            base_dir,
+            inputs,
+            tools,
+            ModelProviderChoice::echo(),
+        )?
+    };
+    if let Some(trace_out) = trace_out {
+        let mut trace = result.trace.clone();
+        trace.push(system_return_event(result.outputs.clone()));
+        write_trace(trace_out, &trace, trace_redact)?;
+    }
+    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
+
+    Ok(())
+}
+
+fn lower(file: PathBuf, backend: LowerBackend, output: Option<PathBuf>) -> Result<()> {
+    let module = air_parser::parse_air_file(&file)?;
+    let report = air_verify::verify(&module);
+    if !report.is_success() {
+        for diagnostic in &report.diagnostics {
+            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
+        }
+        std::process::exit(1);
+    }
+
+    let generated = match backend {
+        LowerBackend::Langgraph => air_backend_langgraph::lower_module(&module)?,
+        LowerBackend::OpenaiAgentsJsSemantic => {
+            air_backend_openai_agents_js::lower_module(&module)?
+        }
+    };
+
+    if let Some(output) = output {
+        fs::write(output, generated)?;
+    } else {
+        print!("{generated}");
+    }
+    Ok(())
+}
+
+fn lower_plan(
+    plan: PathBuf,
+    store: PathBuf,
+    backend: LowerPlanBackend,
+    output: Option<PathBuf>,
+) -> Result<()> {
+    let plan = air_linker::parse_run_plan_file(plan)?;
+    let store = air_linker::parse_module_store_file(store)?;
+    let base_dir = module_base_dir_for_store(&store)?;
+    let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
+    if !report.is_success() {
+        for diagnostic in &report.diagnostics {
+            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
+        }
+        std::process::exit(1);
+    }
+
+    let generated = match backend {
+        LowerPlanBackend::Langgraph => {
+            air_backend_langgraph::lower_run_plan(&plan, &store, base_dir)?
+        }
+        LowerPlanBackend::OpenaiJsStrict => {
+            air_backend_openai_agents_js::lower_run_plan_strict(&plan, &store, base_dir)?
+        }
+    };
+
+    if let Some(output) = output {
+        fs::write(output, generated)?;
+    } else {
+        print!("{generated}");
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::planner::{module_catalog, parse_planner_response, planner_request, recipe_catalog};
+    use crate::profile::read_json_object;
+    use crate::run_plan::{
+        run_plan_with_inputs, write_checkpoint_state, PlanStateFile, RunPlanExecutionOptions,
+    };
     use crate::tools::{provider_error_snippet, search_docs, ConfigTools, LocalDoc};
+    use air_runtime::{read_trace_jsonl, TraceStatus};
+    use serde_json::json;
+    use std::collections::BTreeMap;
 
     #[test]
     fn materializes_recipe_selection_from_planner_response() {
@@ -1522,1159 +1743,4 @@ modules:
         );
         assert_eq!(store, None);
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run(
-    file: PathBuf,
-    input: PathBuf,
-    model_config: Option<PathBuf>,
-    trace_out: Option<PathBuf>,
-    trace_redact: bool,
-    log: bool,
-    example_tools: bool,
-    tool_config: Option<PathBuf>,
-) -> Result<()> {
-    let module = air_parser::parse_air_file(&file)?;
-    let report = air_verify::verify(&module);
-    if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
-        std::process::exit(1);
-    }
-
-    let input = fs::read_to_string(input)?;
-    let Value::Object(inputs) = serde_json::from_str::<Value>(&input)? else {
-        anyhow::bail!("--input must be a JSON object");
-    };
-
-    let observe = log || trace_out.is_some();
-    let mut observed_trace = Vec::new();
-    let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
-    let result = if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
-        let mut vm = Vm {
-            tools,
-            models: ModelProviderChoice::openai(config)?,
-        };
-        if observe {
-            let result = vm.run_with_observer(&module, inputs, |event| {
-                observe_event(event, log, &mut observed_trace)
-            });
-            if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-            }
-            result?
-        } else {
-            vm.run(&module, inputs)?
-        }
-    } else {
-        let mut vm = Vm {
-            tools,
-            models: ModelProviderChoice::echo(),
-        };
-        if observe {
-            let result = vm.run_with_observer(&module, inputs, |event| {
-                observe_event(event, log, &mut observed_trace)
-            });
-            if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-            }
-            result?
-        } else {
-            vm.run(&module, inputs)?
-        }
-    };
-    if let Some(trace_out) = trace_out {
-        let mut trace = result.trace.clone();
-        trace.push(system_return_event(result.outputs.clone()));
-        write_trace(trace_out, &trace, trace_redact)?;
-    }
-    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
-
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_system(
-    file: PathBuf,
-    input: PathBuf,
-    model_config: Option<PathBuf>,
-    trace_out: Option<PathBuf>,
-    trace_redact: bool,
-    log: bool,
-    example_tools: bool,
-    tool_config: Option<PathBuf>,
-) -> Result<()> {
-    let system = air_linker::parse_system_file(&file)?;
-    let base_dir = module_base_dir_for_modules(&system.modules)?;
-    let report = air_linker::validate_system(&system, &base_dir);
-    if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
-        std::process::exit(1);
-    }
-
-    let input = fs::read_to_string(input)?;
-    let Value::Object(inputs) = serde_json::from_str::<Value>(&input)? else {
-        anyhow::bail!("--input must be a JSON object");
-    };
-
-    let observe = log || trace_out.is_some();
-    let mut observed_trace = Vec::new();
-    let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
-    let result = if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
-        if observe {
-            let result = air_linker::run_system_with_observer(
-                &system,
-                base_dir,
-                inputs,
-                tools,
-                ModelProviderChoice::openai(config)?,
-                |event| observe_event(event, log, &mut observed_trace),
-            );
-            if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-            }
-            result?
-        } else {
-            air_linker::run_system(
-                &system,
-                base_dir,
-                inputs,
-                tools,
-                ModelProviderChoice::openai(config)?,
-            )?
-        }
-    } else if observe {
-        let result = air_linker::run_system_with_observer(
-            &system,
-            base_dir,
-            inputs,
-            tools,
-            ModelProviderChoice::echo(),
-            |event| observe_event(event, log, &mut observed_trace),
-        );
-        if result.is_err() {
-            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-        }
-        result?
-    } else {
-        air_linker::run_system(
-            &system,
-            base_dir,
-            inputs,
-            tools,
-            ModelProviderChoice::echo(),
-        )?
-    };
-    if let Some(trace_out) = trace_out {
-        let mut trace = result.trace.clone();
-        trace.push(system_return_event(result.outputs.clone()));
-        write_trace(trace_out, &trace, trace_redact)?;
-    }
-    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
-
-    Ok(())
-}
-
-struct RunPlanOptions {
-    plan: Option<PathBuf>,
-    profile: Option<PathBuf>,
-    store: Option<PathBuf>,
-    input: Option<PathBuf>,
-    model_config: Option<PathBuf>,
-    trace_out: Option<PathBuf>,
-    trace_redact: bool,
-    state_out: Option<PathBuf>,
-    checkpoint_out: Option<PathBuf>,
-    jit_cache: Option<PathBuf>,
-    parallel: bool,
-    log: bool,
-    example_tools: bool,
-    tool_config: Option<PathBuf>,
-}
-
-struct ResumePlanOptions {
-    plan: Option<PathBuf>,
-    profile: Option<PathBuf>,
-    store: Option<PathBuf>,
-    input: Option<PathBuf>,
-    state: PathBuf,
-    overrides: Vec<String>,
-    model_config: Option<PathBuf>,
-    trace_out: Option<PathBuf>,
-    trace_redact: bool,
-    state_out: Option<PathBuf>,
-    checkpoint_out: Option<PathBuf>,
-    log: bool,
-    example_tools: bool,
-    tool_config: Option<PathBuf>,
-}
-
-struct RunPlanExecutionOptions {
-    model_config: Option<PathBuf>,
-    trace_out: Option<PathBuf>,
-    trace_redact: bool,
-    state_out: Option<PathBuf>,
-    checkpoint_out: Option<PathBuf>,
-    jit_cache: Option<PathBuf>,
-    parallel: bool,
-    log: bool,
-    example_tools: bool,
-    tool_config: Option<PathBuf>,
-}
-
-struct ReplayOptions {
-    trace: PathBuf,
-    specialize_run_plan: bool,
-    store: Option<PathBuf>,
-    output: Option<PathBuf>,
-    identity_out: Option<PathBuf>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct PlanStateFile {
-    status: air_linker::RunStatus,
-    outputs: Value,
-    module_outputs: BTreeMap<String, Value>,
-}
-
-fn run_plan(options: RunPlanOptions) -> Result<()> {
-    let RunPlanOptions {
-        plan,
-        profile,
-        store,
-        input,
-        model_config,
-        trace_out,
-        trace_redact,
-        state_out,
-        checkpoint_out,
-        jit_cache,
-        parallel,
-        log,
-        example_tools,
-        tool_config,
-    } = options;
-
-    let profile = match profile {
-        Some(path) => Some((path.clone(), read_run_plan_profile(&path)?)),
-        None => None,
-    };
-
-    let plan = plan
-        .or_else(|| {
-            profile
-                .as_ref()
-                .map(|(path, profile)| resolve_profile_path(path, &profile.plan))
-        })
-        .ok_or_else(|| anyhow::anyhow!("run-plan requires a plan path or --profile"))?;
-    let store = store
-        .or_else(|| {
-            profile
-                .as_ref()
-                .map(|(path, profile)| resolve_profile_path(path, &profile.store))
-        })
-        .ok_or_else(|| anyhow::anyhow!("run-plan requires --store or --profile"))?;
-    let inputs = if let Some(input) = input {
-        read_json_object(input, "--input")?
-    } else if let Some((path, profile)) = &profile {
-        if let Some(input_file) = &profile.input_file {
-            read_json_object(resolve_profile_path(path, input_file), "profile.input_file")?
-        } else if let Some(inputs) = &profile.inputs {
-            serde_json::Map::from_iter(inputs.clone())
-        } else {
-            anyhow::bail!("run-plan requires --input, profile.input_file, or profile.inputs");
-        }
-    } else {
-        anyhow::bail!("run-plan requires --input or --profile");
-    };
-    let model_config = model_config.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .model_config
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let tool_config = tool_config.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .tool_config
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let trace_out = trace_out.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .trace_out
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let state_out = state_out.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .state_out
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let checkpoint_out = checkpoint_out.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .checkpoint_out
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let jit_cache = jit_cache.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .jit_cache
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let parallel = parallel
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.parallel)
-            .unwrap_or(false);
-    let log = log
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.log)
-            .unwrap_or(false);
-    let trace_redact = trace_redact
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.trace_redact)
-            .unwrap_or(false);
-    let example_tools = example_tools
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.example_tools)
-            .unwrap_or(false);
-
-    run_plan_with_inputs(
-        plan,
-        store,
-        inputs,
-        RunPlanExecutionOptions {
-            model_config,
-            trace_out,
-            trace_redact,
-            state_out,
-            checkpoint_out,
-            jit_cache,
-            parallel,
-            log,
-            example_tools,
-            tool_config,
-        },
-    )
-}
-
-fn run_plan_with_inputs(
-    plan: PathBuf,
-    store: PathBuf,
-    inputs: serde_json::Map<String, Value>,
-    options: RunPlanExecutionOptions,
-) -> Result<()> {
-    let RunPlanExecutionOptions {
-        model_config,
-        trace_out,
-        trace_redact,
-        state_out,
-        checkpoint_out,
-        jit_cache,
-        parallel,
-        log,
-        example_tools,
-        tool_config,
-    } = options;
-
-    let original_plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
-    let (plan, jit_context) = if let Some(jit_cache) = jit_cache.as_ref() {
-        select_jit_cached_run_plan(original_plan, &store, &base_dir, &inputs, jit_cache, log)?
-    } else {
-        (original_plan, None)
-    };
-    let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
-    if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
-        std::process::exit(1);
-    }
-
-    let observe = log || trace_out.is_some();
-    let mut observed_trace = Vec::new();
-    let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
-    let result = if parallel {
-        if let Some(model_config) = model_config {
-            let config = air_backend_openai::parse_config_file(model_config)?;
-            let models = ModelProviderChoice::openai(config)?;
-            run_plan_parallel(
-                &plan,
-                &store,
-                base_dir.clone(),
-                inputs,
-                tools,
-                models,
-                observe,
-                log,
-                trace_out.as_ref(),
-                trace_redact,
-                checkpoint_out.as_ref(),
-                &mut observed_trace,
-            )?
-        } else {
-            run_plan_parallel(
-                &plan,
-                &store,
-                base_dir.clone(),
-                inputs,
-                tools,
-                ModelProviderChoice::echo(),
-                observe,
-                log,
-                trace_out.as_ref(),
-                trace_redact,
-                checkpoint_out.as_ref(),
-                &mut observed_trace,
-            )?
-        }
-    } else if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
-        if observe {
-            let result = air_linker::run_run_plan_with_observer_and_checkpoint(
-                &plan,
-                &store,
-                base_dir.clone(),
-                inputs,
-                tools,
-                ModelProviderChoice::openai(config)?,
-                |event| observe_event(event, log, &mut observed_trace),
-                |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-            );
-            if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-            }
-            result?
-        } else {
-            air_linker::run_run_plan_with_observer_and_checkpoint(
-                &plan,
-                &store,
-                base_dir.clone(),
-                inputs,
-                tools,
-                ModelProviderChoice::openai(config)?,
-                |_| {},
-                |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-            )?
-        }
-    } else if observe {
-        let result = air_linker::run_run_plan_with_observer_and_checkpoint(
-            &plan,
-            &store,
-            base_dir.clone(),
-            inputs,
-            tools,
-            ModelProviderChoice::echo(),
-            |event| observe_event(event, log, &mut observed_trace),
-            |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-        );
-        if result.is_err() {
-            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-        }
-        result?
-    } else {
-        air_linker::run_run_plan_with_observer_and_checkpoint(
-            &plan,
-            &store,
-            base_dir.clone(),
-            inputs,
-            tools,
-            ModelProviderChoice::echo(),
-            |_| {},
-            |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-        )?
-    };
-    if let Some(trace_out) = trace_out {
-        let mut trace = result.trace.clone();
-        trace.push(system_return_event(result.outputs.clone()));
-        write_trace(trace_out, &trace, trace_redact)?;
-    }
-    if let Some(state_out) = state_out {
-        write_plan_state(state_out, &result)?;
-    }
-    if let Some(jit_context) = jit_context.as_ref() {
-        if !jit_context.hit {
-            write_jit_cache(jit_context, &result.trace, &store, &base_dir, log)?;
-        }
-    }
-    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
-
-    Ok(())
-}
-
-#[derive(Debug, Clone)]
-struct JitCacheContext {
-    dir: PathBuf,
-    key: String,
-    hit: bool,
-}
-
-fn select_jit_cached_run_plan(
-    original_plan: air_linker::RunPlan,
-    store: &air_linker::ModuleStore,
-    base_dir: &std::path::Path,
-    inputs: &serde_json::Map<String, Value>,
-    cache_dir: &std::path::Path,
-    log: bool,
-) -> Result<(air_linker::RunPlan, Option<JitCacheContext>)> {
-    fs::create_dir_all(cache_dir)?;
-    let key = jit_cache_key(&original_plan, store, base_dir, inputs)?;
-    let context = JitCacheContext {
-        dir: cache_dir.to_path_buf(),
-        key,
-        hit: false,
-    };
-    let plan_path = jit_cache_plan_path(&context);
-    if plan_path.exists() {
-        match air_linker::parse_run_plan_file(&plan_path) {
-            Ok(cached_plan) => {
-                let report = air_linker::validate_run_plan(&cached_plan, store, base_dir);
-                if report.is_success() {
-                    if log {
-                        eprintln!(
-                            "[air-jit] cache hit key={} plan={}",
-                            context.key,
-                            plan_path.display()
-                        );
-                    }
-                    return Ok((
-                        cached_plan,
-                        Some(JitCacheContext {
-                            hit: true,
-                            ..context
-                        }),
-                    ));
-                }
-                if log {
-                    eprintln!(
-                        "[air-jit] ignoring invalid cache key={} diagnostics={:?}",
-                        context.key, report.diagnostics
-                    );
-                }
-            }
-            Err(error) => {
-                if log {
-                    eprintln!(
-                        "[air-jit] ignoring unreadable cache key={} error={error}",
-                        context.key
-                    );
-                }
-            }
-        }
-    } else if log {
-        eprintln!("[air-jit] cache miss key={}", context.key);
-    }
-
-    Ok((original_plan, Some(context)))
-}
-
-fn write_jit_cache(
-    context: &JitCacheContext,
-    trace: &[TraceEvent],
-    store: &air_linker::ModuleStore,
-    base_dir: &std::path::Path,
-    log: bool,
-) -> Result<()> {
-    let specialization = air_linker::specialize_run_plan_trace(trace, store, base_dir)?;
-    let plan_path = jit_cache_plan_path(context);
-    let identity_path = context.dir.join(format!("{}.identity.json", context.key));
-    let meta_path = context.dir.join(format!("{}.meta.json", context.key));
-    fs::create_dir_all(&context.dir)?;
-    fs::write(&plan_path, serde_yaml::to_string(&specialization.plan)?)?;
-    fs::write(
-        &identity_path,
-        serde_json::to_string_pretty(&specialization.cache_identity)?,
-    )?;
-    fs::write(
-        &meta_path,
-        serde_json::to_string_pretty(&json!({
-            "kind": "air.jit_cache_entry.v1",
-            "key": context.key,
-            "plan": specialization.plan.plan,
-            "identity_path": identity_path.file_name().and_then(|name| name.to_str()).unwrap_or_default(),
-        }))?,
-    )?;
-    if log {
-        eprintln!(
-            "[air-jit] wrote cache key={} plan={}",
-            context.key,
-            plan_path.display()
-        );
-    }
-    Ok(())
-}
-
-fn jit_cache_plan_path(context: &JitCacheContext) -> PathBuf {
-    context.dir.join(format!("{}.air-plan.yaml", context.key))
-}
-
-fn jit_cache_key(
-    plan: &air_linker::RunPlan,
-    store: &air_linker::ModuleStore,
-    base_dir: &std::path::Path,
-    inputs: &serde_json::Map<String, Value>,
-) -> Result<String> {
-    let modules = store
-        .modules
-        .iter()
-        .map(|(id, module_ref)| {
-            let path = air_linker::resolve_module_path(base_dir, id, &module_ref.path)?;
-            let content = fs::read_to_string(&path)?;
-            Ok((
-                id.clone(),
-                json!({
-                    "ref": module_ref,
-                    "content": content,
-                }),
-            ))
-        })
-        .collect::<Result<BTreeMap<_, _>>>()?;
-    let identity = json!({
-        "kind": "air.jit_cache_key.v1",
-        "plan": plan,
-        "store": {
-            "metadata": &store.store,
-            "modules": modules,
-            "recipes": &store.recipes,
-        },
-        "inputs": inputs,
-    });
-    let encoded = serde_json::to_string(&identity)?;
-    let mut hasher = DefaultHasher::new();
-    encoded.hash(&mut hasher);
-    Ok(format!("{:016x}", hasher.finish()))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn run_plan_parallel(
-    plan: &air_linker::RunPlan,
-    store: &air_linker::ModuleStore,
-    base_dir: PathBuf,
-    inputs: serde_json::Map<String, Value>,
-    tools: ToolProviderChoice,
-    models: ModelProviderChoice,
-    observe: bool,
-    log: bool,
-    trace_out: Option<&PathBuf>,
-    trace_redact: bool,
-    checkpoint_out: Option<&PathBuf>,
-    observed_trace: &mut Vec<TraceEvent>,
-) -> Result<air_linker::SystemRunResult> {
-    if observe {
-        let result = air_linker::run_run_plan_parallel_with_observer_and_checkpoint(
-            plan,
-            store,
-            base_dir,
-            inputs,
-            || tools.clone(),
-            || models.clone(),
-            |event| observe_event(event, log, observed_trace),
-            |checkpoint| write_checkpoint_state(checkpoint_out, checkpoint),
-        );
-        if result.is_err() {
-            write_partial_trace(trace_out, observed_trace, trace_redact)?;
-        }
-        Ok(result?)
-    } else {
-        Ok(
-            air_linker::run_run_plan_parallel_with_observer_and_checkpoint(
-                plan,
-                store,
-                base_dir,
-                inputs,
-                || tools.clone(),
-                || models.clone(),
-                |_| {},
-                |checkpoint| write_checkpoint_state(checkpoint_out, checkpoint),
-            )?,
-        )
-    }
-}
-
-fn resume_plan(options: ResumePlanOptions) -> Result<()> {
-    let ResumePlanOptions {
-        plan,
-        profile,
-        store,
-        input,
-        state,
-        overrides,
-        model_config,
-        trace_out,
-        trace_redact,
-        state_out,
-        checkpoint_out,
-        log,
-        example_tools,
-        tool_config,
-    } = options;
-
-    let profile = match profile {
-        Some(path) => Some((path.clone(), read_run_plan_profile(&path)?)),
-        None => None,
-    };
-
-    let plan = plan
-        .or_else(|| {
-            profile
-                .as_ref()
-                .map(|(path, profile)| resolve_profile_path(path, &profile.plan))
-        })
-        .ok_or_else(|| anyhow::anyhow!("resume-plan requires a plan path or --profile"))?;
-    let store = store
-        .or_else(|| {
-            profile
-                .as_ref()
-                .map(|(path, profile)| resolve_profile_path(path, &profile.store))
-        })
-        .ok_or_else(|| anyhow::anyhow!("resume-plan requires --store or --profile"))?;
-    let input = input.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .input_file
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let model_config = model_config.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .model_config
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let tool_config = tool_config.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .tool_config
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let trace_out = trace_out.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .trace_out
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let state_out = state_out.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .state_out
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let checkpoint_out = checkpoint_out.or_else(|| {
-        profile.as_ref().and_then(|(path, profile)| {
-            profile
-                .checkpoint_out
-                .as_ref()
-                .map(|value| resolve_profile_path(path, value))
-        })
-    });
-    let log = log
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.log)
-            .unwrap_or(false);
-    let trace_redact = trace_redact
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.trace_redact)
-            .unwrap_or(false);
-    let example_tools = example_tools
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.example_tools)
-            .unwrap_or(false);
-
-    let plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
-    let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
-    if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
-        std::process::exit(1);
-    }
-
-    let inputs = if let Some(input) = input {
-        read_json_object(input, "--input")?
-    } else if let Some((_, profile)) = &profile {
-        if let Some(inputs) = &profile.inputs {
-            serde_json::Map::from_iter(inputs.clone())
-        } else {
-            anyhow::bail!("resume-plan requires --input, profile.input_file, or profile.inputs");
-        }
-    } else {
-        anyhow::bail!("resume-plan requires --input or --profile");
-    };
-    let state_file: PlanStateFile = serde_json::from_str(&fs::read_to_string(state)?)?;
-    let mut resume = air_linker::ResumeState {
-        module_outputs: state_file
-            .module_outputs
-            .into_iter()
-            .map(|(module, value)| {
-                let Value::Object(output) = value else {
-                    anyhow::bail!("state module output {module} must be a JSON object");
-                };
-                Ok((module, output))
-            })
-            .collect::<Result<_>>()?,
-        output_overrides: BTreeMap::new(),
-    };
-    for override_spec in overrides {
-        let (endpoint, value) = parse_output_override(&override_spec)?;
-        resume.output_overrides.insert(endpoint, value);
-    }
-
-    let observe = log || trace_out.is_some();
-    let mut observed_trace = Vec::new();
-    let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
-    let result = if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
-        if observe {
-            let result = air_linker::resume_run_plan_with_observer_and_checkpoint(
-                &plan,
-                &store,
-                base_dir,
-                inputs,
-                resume,
-                tools,
-                ModelProviderChoice::openai(config)?,
-                |event| observe_event(event, log, &mut observed_trace),
-                |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-            );
-            if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-            }
-            result?
-        } else {
-            air_linker::resume_run_plan_with_observer_and_checkpoint(
-                &plan,
-                &store,
-                base_dir,
-                inputs,
-                resume,
-                tools,
-                ModelProviderChoice::openai(config)?,
-                |_| {},
-                |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-            )?
-        }
-    } else if observe {
-        let result = air_linker::resume_run_plan_with_observer_and_checkpoint(
-            &plan,
-            &store,
-            base_dir,
-            inputs,
-            resume,
-            tools,
-            ModelProviderChoice::echo(),
-            |event| observe_event(event, log, &mut observed_trace),
-            |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-        );
-        if result.is_err() {
-            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
-        }
-        result?
-    } else {
-        air_linker::resume_run_plan_with_observer_and_checkpoint(
-            &plan,
-            &store,
-            base_dir,
-            inputs,
-            resume,
-            tools,
-            ModelProviderChoice::echo(),
-            |_| {},
-            |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
-        )?
-    };
-
-    if let Some(trace_out) = trace_out {
-        let mut trace = result.trace.clone();
-        trace.push(system_return_event(result.outputs.clone()));
-        write_trace(trace_out, &trace, trace_redact)?;
-    }
-    if let Some(state_out) = state_out {
-        write_plan_state(state_out, &result)?;
-    }
-    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
-
-    Ok(())
-}
-
-fn parse_output_override(spec: &str) -> Result<(String, Value)> {
-    let Some((endpoint, raw_value)) = spec.split_once('=') else {
-        anyhow::bail!("override must use endpoint=json syntax");
-    };
-    if endpoint.trim().is_empty() {
-        anyhow::bail!("override endpoint must not be empty");
-    }
-    let value =
-        serde_json::from_str(raw_value).unwrap_or_else(|_| Value::String(raw_value.to_string()));
-    Ok((endpoint.to_string(), value))
-}
-
-fn write_plan_state(path: PathBuf, result: &air_linker::SystemRunResult) -> Result<()> {
-    let state = PlanStateFile {
-        status: result.status.clone(),
-        outputs: Value::Object(result.outputs.clone()),
-        module_outputs: result
-            .module_outputs
-            .iter()
-            .map(|(module, outputs)| (module.clone(), Value::Object(outputs.clone())))
-            .collect(),
-    };
-    fs::write(path, serde_json::to_string_pretty(&state)?)?;
-    Ok(())
-}
-
-fn write_checkpoint_state(
-    path: Option<&PathBuf>,
-    checkpoint: &air_linker::SystemCheckpoint,
-) -> Result<(), String> {
-    let Some(path) = path else {
-        return Ok(());
-    };
-
-    let state = PlanStateFile {
-        status: air_linker::RunStatus::InProgress {
-            after: checkpoint.completed_module.clone(),
-        },
-        outputs: Value::Object(Default::default()),
-        module_outputs: checkpoint
-            .module_outputs
-            .iter()
-            .map(|(module, outputs)| (module.clone(), Value::Object(outputs.clone())))
-            .collect(),
-    };
-    let content = serde_json::to_string_pretty(&state).map_err(|error| error.to_string())?;
-    fs::write(path, content).map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn observe_event(event: &TraceEvent, log: bool, trace: &mut Vec<TraceEvent>) {
-    if log {
-        log_event(event);
-    }
-    trace.push(event.clone());
-}
-
-fn write_partial_trace(
-    trace_out: Option<&PathBuf>,
-    trace: &[TraceEvent],
-    trace_redact: bool,
-) -> Result<()> {
-    if let Some(path) = trace_out {
-        write_trace(path, trace, trace_redact)?;
-    }
-    Ok(())
-}
-
-fn write_trace(
-    path: impl AsRef<std::path::Path>,
-    trace: &[TraceEvent],
-    redact: bool,
-) -> Result<()> {
-    if redact {
-        write_trace_jsonl_with_options(path, trace, &TraceWriteOptions::redacted())?;
-    } else {
-        write_trace_jsonl(path, trace)?;
-    }
-    Ok(())
-}
-
-fn log_event(event: &TraceEvent) {
-    let status = match event.status {
-        TraceStatus::Ok => "ok",
-        TraceStatus::Error => "error",
-    };
-    let input = event
-        .input
-        .as_ref()
-        .map(value_shape)
-        .map(|shape| format!(" input={shape}"))
-        .unwrap_or_default();
-    let output = event
-        .output
-        .as_ref()
-        .map(value_shape)
-        .map(|shape| format!(" output={shape}"))
-        .unwrap_or_default();
-    let meta = event
-        .meta
-        .as_ref()
-        .map(value_shape)
-        .map(|shape| format!(" meta={shape}"))
-        .unwrap_or_default();
-    let error = event
-        .error
-        .as_ref()
-        .map(|error| format!(" error={error}"))
-        .unwrap_or_default();
-
-    eprintln!(
-        "[air] {} step={} rule={} action={} status={}{}{}{}{}",
-        event.agent, event.step, event.rule, event.action, status, meta, input, output, error
-    );
-}
-
-fn value_shape(value: &Value) -> String {
-    match value {
-        Value::Object(object) => {
-            let mut entries = object
-                .iter()
-                .take(8)
-                .map(|(key, value)| format!("{key}:{}", compact_value(value)))
-                .collect::<Vec<_>>();
-            if object.len() > entries.len() {
-                entries.push("...".to_string());
-            }
-            format!("{{{}}}", entries.join(","))
-        }
-        value => compact_value(value),
-    }
-}
-
-fn compact_value(value: &Value) -> String {
-    match value {
-        Value::Object(object) => format!("object({})", object.len()),
-        Value::Array(values) => format!("[{}]", values.len()),
-        Value::String(value) => {
-            let max = 80;
-            let mut preview = value.chars().take(max).collect::<String>();
-            if value.chars().count() > max {
-                preview.push_str("...");
-            }
-            format!("{preview:?}")
-        }
-        Value::Number(value) => value.to_string(),
-        Value::Bool(value) => value.to_string(),
-        Value::Null => "null".to_string(),
-    }
-}
-
-fn replay(options: ReplayOptions) -> Result<()> {
-    let ReplayOptions {
-        trace,
-        specialize_run_plan,
-        store,
-        output,
-        identity_out,
-    } = options;
-    let events = read_trace_jsonl(trace)?;
-    if specialize_run_plan {
-        let store = store
-            .ok_or_else(|| anyhow::anyhow!("replay --specialize-run-plan requires --store"))?;
-        let store = air_linker::parse_module_store_file(store)?;
-        let base_dir = module_base_dir_for_store(&store)?;
-        let specialization = air_linker::specialize_run_plan_trace(&events, &store, &base_dir)?;
-        let plan_yaml = serde_yaml::to_string(&specialization.plan)?;
-        if let Some(output) = output {
-            fs::write(output, plan_yaml)?;
-        } else {
-            print!("{plan_yaml}");
-        }
-        if let Some(identity_out) = identity_out {
-            fs::write(
-                identity_out,
-                serde_json::to_string_pretty(&specialization.cache_identity)?,
-            )?;
-        }
-    } else {
-        let output = replay_outputs(&events)?;
-        println!("{}", serde_json::to_string_pretty(&output)?);
-    }
-    Ok(())
-}
-
-fn lower(file: PathBuf, backend: LowerBackend, output: Option<PathBuf>) -> Result<()> {
-    let module = air_parser::parse_air_file(&file)?;
-    let report = air_verify::verify(&module);
-    if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
-        std::process::exit(1);
-    }
-
-    let generated = match backend {
-        LowerBackend::Langgraph => air_backend_langgraph::lower_module(&module)?,
-        LowerBackend::OpenaiAgentsJsSemantic => {
-            air_backend_openai_agents_js::lower_module(&module)?
-        }
-    };
-
-    if let Some(output) = output {
-        fs::write(output, generated)?;
-    } else {
-        print!("{generated}");
-    }
-    Ok(())
-}
-
-fn lower_plan(
-    plan: PathBuf,
-    store: PathBuf,
-    backend: LowerPlanBackend,
-    output: Option<PathBuf>,
-) -> Result<()> {
-    let plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
-    let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
-    if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
-        std::process::exit(1);
-    }
-
-    let generated = match backend {
-        LowerPlanBackend::Langgraph => {
-            air_backend_langgraph::lower_run_plan(&plan, &store, base_dir)?
-        }
-        LowerPlanBackend::OpenaiJsStrict => {
-            air_backend_openai_agents_js::lower_run_plan_strict(&plan, &store, base_dir)?
-        }
-    };
-
-    if let Some(output) = output {
-        fs::write(output, generated)?;
-    } else {
-        print!("{generated}");
-    }
-    Ok(())
 }
