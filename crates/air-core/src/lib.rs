@@ -283,6 +283,12 @@ pub struct DetailedType {
     #[serde(rename = "type")]
     pub kind: DetailedTypeKind,
 
+    #[serde(
+        default = "default_additional_properties",
+        skip_serializing_if = "is_true"
+    )]
+    pub additional_properties: bool,
+
     #[serde(default)]
     pub required: Vec<String>,
 
@@ -300,6 +306,14 @@ pub struct DetailedType {
 
     #[serde(default, rename = "enum")]
     pub enum_values: Vec<String>,
+}
+
+fn default_additional_properties() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -446,6 +460,14 @@ fn validate_object(path: &str, value: &Value, spec: &DetailedType, errors: &mut 
     for (field, field_spec) in &spec.properties {
         if let Some(field_value) = object.get(field) {
             validate_value(&format!("{path}.{field}"), field_value, field_spec, errors);
+        }
+    }
+
+    if !spec.additional_properties {
+        for field in object.keys() {
+            if !spec.properties.contains_key(field) {
+                errors.push(format!("{path}.{field} unexpected additional field"));
+            }
         }
     }
 }

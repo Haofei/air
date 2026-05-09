@@ -86,6 +86,8 @@ Important fields:
 - `workflow.max_steps` bounds execution.
 - `policy` can add budgets such as `max_tool_calls`, `max_model_calls`, `timeout_seconds`, and `require_approval`.
 
+Object schemas allow undeclared fields by default for compatibility with provider metadata and evolving module contracts. Add `additional_properties: false` to a detailed object schema when the AIR VM and generated strict backends should reject undeclared fields.
+
 ## 3. RunPlan Anatomy
 
 A RunPlan connects modules into an app:

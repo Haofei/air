@@ -317,6 +317,10 @@ def _air_validate_object(path: str, value: Any, spec: dict[str, Any]) -> list[st
     for field, field_spec in spec.get("properties", {}).items():
         if field in value:
             errors.extend(_air_validate_value(f"{path}.{field}", value[field], field_spec))
+    if spec.get("additional_properties", True) is False:
+        for field in value:
+            if field not in spec.get("properties", {}):
+                errors.append(f"{path}.{field} unexpected additional field")
     return errors
 
 
@@ -791,6 +795,10 @@ def _air_validate_object(path: str, value: Any, spec: dict[str, Any]) -> list[st
     for field, field_spec in spec.get("properties", {}).items():
         if field in value:
             errors.extend(_air_validate_value(f"{path}.{field}", value[field], field_spec))
+    if spec.get("additional_properties", True) is False:
+        for field in value:
+            if field not in spec.get("properties", {}):
+                errors.append(f"{path}.{field} unexpected additional field")
     return errors
 
 

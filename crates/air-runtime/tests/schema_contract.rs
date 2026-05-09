@@ -900,6 +900,73 @@ fn rejects_model_output_missing_required_field() {
 }
 
 #[test]
+fn allows_model_output_additional_fields_by_default() {
+    let extract = load_agent("tests/agents/schema-extract.air.yaml");
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: SchemaModels {
+            extract: json!({
+                "customer_issue": "double charge",
+                "product_area": "billing",
+                "sentiment": "negative",
+                "urgency_signals": ["cancel"],
+                "provider_metadata": "kept for compatibility"
+            }),
+            score: valid_score(),
+            report: valid_report(),
+        },
+    };
+
+    let output = vm
+        .run(
+            &extract,
+            State::from_iter([("text".to_string(), json!("billing issue"))]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output.outputs["extracted"]["provider_metadata"],
+        json!("kept for compatibility")
+    );
+}
+
+#[test]
+fn rejects_model_output_additional_fields_when_schema_is_strict() {
+    let mut extract = load_agent("tests/agents/schema-extract.air.yaml");
+    let Some(air_core::TypeSpec::Detailed(extracted_schema)) = extract.outputs.get_mut("extracted")
+    else {
+        panic!("expected detailed extracted output schema");
+    };
+    extracted_schema.additional_properties = false;
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: SchemaModels {
+            extract: json!({
+                "customer_issue": "double charge",
+                "product_area": "billing",
+                "sentiment": "negative",
+                "urgency_signals": ["cancel"],
+                "provider_metadata": "should be rejected"
+            }),
+            score: valid_score(),
+            report: valid_report(),
+        },
+    };
+
+    let error = vm
+        .run(
+            &extract,
+            State::from_iter([("text".to_string(), json!("billing issue"))]),
+        )
+        .unwrap_err();
+
+    assert_schema_error_contains(
+        error,
+        "extracted.provider_metadata unexpected additional field",
+    );
+}
+
+#[test]
 fn rejects_model_output_with_wrong_primitive_type() {
     let score = load_agent("tests/agents/schema-score.air.yaml");
     let mut vm = Vm {

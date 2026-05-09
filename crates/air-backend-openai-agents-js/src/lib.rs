@@ -331,6 +331,11 @@ function validateObject(path, value, spec) {
   for (const [field, fieldSpec] of Object.entries(spec.properties ?? {})) {
     if (field in value) errors.push(...validateValue(`${path}.${field}`, value[field], fieldSpec));
   }
+  if (spec.additional_properties === false) {
+    for (const field of Object.keys(value)) {
+      if (!(field in (spec.properties ?? {}))) errors.push(`${path}.${field} unexpected additional field`);
+    }
+  }
   return errors;
 }
 
@@ -635,6 +640,11 @@ function validateObject(path, value, spec) {
   }
   for (const [field, fieldSpec] of Object.entries(spec.properties ?? {})) {
     if (field in value) errors.push(...validateValue(`${path}.${field}`, value[field], fieldSpec));
+  }
+  if (spec.additional_properties === false) {
+    for (const field of Object.keys(value)) {
+      if (!(field in (spec.properties ?? {}))) errors.push(`${path}.${field} unexpected additional field`);
+    }
   }
   return errors;
 }

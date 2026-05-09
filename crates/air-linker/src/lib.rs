@@ -247,6 +247,7 @@ static LINK_TYPE_INTEGER: TypeSpec = TypeSpec::Shorthand(air_core::PrimitiveType
 static LINK_TYPE_OBJECT: TypeSpec = TypeSpec::Shorthand(air_core::PrimitiveType::Object);
 static LINK_TYPE_ARRAY: TypeSpec = TypeSpec::Detailed(air_core::DetailedType {
     kind: air_core::DetailedTypeKind::Array,
+    additional_properties: true,
     required: Vec::new(),
     properties: BTreeMap::new(),
     items: None,
