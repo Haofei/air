@@ -950,6 +950,77 @@ fn rejects_report_model_output_with_wrong_primitive_type() {
     assert_schema_error_contains(error, "report.approved expected boolean");
 }
 
+#[test]
+fn rejects_set_action_value_that_violates_state_schema() {
+    let mut module = load_agent("tests/agents/approval-gate.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::Set { values } = &mut workflow.rules[0].actions[1] else {
+        panic!("expected set action");
+    };
+    values.insert(
+        "result".to_string(),
+        json!({
+            "deployment_id": "deploy-123",
+            "approved": "yes"
+        }),
+    );
+    let mut vm = Vm {
+        tools: ApprovingTools,
+        models: SchemaModels {
+            extract: valid_extracted(),
+            score: valid_score(),
+            report: valid_report(),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("deployment_id".to_string(), json!("deploy-123"))]),
+        )
+        .unwrap_err();
+
+    assert_schema_error_contains(error, "result.approved expected boolean");
+}
+
+#[test]
+fn rejects_return_value_that_violates_output_schema() {
+    let mut module = load_agent("tests/agents/approval-gate.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::Set { values } = &mut workflow.rules[0].actions[1] else {
+        panic!("expected set action");
+    };
+    module.state.remove("result");
+    values.insert(
+        "result".to_string(),
+        json!({
+            "deployment_id": "deploy-123",
+            "approved": "yes"
+        }),
+    );
+    let mut vm = Vm {
+        tools: ApprovingTools,
+        models: SchemaModels {
+            extract: valid_extracted(),
+            score: valid_score(),
+            report: valid_report(),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("deployment_id".to_string(), json!("deploy-123"))]),
+        )
+        .unwrap_err();
+
+    assert_schema_error_contains(error, "result.approved expected boolean");
+}
+
 fn valid_vm() -> Vm<SchemaTools, SchemaModels> {
     Vm {
         tools: SchemaTools,

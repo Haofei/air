@@ -527,6 +527,15 @@ where
         match action {
             StateAction::Set { values } => {
                 for (key, value) in values {
+                    if let Err(error) = validate_state_value(context.module, key, value) {
+                        context.push_event(
+                            "set",
+                            None,
+                            Some(Value::Object(values.clone().into_iter().collect())),
+                            Err(error.to_string()),
+                        );
+                        return Err(error);
+                    }
                     context.state.insert(key.clone(), value.clone());
                 }
                 context.push_event(
@@ -940,6 +949,10 @@ where
             }
             StateAction::Return { output } => {
                 let value = read_field(context.state, context.outputs, output)?.clone();
+                if let Err(error) = validate_return_output(context.module, output, &value) {
+                    context.push_event("return", None, Some(value), Err(error.to_string()));
+                    return Err(error);
+                }
                 context.outputs.insert(output.clone(), value);
                 context.push_event("return", None, context.outputs.get(output).cloned(), Ok(()));
             }
@@ -950,10 +963,34 @@ where
 }
 
 fn validate_output(module: &AirModule, output: &str, value: &Value) -> Result<(), RuntimeError> {
-    let Some(spec) = output_spec(module, output) else {
+    validate_named_value(output, value, output_spec(module, output))
+}
+
+fn validate_state_value(
+    module: &AirModule,
+    field: &str,
+    value: &Value,
+) -> Result<(), RuntimeError> {
+    validate_named_value(field, value, output_spec(module, field))
+}
+
+fn validate_return_output(
+    module: &AirModule,
+    output: &str,
+    value: &Value,
+) -> Result<(), RuntimeError> {
+    validate_named_value(output, value, module.outputs.get(output))
+}
+
+fn validate_named_value(
+    name: &str,
+    value: &Value,
+    spec: Option<&TypeSpec>,
+) -> Result<(), RuntimeError> {
+    let Some(spec) = spec else {
         return Ok(());
     };
-    let errors = validate_value_against_type(output, value, spec);
+    let errors = validate_value_against_type(name, value, spec);
     if errors.is_empty() {
         Ok(())
     } else {
