@@ -1,0 +1,48 @@
+agent:
+  name: topic-branch-agent
+  version: 0.1.0
+  description: "Return one parent note plus a bounded follow-up topic array."
+
+inputs:
+  topic: string
+
+outputs:
+  note: string
+  followups:
+    type: array
+    min_items: 1
+    max_items: 1
+    items: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, done, failed]
+  note: string
+  followups:
+    type: array
+    min_items: 1
+    max_items: 1
+    items: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 3
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            note: "parent noted"
+            followups: ["child"]
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: note
+        - kind: return
+          output: followups

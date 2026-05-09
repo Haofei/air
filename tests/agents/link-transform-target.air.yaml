@@ -1,0 +1,59 @@
+agent:
+  name: link-transform-target-agent
+  version: 0.1.0
+
+inputs:
+  request:
+    type: object
+    required: [research_brief, topic, topic_count, owner, notes]
+    properties:
+      research_brief: string
+      topic: string
+      topic_count: integer
+      owner: string
+      notes:
+        type: array
+        items: string
+
+outputs:
+  response:
+    type: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, call, done, failed]
+  response:
+    type: object
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: call
+    - id: call
+      when: phase == "call"
+      actions:
+        - kind: model_call
+          model: link_transform_echo
+          input:
+            ref: request
+          output: response
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: response

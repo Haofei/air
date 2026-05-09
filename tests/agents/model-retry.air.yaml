@@ -1,0 +1,59 @@
+agent:
+  name: model-retry-agent
+  version: 0.1.0
+
+inputs:
+  text: string
+
+outputs:
+  result:
+    type: object
+    required: [summary, rationale]
+    properties:
+      summary: string
+      rationale: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, call, done, failed]
+  result:
+    type: object
+    required: [summary, rationale]
+    properties:
+      summary: string
+      rationale: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: call
+    - id: call
+      when: phase == "call"
+      actions:
+        - kind: model_call
+          model: retry_model
+          input:
+            object:
+              text:
+                ref: text
+          output: result
+          timeout_seconds: 30
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: result

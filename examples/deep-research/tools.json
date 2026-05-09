@@ -1,0 +1,30 @@
+{
+  "tools": {
+    "web.search": {
+      "kind": "local_docs_search",
+      "capability": "network.search",
+      "max_results": 5,
+      "documents": [
+        {
+          "id": "ev-800v-readiness",
+          "title": "800V EV platform readiness",
+          "content": "800V electric vehicle platforms are moving from premium models toward broader adoption. Readiness depends on high-voltage component supply, charging infrastructure, thermal design, and service readiness."
+        },
+        {
+          "id": "sic-drive-readiness",
+          "title": "Silicon carbide drive readiness",
+          "content": "Silicon carbide inverters improve efficiency and charging performance, but commercialization depends on wafer supply, module packaging, thermal reliability, and cost reduction."
+        },
+        {
+          "id": "solid-state-distributed-drive",
+          "title": "Solid-state batteries and distributed drive timelines",
+          "content": "Solid-state batteries remain less mature for mass-market 2026-2030 products, while distributed drive systems are more likely to appear first in premium, specialty, and autonomy-focused vehicles."
+        }
+      ]
+    },
+    "research.think": {
+      "kind": "local_reflection",
+      "capability": "research.reflect"
+    }
+  }
+}

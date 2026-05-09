@@ -1,0 +1,10 @@
+{
+  "tools": {},
+  "approvals": {
+    "production.deploy": {
+      "approved": true,
+      "approver": "verification",
+      "reason": "approval smoke test"
+    }
+  }
+}

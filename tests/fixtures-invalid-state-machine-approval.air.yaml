@@ -1,0 +1,44 @@
+agent:
+  name: invalid-state-machine-approval
+  version: 0.1.0
+
+outputs:
+  deployment_id: string
+
+state:
+  phase:
+    type: enum
+    enum: [deploy, done, failed]
+  deployment_id: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: state_machine
+  initial: deploy
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: deploy
+      when: phase == "deploy"
+      actions:
+        - kind: tool_call
+          tool: deploy.production
+          input: deployment_id
+          output: deployment_id
+          timeout_seconds: 60
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+
+policy:
+  require_approval:
+    - production.deploy

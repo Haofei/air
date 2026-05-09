@@ -1,0 +1,27 @@
+[workspace]
+members = [
+    "crates/air-backend-langgraph",
+    "crates/air-backend-openai-agents-js",
+    "crates/air-backend-openai",
+    "crates/air-cli",
+    "crates/air-core",
+    "crates/air-linker",
+    "crates/air-parser",
+    "crates/air-runtime",
+    "crates/air-verify",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/Haofei/air"
+
+[workspace.dependencies]
+anyhow = "1.0"
+clap = { version = "4.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+thiserror = "1.0"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }

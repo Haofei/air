@@ -1,0 +1,21 @@
+plan:
+  name: customer-triage-composite-run-plan
+  version: 0.1.0
+
+nodes:
+  - id: triage
+    module: customer.triage@0.1.0
+
+entry: triage
+
+connect:
+  - from: $input.text
+    to: triage.text
+
+outputs:
+  report: triage.report
+
+decisions:
+  - id: choose-composite-triage
+    rationale: "Use the public composite triage module instead of manually composing internal primitives."
+    selected: [customer.triage@0.1.0]

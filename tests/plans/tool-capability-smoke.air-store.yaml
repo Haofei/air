@@ -1,0 +1,12 @@
+store:
+  name: tool-capability-smoke-store
+  version: 0.1.0
+
+modules:
+  test.tool_capability_smoke@0.1.0:
+    path: tests/agents/tool-capability-smoke.air.yaml
+    kind: primitive
+    visibility: public
+    description: "Tool capability handshake smoke module."
+    tags: [tools, capability]
+    covers: [search]

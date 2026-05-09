@@ -1,0 +1,54 @@
+agent:
+  name: approval-gate-agent
+  version: 0.1.0
+
+inputs:
+  deployment_id: string
+
+outputs:
+  result:
+    type: object
+    required: [deployment_id, approved]
+    properties:
+      deployment_id: string
+      approved: boolean
+
+state:
+  phase:
+    type: enum
+    enum: [approval, done, failed]
+  result:
+    type: object
+    required: [deployment_id, approved]
+    properties:
+      deployment_id: string
+      approved: boolean
+
+requires:
+  capabilities: [production.deploy]
+
+workflow:
+  kind: state_machine
+  initial: approval
+  max_steps: 4
+  terminal: [done, failed]
+  rules:
+    - id: approval
+      when: phase == "approval"
+      actions:
+        - kind: approval
+          approval_for: [production.deploy]
+        - kind: set
+          values:
+            result:
+              deployment_id: deploy-123
+              approved: true
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: result
+
+policy:
+  require_approval: [production.deploy]

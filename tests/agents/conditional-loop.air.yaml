@@ -1,0 +1,72 @@
+agent:
+  name: conditional-loop-agent
+  version: 0.1.0
+
+inputs:
+  question: string
+
+outputs:
+  decision:
+    type: object
+    required: [complete, query]
+    properties:
+      complete: boolean
+      query: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, decide, route, done, failed]
+  decision:
+    type: object
+    required: [complete, query]
+    properties:
+      complete: boolean
+      query: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 8
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: decide
+    - id: decide
+      when: phase == "decide"
+      actions:
+        - kind: model_call
+          model: loop_decider
+          input:
+            object:
+              question:
+                ref: question
+          output: decision
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: route
+    - id: continue
+      when: phase == "route" && decision.complete == false
+      actions:
+        - kind: set
+          values:
+            phase: decide
+    - id: finish
+      when: phase == "route" && decision.complete == true
+      actions:
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: decision
+

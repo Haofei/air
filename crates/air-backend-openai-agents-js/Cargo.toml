@@ -1,0 +1,17 @@
+[package]
+name = "air-backend-openai-agents-js"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+air-core = { path = "../air-core" }
+air-linker = { path = "../air-linker" }
+air-parser = { path = "../air-parser" }
+air-verify = { path = "../air-verify" }
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+air-parser = { path = "../air-parser" }

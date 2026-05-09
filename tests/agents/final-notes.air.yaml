@@ -1,0 +1,37 @@
+agent:
+  name: final-notes-agent
+  version: 0.1.0
+  description: "Return one fixed report after notes have been collected."
+
+inputs:
+  notes:
+    type: array
+    items: string
+
+outputs:
+  report: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, done, failed]
+  report: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 3
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            report: "done"
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: report

@@ -1,0 +1,35 @@
+agent:
+  name: topic-note-agent
+  version: 0.1.0
+  description: "Return one fixed note for a dynamic fan-out smoke topic."
+
+inputs:
+  topic: string
+
+outputs:
+  note: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, done, failed]
+  note: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 3
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            note: "noted"
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: note

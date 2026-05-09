@@ -1,0 +1,109 @@
+agent:
+  name: pr-review-agent
+  version: 0.1.0
+  description: Minimal AIR v0.1 state-machine agent.
+
+inputs:
+  repo: string
+  pr_number: integer
+
+outputs:
+  comment_result: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, read, model, comment, done, failed]
+  pr_payload: object
+  messages:
+    type: array
+    items: object
+  response: object
+  comment_result: object
+
+requires:
+  capabilities:
+    - github.read
+    - github.comment
+
+tools:
+  - name: github.read_pr
+    capability: github.read
+    timeout_ms: 30000
+  - name: github.comment_pr
+    capability: github.comment
+    timeout_ms: 30000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 20
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: read
+            messages: []
+
+    - id: read_pr
+      when: phase == "read"
+      actions:
+        - kind: tool_call
+          tool: github.read_pr
+          input: repo
+          output: pr_payload
+          timeout_seconds: 30
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: model
+
+    - id: analyze_diff
+      when: phase == "model"
+      actions:
+        - kind: model_call
+          model: reasoning
+          input: pr_payload
+          output: response
+          timeout_seconds: 120
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: comment
+
+    - id: post_comment
+      when: phase == "comment"
+      actions:
+        - kind: tool_call
+          tool: github.comment_pr
+          input: response
+          output: comment_result
+          timeout_seconds: 30
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+
+    - id: finish
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: comment_result
+
+policy:
+  max_tool_calls: 10
+  timeout_seconds: 300
+  require_approval: []
+
+observability:
+  traces: true
+  metrics:
+    - tool_latency
+    - token_usage
+    - retry_count

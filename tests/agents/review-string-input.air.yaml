@@ -1,0 +1,35 @@
+agent:
+  name: review-string-input-agent
+  version: 0.1.0
+
+inputs:
+  pr_payload_id: string
+
+outputs:
+  review: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, done]
+  review: object
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            review:
+              summary: never-run
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: review

@@ -1,0 +1,355 @@
+agent:
+  name: deep-research-topic-agent
+  version: 0.1.0
+  description: "Research and compress one planned topic."
+
+inputs:
+  research_brief: string
+  topic: string
+
+outputs:
+  note:
+    type: object
+    required: [topic, summary, sources]
+    properties:
+      topic: string
+      summary: string
+      sources:
+        type: array
+        items: string
+
+state:
+  phase:
+    type: enum
+    enum:
+      - init
+      - search_initial
+      - refine_initial
+      - route_initial
+      - search_followup_1
+      - refine_followup_1
+      - route_followup_1
+      - search_followup_2
+      - refine_followup_2
+      - route_followup_2
+      - compress
+      - done
+      - failed
+  latest_search_results:
+    type: object
+    required: [query, documents]
+    properties:
+      query: string
+      documents:
+        type: array
+        items:
+          type: object
+          required: [id, title, content]
+          properties:
+            id: string
+            title: string
+            content: string
+  evidence:
+    type: array
+    items:
+      type: object
+      required: [query, documents]
+      properties:
+        query: string
+        documents:
+          type: array
+          items:
+            type: object
+            required: [id, title, content]
+            properties:
+              id: string
+              title: string
+              content: string
+  research_direction:
+    type: object
+    required: [complete, follow_up_query, rationale]
+    properties:
+      complete: boolean
+      follow_up_query: string
+      rationale: string
+  reflection:
+    type: object
+    required: [reflection]
+    properties:
+      reflection: string
+  note:
+    type: object
+    required: [topic, summary, sources]
+    properties:
+      topic: string
+      summary: string
+      sources:
+        type: array
+        items: string
+
+tools:
+  - name: web.search
+    capability: network.search
+    timeout_ms: 10000
+  - name: research.think
+    capability: research.reflect
+    timeout_ms: 1000
+
+requires:
+  capabilities: [network.search, research.reflect]
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 20
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: search_initial
+    - id: search_initial
+      when: phase == "search_initial"
+      actions:
+        - kind: tool_call
+          tool: web.search
+          input:
+            object:
+              query:
+                ref: topic
+          output: latest_search_results
+          timeout_seconds: 20
+          retry:
+            max_attempts: 3
+        - kind: append
+          target: evidence
+          value:
+            ref: latest_search_results
+        - kind: set
+          values:
+            phase: refine_initial
+    - id: refine_initial
+      when: phase == "refine_initial"
+      actions:
+        - kind: model_call
+          model: research_refiner
+          input:
+            object:
+              research_brief:
+                ref: research_brief
+              topic:
+                ref: topic
+              search_results:
+                ref: latest_search_results
+          output: research_direction
+          timeout_seconds: 60
+          retry:
+            max_attempts: 3
+        - kind: tool_call
+          tool: research.think
+          input:
+            object:
+              topic:
+                ref: topic
+              complete:
+                ref: research_direction.complete
+              follow_up_query:
+                ref: research_direction.follow_up_query
+              reflection:
+                ref: research_direction.rationale
+          output: reflection
+          timeout_seconds: 5
+          retry:
+            max_attempts: 3
+        - kind: set
+          values:
+            phase: route_initial
+    - id: route_initial_complete
+      when: phase == "route_initial" && research_direction.complete == true
+      actions:
+        - kind: set
+          values:
+            phase: compress
+    - id: route_initial_followup
+      when: phase == "route_initial" && research_direction.complete == false
+      actions:
+        - kind: set
+          values:
+            phase: search_followup_1
+    - id: search_followup_1
+      when: phase == "search_followup_1"
+      actions:
+        - kind: tool_call
+          tool: web.search
+          input:
+            object:
+              query:
+                ref: research_direction.follow_up_query
+          output: latest_search_results
+          timeout_seconds: 20
+          retry:
+            max_attempts: 3
+        - kind: append
+          target: evidence
+          value:
+            ref: latest_search_results
+        - kind: set
+          values:
+            phase: refine_followup_1
+    - id: refine_followup_1
+      when: phase == "refine_followup_1"
+      actions:
+        - kind: model_call
+          model: research_refiner
+          input:
+            object:
+              research_brief:
+                ref: research_brief
+              topic:
+                ref: topic
+              search_results:
+                ref: latest_search_results
+          output: research_direction
+          timeout_seconds: 60
+          retry:
+            max_attempts: 3
+        - kind: tool_call
+          tool: research.think
+          input:
+            object:
+              topic:
+                ref: topic
+              complete:
+                ref: research_direction.complete
+              follow_up_query:
+                ref: research_direction.follow_up_query
+              reflection:
+                ref: research_direction.rationale
+          output: reflection
+          timeout_seconds: 5
+          retry:
+            max_attempts: 3
+        - kind: set
+          values:
+            phase: route_followup_1
+    - id: route_followup_1_complete
+      when: phase == "route_followup_1" && research_direction.complete == true
+      actions:
+        - kind: set
+          values:
+            phase: compress
+    - id: route_followup_1_more
+      when: phase == "route_followup_1" && research_direction.complete == false
+      actions:
+        - kind: set
+          values:
+            phase: search_followup_2
+    - id: search_followup_2
+      when: phase == "search_followup_2"
+      actions:
+        - kind: tool_call
+          tool: web.search
+          input:
+            object:
+              query:
+                ref: research_direction.follow_up_query
+          output: latest_search_results
+          timeout_seconds: 20
+          retry:
+            max_attempts: 3
+        - kind: append
+          target: evidence
+          value:
+            ref: latest_search_results
+        - kind: set
+          values:
+            phase: refine_followup_2
+    - id: refine_followup_2
+      when: phase == "refine_followup_2"
+      actions:
+        - kind: model_call
+          model: research_refiner
+          input:
+            object:
+              research_brief:
+                ref: research_brief
+              topic:
+                ref: topic
+              search_results:
+                ref: latest_search_results
+          output: research_direction
+          timeout_seconds: 60
+          retry:
+            max_attempts: 3
+        - kind: tool_call
+          tool: research.think
+          input:
+            object:
+              topic:
+                ref: topic
+              complete:
+                ref: research_direction.complete
+              follow_up_query:
+                ref: research_direction.follow_up_query
+              reflection:
+                ref: research_direction.rationale
+          output: reflection
+          timeout_seconds: 5
+          retry:
+            max_attempts: 3
+        - kind: set
+          values:
+            phase: route_followup_2
+    - id: route_followup_2_done
+      when: phase == "route_followup_2"
+      actions:
+        - kind: set
+          values:
+            phase: compress
+    - id: compress
+      when: phase == "compress"
+      actions:
+        - kind: model_call
+          model: research_compressor
+          input:
+            object:
+              research_brief:
+                ref: research_brief
+              topic:
+                ref: topic
+              evidence:
+                object:
+                  all_searches:
+                    truncate:
+                      ref: evidence
+                    max_chars: 12000
+                  latest_search:
+                    ref: latest_search_results
+                  final_direction:
+                    ref: research_direction
+          output: note
+          timeout_seconds: 120
+          retry:
+            max_attempts: 3
+            on_provider_error:
+              token_limit:
+                max_input_chars: [9000, 6000]
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: note
+
+policy:
+  max_tool_calls: 8
+  max_model_calls: 8
+  timeout_seconds: 360
+  require_approval: []
+
+observability:
+  traces: true

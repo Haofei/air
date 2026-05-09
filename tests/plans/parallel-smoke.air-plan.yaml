@@ -1,0 +1,28 @@
+plan:
+  name: parallel-smoke
+  version: 0.1.0
+
+nodes:
+  - id: left
+    module: test.model_smoke@0.1.0
+  - id: right
+    module: test.model_smoke@0.1.0
+
+entry: left
+
+schedule:
+  max_parallel: 2
+  groups:
+    - id: smoke_wave
+      nodes: [left, right]
+      max_parallel: 2
+
+connect:
+  - from: $input.prompt
+    to: left.prompt
+  - from: $input.prompt
+    to: right.prompt
+
+outputs:
+  left: left.response
+  right: right.response

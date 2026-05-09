@@ -1,0 +1,16 @@
+{
+  "tools": {
+    "docs.search": {
+      "kind": "local_docs_search",
+      "capability": "retrieval.local",
+      "max_results": 1,
+      "documents": [
+        {
+          "id": "refund",
+          "title": "Refund policy",
+          "content": "Refund requests are routed to billing support."
+        }
+      ]
+    }
+  }
+}

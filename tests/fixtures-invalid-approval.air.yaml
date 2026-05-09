@@ -1,0 +1,35 @@
+agent:
+  name: invalid-approval
+  version: 0.1.0
+
+outputs:
+  deployment_id: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: dag
+  entry: deploy
+  nodes:
+    - id: deploy
+      kind: tool_call
+      tool: deploy.production
+      timeout_seconds: 60
+      retry:
+        max_attempts: 1
+    - id: done
+      kind: return
+      output: deployment_id
+  edges:
+    - from: deploy
+      to: done
+
+policy:
+  require_approval:
+    - production.deploy

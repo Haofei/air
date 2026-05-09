@@ -1,0 +1,156 @@
+# Bounded two-step supervisor example for deep research.
+# It models repeated ConductResearch / ResearchComplete decisions without
+# allowing runtime graph mutation: both optional waves are statically present.
+plan:
+  name: deep-research-supervised-two-step
+  version: 0.1.0
+
+requires:
+  capabilities: [network.search, research.reflect]
+
+nodes:
+  - id: plan
+    module: deep_research.plan_array@0.1.0
+  - id: topic_1
+    module: deep_research.research_topic@0.1.0
+  - id: topic_2
+    module: deep_research.research_topic@0.1.0
+  - id: supervisor_1
+    module: deep_research.supervisor@0.1.0
+  - id: topic_3
+    module: deep_research.research_topic@0.1.0
+    when: supervisor_1.decision.action == "conduct_research" || supervisor_1.decision.needs_more == true
+  - id: topic_4
+    module: deep_research.research_topic@0.1.0
+    when: supervisor_1.decision.action == "conduct_research" || supervisor_1.decision.needs_more == true
+  - id: supervisor_2
+    module: deep_research.supervisor@0.1.0
+    when: supervisor_1.decision.action == "conduct_research" || supervisor_1.decision.needs_more == true
+  - id: topic_5
+    module: deep_research.research_topic@0.1.0
+    when: supervisor_2.decision.action == "conduct_research" || supervisor_2.decision.needs_more == true
+  - id: topic_6
+    module: deep_research.research_topic@0.1.0
+    when: supervisor_2.decision.action == "conduct_research" || supervisor_2.decision.needs_more == true
+  - id: final
+    module: deep_research.final_report@0.1.0
+
+entry: plan
+
+schedule:
+  max_parallel: 2
+  groups:
+    - id: initial_research_wave
+      nodes: [topic_1, topic_2]
+      max_parallel: 2
+    - id: supervisor_1_follow_up_wave
+      nodes: [topic_3, topic_4]
+      max_parallel: 2
+    - id: supervisor_2_follow_up_wave
+      nodes: [topic_5, topic_6]
+      max_parallel: 2
+
+edges:
+  - from: plan
+    to: topic_1
+  - from: plan
+    to: topic_2
+  - from: topic_1
+    to: supervisor_1
+  - from: topic_2
+    to: supervisor_1
+  - from: supervisor_1
+    to: topic_3
+  - from: supervisor_1
+    to: topic_4
+  - from: supervisor_1
+    to: supervisor_2
+  - from: topic_3
+    to: supervisor_2
+  - from: topic_4
+    to: supervisor_2
+  - from: supervisor_2
+    to: topic_5
+  - from: supervisor_2
+    to: topic_6
+  - from: topic_1
+    to: final
+  - from: topic_2
+    to: final
+  - from: topic_3
+    to: final
+  - from: topic_4
+    to: final
+  - from: topic_5
+    to: final
+  - from: topic_6
+    to: final
+
+connect:
+  - from: $input.question
+    to: plan.question
+  - from: $input.question
+    to: final.question
+  - from: plan.plan.research_brief
+    to: topic_1.research_brief
+  - from: plan.plan.research_brief
+    to: topic_2.research_brief
+  - from: plan.plan.research_brief
+    to: supervisor_1.research_brief
+  - from: plan.plan.research_brief
+    to: supervisor_2.research_brief
+  - from: plan.plan.research_brief
+    to: topic_3.research_brief
+  - from: plan.plan.research_brief
+    to: topic_4.research_brief
+  - from: plan.plan.research_brief
+    to: topic_5.research_brief
+  - from: plan.plan.research_brief
+    to: topic_6.research_brief
+  - from: plan.plan.topics[0]
+    to: topic_1.topic
+  - from: plan.plan.topics[1]
+    to: topic_2.topic
+  - from: supervisor_1.decision.follow_up_topics[0]
+    to: topic_3.topic
+  - from: supervisor_1.decision.follow_up_topics[1]
+    to: topic_4.topic
+  - from: supervisor_2.decision.follow_up_topics[0]
+    to: topic_5.topic
+  - from: supervisor_2.decision.follow_up_topics[1]
+    to: topic_6.topic
+  - from: topic_1.note
+    to: supervisor_1.notes[]
+  - from: topic_2.note
+    to: supervisor_1.notes[]
+  - from: topic_1.note
+    to: supervisor_2.notes[]
+  - from: topic_2.note
+    to: supervisor_2.notes[]
+  - from: topic_3.note
+    to: supervisor_2.notes[]
+  - from: topic_4.note
+    to: supervisor_2.notes[]
+  - from: topic_1.note
+    to: final.notes[]
+  - from: topic_2.note
+    to: final.notes[]
+  - from: topic_3.note
+    to: final.notes[]
+  - from: topic_4.note
+    to: final.notes[]
+  - from: topic_5.note
+    to: final.notes[]
+  - from: topic_6.note
+    to: final.notes[]
+  - from: plan.plan
+    to: final.plan
+
+outputs:
+  result: final.final_report
+  supervisor_decision_1: supervisor_1.decision
+
+decisions:
+  - id: bounded-supervisor-two-step
+    rationale: "Model repeated supervisor decisions as two statically bounded optional researcher waves."
+    selected: [plan, topic_1, topic_2, supervisor_1, topic_3, topic_4, supervisor_2, topic_5, topic_6, final]

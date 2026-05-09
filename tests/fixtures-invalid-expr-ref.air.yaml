@@ -1,0 +1,47 @@
+agent:
+  name: invalid-expr-ref-agent
+  version: 0.1.0
+
+inputs:
+  text: string
+
+outputs:
+  response: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, call, done]
+  response: object
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: call
+    - id: call
+      when: phase == "call"
+      actions:
+        - kind: model_call
+          model: expr_model
+          input:
+            object:
+              missing:
+                path: missing.value
+          output: response
+          timeout_seconds: 30
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: response

@@ -1,0 +1,24 @@
+agent:
+  name: invalid-state-machine-phase
+  version: 0.1.0
+
+outputs:
+  done: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, done]
+
+workflow:
+  kind: state_machine
+  initial: boot
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: done

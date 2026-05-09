@@ -1,0 +1,76 @@
+agent:
+  name: deep-research-clarify-scope-agent
+  version: 0.1.0
+  description: "Normalize a user research request and identify whether clarification is needed."
+
+inputs:
+  question: string
+
+outputs:
+  clarification:
+    type: object
+    required: [needs_clarification, question, verification, normalized_question, assumptions]
+    properties:
+      needs_clarification: boolean
+      question: string
+      verification: string
+      normalized_question: string
+      assumptions:
+        type: array
+        items: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, clarify, done, failed]
+  clarification:
+    type: object
+    required: [needs_clarification, question, verification, normalized_question, assumptions]
+    properties:
+      needs_clarification: boolean
+      question: string
+      verification: string
+      normalized_question: string
+      assumptions:
+        type: array
+        items: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: clarify
+    - id: clarify
+      when: phase == "clarify"
+      actions:
+        - kind: model_call
+          model: research_clarifier
+          input:
+            object:
+              question:
+                ref: question
+          output: clarification
+          timeout_seconds: 60
+          retry:
+            max_attempts: 3
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: clarification
+
+policy:
+  timeout_seconds: 90
+
+observability:
+  traces: true

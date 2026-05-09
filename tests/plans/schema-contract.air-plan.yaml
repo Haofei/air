@@ -1,0 +1,41 @@
+plan:
+  name: schema-contract-run-plan
+  version: 0.1.0
+
+nodes:
+  - id: extract
+    module: customer.extract@0.1.0
+  - id: score
+    module: customer.score@0.1.0
+  - id: report
+    module: customer.report@0.1.0
+
+entry: extract
+
+edges:
+  - from: extract
+    to: score
+  - from: score
+    to: report
+
+connect:
+  - from: $input.text
+    to: extract.text
+  - from: $input.text
+    to: score.text
+  - from: $input.text
+    to: report.text
+  - from: extract.extracted
+    to: score.extracted
+  - from: extract.extracted
+    to: report.extracted
+  - from: score.score
+    to: report.score
+
+outputs:
+  report: report.report
+
+decisions:
+  - id: choose-customer-triage
+    rationale: "The task is customer feedback triage, so compose extract, score, and report modules."
+    selected: [extract, score, report]

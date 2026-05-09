@@ -1,0 +1,83 @@
+plan:
+  name: deep-research-static-three-topic
+  version: 0.1.0
+
+requires:
+  capabilities: [network.search, research.reflect]
+
+nodes:
+  - id: plan
+    module: deep_research.plan@0.1.0
+  - id: topic_1
+    module: deep_research.research_topic@0.1.0
+  - id: topic_2
+    module: deep_research.research_topic@0.1.0
+  - id: topic_3
+    module: deep_research.research_topic@0.1.0
+  - id: final
+    module: deep_research.final_report@0.1.0
+
+entry: plan
+
+schedule:
+  max_parallel: 3
+  groups:
+    - id: initial_research_wave
+      nodes: [topic_1, topic_2, topic_3]
+      max_parallel: 3
+
+edges:
+  - from: plan
+    to: topic_1
+  - from: plan
+    to: topic_2
+  - from: plan
+    to: topic_3
+  - from: plan
+    to: final
+  - from: topic_1
+    to: final
+  - from: topic_2
+    to: final
+  - from: topic_3
+    to: final
+
+connect:
+  - from: $input.question
+    to: plan.question
+  - from: plan.plan.research_brief
+    to: topic_1.research_brief
+  - from: plan.plan.topic_1
+    to: topic_1.topic
+  - from: plan.plan.research_brief
+    to: topic_2.research_brief
+  - from: plan.plan.topic_2
+    to: topic_2.topic
+  - from: plan.plan.research_brief
+    to: topic_3.research_brief
+  - from: plan.plan.topic_3
+    to: topic_3.topic
+  - from: $input.question
+    to: final.question
+  - from: plan.plan
+    to: final.plan
+  - from: topic_1.note
+    to: final.notes[]
+  - from: topic_2.note
+    to: final.notes[]
+  - from: topic_3.note
+    to: final.notes[]
+
+outputs:
+  final_report: final.final_report
+
+decisions:
+  - id: use-bounded-research-plan
+    rationale: "Keep topic selection in a static, schema-checked planning module instead of unbounded free exploration."
+    selected: [plan]
+  - id: fan-out-three-researchers
+    rationale: "Run three bounded researcher modules from explicit plan fields. This models deep research parallelism without letting a module create arbitrary runtime graph structure."
+    selected: [topic_1, topic_2, topic_3]
+  - id: fan-in-final-report
+    rationale: "Collect compressed notes with the AIR array fan-in reducer, then join them in a final report module with a typed output contract."
+    selected: [final]

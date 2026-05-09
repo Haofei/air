@@ -1,0 +1,77 @@
+store:
+  name: test-module-store
+  version: 0.1.0
+
+modules:
+  customer.triage@0.1.0:
+    path: tests/agents/customer-triage.air.yaml
+    kind: composite
+    visibility: public
+    description: "End-to-end customer feedback triage: extract issue, score risk, and produce an approved support report."
+    tags: [customer_support, triage, feedback, billing]
+    covers: [extract_issue, score_risk, generate_report, assign_owner]
+    priority: 100
+  customer.extract@0.1.0:
+    path: tests/agents/schema-extract.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Extract structured issue facts from customer feedback text."
+    tags: [customer_support, extract]
+    covers: [extract_issue]
+    priority: 10
+  customer.score@0.1.0:
+    path: tests/agents/schema-score.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Score customer issue risk and priority from extracted facts."
+    tags: [customer_support, risk]
+    covers: [score_risk]
+    priority: 10
+  customer.report@0.1.0:
+    path: tests/agents/schema-report.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Generate final support report from customer issue facts and risk score."
+    tags: [customer_support, report]
+    covers: [generate_report, assign_owner]
+    priority: 10
+  customer.compliance_check@0.1.0:
+    path: tests/agents/compliance-check.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Check whether a support case requires legal or policy review."
+    tags: [customer_support, compliance]
+    covers: [policy_review, legal_review]
+    priority: 20
+  customer.retention_plan@0.1.0:
+    path: tests/agents/retention-plan.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Plan a retention action from a triaged support case."
+    tags: [customer_support, retention]
+    covers: [retain_customer, churn_risk]
+    priority: 20
+  customer.finance_impact@0.1.0:
+    path: tests/agents/finance-impact.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Estimate refund and billing operations impact."
+    tags: [customer_support, billing, finance]
+    covers: [refund_estimate, billing_priority]
+    priority: 20
+  customer.incident_classify@0.1.0:
+    path: tests/agents/incident-classify.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Classify incident severity and customer-visible impact."
+    tags: [customer_support, incident]
+    covers: [incident_severity, customer_visibility]
+    priority: 20
+  customer.executive_case_summary@0.1.0:
+    path: tests/agents/executive-case-summary.air.yaml
+    kind: composite
+    visibility: internal
+    description: "Join specialist outputs into an executive support case summary."
+    tags: [customer_support, summary, executive]
+    covers: [executive_summary, escalation_packet]
+    priority: 30

@@ -1,0 +1,52 @@
+agent:
+  name: model-smoke
+  version: 0.1.0
+  description: Minimal model_call smoke test for OpenAI-compatible providers.
+
+inputs:
+  prompt: string
+
+outputs:
+  response: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, call, done, failed]
+  response: object
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: call
+
+    - id: call_model
+      when: phase == "call"
+      actions:
+        - kind: model_call
+          model: reasoning
+          input: prompt
+          output: response
+          timeout_seconds: 120
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: response
+
+observability:
+  traces: true

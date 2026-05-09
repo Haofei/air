@@ -1,0 +1,20 @@
+plan:
+  name: simple-helpdesk
+  version: 0.1.0
+  description: "Single-agent helpdesk RAG example."
+
+requires:
+  capabilities: [retrieval.local]
+
+nodes:
+  - id: helpdesk
+    module: helpdesk.rag@0.1.0
+
+entry: helpdesk
+
+connect:
+  - from: $input.question
+    to: helpdesk.question
+
+outputs:
+  answer: helpdesk.answer

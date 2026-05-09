@@ -1,0 +1,99 @@
+agent:
+  name: deep-research-final-report-agent
+  version: 0.1.0
+  description: "Synthesize compressed research notes into a final report."
+
+inputs:
+  question: string
+  plan:
+    type: object
+    required: [research_brief]
+    properties:
+      research_brief: string
+  notes:
+    type: array
+    items:
+      type: object
+      required: [topic, summary, sources]
+      properties:
+        topic: string
+        summary: string
+        sources:
+          type: array
+          items: string
+
+outputs:
+  final_report:
+    type: object
+    required: [report, sources, limitations]
+    properties:
+      report: string
+      sources:
+        type: array
+        items: string
+      limitations:
+        type: array
+        items: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, write, done, failed]
+  final_report:
+    type: object
+    required: [report, sources, limitations]
+    properties:
+      report: string
+      sources:
+        type: array
+        items: string
+      limitations:
+        type: array
+        items: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: write
+    - id: write
+      when: phase == "write"
+      actions:
+        - kind: model_call
+          model: final_reporter
+          input:
+            object:
+              question:
+                ref: question
+              research_brief:
+                ref: plan.research_brief
+              notes:
+                ref: notes
+          output: final_report
+          timeout_seconds: 180
+          retry:
+            max_attempts: 3
+            on_provider_error:
+              token_limit:
+                max_input_chars: [24000, 12000]
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: final_report
+
+policy:
+  timeout_seconds: 240
+
+observability:
+  traces: true

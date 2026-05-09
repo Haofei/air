@@ -1,0 +1,124 @@
+agent:
+  name: customer-triage-agent
+  version: 0.1.0
+  description: "End-to-end customer feedback triage: extract issue, score risk, and produce a support report."
+
+inputs:
+  text: string
+
+outputs:
+  report:
+    type: object
+    required: [summary, recommended_action, owner, approved]
+    properties:
+      summary: string
+      recommended_action: string
+      owner:
+        type: enum
+        enum: [billing_support, technical_support, customer_success, sales_ops]
+      approved: boolean
+
+state:
+  phase:
+    type: enum
+    enum: [init, extract, score, report, done, failed]
+  extracted:
+    type: object
+    required: [customer_issue, product_area, sentiment, urgency_signals]
+    properties:
+      customer_issue: string
+      product_area:
+        type: enum
+        enum: [billing, account, technical, sales, other]
+      sentiment:
+        type: enum
+        enum: [positive, neutral, negative]
+      urgency_signals:
+        type: array
+        items: string
+  score:
+    type: object
+    required: [issue_summary, risk_score, priority, reason]
+    properties:
+      issue_summary: string
+      risk_score: number
+      priority:
+        type: enum
+        enum: [low, medium, high, critical]
+      reason: string
+  report:
+    type: object
+    required: [summary, recommended_action, owner, approved]
+    properties:
+      summary: string
+      recommended_action: string
+      owner:
+        type: enum
+        enum: [billing_support, technical_support, customer_success, sales_ops]
+      approved: boolean
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 8
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: extract
+    - id: extract
+      when: phase == "extract"
+      actions:
+        - kind: model_call
+          model: extractor
+          input:
+            fields:
+              text: text
+          output: extracted
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: score
+    - id: score
+      when: phase == "score"
+      actions:
+        - kind: model_call
+          model: scorer
+          input:
+            fields:
+              text: text
+              extracted: extracted
+          output: score
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: report
+    - id: report
+      when: phase == "report"
+      actions:
+        - kind: model_call
+          model: reporter
+          input:
+            fields:
+              text: text
+              extracted: extracted
+              score: score
+          output: report
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: report

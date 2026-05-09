@@ -1,0 +1,81 @@
+agent:
+  name: pr-review-system
+  version: 0.1.0
+  description: Minimal composition DAG for linking agent modules.
+
+inputs:
+  repo: string
+  pr_number: integer
+
+outputs:
+  report_url: string
+
+requires:
+  capabilities:
+    - github.read
+    - github.comment
+    - slack.send
+
+tools:
+  - name: github.read_pr
+    capability: github.read
+    timeout_ms: 30000
+  - name: github.comment_pr
+    capability: github.comment
+    timeout_ms: 30000
+  - name: slack.report
+    capability: slack.send
+    timeout_ms: 30000
+
+workflow:
+  kind: dag
+  entry: read_pr
+  nodes:
+    - id: read_pr
+      kind: tool_call
+      tool: github.read_pr
+      timeout_seconds: 30
+      retry:
+        max_attempts: 2
+    - id: review_agent
+      kind: model_call
+      model: reasoning
+      timeout_seconds: 120
+      retry:
+        max_attempts: 1
+    - id: comment_pr
+      kind: tool_call
+      tool: github.comment_pr
+      timeout_seconds: 30
+      retry:
+        max_attempts: 2
+    - id: report
+      kind: tool_call
+      tool: slack.report
+      timeout_seconds: 30
+      retry:
+        max_attempts: 2
+    - id: done
+      kind: return
+      output: report_url
+  edges:
+    - from: read_pr
+      to: review_agent
+    - from: review_agent
+      to: comment_pr
+    - from: review_agent
+      to: report
+    - from: comment_pr
+      to: done
+    - from: report
+      to: done
+
+policy:
+  max_tool_calls: 20
+  timeout_seconds: 600
+
+observability:
+  traces: true
+  metrics:
+    - tool_latency
+    - token_usage

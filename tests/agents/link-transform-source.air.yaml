@@ -1,0 +1,54 @@
+agent:
+  name: link-transform-source-agent
+  version: 0.1.0
+
+inputs: {}
+
+outputs:
+  plan:
+    type: object
+    required: [brief, topics, owner]
+    properties:
+      brief: string
+      topics:
+        type: array
+        items: string
+      owner: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, done, failed]
+  plan:
+    type: object
+    required: [brief, topics, owner]
+    properties:
+      brief: string
+      topics:
+        type: array
+        items: string
+      owner: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 3
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            plan:
+              brief: "Research migration readiness"
+              topics:
+                - "dynamic fan-out"
+                - "typed transforms"
+              owner: ""
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: plan

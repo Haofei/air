@@ -1,0 +1,22 @@
+system:
+  name: invalid-connect-type
+  version: 0.1.0
+
+modules:
+  read:
+    path: tests/agents/read-pr.air.yaml
+  review:
+    path: tests/agents/review-string-input.air.yaml
+
+entry: read
+
+edges:
+  - from: read
+    to: review
+
+connect:
+  - from: read.pr_payload
+    to: review.pr_payload_id
+
+outputs:
+  review: review.review

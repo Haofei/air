@@ -1,0 +1,58 @@
+agent:
+  name: report-agent
+  version: 0.1.0
+
+inputs:
+  review: object
+
+outputs:
+  report: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, report, done, failed]
+  report: object
+
+requires:
+  capabilities:
+    - slack.send
+
+tools:
+  - name: slack.report
+    capability: slack.send
+    timeout_ms: 30000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: report
+    - id: report
+      when: phase == "report"
+      actions:
+        - kind: tool_call
+          tool: slack.report
+          input: review
+          output: report
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: report
+
+observability:
+  traces: true

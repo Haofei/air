@@ -1,0 +1,22 @@
+{
+  "name": "air",
+  "version": "1.0.0",
+  "description": "AIR is a compiler-first module system for production agents. The first milestone is intentionally small: parse and statically verify typed, permissioned AIR modules before adding runtime execution, linking, package management, or deployment targets.",
+  "main": "index.js",
+  "directories": {
+    "example": "examples",
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "@openai/agents": "^0.11.0",
+    "openai": "^6.37.0",
+    "zod": "^4.4.3"
+  }
+}

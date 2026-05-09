@@ -1,0 +1,19 @@
+plan:
+  name: http-json-tool-smoke
+  version: 0.1.0
+
+requires:
+  capabilities: [network.search]
+
+nodes:
+  - id: search
+    module: test.http_json_tool_smoke@0.1.0
+
+entry: search
+
+connect:
+  - from: $input.query
+    to: search.query
+
+outputs:
+  result: search.result

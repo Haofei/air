@@ -1,0 +1,112 @@
+agent:
+  name: helpdesk-rag-agent
+  version: 0.1.0
+  description: "Fixed RAG workflow: retrieve support docs, then answer from retrieved evidence."
+
+inputs:
+  question: string
+
+outputs:
+  answer:
+    type: object
+    required: [answer, citations, escalation_required]
+    properties:
+      answer: string
+      citations:
+        type: array
+        items: string
+      escalation_required: boolean
+
+requires:
+  capabilities: [retrieval.local]
+
+state:
+  phase:
+    type: enum
+    enum: [init, retrieve, answer, done, failed]
+  retrieved:
+    type: object
+    required: [query, documents]
+    properties:
+      query: string
+      documents:
+        type: array
+        items:
+          type: object
+          required: [id, title, content]
+          properties:
+            id: string
+            title: string
+            content: string
+  answer:
+    type: object
+    required: [answer, citations, escalation_required]
+    properties:
+      answer: string
+      citations:
+        type: array
+        items: string
+      escalation_required: boolean
+
+tools:
+  - name: docs.search
+    capability: retrieval.local
+    timeout_ms: 10000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 8
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: retrieve
+
+    - id: retrieve
+      when: phase == "retrieve"
+      actions:
+        - kind: tool_call
+          tool: docs.search
+          input:
+            object:
+              query:
+                ref: question
+          output: retrieved
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: answer
+
+    - id: answer
+      when: phase == "answer"
+      actions:
+        - kind: model_call
+          model: rag_answerer
+          input:
+            object:
+              question:
+                ref: question
+              retrieved:
+                ref: retrieved
+          output: answer
+          timeout_seconds: 120
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: answer
+
+observability:
+  traces: true

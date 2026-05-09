@@ -1,0 +1,136 @@
+agent:
+  name: executive-case-summary-agent
+  version: 0.1.0
+  description: "Join triage, compliance, retention, finance, and incident outputs into an executive case summary."
+
+inputs:
+  text: string
+  report:
+    type: object
+    required: [summary, recommended_action, owner, approved]
+    properties:
+      summary: string
+      recommended_action: string
+      owner:
+        type: enum
+        enum: [billing_support, technical_support, customer_success, sales_ops]
+      approved: boolean
+  compliance:
+    type: object
+    required: [requires_legal_review, policy_refs, reason]
+    properties:
+      requires_legal_review: boolean
+      policy_refs:
+        type: array
+        items: string
+      reason: string
+  retention:
+    type: object
+    required: [churn_risk, offer, owner]
+    properties:
+      churn_risk:
+        type: enum
+        enum: [low, medium, high, critical]
+      offer: string
+      owner: string
+  finance:
+    type: object
+    required: [refund_required, estimated_credit, finance_priority]
+    properties:
+      refund_required: boolean
+      estimated_credit: number
+      finance_priority:
+        type: enum
+        enum: [normal, urgent]
+  incident:
+    type: object
+    required: [severity, region, customer_visible]
+    properties:
+      severity:
+        type: enum
+        enum: [sev0, sev1, sev2, sev3]
+      region:
+        type: enum
+        enum: [us, eu, apac]
+      customer_visible: boolean
+
+outputs:
+  final_case:
+    type: object
+    required: [summary, actions, approvals, escalation_required, owners]
+    properties:
+      summary: string
+      actions:
+        type: array
+        items: string
+      approvals:
+        type: array
+        items: string
+      escalation_required: boolean
+      owners:
+        type: array
+        items: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, summarize, done, failed]
+  final_case:
+    type: object
+    required: [summary, actions, approvals, escalation_required, owners]
+    properties:
+      summary: string
+      actions:
+        type: array
+        items: string
+      approvals:
+        type: array
+        items: string
+      escalation_required: boolean
+      owners:
+        type: array
+        items: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: summarize
+    - id: summarize
+      when: phase == "summarize"
+      actions:
+        - kind: model_call
+          model: executive_summarizer
+          input:
+            object:
+              text:
+                ref: text
+              report:
+                ref: report
+              compliance:
+                ref: compliance
+              retention:
+                ref: retention
+              finance:
+                ref: finance
+              incident:
+                ref: incident
+          output: final_case
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: final_case

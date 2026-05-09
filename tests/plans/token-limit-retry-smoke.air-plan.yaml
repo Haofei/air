@@ -1,0 +1,16 @@
+plan:
+  name: token-limit-retry-smoke
+  version: 0.1.0
+
+nodes:
+  - id: retry
+    module: test.model_token_limit_retry@0.1.0
+
+entry: retry
+
+connect:
+  - from: $input.text
+    to: retry.text
+
+outputs:
+  result: retry.result

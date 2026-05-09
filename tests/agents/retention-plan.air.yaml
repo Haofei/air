@@ -1,0 +1,80 @@
+agent:
+  name: retention-plan-agent
+  version: 0.1.0
+  description: "Plan customer retention action for a support case."
+
+inputs:
+  account_tier:
+    type: enum
+    enum: [free, pro, enterprise]
+  report:
+    type: object
+    required: [summary, recommended_action, owner, approved]
+    properties:
+      summary: string
+      recommended_action: string
+      owner:
+        type: enum
+        enum: [billing_support, technical_support, customer_success, sales_ops]
+      approved: boolean
+
+outputs:
+  retention:
+    type: object
+    required: [churn_risk, offer, owner]
+    properties:
+      churn_risk:
+        type: enum
+        enum: [low, medium, high, critical]
+      offer: string
+      owner: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, plan, done, failed]
+  retention:
+    type: object
+    required: [churn_risk, offer, owner]
+    properties:
+      churn_risk:
+        type: enum
+        enum: [low, medium, high, critical]
+      offer: string
+      owner: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: plan
+    - id: plan
+      when: phase == "plan"
+      actions:
+        - kind: model_call
+          model: retention_planner
+          input:
+            object:
+              account_tier:
+                ref: account_tier
+              report:
+                ref: report
+          output: retention
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: retention

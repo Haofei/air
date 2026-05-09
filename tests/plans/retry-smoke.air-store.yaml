@@ -1,0 +1,9 @@
+store:
+  name: retry-smoke-store
+  version: 0.1.0
+
+modules:
+  test.model_retry@0.1.0:
+    path: tests/agents/model-retry.air.yaml
+    kind: primitive
+    visibility: public

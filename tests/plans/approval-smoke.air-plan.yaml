@@ -1,0 +1,19 @@
+plan:
+  name: approval-smoke
+  version: 0.1.0
+
+requires:
+  capabilities: [production.deploy]
+
+nodes:
+  - id: approval
+    module: test.approval_gate@0.1.0
+
+entry: approval
+
+connect:
+  - from: $input.deployment_id
+    to: approval.deployment_id
+
+outputs:
+  result: approval.result

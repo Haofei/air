@@ -1,0 +1,35 @@
+plan:
+  name: dynamic-smoke
+  version: 0.1.0
+
+nodes:
+  - id: plan
+    module: test.dynamic_plan@0.1.0
+  - id: final
+    module: test.final_notes@0.1.0
+
+entry: plan
+
+edges:
+  - from: plan
+    to: final
+
+dynamic:
+  fanouts:
+    - id: topic_wave
+      after: plan
+      source: plan.topics
+      module: test.topic_note@0.1.0
+      id_prefix: topic
+      min_items: 2
+      max_items: 2
+      max_parallel: 2
+      input:
+        - from: $item
+          to: $each.topic
+      fan_in:
+        - from: $each.note
+          to: final.notes[]
+
+outputs:
+  report: final.report

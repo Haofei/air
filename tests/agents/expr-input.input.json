@@ -1,0 +1,7 @@
+{
+  "text": "please fix billing",
+  "extracted": {
+    "customer_issue": "double charge",
+    "product_area": "billing"
+  }
+}

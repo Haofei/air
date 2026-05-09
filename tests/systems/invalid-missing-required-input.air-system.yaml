@@ -1,0 +1,18 @@
+system:
+  name: invalid-missing-required-input
+  version: 0.1.0
+
+modules:
+  read:
+    path: tests/agents/read-pr.air.yaml
+  review:
+    path: tests/agents/review.air.yaml
+
+entry: read
+
+edges:
+  - from: read
+    to: review
+
+outputs:
+  review: review.review
