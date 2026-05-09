@@ -1,7 +1,8 @@
 use air_core::{StateAction, Workflow};
 use air_runtime::{
-    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl, ApprovalDecision,
-    ModelProvider, RuntimeError, State, ToolProvider, TraceStatus, Vm,
+    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl,
+    write_trace_jsonl_with_options, ApprovalDecision, ModelProvider, RuntimeError, State,
+    ToolProvider, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
 };
 use serde_json::{json, Value};
 
@@ -715,6 +716,57 @@ fn writes_jsonl_trace_and_replays_final_output() {
     assert_eq!(replayed["extracted"]["product_area"], json!("billing"));
 
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn redacted_trace_writer_masks_sensitive_fields_and_limits_size() {
+    let trace = vec![TraceEvent {
+        agent: "test-agent".to_string(),
+        step: 0,
+        rule: "test".to_string(),
+        action: "model_call".to_string(),
+        input: Some(json!({
+            "api_key": "sk-live-secret",
+            "nested": {
+                "password": "super-secret-password",
+                "text": "safe"
+            },
+            "long": "x".repeat(32)
+        })),
+        output: Some(json!({
+            "token": "runtime-token",
+            "summary": "done"
+        })),
+        meta: Some(json!({
+            "headers": {
+                "authorization": "Bearer provider-secret"
+            }
+        })),
+        status: TraceStatus::Error,
+        error: Some("provider returned Authorization: Bearer error-secret".to_string()),
+    }];
+    let path = std::env::temp_dir().join(format!(
+        "air-redacted-trace-{}-{}.jsonl",
+        std::process::id(),
+        "schema-contract"
+    ));
+    let options = TraceWriteOptions {
+        redact_sensitive: true,
+        max_string_chars: Some(8),
+        max_event_bytes: Some(512),
+    };
+
+    write_trace_jsonl_with_options(&path, &trace, &options).unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let _ = std::fs::remove_file(path);
+
+    assert!(!raw.contains("sk-live-secret"));
+    assert!(!raw.contains("super-secret-password"));
+    assert!(!raw.contains("runtime-token"));
+    assert!(!raw.contains("provider-secret"));
+    assert!(!raw.contains("error-secret"));
+    assert!(raw.contains("[AIR_REDACTED]"));
+    assert!(raw.contains("[AIR_TRUNCATED]"));
 }
 
 #[test]

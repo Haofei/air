@@ -39,6 +39,23 @@ pub struct TraceEvent {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TraceWriteOptions {
+    pub redact_sensitive: bool,
+    pub max_string_chars: Option<usize>,
+    pub max_event_bytes: Option<usize>,
+}
+
+impl TraceWriteOptions {
+    pub fn redacted() -> Self {
+        Self {
+            redact_sensitive: true,
+            max_string_chars: Some(4096),
+            max_event_bytes: Some(64 * 1024),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TraceStatus {
@@ -207,10 +224,25 @@ pub fn write_trace_jsonl(
     path: impl AsRef<Path>,
     events: &[TraceEvent],
 ) -> Result<(), RuntimeError> {
+    write_trace_jsonl_with_options(path, events, &TraceWriteOptions::default())
+}
+
+pub fn write_trace_jsonl_with_options(
+    path: impl AsRef<Path>,
+    events: &[TraceEvent],
+    options: &TraceWriteOptions,
+) -> Result<(), RuntimeError> {
     let mut file = File::create(path).map_err(|error| RuntimeError::TraceIo(error.to_string()))?;
     for event in events {
-        let line = serde_json::to_string(event)
+        let event = sanitize_trace_event(event, options);
+        let mut line = serde_json::to_string(&event)
             .map_err(|error| RuntimeError::TraceJson(error.to_string()))?;
+        if let Some(max_bytes) = options.max_event_bytes {
+            if line.len() > max_bytes {
+                line = serde_json::to_string(&compact_trace_event(&event))
+                    .map_err(|error| RuntimeError::TraceJson(error.to_string()))?;
+            }
+        }
         writeln!(file, "{line}").map_err(|error| RuntimeError::TraceIo(error.to_string()))?;
     }
     Ok(())
@@ -245,6 +277,147 @@ pub fn replay_outputs(events: &[TraceEvent]) -> Result<Value, RuntimeError> {
         })
         .and_then(|event| event.output.clone())
         .ok_or(RuntimeError::TraceMissingOutput)
+}
+
+pub fn sanitize_trace_event(event: &TraceEvent, options: &TraceWriteOptions) -> TraceEvent {
+    let mut sanitized = event.clone();
+    sanitized.input = sanitized
+        .input
+        .as_ref()
+        .map(|value| sanitize_trace_value(value, options));
+    sanitized.output = sanitized
+        .output
+        .as_ref()
+        .map(|value| sanitize_trace_value(value, options));
+    sanitized.meta = sanitized
+        .meta
+        .as_ref()
+        .map(|value| sanitize_trace_value(value, options));
+    if let Some(error) = &sanitized.error {
+        sanitized.error = Some(sanitize_trace_string(error, options));
+    }
+    sanitized
+}
+
+fn sanitize_trace_value(value: &Value, options: &TraceWriteOptions) -> Value {
+    match value {
+        Value::Object(object) => Value::Object(
+            object
+                .iter()
+                .map(|(key, value)| {
+                    let value = if options.redact_sensitive && is_sensitive_key(key) {
+                        Value::String("[AIR_REDACTED]".to_string())
+                    } else {
+                        sanitize_trace_value(value, options)
+                    };
+                    (key.clone(), value)
+                })
+                .collect(),
+        ),
+        Value::Array(values) => Value::Array(
+            values
+                .iter()
+                .map(|value| sanitize_trace_value(value, options))
+                .collect(),
+        ),
+        Value::String(text) => Value::String(sanitize_trace_string(text, options)),
+        _ => value.clone(),
+    }
+}
+
+fn sanitize_trace_string(text: &str, options: &TraceWriteOptions) -> String {
+    let mut text = if options.redact_sensitive {
+        mask_sensitive_text(text)
+    } else {
+        text.to_string()
+    };
+    if let Some(max_chars) = options.max_string_chars {
+        if text.chars().count() > max_chars {
+            text = text.chars().take(max_chars).collect::<String>();
+            text.push_str("[AIR_TRUNCATED]");
+        }
+    }
+    text
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key
+        .chars()
+        .filter(|ch| ch.is_ascii_alphanumeric())
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    matches!(
+        normalized.as_str(),
+        "apikey"
+            | "apiaccesskey"
+            | "authorization"
+            | "cookie"
+            | "setcookie"
+            | "password"
+            | "passwd"
+            | "pwd"
+            | "secret"
+            | "token"
+            | "accesstoken"
+            | "refreshtoken"
+            | "clientsecret"
+    )
+}
+
+fn mask_sensitive_text(text: &str) -> String {
+    let mut output = text.to_string();
+    for marker in [
+        "Bearer ",
+        "authorization: ",
+        "Authorization: ",
+        "api_key=",
+        "api-key=",
+        "apikey=",
+        "password=",
+        "secret=",
+        "token=",
+    ] {
+        output = mask_after_marker(&output, marker);
+    }
+    output
+}
+
+fn mask_after_marker(text: &str, marker: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(index) = rest.find(marker) {
+        output.push_str(&rest[..index + marker.len()]);
+        output.push_str("[AIR_REDACTED]");
+        let value_start = index + marker.len();
+        let value = &rest[value_start..];
+        let value_end = value
+            .find(|ch: char| ch.is_whitespace() || ch == '&' || ch == '"' || ch == '\'')
+            .unwrap_or(value.len());
+        rest = &value[value_end..];
+    }
+    output.push_str(rest);
+    output
+}
+
+fn compact_trace_event(event: &TraceEvent) -> TraceEvent {
+    let mut compact = event.clone();
+    compact.input = compact
+        .input
+        .as_ref()
+        .map(|_| json!({"_air_truncated": true}));
+    compact.output = compact
+        .output
+        .as_ref()
+        .map(|_| json!({"_air_truncated": true}));
+    compact.meta = compact
+        .meta
+        .as_ref()
+        .map(|_| json!({"_air_truncated": true}));
+    compact.error = compact
+        .error
+        .as_ref()
+        .map(|_| "[AIR_TRUNCATED]".to_string());
+    compact
 }
 
 pub struct Vm<T, M> {

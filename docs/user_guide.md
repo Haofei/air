@@ -318,6 +318,14 @@ cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-pr
   --trace-out target/generated/run.trace.jsonl
 ```
 
+Use redacted traces when the file may leave the trusted workspace. This masks common sensitive keys such as API keys, authorization headers, passwords, secrets, and tokens, and caps large string/event payloads. Redacted traces are for audit/debugging and may not be replayable because outputs can be masked.
+
+```bash
+cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
+  --trace-out target/generated/run.redacted.trace.jsonl \
+  --trace-redact
+```
+
 Use checkpoint/resume for long plans:
 
 ```bash

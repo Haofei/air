@@ -1,8 +1,9 @@
 use air_backend_openai::OpenAiCompatibleModelProvider;
 use air_core::Severity;
 use air_runtime::{
-    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl, ApprovalDecision,
-    ModelProvider, RuntimeError, ToolProvider, TraceEvent, TraceStatus, Vm,
+    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl,
+    write_trace_jsonl_with_options, ApprovalDecision, ModelProvider, RuntimeError, ToolProvider,
+    TraceEvent, TraceStatus, TraceWriteOptions, Vm,
 };
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -96,6 +97,10 @@ enum Command {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
+        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        #[arg(long)]
+        trace_redact: bool,
+
         /// Print human-readable execution logs to stderr.
         #[arg(long)]
         log: bool,
@@ -125,6 +130,10 @@ enum Command {
         /// Optional JSONL trace output path.
         #[arg(long)]
         trace_out: Option<PathBuf>,
+
+        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        #[arg(long)]
+        trace_redact: bool,
 
         /// Print human-readable execution logs to stderr.
         #[arg(long)]
@@ -162,6 +171,10 @@ enum Command {
         /// Optional JSONL trace output path.
         #[arg(long)]
         trace_out: Option<PathBuf>,
+
+        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        #[arg(long)]
+        trace_redact: bool,
 
         /// Optional JSON state output path for AIR resume.
         #[arg(long)]
@@ -223,6 +236,10 @@ enum Command {
         /// Optional JSONL trace output path.
         #[arg(long)]
         trace_out: Option<PathBuf>,
+
+        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        #[arg(long)]
+        trace_redact: bool,
 
         /// Optional JSON state output path for AIR resume.
         #[arg(long)]
@@ -348,6 +365,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
+            trace_redact,
             log,
             example_tools,
             tool_config,
@@ -356,6 +374,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
+            trace_redact,
             log,
             example_tools,
             tool_config,
@@ -365,6 +384,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
+            trace_redact,
             log,
             example_tools,
             tool_config,
@@ -373,6 +393,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
+            trace_redact,
             log,
             example_tools,
             tool_config,
@@ -384,6 +405,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
+            trace_redact,
             state_out,
             checkpoint_out,
             jit_cache,
@@ -398,6 +420,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
+            trace_redact,
             state_out,
             checkpoint_out,
             jit_cache,
@@ -415,6 +438,7 @@ fn main() -> Result<()> {
             overrides,
             model_config,
             trace_out,
+            trace_redact,
             state_out,
             checkpoint_out,
             log,
@@ -429,6 +453,7 @@ fn main() -> Result<()> {
             overrides,
             model_config,
             trace_out,
+            trace_redact,
             state_out,
             checkpoint_out,
             log,
@@ -1784,6 +1809,7 @@ mod tests {
             RunPlanExecutionOptions {
                 model_config: None,
                 trace_out: None,
+                trace_redact: false,
                 state_out: None,
                 checkpoint_out: None,
                 jit_cache: Some(cache_dir.clone()),
@@ -1816,6 +1842,7 @@ mod tests {
             RunPlanExecutionOptions {
                 model_config: None,
                 trace_out: Some(trace_path.clone()),
+                trace_redact: false,
                 state_out: None,
                 checkpoint_out: None,
                 jit_cache: Some(cache_dir.clone()),
@@ -1876,6 +1903,7 @@ mod tests {
             RunPlanExecutionOptions {
                 model_config: None,
                 trace_out: Some(trace_path.clone()),
+                trace_redact: false,
                 state_out: None,
                 checkpoint_out: None,
                 jit_cache: None,
@@ -1975,6 +2003,7 @@ modules:
             RunPlanExecutionOptions {
                 model_config: None,
                 trace_out: Some(trace_path.clone()),
+                trace_redact: false,
                 state_out: None,
                 checkpoint_out: None,
                 jit_cache: None,
@@ -2039,6 +2068,7 @@ modules:
             RunPlanExecutionOptions {
                 model_config: None,
                 trace_out: Some(trace_path.clone()),
+                trace_redact: false,
                 state_out: None,
                 checkpoint_out: None,
                 jit_cache: None,
@@ -2136,6 +2166,7 @@ modules:
             RunPlanExecutionOptions {
                 model_config: None,
                 trace_out: Some(trace_path.clone()),
+                trace_redact: false,
                 state_out: None,
                 checkpoint_out: None,
                 jit_cache: None,
@@ -2217,11 +2248,13 @@ modules:
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run(
     file: PathBuf,
     input: PathBuf,
     model_config: Option<PathBuf>,
     trace_out: Option<PathBuf>,
+    trace_redact: bool,
     log: bool,
     example_tools: bool,
     tool_config: Option<PathBuf>,
@@ -2254,7 +2287,7 @@ fn run(
                 observe_event(event, log, &mut observed_trace)
             });
             if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
             }
             result?
         } else {
@@ -2270,7 +2303,7 @@ fn run(
                 observe_event(event, log, &mut observed_trace)
             });
             if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
             }
             result?
         } else {
@@ -2280,18 +2313,20 @@ fn run(
     if let Some(trace_out) = trace_out {
         let mut trace = result.trace.clone();
         trace.push(system_return_event(result.outputs.clone()));
-        write_trace_jsonl(trace_out, &trace)?;
+        write_trace(trace_out, &trace, trace_redact)?;
     }
     println!("{}", serde_json::to_string_pretty(&result.outputs)?);
 
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_system(
     file: PathBuf,
     input: PathBuf,
     model_config: Option<PathBuf>,
     trace_out: Option<PathBuf>,
+    trace_redact: bool,
     log: bool,
     example_tools: bool,
     tool_config: Option<PathBuf>,
@@ -2326,7 +2361,7 @@ fn run_system(
                 |event| observe_event(event, log, &mut observed_trace),
             );
             if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
             }
             result?
         } else {
@@ -2348,7 +2383,7 @@ fn run_system(
             |event| observe_event(event, log, &mut observed_trace),
         );
         if result.is_err() {
-            write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
         }
         result?
     } else {
@@ -2363,7 +2398,7 @@ fn run_system(
     if let Some(trace_out) = trace_out {
         let mut trace = result.trace.clone();
         trace.push(system_return_event(result.outputs.clone()));
-        write_trace_jsonl(trace_out, &trace)?;
+        write_trace(trace_out, &trace, trace_redact)?;
     }
     println!("{}", serde_json::to_string_pretty(&result.outputs)?);
 
@@ -2377,6 +2412,7 @@ struct RunPlanOptions {
     input: Option<PathBuf>,
     model_config: Option<PathBuf>,
     trace_out: Option<PathBuf>,
+    trace_redact: bool,
     state_out: Option<PathBuf>,
     checkpoint_out: Option<PathBuf>,
     jit_cache: Option<PathBuf>,
@@ -2395,6 +2431,7 @@ struct ResumePlanOptions {
     overrides: Vec<String>,
     model_config: Option<PathBuf>,
     trace_out: Option<PathBuf>,
+    trace_redact: bool,
     state_out: Option<PathBuf>,
     checkpoint_out: Option<PathBuf>,
     log: bool,
@@ -2405,6 +2442,7 @@ struct ResumePlanOptions {
 struct RunPlanExecutionOptions {
     model_config: Option<PathBuf>,
     trace_out: Option<PathBuf>,
+    trace_redact: bool,
     state_out: Option<PathBuf>,
     checkpoint_out: Option<PathBuf>,
     jit_cache: Option<PathBuf>,
@@ -2443,6 +2481,9 @@ struct RunPlanProfile {
     trace_out: Option<PathBuf>,
 
     #[serde(default)]
+    trace_redact: Option<bool>,
+
+    #[serde(default)]
     state_out: Option<PathBuf>,
 
     #[serde(default)]
@@ -2476,6 +2517,7 @@ fn run_plan(options: RunPlanOptions) -> Result<()> {
         input,
         model_config,
         trace_out,
+        trace_redact,
         state_out,
         checkpoint_out,
         jit_cache,
@@ -2575,6 +2617,11 @@ fn run_plan(options: RunPlanOptions) -> Result<()> {
             .as_ref()
             .and_then(|(_, profile)| profile.log)
             .unwrap_or(false);
+    let trace_redact = trace_redact
+        || profile
+            .as_ref()
+            .and_then(|(_, profile)| profile.trace_redact)
+            .unwrap_or(false);
     let example_tools = example_tools
         || profile
             .as_ref()
@@ -2588,6 +2635,7 @@ fn run_plan(options: RunPlanOptions) -> Result<()> {
         RunPlanExecutionOptions {
             model_config,
             trace_out,
+            trace_redact,
             state_out,
             checkpoint_out,
             jit_cache,
@@ -2608,6 +2656,7 @@ fn run_plan_with_inputs(
     let RunPlanExecutionOptions {
         model_config,
         trace_out,
+        trace_redact,
         state_out,
         checkpoint_out,
         jit_cache,
@@ -2650,6 +2699,7 @@ fn run_plan_with_inputs(
                 observe,
                 log,
                 trace_out.as_ref(),
+                trace_redact,
                 checkpoint_out.as_ref(),
                 &mut observed_trace,
             )?
@@ -2664,6 +2714,7 @@ fn run_plan_with_inputs(
                 observe,
                 log,
                 trace_out.as_ref(),
+                trace_redact,
                 checkpoint_out.as_ref(),
                 &mut observed_trace,
             )?
@@ -2682,7 +2733,7 @@ fn run_plan_with_inputs(
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
             if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
             }
             result?
         } else {
@@ -2709,7 +2760,7 @@ fn run_plan_with_inputs(
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         );
         if result.is_err() {
-            write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
         }
         result?
     } else {
@@ -2727,7 +2778,7 @@ fn run_plan_with_inputs(
     if let Some(trace_out) = trace_out {
         let mut trace = result.trace.clone();
         trace.push(system_return_event(result.outputs.clone()));
-        write_trace_jsonl(trace_out, &trace)?;
+        write_trace(trace_out, &trace, trace_redact)?;
     }
     if let Some(state_out) = state_out {
         write_plan_state(state_out, &result)?;
@@ -2896,6 +2947,7 @@ fn run_plan_parallel(
     observe: bool,
     log: bool,
     trace_out: Option<&PathBuf>,
+    trace_redact: bool,
     checkpoint_out: Option<&PathBuf>,
     observed_trace: &mut Vec<TraceEvent>,
 ) -> Result<air_linker::SystemRunResult> {
@@ -2911,7 +2963,7 @@ fn run_plan_parallel(
             |checkpoint| write_checkpoint_state(checkpoint_out, checkpoint),
         );
         if result.is_err() {
-            write_partial_trace(trace_out, observed_trace)?;
+            write_partial_trace(trace_out, observed_trace, trace_redact)?;
         }
         Ok(result?)
     } else {
@@ -2940,6 +2992,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
         overrides,
         model_config,
         trace_out,
+        trace_redact,
         state_out,
         checkpoint_out,
         log,
@@ -3019,6 +3072,11 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             .as_ref()
             .and_then(|(_, profile)| profile.log)
             .unwrap_or(false);
+    let trace_redact = trace_redact
+        || profile
+            .as_ref()
+            .and_then(|(_, profile)| profile.trace_redact)
+            .unwrap_or(false);
     let example_tools = example_tools
         || profile
             .as_ref()
@@ -3084,7 +3142,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
             if result.is_err() {
-                write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+                write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
             }
             result?
         } else {
@@ -3113,7 +3171,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         );
         if result.is_err() {
-            write_partial_trace(trace_out.as_ref(), &observed_trace)?;
+            write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
         }
         result?
     } else {
@@ -3133,7 +3191,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
     if let Some(trace_out) = trace_out {
         let mut trace = result.trace.clone();
         trace.push(system_return_event(result.outputs.clone()));
-        write_trace_jsonl(trace_out, &trace)?;
+        write_trace(trace_out, &trace, trace_redact)?;
     }
     if let Some(state_out) = state_out {
         write_plan_state(state_out, &result)?;
@@ -3231,8 +3289,25 @@ fn observe_event(event: &TraceEvent, log: bool, trace: &mut Vec<TraceEvent>) {
     trace.push(event.clone());
 }
 
-fn write_partial_trace(trace_out: Option<&PathBuf>, trace: &[TraceEvent]) -> Result<()> {
+fn write_partial_trace(
+    trace_out: Option<&PathBuf>,
+    trace: &[TraceEvent],
+    trace_redact: bool,
+) -> Result<()> {
     if let Some(path) = trace_out {
+        write_trace(path, trace, trace_redact)?;
+    }
+    Ok(())
+}
+
+fn write_trace(
+    path: impl AsRef<std::path::Path>,
+    trace: &[TraceEvent],
+    redact: bool,
+) -> Result<()> {
+    if redact {
+        write_trace_jsonl_with_options(path, trace, &TraceWriteOptions::redacted())?;
+    } else {
         write_trace_jsonl(path, trace)?;
     }
     Ok(())
