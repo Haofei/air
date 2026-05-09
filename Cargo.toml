@@ -8,6 +8,7 @@ members = [
     "crates/air-linker",
     "crates/air-parser",
     "crates/air-runtime",
+    "crates/air-tools",
     "crates/air-verify",
 ]
 resolver = "2"

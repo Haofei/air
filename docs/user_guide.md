@@ -261,6 +261,17 @@ AIR checks:
 - the provider-configured capability matches the module-declared capability;
 - `policy.max_tool_calls` is not exceeded.
 
+Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
+
+| Tool kind | Typical AIR tool name | Input | Output | Notes |
+| --- | --- | --- | --- | --- |
+| `local_docs_search` | `docs.search` | `{ "query": "..." }` | `{ query, documents[] }` | In-memory docs for examples, tests, and local RAG. |
+| `local_reflection` | `research.think` | `{ "reflection": "..." }` | `{ reflection }` | Deterministic reflection placeholder for bounded research loops. |
+| `http_json` | `web.search` / custom API | tool input object | JSON response body | Calls REST endpoints; response must be JSON. |
+| `web_fetch` | `web.fetch` | `{ "url": "https://..." }` | `{ url, status, content_type, text, bytes, truncated }` | GET only; supports headers, bearer token env, timeout, max bytes. |
+| `file_read` | `file.read` | `{ "path": "relative/file.txt" }` | `{ path, content, bytes, truncated }` | Read-only and constrained to configured `base_dir`. |
+| `git_diff` | `git.diff` | `{ "path": "...", "staged": false }` | `{ repo, diff, bytes, truncated }` | Read-only diff; path filters must stay inside `repo_dir`. |
+
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 
 ```json
@@ -282,6 +293,27 @@ For production-shaped adapters, AIR also supports an HTTP JSON tool provider in 
 ```
 
 `body`, `url`, and header values can use `{{field}}` templates from the tool input. The response must be JSON and must match the module state/output schema for the action target.
+
+Example read-only file and git tools:
+
+```json
+{
+  "tools": {
+    "file.read": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": ".",
+      "max_bytes": 262144
+    },
+    "git.diff": {
+      "kind": "git_diff",
+      "capability": "code.read",
+      "repo_dir": ".",
+      "max_bytes": 262144
+    }
+  }
+}
+```
 
 ## 8. Approvals
 

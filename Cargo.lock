@@ -48,10 +48,10 @@ dependencies = [
  "air-linker",
  "air-parser",
  "air-runtime",
+ "air-tools",
  "air-verify",
  "anyhow",
  "clap",
- "reqwest",
  "ring",
  "serde",
  "serde_json",
@@ -100,6 +100,18 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "air-tools"
+version = "0.1.0"
+dependencies = [
+ "air-core",
+ "air-runtime",
+ "anyhow",
+ "reqwest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

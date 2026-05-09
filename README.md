@@ -22,7 +22,7 @@ AIR is usable as a local compiler/runtime prototype with bounded production-orie
 | --- | --- |
 | Typed state-machine AIR modules | Supported |
 | Module schema validation | Supported, including opt-in strict object fields with `additional_properties: false` |
-| Model/tool providers and capability checks | Supported |
+| Model/tool providers and capability checks | Supported; common native tools live in `air-tools` |
 | Approval gates, retry, budgets, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
 | RunPlan module composition | Supported |
 | Dynamic bounded fan-out/fan-in | Supported |
