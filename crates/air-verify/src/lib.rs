@@ -806,11 +806,8 @@ impl Verifier {
 
     fn verify_path_ref(&mut self, rule_id: &str, label: &str, path: &str, module: &AirModule) {
         let normalized = normalize_path(path);
-        let Some(root) = normalized
-            .split('.')
-            .next()
-            .filter(|segment| !segment.trim().is_empty())
-        else {
+        let mut segments = normalized.split('.');
+        let Some(root) = segments.next().filter(|segment| !segment.trim().is_empty()) else {
             self.error(
                 "AIR085",
                 format!("{label} in rule {rule_id} has an empty expression path"),
@@ -818,6 +815,33 @@ impl Verifier {
             return;
         };
         self.verify_state_ref(rule_id, label, root, module);
+        let Some(mut spec) = module_field_type(module, root) else {
+            return;
+        };
+        let mut checked_path = root.to_string();
+        for segment in segments {
+            if segment.trim().is_empty() {
+                self.error(
+                    "AIR085",
+                    format!("{label} in rule {rule_id} has an empty expression path"),
+                );
+                return;
+            }
+            checked_path.push('.');
+            checked_path.push_str(segment);
+            let Some(next) = nested_property_type(spec, segment) else {
+                if type_has_known_properties(spec) {
+                    self.error(
+                        "AIR094",
+                        format!(
+                            "{label} in rule {rule_id} references unknown nested path {checked_path}"
+                        ),
+                    );
+                }
+                return;
+            };
+            spec = next;
+        }
     }
 
     fn verify_timeout(&mut self, rule_id: &str, action: &str, timeout_seconds: u64) {
@@ -981,6 +1005,40 @@ fn next_phases_after_rule(
         }
     }
     next.unwrap_or_else(|| BTreeSet::from_iter([current_phase.to_string()]))
+}
+
+fn module_field_type<'a>(module: &'a AirModule, field: &str) -> Option<&'a TypeSpec> {
+    module
+        .inputs
+        .get(field)
+        .or_else(|| module.state.get(field))
+        .or_else(|| module.outputs.get(field))
+}
+
+fn nested_property_type<'a>(spec: &'a TypeSpec, segment: &str) -> Option<&'a TypeSpec> {
+    let TypeSpec::Detailed(detailed) = spec else {
+        return None;
+    };
+
+    match detailed.kind {
+        DetailedTypeKind::Object => detailed.properties.get(segment),
+        DetailedTypeKind::Array => {
+            if segment.parse::<usize>().is_ok() {
+                detailed.items.as_deref()
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+fn type_has_known_properties(spec: &TypeSpec) -> bool {
+    matches!(
+        spec,
+        TypeSpec::Detailed(detailed)
+            if matches!(detailed.kind, DetailedTypeKind::Object | DetailedTypeKind::Array)
+    )
 }
 
 fn is_array_type(spec: Option<&TypeSpec>) -> bool {

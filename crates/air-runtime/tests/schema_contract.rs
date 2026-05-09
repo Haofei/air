@@ -1021,6 +1021,37 @@ fn rejects_return_value_that_violates_output_schema() {
     assert_schema_error_contains(error, "result.approved expected boolean");
 }
 
+#[test]
+fn rejects_expression_path_missing_nested_schema_field() {
+    let mut module = load_agent("tests/agents/expr-input.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ModelCall { input, .. } = &mut workflow.rules[1].actions[0] else {
+        panic!("expected model_call action");
+    };
+    let air_core::InputSpec::Expr(air_core::Expr::Object { object }) = input else {
+        panic!("expected object expression");
+    };
+    object.insert(
+        "bad".to_string(),
+        air_core::Expr::Path {
+            path: "extracted.not_a_field".to_string(),
+        },
+    );
+
+    let report = air_verify::verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR094"),
+        "expected AIR094, got {:?}",
+        report.diagnostics
+    );
+}
+
 fn valid_vm() -> Vm<SchemaTools, SchemaModels> {
     Vm {
         tools: SchemaTools,
