@@ -15,9 +15,15 @@ pub struct OpenAiCompatibleConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiModelConfig {
-    pub base_url: String,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub base_url_env: Option<String>,
     pub api_key_env: String,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
+    pub model_env: Option<String>,
 
     #[serde(default)]
     pub temperature: Option<f64>,
@@ -74,17 +80,22 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
         if alias.trim().is_empty() {
             return Err(invalid_config(path, "models contains an empty alias"));
         }
-        if model.base_url.trim().is_empty() {
+        if model.base_url.is_none() && model.base_url_env.is_none() {
             return Err(invalid_config(
                 path,
-                format!("models.{alias}.base_url must not be empty"),
+                format!("models.{alias} must declare base_url or base_url_env"),
             ));
         }
-        if !(model.base_url.starts_with("http://") || model.base_url.starts_with("https://")) {
-            return Err(invalid_config(
-                path,
-                format!("models.{alias}.base_url must start with http:// or https://"),
-            ));
+        if let Some(base_url) = &model.base_url {
+            validate_base_url(path, alias, base_url)?;
+        }
+        if let Some(base_url_env) = &model.base_url_env {
+            if base_url_env.trim().is_empty() {
+                return Err(invalid_config(
+                    path,
+                    format!("models.{alias}.base_url_env must not be empty"),
+                ));
+            }
         }
         if model.api_key_env.trim().is_empty() {
             return Err(invalid_config(
@@ -92,11 +103,19 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
                 format!("models.{alias}.api_key_env must not be empty"),
             ));
         }
-        if model.model.trim().is_empty() {
+        if model.model.trim().is_empty() && model.model_env.is_none() {
             return Err(invalid_config(
                 path,
-                format!("models.{alias}.model must not be empty"),
+                format!("models.{alias} must declare model or model_env"),
             ));
+        }
+        if let Some(model_env) = &model.model_env {
+            if model_env.trim().is_empty() {
+                return Err(invalid_config(
+                    path,
+                    format!("models.{alias}.model_env must not be empty"),
+                ));
+            }
         }
         if let Some(temperature) = model.temperature {
             if !(0.0..=2.0).contains(&temperature) {
@@ -108,6 +127,22 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
         }
     }
 
+    Ok(())
+}
+
+fn validate_base_url(path: &Path, alias: &str, base_url: &str) -> Result<(), OpenAiConfigError> {
+    if base_url.trim().is_empty() {
+        return Err(invalid_config(
+            path,
+            format!("models.{alias}.base_url must not be empty"),
+        ));
+    }
+    if !(base_url.starts_with("http://") || base_url.starts_with("https://")) {
+        return Err(invalid_config(
+            path,
+            format!("models.{alias}.base_url must start with http:// or https://"),
+        ));
+    }
     Ok(())
 }
 
@@ -148,7 +183,9 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
                 model_config.api_key_env
             ))
         })?;
-        let url = chat_completions_url(&model_config.base_url);
+        let base_url = resolve_base_url(model_config)?;
+        let url = chat_completions_url(&base_url);
+        let model_name = resolve_model_name(model_config)?;
         let content = input_to_content(input)?;
 
         let mut messages = Vec::new();
@@ -164,7 +201,7 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         }));
 
         let mut body = json!({
-            "model": model_config.model,
+            "model": model_name,
             "messages": messages
         });
 
@@ -194,6 +231,46 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
 
 fn provider_error(error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Provider(error.to_string())
+}
+
+fn resolve_base_url(model_config: &OpenAiModelConfig) -> Result<String, RuntimeError> {
+    if let Some(base_url_env) = &model_config.base_url_env {
+        match std::env::var(base_url_env) {
+            Ok(value) if !value.trim().is_empty() => return Ok(value),
+            Ok(_) => {
+                return Err(RuntimeError::Provider(format!(
+                    "environment variable {base_url_env} is empty"
+                )));
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(error) => return Err(provider_error(error)),
+        }
+    }
+    model_config
+        .base_url
+        .clone()
+        .ok_or_else(|| RuntimeError::Provider("model base_url is not configured".to_string()))
+}
+
+fn resolve_model_name(model_config: &OpenAiModelConfig) -> Result<String, RuntimeError> {
+    if let Some(model_env) = &model_config.model_env {
+        match std::env::var(model_env) {
+            Ok(value) if !value.trim().is_empty() => return Ok(value),
+            Ok(_) => {
+                return Err(RuntimeError::Provider(format!(
+                    "environment variable {model_env} is empty"
+                )));
+            }
+            Err(std::env::VarError::NotPresent) => {}
+            Err(error) => return Err(provider_error(error)),
+        }
+    }
+    if !model_config.model.trim().is_empty() {
+        return Ok(model_config.model.clone());
+    }
+    Err(RuntimeError::Provider(
+        "model name is not configured".to_string(),
+    ))
 }
 
 fn chat_completions_url(base_url: &str) -> String {
@@ -311,6 +388,125 @@ mod tests {
         assert!(message.contains(&path.display().to_string()));
         assert!(message.contains("models.planner.base_url"));
         assert!(message.contains("http:// or https://"));
+    }
+
+    #[test]
+    fn parse_config_file_accepts_base_url_env_without_literal_url() {
+        let path = temp_file_path("air-model-config-base-url-env", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url_env": "OPENAI_BASE_URL",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            config.models["planner"].base_url_env.as_deref(),
+            Some("OPENAI_BASE_URL")
+        );
+        assert_eq!(config.models["planner"].base_url, None);
+    }
+
+    #[test]
+    fn parse_config_file_accepts_model_env_without_literal_model() {
+        let path = temp_file_path("air-model-config-model-env", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model_env": "OPENAI_MODEL"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            config.models["planner"].model_env.as_deref(),
+            Some("OPENAI_MODEL")
+        );
+        assert_eq!(config.models["planner"].model, "");
+    }
+
+    #[test]
+    fn parse_config_file_requires_base_url_or_env() {
+        let path = temp_file_path("air-model-config-missing-base-url", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let error = parse_config_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        let message = error.to_string();
+
+        assert!(message.contains("models.planner"));
+        assert!(message.contains("base_url or base_url_env"));
+    }
+
+    #[test]
+    fn resolve_base_url_prefers_env_over_literal_url() {
+        let env_name = format!("AIR_TEST_BASE_URL_{}", std::process::id());
+        std::env::set_var(&env_name, "https://runtime.example/v1");
+
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: Some(env_name.clone()),
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            model: "gpt-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            system_prompt: None,
+        };
+
+        assert_eq!(
+            resolve_base_url(&config).unwrap(),
+            "https://runtime.example/v1"
+        );
+        std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn resolve_model_name_prefers_env_over_literal_model() {
+        let env_name = format!("AIR_TEST_MODEL_{}", std::process::id());
+        std::env::set_var(&env_name, "runtime-model");
+
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            model: "configured-model".to_string(),
+            model_env: Some(env_name.clone()),
+            temperature: None,
+            system_prompt: None,
+        };
+
+        assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");
+        std::env::remove_var(env_name);
     }
 
     #[test]

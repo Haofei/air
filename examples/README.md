@@ -36,4 +36,6 @@ cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-pr
 
 ```bash
 export BIGMODEL_API_KEY=...
+export BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+export BIGMODEL_MODEL=GLM-5.1
 ```

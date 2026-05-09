@@ -205,11 +205,24 @@ function configureOpenAICompatible(modelConfig, alias) {
   if (!model) throw new Error(`unknown model alias ${alias}`);
   const apiKey = process.env[model.api_key_env];
   if (!apiKey) throw new Error(`environment variable ${model.api_key_env} is not set`);
+  const baseURL = modelBaseURL(model);
 
   setTracingDisabled(true);
   setOpenAIAPI('chat_completions');
-  setDefaultOpenAIClient(new OpenAI({ apiKey, baseURL: model.base_url }));
+  setDefaultOpenAIClient(new OpenAI({ apiKey, baseURL }));
   return model;
+}
+
+function modelBaseURL(model) {
+  if (model.base_url_env && process.env[model.base_url_env]) return process.env[model.base_url_env];
+  if (model.base_url) return model.base_url;
+  throw new Error(`model ${model.model} must declare base_url or base_url_env`);
+}
+
+function modelName(model) {
+  if (model.model_env && process.env[model.model_env]) return process.env[model.model_env];
+  if (model.model) return model.model;
+  throw new Error('model must declare model or model_env');
 }
 
 function makeLocalDocsSearchTool(toolConfig, airToolName) {
@@ -389,13 +402,14 @@ async function callModel(modelConfigRoot, name, inputValue) {
   if (!model) throw new Error(`unknown model alias ${name}`);
   const apiKey = process.env[model.api_key_env];
   if (!apiKey) throw new Error(`environment variable ${model.api_key_env} is not set`);
-  const client = new OpenAI({ apiKey, baseURL: model.base_url });
+  const client = new OpenAI({ apiKey, baseURL: modelBaseURL(model) });
   const messages = [];
   if (model.system_prompt) messages.push({ role: 'system', content: model.system_prompt });
   messages.push({ role: 'user', content: inputToContent(inputValue) });
-  console.error(`[openai-js] call_model ${name} -> ${model.model}`);
+  const resolvedModel = modelName(model);
+  console.error(`[openai-js] call_model ${name} -> ${resolvedModel}`);
   const response = await client.chat.completions.create({
-    model: model.model,
+    model: resolvedModel,
     messages,
     temperature: model.temperature ?? 0,
   });
@@ -1193,7 +1207,7 @@ fn push_main(output: &mut String, module: &AirModule, plan: &SemanticPlan) {
     output.push_str("  const tools = semanticTool ? [semanticTool] : [];\n\n");
     output.push_str("  const agent = new Agent({\n");
     output.push_str(&format!("    name: {},\n", agent_name));
-    output.push_str("    model: model.model,\n");
+    output.push_str("    model: modelName(model),\n");
     output.push_str("    instructions:\n");
     output.push_str(&format!(
         "      `${{model.system_prompt ?? ''}}\\n\\n{}\\n` +\n",

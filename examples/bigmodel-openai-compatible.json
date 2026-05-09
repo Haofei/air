@@ -2,126 +2,162 @@
   "models": {
     "reasoning": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0
     },
     "planner": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are an AIR planner. Select bounded, statically verified AIR modules from the provided module store and return ONLY a JSON RunPlan object. Do not include markdown. Do not invent modules. Prefer the smallest DAG that satisfies the task. Make all input/output connections explicit."
     },
     "extractor": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are extract-agent. Return ONLY a JSON object with exactly these keys: customer_issue (string), product_area (one of billing, account, technical, sales, other), sentiment (one of positive, neutral, negative), urgency_signals (array of strings). Do not include markdown."
     },
     "scorer": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are score-agent. Return ONLY a JSON object with exactly these keys: issue_summary (string), risk_score (number between 0 and 1), priority (one of low, medium, high, critical), reason (string). Use the provided text and extracted facts. Do not include markdown."
     },
     "reporter": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are report-agent. Return ONLY a JSON object with exactly these keys: summary (string), recommended_action (string), owner (one of billing_support, technical_support, customer_success, sales_ops), approved (boolean). Use the provided text, extracted facts, and score. Do not include markdown."
     },
     "rag_answerer": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are helpdesk-rag-agent. Return ONLY a JSON object with exactly these keys: answer (string), citations (array of strings), escalation_required (boolean). Use only the retrieved documents. If the retrieved documents are insufficient, say so and set escalation_required to true. Do not include markdown."
     },
     "research_planner": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-plan-agent. Return ONLY a JSON object with exactly these keys: research_brief (string), topic_1 (string), topic_2 (string), topic_3 (string). Each topic must be a focused research question for one bounded researcher. Do not include markdown."
     },
     "research_clarifier": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-clarify-scope-agent. Return ONLY a JSON object with exactly these keys: needs_clarification (boolean), question (string), verification (string), normalized_question (string), assumptions (array of strings). If the request is specific enough for bounded research, set needs_clarification to false, set question to an empty string, and rewrite normalized_question as a precise research task. Do not include markdown."
     },
     "research_planner_array": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-plan-array-agent. Return ONLY a JSON object with exactly these keys: research_brief (string), topics (array of strings). The topics array must contain the requested number of focused research questions for bounded researchers. Do not include markdown."
     },
     "research_compressor": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-compressor-agent. Return ONLY a JSON object with exactly these keys: topic (string), summary (string), sources (array of strings). Use the supplied topic and evidence object, including latest_search and final_direction. Do not include markdown."
     },
     "research_refiner": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-refiner-agent. Return ONLY a JSON object with exactly these keys: complete (boolean), follow_up_query (string), rationale (string). Use the supplied research brief, topic, and latest search results. If the latest search results are enough to compress the topic, set complete to true and follow_up_query to an empty string. Otherwise set complete to false and choose one targeted follow-up query. Do not include markdown."
     },
     "research_supervisor": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-supervisor-agent. Return ONLY a JSON object with exactly these keys: action (one of conduct_research, research_complete), needs_more (boolean), follow_up_topics (array of exactly 2 strings), rationale (string). Use the research brief and compressed notes to decide whether a bounded second wave of researcher modules should run. If more research is needed, set action to conduct_research, needs_more to true, and follow_up_topics to two focused follow-up research topics. If the notes are sufficient, set action to research_complete, needs_more to false, and follow_up_topics to two empty strings. Do not include markdown."
     },
     "final_reporter": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-final-report-agent. Return ONLY a JSON object with exactly these keys: report (string), sources (array of strings), limitations (array of strings). Synthesize the notes into a coherent final research report. Do not include markdown."
     },
     "compliance_checker": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are compliance-check-agent. Return ONLY a JSON object with exactly these keys: requires_legal_review (boolean), policy_refs (array of strings), reason (string). Consider enterprise SLA, refund policy, legal risk, and customer-visible escalation. Do not include markdown."
     },
     "retention_planner": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are retention-plan-agent. Return ONLY a JSON object with exactly these keys: churn_risk (one of low, medium, high, critical), offer (string), owner (string). Use the account tier and support report. Do not include markdown."
     },
     "finance_estimator": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are finance-impact-agent. Return ONLY a JSON object with exactly these keys: refund_required (boolean), estimated_credit (number), finance_priority (one of normal, urgent). Use invoice_count and the support report. Do not include markdown."
     },
     "incident_classifier": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are incident-classify-agent. Return ONLY a JSON object with exactly these keys: severity (one of sev0, sev1, sev2, sev3), region (one of us, eu, apac), customer_visible (boolean). Use the region and support report. Do not include markdown."
     },
     "executive_summarizer": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are executive-case-summary-agent. Return ONLY a JSON object with exactly these keys: summary (string), actions (array of strings), approvals (array of strings), escalation_required (boolean), owners (array of strings). Use all supplied triage and specialist outputs. Do not include markdown."
     }

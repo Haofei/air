@@ -40,17 +40,27 @@ function configureOpenAICompatible(modelConfig, alias) {
 
   const apiKey = process.env[model.api_key_env];
   if (!apiKey) throw new Error(`environment variable ${model.api_key_env} is not set`);
+  const baseURL = model.base_url_env && process.env[model.base_url_env]
+    ? process.env[model.base_url_env]
+    : model.base_url;
+  if (!baseURL) throw new Error('model must declare base_url or base_url_env');
 
   setTracingDisabled(true);
   setOpenAIAPI('chat_completions');
   setDefaultOpenAIClient(
     new OpenAI({
       apiKey,
-      baseURL: model.base_url,
+      baseURL,
     }),
   );
 
   return model;
+}
+
+function modelName(model) {
+  if (model.model_env && process.env[model.model_env]) return process.env[model.model_env];
+  if (model.model) return model.model;
+  throw new Error('model must declare model or model_env');
 }
 
 function makeDocsSearchTool(toolConfig) {
@@ -119,7 +129,7 @@ async function main() {
 
   const agent = new Agent({
     name: 'Helpdesk RAG Agent',
-    model: model.model,
+    model: modelName(model),
     instructions:
       `${model.system_prompt ?? ''}\n\n` +
       'You must call docs_search once before answering. Use only returned documents. ' +

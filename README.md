@@ -23,6 +23,8 @@ cargo build
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 
 export BIGMODEL_API_KEY=...
+export BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+export BIGMODEL_MODEL=GLM-5.1
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 

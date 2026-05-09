@@ -16,6 +16,8 @@ The native VM is the conformance runtime. Generated backends preserve AIR's chec
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 
 export BIGMODEL_API_KEY=...
+export BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+export BIGMODEL_MODEL=GLM-5.1
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 
@@ -181,8 +183,10 @@ AIR uses OpenAI-compatible model config for real model calls:
   "models": {
     "rag_answerer": {
       "base_url": "https://example.com/v1",
+      "base_url_env": "OPENAI_BASE_URL",
       "api_key_env": "BIGMODEL_API_KEY",
       "model": "example-model",
+      "model_env": "OPENAI_MODEL",
       "temperature": 0,
       "system_prompt": "Return only JSON."
     }
@@ -194,6 +198,8 @@ Run with:
 
 ```bash
 export BIGMODEL_API_KEY=...
+export OPENAI_BASE_URL=https://example.com/v1
+export OPENAI_MODEL=example-model
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 ```
 
