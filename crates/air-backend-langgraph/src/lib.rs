@@ -1,5 +1,5 @@
 use air_core::{AirModule, Expr, InputSpec, StateAction, Workflow};
-use air_linker::{ModuleStore, RunPlan};
+use air_linker::{resolve_module_path, ModuleStore, RunPlan};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -18,6 +18,9 @@ pub enum LangGraphBackendError {
 
     #[error("failed to parse AIR module: {0}")]
     ModuleParse(#[from] air_parser::ParseError),
+
+    #[error(transparent)]
+    Linker(#[from] air_linker::LinkerError),
 
     #[error("run plan references unknown module {0}")]
     UnknownModule(String),
@@ -61,7 +64,8 @@ pub fn lower_run_plan(
             .modules
             .get(&node.module)
             .ok_or_else(|| LangGraphBackendError::UnknownModule(node.module.clone()))?;
-        let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+        let path = resolve_module_path(base_dir, &node.module, &module_ref.path)?;
+        let module = air_parser::parse_air_file(path)?;
         let verification = air_verify::verify(&module);
         if !verification.is_success() {
             return Err(LangGraphBackendError::ModuleVerify {
@@ -80,7 +84,8 @@ pub fn lower_run_plan(
                 .modules
                 .get(&fanout.module)
                 .ok_or_else(|| LangGraphBackendError::UnknownModule(fanout.module.clone()))?;
-            let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+            let path = resolve_module_path(base_dir, &fanout.module, &module_ref.path)?;
+            let module = air_parser::parse_air_file(path)?;
             let verification = air_verify::verify(&module);
             if !verification.is_success() {
                 return Err(LangGraphBackendError::ModuleVerify {

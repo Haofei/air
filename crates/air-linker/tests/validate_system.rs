@@ -2,6 +2,10 @@ use air_linker::{
     parse_module_store_file, parse_run_plan_file, parse_system_file, validate_run_plan,
     validate_system,
 };
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[test]
 fn accepts_valid_system() {
@@ -418,6 +422,70 @@ fn rejects_run_plan_unknown_store_module() {
             .iter()
             .any(|diagnostic| diagnostic.code == "AIRP012"),
         "expected AIRP012, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn rejects_module_path_outside_base_dir() {
+    let repo_root = root();
+    let temp_root = std::env::temp_dir().join(format!(
+        "air-linker-path-boundary-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let base_dir = temp_root.join("base");
+    let outside_dir = temp_root.join("outside");
+    fs::create_dir_all(&base_dir).unwrap();
+    fs::create_dir_all(&outside_dir).unwrap();
+    fs::copy(
+        repo_root.join("tests/agents/model-smoke.air.yaml"),
+        outside_dir.join("model-smoke.air.yaml"),
+    )
+    .unwrap();
+
+    let mut modules = BTreeMap::new();
+    modules.insert(
+        "bad".to_string(),
+        air_linker::ModuleRef {
+            path: PathBuf::from("../outside/model-smoke.air.yaml"),
+            kind: air_linker::ModuleKind::Primitive,
+            visibility: air_linker::ModuleVisibility::Public,
+            description: None,
+            tags: Vec::new(),
+            covers: Vec::new(),
+            priority: 0,
+        },
+    );
+    let system = air_linker::AirSystem {
+        system: air_linker::SystemMetadata {
+            name: "path-boundary".to_string(),
+            version: "0.1.0".to_string(),
+        },
+        modules,
+        entry: "bad".to_string(),
+        edges: Vec::new(),
+        connect: Vec::new(),
+        outputs: BTreeMap::new(),
+        halts: Vec::new(),
+        node_conditions: BTreeMap::new(),
+        schedule: None,
+    };
+
+    let report = validate_system(&system, &base_dir);
+    let _ = fs::remove_dir_all(temp_root);
+
+    assert!(
+        report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "AIRL004"
+                && diagnostic
+                    .message
+                    .contains("resolves outside module base directory")
+        }),
+        "expected AIRL004 path-boundary diagnostic, got {:?}",
         report.diagnostics
     );
 }

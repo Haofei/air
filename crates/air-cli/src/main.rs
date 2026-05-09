@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet};
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Parser)]
 #[command(name = "air")]
@@ -464,7 +464,7 @@ fn main() -> Result<()> {
 
 fn validate_system(file: PathBuf) -> Result<()> {
     let system = air_linker::parse_system_file(&file)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_modules(&system.modules)?;
     let report = air_linker::validate_system(&system, base_dir);
 
     if report.diagnostics.is_empty() {
@@ -515,7 +515,7 @@ fn validate_plan(options: ValidatePlanOptions) -> Result<()> {
 
     let plan = air_linker::parse_run_plan_file(plan)?;
     let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_store(&store)?;
     let report = air_linker::validate_run_plan(&plan, &store, base_dir);
 
     if report.diagnostics.is_empty() {
@@ -597,7 +597,7 @@ fn plan_task(options: PlanOptions) -> Result<()> {
     };
 
     let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_store(&store)?;
     let catalog = module_catalog(&store, &base_dir, allow_internal)?;
     let recipes = recipe_catalog(&store, &base_dir, allow_internal)?;
     let request = planner_request(&task, &store, catalog, recipes, allow_internal);
@@ -990,7 +990,7 @@ fn module_catalog(
             continue;
         }
 
-        let path = base_dir.join(&module_ref.path);
+        let path = air_linker::resolve_module_path(base_dir, id, &module_ref.path)?;
         let module = air_parser::parse_air_file(&path)?;
         let report = air_verify::verify(&module);
         if !report.is_success() {
@@ -1039,6 +1039,37 @@ fn module_catalog(
     });
 
     Ok(catalog)
+}
+
+fn module_base_dir_for_store(store: &air_linker::ModuleStore) -> Result<PathBuf> {
+    module_base_dir_for_modules(&store.modules)
+}
+
+fn module_base_dir_for_modules(
+    modules: &BTreeMap<String, air_linker::ModuleRef>,
+) -> Result<PathBuf> {
+    let current_dir = std::env::current_dir()?;
+    Ok(infer_module_base_dir(&current_dir, modules))
+}
+
+fn infer_module_base_dir(
+    start_dir: &Path,
+    modules: &BTreeMap<String, air_linker::ModuleRef>,
+) -> PathBuf {
+    if modules.values().all(|module| module.path.is_absolute()) {
+        return start_dir.to_path_buf();
+    }
+
+    start_dir
+        .ancestors()
+        .find(|candidate| {
+            modules
+                .values()
+                .filter(|module| !module.path.is_absolute())
+                .all(|module| candidate.join(&module.path).exists())
+        })
+        .unwrap_or(start_dir)
+        .to_path_buf()
 }
 
 fn recipe_catalog(
@@ -1739,13 +1770,10 @@ mod tests {
         let store_path = std::env::temp_dir().join(format!("{unique}.store.yaml"));
 
         let plan_path = root.join("tests/plans/dynamic-smoke.air-plan.yaml");
-        let mut store = air_linker::parse_module_store_file(
+        let store = air_linker::parse_module_store_file(
             root.join("tests/plans/dynamic-smoke.air-store.yaml"),
         )
         .unwrap();
-        for module in store.modules.values_mut() {
-            module.path = root.join(&module.path);
-        }
         fs::write(&store_path, serde_yaml::to_string(&store).unwrap()).unwrap();
         let inputs = serde_json::Map::new();
 
@@ -1835,13 +1863,10 @@ mod tests {
         let plan_path = root.join("tests/plans/approval-smoke.air-plan.yaml");
         let tool_config = root.join("tests/plans/approval-smoke.tools.json");
 
-        let mut store = air_linker::parse_module_store_file(
+        let store = air_linker::parse_module_store_file(
             root.join("tests/plans/approval-smoke.air-store.yaml"),
         )
         .unwrap();
-        for module in store.modules.values_mut() {
-            module.path = root.join(&module.path);
-        }
         fs::write(&store_path, serde_yaml::to_string(&store).unwrap()).unwrap();
 
         run_plan_with_inputs(
@@ -1930,19 +1955,16 @@ mod tests {
         ));
         fs::write(
             &store_path,
-            format!(
-                r#"store:
+            r#"store:
   name: parallel-smoke-store
   version: 0.1.0
 
 modules:
   test.model_smoke@0.1.0:
-    path: {}
+    path: tests/agents/model-smoke.air.yaml
     kind: primitive
     visibility: public
 "#,
-                root.join("tests/agents/model-smoke.air.yaml").display()
-            ),
         )
         .unwrap();
 
@@ -1997,19 +2019,16 @@ modules:
         let store_path = trace_path.with_extension("store.yaml");
         fs::write(
             &store_path,
-            format!(
-                r#"store:
+            r#"store:
   name: parallel-smoke-store
   version: 0.1.0
 
 modules:
   test.model_smoke@0.1.0:
-    path: {}
+    path: tests/agents/model-smoke.air.yaml
     kind: primitive
     visibility: public
 "#,
-                root.join("tests/agents/model-smoke.air.yaml").display()
-            ),
         )
         .unwrap();
 
@@ -2067,13 +2086,10 @@ modules:
                 .as_nanos()
         ));
         let output_path = store_path.with_extension("py");
-        let mut store = air_linker::parse_module_store_file(
+        let store = air_linker::parse_module_store_file(
             root.join("examples/deep-research/module-store.air-store.yaml"),
         )
         .unwrap();
-        for module in store.modules.values_mut() {
-            module.path = root.join(&module.path);
-        }
         fs::write(&store_path, serde_yaml::to_string(&store).unwrap()).unwrap();
 
         lower_plan(
@@ -2107,13 +2123,10 @@ modules:
         let identity_path = trace_path.with_extension("identity.json");
         let langgraph_path = trace_path.with_extension("py");
         let openai_path = trace_path.with_extension("mjs");
-        let mut store = air_linker::parse_module_store_file(
+        let store = air_linker::parse_module_store_file(
             root.join("tests/plans/dynamic-smoke.air-store.yaml"),
         )
         .unwrap();
-        for module in store.modules.values_mut() {
-            module.path = root.join(&module.path);
-        }
         fs::write(&store_path, serde_yaml::to_string(&store).unwrap()).unwrap();
 
         run_plan_with_inputs(
@@ -2284,7 +2297,7 @@ fn run_system(
     tool_config: Option<PathBuf>,
 ) -> Result<()> {
     let system = air_linker::parse_system_file(&file)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_modules(&system.modules)?;
     let report = air_linker::validate_system(&system, &base_dir);
     if !report.is_success() {
         for diagnostic in &report.diagnostics {
@@ -2606,7 +2619,7 @@ fn run_plan_with_inputs(
 
     let original_plan = air_linker::parse_run_plan_file(plan)?;
     let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_store(&store)?;
     let (plan, jit_context) = if let Some(jit_cache) = jit_cache.as_ref() {
         select_jit_cached_run_plan(original_plan, &store, &base_dir, &inputs, jit_cache, log)?
     } else {
@@ -2845,7 +2858,7 @@ fn jit_cache_key(
         .modules
         .iter()
         .map(|(id, module_ref)| {
-            let path = base_dir.join(&module_ref.path);
+            let path = air_linker::resolve_module_path(base_dir, id, &module_ref.path)?;
             let content = fs::read_to_string(&path)?;
             Ok((
                 id.clone(),
@@ -3014,7 +3027,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
 
     let plan = air_linker::parse_run_plan_file(plan)?;
     let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_store(&store)?;
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
         for diagnostic in &report.diagnostics {
@@ -3308,7 +3321,7 @@ fn replay(options: ReplayOptions) -> Result<()> {
         let store = store
             .ok_or_else(|| anyhow::anyhow!("replay --specialize-run-plan requires --store"))?;
         let store = air_linker::parse_module_store_file(store)?;
-        let base_dir = std::env::current_dir()?;
+        let base_dir = module_base_dir_for_store(&store)?;
         let specialization = air_linker::specialize_run_plan_trace(&events, &store, &base_dir)?;
         let plan_yaml = serde_yaml::to_string(&specialization.plan)?;
         if let Some(output) = output {
@@ -3362,7 +3375,7 @@ fn lower_plan(
 ) -> Result<()> {
     let plan = air_linker::parse_run_plan_file(plan)?;
     let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = std::env::current_dir()?;
+    let base_dir = module_base_dir_for_store(&store)?;
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
         for diagnostic in &report.diagnostics {

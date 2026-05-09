@@ -1,5 +1,5 @@
 use air_core::{AirModule, DetailedTypeKind, StateAction, TypeSpec, Workflow};
-use air_linker::{ModuleStore, RunPlan};
+use air_linker::{resolve_module_path, ModuleStore, RunPlan};
 use std::collections::BTreeMap;
 use std::path::Path;
 use thiserror::Error;
@@ -17,6 +17,9 @@ pub enum OpenAiAgentsJsBackendError {
 
     #[error("failed to parse AIR module: {0}")]
     ModuleParse(#[from] air_parser::ParseError),
+
+    #[error(transparent)]
+    Linker(#[from] air_linker::LinkerError),
 
     #[error("failed to serialize JSON: {0}")]
     Json(#[from] serde_json::Error),
@@ -66,7 +69,8 @@ pub fn lower_run_plan_strict(
             .modules
             .get(&node.module)
             .ok_or_else(|| OpenAiAgentsJsBackendError::UnknownModule(node.module.clone()))?;
-        let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+        let path = resolve_module_path(base_dir, &node.module, &module_ref.path)?;
+        let module = air_parser::parse_air_file(path)?;
         let verification = air_verify::verify(&module);
         if !verification.is_success() {
             return Err(OpenAiAgentsJsBackendError::ModuleVerify {
@@ -85,7 +89,8 @@ pub fn lower_run_plan_strict(
                 .modules
                 .get(&fanout.module)
                 .ok_or_else(|| OpenAiAgentsJsBackendError::UnknownModule(fanout.module.clone()))?;
-            let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+            let path = resolve_module_path(base_dir, &fanout.module, &module_ref.path)?;
+            let module = air_parser::parse_air_file(path)?;
             let verification = air_verify::verify(&module);
             if !verification.is_success() {
                 return Err(OpenAiAgentsJsBackendError::ModuleVerify {

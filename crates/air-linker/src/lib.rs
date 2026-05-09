@@ -364,6 +364,13 @@ pub enum LinkerError {
         source: std::io::Error,
     },
 
+    #[error("module {module} path {path} resolves outside module base directory {base_dir}")]
+    ModulePathOutsideBase {
+        module: String,
+        path: String,
+        base_dir: String,
+    },
+
     #[error("failed to parse AIR system YAML: {0}")]
     Parse(#[from] serde_yaml::Error),
 
@@ -446,6 +453,40 @@ pub fn parse_run_plan_file(path: impl AsRef<Path>) -> Result<RunPlan, LinkerErro
         source,
     })?;
     Ok(serde_yaml::from_str(&source)?)
+}
+
+pub fn resolve_module_path(
+    base_dir: impl AsRef<Path>,
+    module_id: &str,
+    module_path: impl AsRef<Path>,
+) -> Result<PathBuf, LinkerError> {
+    let base_dir = base_dir.as_ref();
+    let module_path = module_path.as_ref();
+    let base = base_dir
+        .canonicalize()
+        .map_err(|source| LinkerError::Read {
+            path: base_dir.display().to_string(),
+            source,
+        })?;
+    let candidate = if module_path.is_absolute() {
+        module_path.to_path_buf()
+    } else {
+        base_dir.join(module_path)
+    };
+    let canonical = candidate
+        .canonicalize()
+        .map_err(|source| LinkerError::Read {
+            path: candidate.display().to_string(),
+            source,
+        })?;
+    if !canonical.starts_with(&base) {
+        return Err(LinkerError::ModulePathOutsideBase {
+            module: module_id.to_string(),
+            path: canonical.display().to_string(),
+            base_dir: base.display().to_string(),
+        });
+    }
+    Ok(canonical)
 }
 
 pub fn validate_system(system: &AirSystem, base_dir: impl AsRef<Path>) -> SystemVerificationReport {
@@ -1939,9 +1980,15 @@ impl SystemVerifier {
             );
         }
 
-        let Ok(modules) = load_modules(system, base_dir) else {
-            self.error("AIRL004", "failed to load or verify one or more modules");
-            return;
+        let modules = match load_modules(system, base_dir) {
+            Ok(modules) => modules,
+            Err(error) => {
+                self.error(
+                    "AIRL004",
+                    format!("failed to load or verify one or more modules: {error}"),
+                );
+                return;
+            }
         };
 
         self.diagnostics
@@ -2342,7 +2389,10 @@ fn validate_run_plan_capabilities(
         let Some(module_ref) = store.modules.get(&module_id) else {
             continue;
         };
-        let Ok(module) = air_parser::parse_air_file(base_dir.join(&module_ref.path)) else {
+        let Ok(path) = resolve_module_path(base_dir, &module_id, &module_ref.path) else {
+            continue;
+        };
+        let Ok(module) = air_parser::parse_air_file(path) else {
             continue;
         };
         for capability in &module.requires.capabilities {
@@ -2405,8 +2455,11 @@ fn validate_dynamic_run_plan(
             let Some(module_ref) = store.modules.get(&parent.module) else {
                 continue;
             };
-            let Ok(parent_module) = air_parser::parse_air_file(base_dir.join(&module_ref.path))
+            let Ok(module_path) = resolve_module_path(base_dir, &parent.module, &module_ref.path)
             else {
+                continue;
+            };
+            let Ok(parent_module) = air_parser::parse_air_file(module_path) else {
                 continue;
             };
             let normalized = match normalize_endpoint_path(path) {
@@ -2987,7 +3040,8 @@ fn load_modules(
     let mut modules = BTreeMap::new();
 
     for (id, module_ref) in &system.modules {
-        let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+        let path = resolve_module_path(base_dir, id, &module_ref.path)?;
+        let module = air_parser::parse_air_file(path)?;
         let verification = air_verify::verify(&module);
         if !verification.is_success() {
             return Err(LinkerError::ModuleVerify {
@@ -3054,7 +3108,8 @@ where
         .modules
         .get(&fanout.module)
         .ok_or_else(|| LinkerError::UnknownModule(fanout.module.clone()))?;
-    let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+    let path = resolve_module_path(base_dir, &fanout.module, &module_ref.path)?;
+    let module = air_parser::parse_air_file(path)?;
     let verification = air_verify::verify(&module);
     if !verification.is_success() {
         return Err(LinkerError::ModuleVerify {
@@ -3246,7 +3301,8 @@ where
         .modules
         .get(&fanout.module)
         .ok_or_else(|| LinkerError::UnknownModule(fanout.module.clone()))?;
-    let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+    let path = resolve_module_path(base_dir, &fanout.module, &module_ref.path)?;
+    let module = air_parser::parse_air_file(path)?;
     let verification = air_verify::verify(&module);
     if !verification.is_success() {
         return Err(LinkerError::ModuleVerify {
@@ -3413,7 +3469,8 @@ where
         .modules
         .get(&fanout.module)
         .ok_or_else(|| LinkerError::UnknownModule(fanout.module.clone()))?;
-    let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+    let path = resolve_module_path(base_dir, &fanout.module, &module_ref.path)?;
+    let module = air_parser::parse_air_file(path)?;
     let verification = air_verify::verify(&module);
     if !verification.is_success() {
         return Err(LinkerError::ModuleVerify {
@@ -3651,7 +3708,8 @@ where
         .modules
         .get(&fanout.module)
         .ok_or_else(|| LinkerError::UnknownModule(fanout.module.clone()))?;
-    let module = air_parser::parse_air_file(base_dir.join(&module_ref.path))?;
+    let path = resolve_module_path(base_dir, &fanout.module, &module_ref.path)?;
+    let module = air_parser::parse_air_file(path)?;
     let verification = air_verify::verify(&module);
     if !verification.is_success() {
         return Err(LinkerError::ModuleVerify {
