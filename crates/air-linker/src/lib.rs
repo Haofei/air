@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use air_core::{AirModule, Diagnostic, Severity, TypeSpec};
 use air_runtime::{
     ModelProvider, RunResult, RuntimeError, State, ToolProvider, TraceEvent, TraceStatus, Vm,

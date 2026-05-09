@@ -1051,9 +1051,11 @@ impl ExecutionContext<'_> {
             self.step,
             self.rule,
             action,
-            input,
-            output,
-            meta,
+            EventPayload {
+                input,
+                output,
+                meta,
+            },
             &status,
         );
         (self.observer)(&event);
@@ -1312,9 +1314,7 @@ fn event(
     step: u32,
     rule: &str,
     action: &str,
-    input: Option<Value>,
-    output: Option<Value>,
-    meta: Option<Value>,
+    payload: EventPayload,
     status: &Result<(), String>,
 ) -> TraceEvent {
     TraceEvent {
@@ -1322,15 +1322,21 @@ fn event(
         step,
         rule: rule.to_string(),
         action: action.to_string(),
-        input,
-        output,
-        meta,
+        input: payload.input,
+        output: payload.output,
+        meta: payload.meta,
         status: match status {
             Ok(()) => TraceStatus::Ok,
             Err(_) => TraceStatus::Error,
         },
         error: status.as_ref().err().cloned(),
     }
+}
+
+struct EventPayload {
+    input: Option<Value>,
+    output: Option<Value>,
+    meta: Option<Value>,
 }
 
 fn condition_matches(

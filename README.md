@@ -14,6 +14,26 @@ AIR is a compiler-first module system for production agent workflows. Agents are
 | Tool permissions are implicit | Capabilities, provider tool contracts, budgets, and approval gates are verified |
 | Long runs are opaque | Human logs, JSONL traces, checkpoints, resume, and replay are built in |
 
+## Status
+
+AIR is usable as a local compiler/runtime prototype with bounded production-oriented semantics. Backend lowering is available but still experimental; the native Rust VM is the reference runtime.
+
+| Feature | Status |
+| --- | --- |
+| Typed state-machine AIR modules | Supported |
+| Module schema validation | Supported |
+| Model/tool providers and capability checks | Supported |
+| Approval gates, retry, budgets, and action timeout detection | Supported |
+| RunPlan module composition | Supported |
+| Dynamic bounded fan-out/fan-in | Supported |
+| Checkpoint, halt/resume, replay, and JIT hot-path specialization | Supported |
+| LangGraph strict lowering | Experimental |
+| OpenAI Agents JS strict lowering | Experimental |
+| OpenAI Agents JS semantic lowering | Limited: one module shape, local-docs RAG oriented |
+| Hard cancellation of hung model/tool calls | Not yet |
+| Trace redaction and sensitive-field policy | Not yet |
+| Backend conformance suite | Not yet |
+
 ## Quick Start
 
 Run the small packaged example first:
