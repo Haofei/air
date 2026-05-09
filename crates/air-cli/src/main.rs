@@ -1,11 +1,11 @@
-use air_backend_openai::OpenAiCompatibleModelProvider;
 use air_core::Severity;
 use air_runtime::{
     read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl,
-    write_trace_jsonl_with_options, ModelProvider, RuntimeError, TraceEvent, TraceStatus,
-    TraceWriteOptions, Vm,
+    write_trace_jsonl_with_options, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
 };
+mod models;
 mod tools;
+use crate::models::{call_openai_model, ModelProviderChoice};
 use crate::tools::ToolProviderChoice;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
@@ -629,9 +629,7 @@ fn plan_task(options: PlanOptions) -> Result<()> {
     let recipes = recipe_catalog(&store, &base_dir, allow_internal)?;
     let request = planner_request(&task, &store, catalog, recipes, allow_internal);
 
-    let config = air_backend_openai::parse_config_file(model_config)?;
-    let mut models = OpenAiCompatibleModelProvider::new(config)?;
-    let plan_value = models.call_model(&planner_model, &request)?;
+    let plan_value = call_openai_model(model_config, &planner_model, &request)?;
     let mut plan = parse_planner_response(plan_value, &store, &base_dir, allow_internal)?;
     normalize_planner_run_plan(&mut plan);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
@@ -2298,7 +2296,7 @@ fn run(
         let config = air_backend_openai::parse_config_file(model_config)?;
         let mut vm = Vm {
             tools,
-            models: ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+            models: ModelProviderChoice::openai(config)?,
         };
         if observe {
             let result = vm.run_with_observer(&module, inputs, |event| {
@@ -2314,7 +2312,7 @@ fn run(
     } else {
         let mut vm = Vm {
             tools,
-            models: ModelProviderChoice::Echo(EchoModels),
+            models: ModelProviderChoice::echo(),
         };
         if observe {
             let result = vm.run_with_observer(&module, inputs, |event| {
@@ -2375,7 +2373,7 @@ fn run_system(
                 base_dir,
                 inputs,
                 tools,
-                ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+                ModelProviderChoice::openai(config)?,
                 |event| observe_event(event, log, &mut observed_trace),
             );
             if result.is_err() {
@@ -2388,7 +2386,7 @@ fn run_system(
                 base_dir,
                 inputs,
                 tools,
-                ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+                ModelProviderChoice::openai(config)?,
             )?
         }
     } else if observe {
@@ -2397,7 +2395,7 @@ fn run_system(
             base_dir,
             inputs,
             tools,
-            ModelProviderChoice::Echo(EchoModels),
+            ModelProviderChoice::echo(),
             |event| observe_event(event, log, &mut observed_trace),
         );
         if result.is_err() {
@@ -2410,7 +2408,7 @@ fn run_system(
             base_dir,
             inputs,
             tools,
-            ModelProviderChoice::Echo(EchoModels),
+            ModelProviderChoice::echo(),
         )?
     };
     if let Some(trace_out) = trace_out {
@@ -2706,7 +2704,7 @@ fn run_plan_with_inputs(
     let result = if parallel {
         if let Some(model_config) = model_config {
             let config = air_backend_openai::parse_config_file(model_config)?;
-            let models = ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?);
+            let models = ModelProviderChoice::openai(config)?;
             run_plan_parallel(
                 &plan,
                 &store,
@@ -2728,7 +2726,7 @@ fn run_plan_with_inputs(
                 base_dir.clone(),
                 inputs,
                 tools,
-                ModelProviderChoice::Echo(EchoModels),
+                ModelProviderChoice::echo(),
                 observe,
                 log,
                 trace_out.as_ref(),
@@ -2746,7 +2744,7 @@ fn run_plan_with_inputs(
                 base_dir.clone(),
                 inputs,
                 tools,
-                ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+                ModelProviderChoice::openai(config)?,
                 |event| observe_event(event, log, &mut observed_trace),
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
@@ -2761,7 +2759,7 @@ fn run_plan_with_inputs(
                 base_dir.clone(),
                 inputs,
                 tools,
-                ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+                ModelProviderChoice::openai(config)?,
                 |_| {},
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             )?
@@ -2773,7 +2771,7 @@ fn run_plan_with_inputs(
             base_dir.clone(),
             inputs,
             tools,
-            ModelProviderChoice::Echo(EchoModels),
+            ModelProviderChoice::echo(),
             |event| observe_event(event, log, &mut observed_trace),
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         );
@@ -2788,7 +2786,7 @@ fn run_plan_with_inputs(
             base_dir.clone(),
             inputs,
             tools,
-            ModelProviderChoice::Echo(EchoModels),
+            ModelProviderChoice::echo(),
             |_| {},
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         )?
@@ -3155,7 +3153,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
                 inputs,
                 resume,
                 tools,
-                ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+                ModelProviderChoice::openai(config)?,
                 |event| observe_event(event, log, &mut observed_trace),
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
@@ -3171,7 +3169,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
                 inputs,
                 resume,
                 tools,
-                ModelProviderChoice::OpenAi(OpenAiCompatibleModelProvider::new(config)?),
+                ModelProviderChoice::openai(config)?,
                 |_| {},
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             )?
@@ -3184,7 +3182,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             inputs,
             resume,
             tools,
-            ModelProviderChoice::Echo(EchoModels),
+            ModelProviderChoice::echo(),
             |event| observe_event(event, log, &mut observed_trace),
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         );
@@ -3200,7 +3198,7 @@ fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             inputs,
             resume,
             tools,
-            ModelProviderChoice::Echo(EchoModels),
+            ModelProviderChoice::echo(),
             |_| {},
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         )?
@@ -3492,31 +3490,4 @@ fn lower_plan(
         print!("{generated}");
     }
     Ok(())
-}
-
-#[derive(Clone)]
-struct EchoModels;
-
-impl ModelProvider for EchoModels {
-    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        Ok(serde_json::json!({
-            "model": name,
-            "input": input
-        }))
-    }
-}
-
-#[derive(Clone)]
-enum ModelProviderChoice {
-    Echo(EchoModels),
-    OpenAi(OpenAiCompatibleModelProvider),
-}
-
-impl ModelProvider for ModelProviderChoice {
-    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        match self {
-            ModelProviderChoice::Echo(provider) => provider.call_model(name, input),
-            ModelProviderChoice::OpenAi(provider) => provider.call_model(name, input),
-        }
-    }
 }
