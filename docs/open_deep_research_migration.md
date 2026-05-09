@@ -127,7 +127,7 @@ Implemented:
 - runtime enforcement of `policy.max_tool_calls` and `policy.max_model_calls`, so bounded researcher loops fail closed if they try to exceed their declared tool-call or model-call budget;
 - runtime tool capability handshake, where provider-configured tool capabilities must match module `tools[].capability` and be present in `requires.capabilities` before the AIR VM runs the tool; generated LangGraph and OpenAI JS strict runtimes also reject undeclared or mismatched tool calls, with LangGraph accepting host-provided `AIR_TOOL_CAPABILITIES`;
 - native VM approval provider hook for `kind: approval`, where the default provider fails closed, explicit providers or `tool-config.approvals` can approve or deny requested capabilities, and approval decisions are emitted in trace;
-- runtime enforcement of action `timeout_seconds` and module-level `policy.timeout_seconds` after provider calls return, so slow calls or over-budget modules fail closed instead of silently updating state;
+- runtime enforcement of action `timeout_seconds` and module-level `policy.timeout_seconds`, with action deadlines forwarded to timeout-aware providers such as OpenAI-compatible model calls and HTTP JSON tools;
 - explicit supervisor reflection through `research.think` before conditional second-wave routing;
 - typed supervisor routing via `action: conduct_research | research_complete` and bounded `follow_up_topics`, so the second wave is delegated by structured AIR state instead of prompt convention;
 - bounded multi-step supervisor routing via `deep-research-supervised-two-step.air-plan.yaml`, where repeated supervisor decisions can run or skip later researcher waves without runtime graph mutation;
@@ -268,7 +268,7 @@ Missing or intentionally simplified:
 - arbitrary dynamic fan-out-after-fan-out is limited to the declared parent-fanout form; ad hoc child graph mutation remains unsupported;
 - unbounded supervisor ReAct loops beyond the current statically bounded one-step and two-step supervisor examples;
 - richer condition expressions beyond equality, inequality, conjunction, and disjunction;
-- preemptive cancellation for in-flight provider calls; current timeout enforcement is non-preemptive and checked after provider calls return;
+- preemptive cancellation for arbitrary synchronous providers; timeout-aware HTTP/model providers can enforce request deadlines, but AIR does not yet isolate and terminate any blocking provider implementation;
 - provider-native search behavior for OpenAI and Anthropic web search beyond the generic HTTP JSON adapter;
 - Tavily/API-native summarization and provider-specific search ranking beyond generic HTTP JSON and local search normalization;
 - MCP server auth and tool discovery;

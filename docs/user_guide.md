@@ -199,7 +199,7 @@ AIR uses OpenAI-compatible model config for real model calls:
 }
 ```
 
-`request_timeout_seconds` is optional and defaults to 120 seconds. It controls the HTTP request timeout for the OpenAI-compatible provider; AIR action `timeout_seconds` still records and enforces elapsed-time violations after provider calls return.
+`request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout for each HTTP request. AIR also records elapsed-time violations in the runtime trace.
 
 Run with:
 
