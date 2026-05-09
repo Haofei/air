@@ -1,10 +1,12 @@
 use air_core::Severity;
 use air_runtime::{system_return_event, Vm};
+mod explain;
 mod models;
 mod planner;
 mod profile;
 mod run_plan;
 mod tools;
+use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
     module_base_dir_for_modules, module_base_dir_for_store_path, plan_task, PlanOptions,
@@ -56,6 +58,10 @@ enum Command {
         /// Path to a .air-store.yaml file.
         #[arg(long)]
         store: Option<PathBuf>,
+
+        /// Print a governance and compatibility summary for the validated run plan.
+        #[arg(long)]
+        explain: bool,
     },
     /// Ask a planner model to generate a dynamic AIR run plan from a task.
     Plan {
@@ -362,10 +368,12 @@ fn main() -> Result<()> {
             plan,
             profile,
             store,
+            explain,
         } => validate_plan(ValidatePlanOptions {
             plan,
             profile,
             store,
+            explain,
         }),
         Command::Plan {
             task,
@@ -547,6 +555,7 @@ fn validate_plan(options: ValidatePlanOptions) -> Result<()> {
         plan,
         profile,
         store,
+        explain,
     } = options;
 
     let profile = match profile {
@@ -572,12 +581,7 @@ fn validate_plan(options: ValidatePlanOptions) -> Result<()> {
     let store_path = store;
     let store = air_linker::parse_module_store_file(&store_path)?;
     let base_dir = module_base_dir_for_store_path(&store, &store_path);
-    let report = air_linker::validate_run_plan(&plan, &store, base_dir);
-
-    if report.diagnostics.is_empty() {
-        println!("ok: {} {}", plan.plan.name, plan.plan.version);
-        return Ok(());
-    }
+    let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
 
     for diagnostic in &report.diagnostics {
         let severity = match diagnostic.severity {
@@ -588,6 +592,12 @@ fn validate_plan(options: ValidatePlanOptions) -> Result<()> {
     }
 
     if report.is_success() {
+        if explain {
+            let explanation = build_plan_explanation(&plan, &store, &base_dir)?;
+            print!("{}", format_plan_explanation(&explanation));
+        } else if report.diagnostics.is_empty() {
+            println!("ok: {} {}", plan.plan.name, plan.plan.version);
+        }
         Ok(())
     } else {
         std::process::exit(1);
@@ -1745,6 +1755,7 @@ modules:
             plan,
             profile,
             store,
+            explain,
         } = cli.command
         else {
             panic!("expected validate-plan command");
@@ -1758,5 +1769,25 @@ modules:
             ))
         );
         assert_eq!(store, None);
+        assert!(!explain);
+    }
+
+    #[test]
+    fn validate_plan_accepts_explain_flag() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "validate-plan",
+            "tests/plans/approval-smoke.air-plan.yaml",
+            "--store",
+            "tests/plans/approval-smoke.air-store.yaml",
+            "--explain",
+        ])
+        .unwrap();
+
+        let Command::ValidatePlan { explain, .. } = cli.command else {
+            panic!("expected validate-plan command");
+        };
+
+        assert!(explain);
     }
 }

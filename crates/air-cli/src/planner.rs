@@ -19,6 +19,7 @@ pub(crate) struct ValidatePlanOptions {
     pub(crate) plan: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) store: Option<PathBuf>,
+    pub(crate) explain: bool,
 }
 
 pub(crate) fn plan_task(options: PlanOptions) -> Result<()> {
