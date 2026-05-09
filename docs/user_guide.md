@@ -88,6 +88,8 @@ Important fields:
 
 Object schemas allow undeclared fields by default for compatibility with provider metadata and evolving module contracts. Add `additional_properties: false` to a detailed object schema when the AIR VM and generated strict backends should reject undeclared fields.
 
+Conditions use AIR's small equality-only condition DSL. `&&` binds tighter than `||`; parentheses and numeric comparisons are not supported. See [condition_dsl.md](condition_dsl.md) for the formal grammar and limits.
+
 ## 3. RunPlan Anatomy
 
 A RunPlan connects modules into an app:
