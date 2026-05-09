@@ -1,4 +1,4 @@
-use air_runtime::{ModelProvider, RuntimeError};
+use air_runtime::{sanitize_trace_text, ModelProvider, RuntimeError, TraceWriteOptions};
 use reqwest::blocking::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -220,9 +220,11 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         let status = response.status();
         let response_text = response.text().map_err(provider_error)?;
         if !status.is_success() {
-            return Err(RuntimeError::Provider(format!(
-                "chat/completions failed with status {status}: {response_text}"
-            )));
+            return Err(provider_http_error(
+                "chat/completions",
+                status,
+                &response_text,
+            ));
         }
 
         parse_chat_completion_content(&response_text)
@@ -231,6 +233,22 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
 
 fn provider_error(error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Provider(error.to_string())
+}
+
+fn provider_http_error(
+    operation: &str,
+    status: reqwest::StatusCode,
+    response_text: &str,
+) -> RuntimeError {
+    let body = sanitize_trace_text(
+        response_text,
+        &TraceWriteOptions {
+            redact_sensitive: true,
+            max_string_chars: Some(2048),
+            max_event_bytes: None,
+        },
+    );
+    RuntimeError::Provider(format!("{operation} failed with status {status}: {body}"))
 }
 
 fn resolve_base_url(model_config: &OpenAiModelConfig) -> Result<String, RuntimeError> {
@@ -520,6 +538,23 @@ mod tests {
 
         assert!(message.contains(&path.display().to_string()));
         assert!(message.contains("models must contain at least one alias"));
+    }
+
+    #[test]
+    fn provider_http_error_redacts_and_truncates_response_body() {
+        let body = format!(
+            "api_key=sk-live-secret Authorization: Bearer provider-secret {}",
+            "x".repeat(4096)
+        );
+        let error =
+            provider_http_error("chat/completions", reqwest::StatusCode::BAD_REQUEST, &body);
+        let message = error.to_string();
+
+        assert!(!message.contains("sk-live-secret"));
+        assert!(!message.contains("provider-secret"));
+        assert!(message.contains("[AIR_REDACTED]"));
+        assert!(message.contains("[AIR_TRUNCATED]"));
+        assert!(message.len() < body.len());
     }
 
     fn temp_file_path(prefix: &str, extension: &str) -> std::path::PathBuf {

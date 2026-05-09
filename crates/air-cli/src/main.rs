@@ -1600,6 +1600,21 @@ mod tests {
     }
 
     #[test]
+    fn provider_error_snippet_redacts_http_tool_body() {
+        let body = format!(
+            "token=tool-secret Authorization: Bearer header-secret {}",
+            "x".repeat(4096)
+        );
+        let message = provider_error_snippet(&body);
+
+        assert!(!message.contains("tool-secret"));
+        assert!(!message.contains("header-secret"));
+        assert!(message.contains("[AIR_REDACTED]"));
+        assert!(message.contains("[AIR_TRUNCATED]"));
+        assert!(message.len() < body.len());
+    }
+
+    #[test]
     fn tool_config_reports_invalid_local_docs_limit_field() {
         let path = temp_file_path("air-doc-tool-diagnostic", "json");
         fs::write(
@@ -3936,14 +3951,26 @@ fn call_http_json_tool(
         return Err(RuntimeError::Provider(format!(
             "tool {name} HTTP status {}: {}",
             status.as_u16(),
-            body
+            provider_error_snippet(&body)
         )));
     }
     serde_json::from_str(&body).map_err(|error| {
         RuntimeError::Provider(format!(
-            "tool {name} HTTP response was not valid JSON: {error}; body={body}"
+            "tool {name} HTTP response was not valid JSON: {error}; body={}",
+            provider_error_snippet(&body)
         ))
     })
+}
+
+fn provider_error_snippet(body: &str) -> String {
+    air_runtime::sanitize_trace_text(
+        body,
+        &TraceWriteOptions {
+            redact_sensitive: true,
+            max_string_chars: Some(2048),
+            max_event_bytes: None,
+        },
+    )
 }
 
 fn render_json_template_value(template: &Value, input: &Value) -> Value {

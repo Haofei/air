@@ -294,7 +294,7 @@ pub fn sanitize_trace_event(event: &TraceEvent, options: &TraceWriteOptions) -> 
         .as_ref()
         .map(|value| sanitize_trace_value(value, options));
     if let Some(error) = &sanitized.error {
-        sanitized.error = Some(sanitize_trace_string(error, options));
+        sanitized.error = Some(sanitize_trace_text(error, options));
     }
     sanitized
 }
@@ -320,12 +320,12 @@ fn sanitize_trace_value(value: &Value, options: &TraceWriteOptions) -> Value {
                 .map(|value| sanitize_trace_value(value, options))
                 .collect(),
         ),
-        Value::String(text) => Value::String(sanitize_trace_string(text, options)),
+        Value::String(text) => Value::String(sanitize_trace_text(text, options)),
         _ => value.clone(),
     }
 }
 
-fn sanitize_trace_string(text: &str, options: &TraceWriteOptions) -> String {
+pub fn sanitize_trace_text(text: &str, options: &TraceWriteOptions) -> String {
     let mut text = if options.redact_sensitive {
         mask_sensitive_text(text)
     } else {
