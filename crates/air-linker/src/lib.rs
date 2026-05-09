@@ -2602,7 +2602,7 @@ impl LoadedSystemVerifier<'_> {
         self.verify_schedule();
     }
 
-    fn verify_connections(&mut self) -> Vec<(Endpoint, Endpoint)> {
+    fn verify_connections(&mut self) -> Vec<Endpoint> {
         let mut parsed = Vec::new();
 
         for connection in &self.system.connect {
@@ -2683,9 +2683,7 @@ impl LoadedSystemVerifier<'_> {
                 }
             }
 
-            for from in link_expr_endpoints(&source) {
-                parsed.push((from, to.clone()));
-            }
+            parsed.push(to);
         }
 
         parsed
@@ -2761,9 +2759,9 @@ impl LoadedSystemVerifier<'_> {
         }
     }
 
-    fn verify_required_inputs(&mut self, connections: &[(Endpoint, Endpoint)]) {
+    fn verify_required_inputs(&mut self, connections: &[Endpoint]) {
         let mut covered: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
-        for (_, to) in connections {
+        for to in connections {
             covered
                 .entry(to.module.as_str())
                 .or_default()
@@ -4723,34 +4721,6 @@ fn collect_link_expr_source_modules(expr: &LinkExpr, modules: &mut BTreeSet<Stri
             }
         }
         LinkExpr::Count { count } => collect_link_expr_source_modules(count, modules),
-        LinkExpr::Literal { .. } => {}
-    }
-}
-
-fn link_expr_endpoints(expr: &LinkExpr) -> Vec<Endpoint> {
-    let mut endpoints = Vec::new();
-    collect_link_expr_endpoints(expr, &mut endpoints);
-    endpoints
-}
-
-fn collect_link_expr_endpoints(expr: &LinkExpr, endpoints: &mut Vec<Endpoint>) {
-    match expr {
-        LinkExpr::From { from } => {
-            if let Ok(endpoint) = parse_endpoint(from) {
-                endpoints.push(endpoint);
-            }
-        }
-        LinkExpr::Object { object } => {
-            for value in object.values() {
-                collect_link_expr_endpoints(value, endpoints);
-            }
-        }
-        LinkExpr::Array { array } | LinkExpr::Coalesce { coalesce: array } => {
-            for value in array {
-                collect_link_expr_endpoints(value, endpoints);
-            }
-        }
-        LinkExpr::Count { count } => collect_link_expr_endpoints(count, endpoints),
         LinkExpr::Literal { .. } => {}
     }
 }

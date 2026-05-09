@@ -100,6 +100,22 @@ fn accepts_run_plan_connect_value_transforms() {
 }
 
 #[test]
+fn accepts_semantic_adapter_module_run_plan() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let store =
+        parse_module_store_file(root.join("tests/plans/semantic-adapter.air-store.yaml")).unwrap();
+    let plan =
+        parse_run_plan_file(root.join("tests/plans/semantic-adapter.air-plan.yaml")).unwrap();
+    let report = validate_run_plan(&plan, &store, &root);
+
+    assert!(
+        report.is_success(),
+        "expected valid semantic adapter run plan, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_complex_escalation_run_plan() {
     let root = root();
     let store =

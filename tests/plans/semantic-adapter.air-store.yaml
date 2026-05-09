@@ -1,0 +1,11 @@
+store:
+  name: semantic-adapter-store
+  version: 0.1.0
+
+modules:
+  test.link_transform_source@0.1.0:
+    path: tests/agents/link-transform-source.air.yaml
+  test.semantic_adapter@0.1.0:
+    path: tests/agents/semantic-adapter.air.yaml
+  test.link_transform_target@0.1.0:
+    path: tests/agents/link-transform-target.air.yaml

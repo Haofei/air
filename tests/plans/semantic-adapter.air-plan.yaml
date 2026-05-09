@@ -1,0 +1,51 @@
+plan:
+  name: semantic-adapter-run-plan
+  version: 0.1.0
+
+nodes:
+  - id: plan
+    module: test.link_transform_source@0.1.0
+  - id: adapter
+    module: test.semantic_adapter@0.1.0
+  - id: topic
+    module: test.link_transform_target@0.1.0
+
+entry: plan
+
+edges:
+  - from: plan
+    to: adapter
+  - from: adapter
+    to: topic
+
+connect:
+  - from: plan.plan
+    to: adapter.raw
+  - to: adapter.target_schema
+    value:
+      object:
+        required:
+          array:
+            - literal: research_brief
+            - literal: topic
+            - literal: topic_count
+            - literal: owner
+            - literal: notes
+        properties:
+          object:
+            research_brief:
+              literal: string
+            topic:
+              literal: string
+            topic_count:
+              literal: integer
+            owner:
+              literal: string
+            notes:
+              literal: array<string>
+  - from: adapter.request
+    to: topic.request
+
+outputs:
+  adapted: adapter.request
+  request: topic.response

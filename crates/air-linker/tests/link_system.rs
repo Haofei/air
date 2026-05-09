@@ -88,6 +88,24 @@ impl ModelProvider for MockModels {
                 ]
             })),
             "link_transform_echo" => Ok(input.clone()),
+            "semantic_adapter" => {
+                assert_eq!(
+                    input["target_schema"]["required"],
+                    json!(["research_brief", "topic", "topic_count", "owner", "notes"])
+                );
+                let raw = &input["raw"];
+                let topics = raw["topics"].as_array().unwrap();
+                Ok(json!({
+                    "research_brief": raw["brief"],
+                    "topic": topics[0],
+                    "topic_count": topics.len(),
+                    "owner": "semantic_research_ops",
+                    "notes": [
+                        format!("adapted: {}", topics[0].as_str().unwrap()),
+                        format!("evidence: {}", topics[1].as_str().unwrap())
+                    ]
+                }))
+            }
             other => panic!("unexpected model {other}"),
         }
     }
@@ -698,6 +716,35 @@ fn run_plan_connect_value_supports_typed_transforms() {
             "notes": ["planner", "typed transforms"]
         })
     );
+}
+
+#[test]
+fn run_plan_uses_semantic_adapter_module_for_complex_interface_conversion() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let store =
+        parse_module_store_file(root.join("tests/plans/semantic-adapter.air-store.yaml")).unwrap();
+    let plan =
+        parse_run_plan_file(root.join("tests/plans/semantic-adapter.air-plan.yaml")).unwrap();
+
+    let result = run_run_plan(&plan, &store, &root, State::new(), MockTools, MockModels).unwrap();
+
+    assert_eq!(
+        result.outputs["adapted"],
+        json!({
+            "research_brief": "Research migration readiness",
+            "topic": "dynamic fan-out",
+            "topic_count": 2,
+            "owner": "semantic_research_ops",
+            "notes": ["adapted: dynamic fan-out", "evidence: typed transforms"]
+        })
+    );
+    assert_eq!(result.outputs["request"], result.outputs["adapted"]);
+
+    assert!(result.trace.iter().any(|event| {
+        event.agent == "semantic-adapter-agent"
+            && event.action == "model_call"
+            && event.output.as_ref() == Some(&result.outputs["adapted"])
+    }));
 }
 
 #[test]

@@ -125,6 +125,12 @@ Key rules:
 - `halts` can stop a plan for clarification or approval-style flows.
 - `schedule.groups` can declare bounded parallel waves.
 
+For deterministic shape changes, `connect.value` supports typed expression transforms such as
+object construction, arrays, counts, and coalescing. For semantic or lossy interface conversion,
+make the conversion an explicit adapter module with a `model_call`, then connect source output to
+the adapter input and adapter output to the target module. This keeps model cost, timeout, retry,
+schema validation, and trace events visible instead of hiding model execution inside wiring.
+
 ## 4. Module Store And Recipes
 
 A module store publishes modules and optional recipes:
