@@ -72,6 +72,9 @@ PY
 kill "$HTTP_TOOL_PID" 2>/dev/null || true
 trap - EXIT
 
+echo "[air-1.0] backend conformance"
+scripts/verify_backend_conformance.sh
+
 echo "[air-1.0] scoped verifier"
 if [[ "${AIR_1_0_REAL:-0}" == "1" ]]; then
   AIR_DEEP_RESEARCH_REAL=1 scripts/verify_deep_research.sh

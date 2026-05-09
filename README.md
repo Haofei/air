@@ -32,7 +32,7 @@ AIR is usable as a local compiler/runtime prototype with bounded production-orie
 | OpenAI Agents JS semantic lowering | Limited: one module shape, local-docs RAG oriented |
 | Hard cancellation of hung model/tool calls | Not yet |
 | Trace redaction and sensitive-field policy | Supported: opt-in `--trace-redact` for trace files |
-| Backend conformance suite | Not yet |
+| Backend conformance suite | Supported for core strict-runtime cases via `scripts/verify_backend_conformance.sh` |
 
 ## Quick Start
 
