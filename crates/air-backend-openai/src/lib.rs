@@ -218,11 +218,8 @@ impl OpenAiCompatibleModelProvider {
             body["temperature"] = json!(temperature);
         }
 
-        let configured_timeout =
-            Duration::from_secs(model_config.request_timeout_seconds.unwrap_or(120));
-        let request_timeout = action_timeout
-            .map(|timeout| timeout.min(configured_timeout))
-            .unwrap_or(configured_timeout);
+        let request_timeout =
+            effective_request_timeout(model_config.request_timeout_seconds, action_timeout);
 
         let response = self
             .client
@@ -264,6 +261,16 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
 
 fn provider_error(error: impl std::fmt::Display) -> RuntimeError {
     RuntimeError::Provider(error.to_string())
+}
+
+fn effective_request_timeout(
+    configured_timeout_seconds: Option<u64>,
+    action_timeout: Option<Duration>,
+) -> Duration {
+    let configured_timeout = Duration::from_secs(configured_timeout_seconds.unwrap_or(120));
+    action_timeout
+        .map(|timeout| timeout.min(configured_timeout))
+        .unwrap_or(configured_timeout)
 }
 
 fn provider_http_error(
@@ -541,6 +548,22 @@ mod tests {
 
         assert!(message.contains("models.planner.request_timeout_seconds"));
         assert!(message.contains("at least 1"));
+    }
+
+    #[test]
+    fn effective_request_timeout_uses_smaller_action_deadline() {
+        assert_eq!(
+            effective_request_timeout(Some(30), Some(Duration::from_secs(5))),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            effective_request_timeout(Some(5), Some(Duration::from_secs(30))),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            effective_request_timeout(None, None),
+            Duration::from_secs(120)
+        );
     }
 
     #[test]
