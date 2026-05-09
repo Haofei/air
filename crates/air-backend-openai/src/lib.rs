@@ -29,6 +29,9 @@ pub struct OpenAiModelConfig {
     pub temperature: Option<f64>,
 
     #[serde(default)]
+    pub request_timeout_seconds: Option<u64>,
+
+    #[serde(default)]
     pub system_prompt: Option<String>,
 }
 
@@ -125,6 +128,12 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
                 ));
             }
         }
+        if matches!(model.request_timeout_seconds, Some(0)) {
+            return Err(invalid_config(
+                path,
+                format!("models.{alias}.request_timeout_seconds must be at least 1"),
+            ));
+        }
     }
 
     Ok(())
@@ -161,10 +170,7 @@ pub struct OpenAiCompatibleModelProvider {
 
 impl OpenAiCompatibleModelProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, RuntimeError> {
-        let client = Client::builder()
-            .timeout(Duration::from_secs(120))
-            .build()
-            .map_err(provider_error)?;
+        let client = Client::builder().build().map_err(provider_error)?;
 
         Ok(Self { config, client })
     }
@@ -212,6 +218,9 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         let response = self
             .client
             .post(url)
+            .timeout(Duration::from_secs(
+                model_config.request_timeout_seconds.unwrap_or(120),
+            ))
             .bearer_auth(api_key)
             .json(&body)
             .send()
@@ -463,6 +472,56 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_file_accepts_request_timeout_seconds() {
+        let path = temp_file_path("air-model-config-timeout", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1",
+                  "request_timeout_seconds": 7
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(config.models["planner"].request_timeout_seconds, Some(7));
+    }
+
+    #[test]
+    fn parse_config_file_rejects_zero_request_timeout_seconds() {
+        let path = temp_file_path("air-model-config-timeout-zero", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1",
+                  "request_timeout_seconds": 0
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let error = parse_config_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        let message = error.to_string();
+
+        assert!(message.contains("models.planner.request_timeout_seconds"));
+        assert!(message.contains("at least 1"));
+    }
+
+    #[test]
     fn parse_config_file_requires_base_url_or_env() {
         let path = temp_file_path("air-model-config-missing-base-url", "json");
         fs::write(
@@ -498,6 +557,7 @@ mod tests {
             model: "gpt-5.1".to_string(),
             model_env: None,
             temperature: None,
+            request_timeout_seconds: None,
             system_prompt: None,
         };
 
@@ -520,6 +580,7 @@ mod tests {
             model: "configured-model".to_string(),
             model_env: Some(env_name.clone()),
             temperature: None,
+            request_timeout_seconds: None,
             system_prompt: None,
         };
 

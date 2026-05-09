@@ -192,11 +192,14 @@ AIR uses OpenAI-compatible model config for real model calls:
       "model": "example-model",
       "model_env": "OPENAI_MODEL",
       "temperature": 0,
+      "request_timeout_seconds": 120,
       "system_prompt": "Return only JSON."
     }
   }
 }
 ```
+
+`request_timeout_seconds` is optional and defaults to 120 seconds. It controls the HTTP request timeout for the OpenAI-compatible provider; AIR action `timeout_seconds` still records and enforces elapsed-time violations after provider calls return.
 
 Run with:
 
