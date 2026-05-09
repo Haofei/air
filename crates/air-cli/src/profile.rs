@@ -29,6 +29,9 @@ pub(crate) struct RunPlanProfile {
     pub(crate) trace_redact: Option<bool>,
 
     #[serde(default)]
+    pub(crate) trace_raw: Option<bool>,
+
+    #[serde(default)]
     pub(crate) state_out: Option<PathBuf>,
 
     #[serde(default)]

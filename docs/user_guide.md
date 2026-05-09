@@ -324,19 +324,19 @@ Use logs for humans:
 cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --log
 ```
 
-Use JSONL traces for replay/audit:
+Use JSONL traces for replay/audit. Trace files are redacted by default: common sensitive keys such as API keys, authorization headers, passwords, secrets, and tokens are masked, and large string/event payloads are capped.
 
 ```bash
 cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
   --trace-out target/generated/run.trace.jsonl
 ```
 
-Use redacted traces when the file may leave the trusted workspace. This masks common sensitive keys such as API keys, authorization headers, passwords, secrets, and tokens, and caps large string/event payloads. Redacted traces are for audit/debugging and may not be replayable because outputs can be masked.
+Use raw traces only for trusted local debugging. Raw traces preserve complete model/tool inputs and outputs, which can include prompts, documents, credentials, or user data.
 
 ```bash
 cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
-  --trace-out target/generated/run.redacted.trace.jsonl \
-  --trace-redact
+  --trace-out target/generated/run.raw.trace.jsonl \
+  --trace-raw
 ```
 
 Use checkpoint/resume for long plans:

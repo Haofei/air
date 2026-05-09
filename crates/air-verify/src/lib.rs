@@ -495,6 +495,7 @@ impl Verifier {
                 }
             }
             StateAction::Append { target, value } => {
+                self.verify_control_field_write(rule_id, "append target", target);
                 if !module.state.contains_key(target) {
                     self.error(
                         "AIR088",
@@ -522,6 +523,7 @@ impl Verifier {
                     );
                 }
                 self.verify_input_spec(rule_id, "model_call input", input, module);
+                self.verify_control_field_write(rule_id, "model_call output", output);
                 self.verify_state_ref(rule_id, "model_call output", output, module);
                 self.verify_timeout(rule_id, "model_call", *timeout_seconds);
                 self.verify_retry(rule_id, retry);
@@ -541,6 +543,7 @@ impl Verifier {
                         ),
                     );
                     self.verify_input_spec(rule_id, "tool_call input", input, module);
+                    self.verify_control_field_write(rule_id, "tool_call output", output);
                     self.verify_state_ref(rule_id, "tool_call output", output, module);
                     self.verify_timeout(rule_id, "tool_call", *timeout_seconds);
                     self.verify_retry(rule_id, retry);
@@ -548,6 +551,7 @@ impl Verifier {
                 };
 
                 self.verify_input_spec(rule_id, "tool_call input", input, module);
+                self.verify_control_field_write(rule_id, "tool_call output", output);
                 self.verify_state_ref(rule_id, "tool_call output", output, module);
                 self.verify_timeout(rule_id, "tool_call", *timeout_seconds);
                 self.verify_retry(rule_id, retry);
@@ -580,6 +584,17 @@ impl Verifier {
                     );
                 }
             }
+        }
+    }
+
+    fn verify_control_field_write(&mut self, rule_id: &str, label: &str, field: &str) {
+        if normalize_path(field) == "phase" {
+            self.error(
+                "AIR094",
+                format!(
+                    "{label} in rule {rule_id} cannot write state.phase; use an explicit set action for state_machine transitions"
+                ),
+            );
         }
     }
 

@@ -39,8 +39,9 @@ pub(crate) fn plan_task(options: PlanOptions) -> Result<()> {
         (Some(_), Some(_)) => anyhow::bail!("use either --task or --task-file, not both"),
     };
 
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
+    let store_path = store;
+    let store = air_linker::parse_module_store_file(&store_path)?;
+    let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let catalog = module_catalog(&store, &base_dir, allow_internal)?;
     let recipes = recipe_catalog(&store, &base_dir, allow_internal)?;
     let request = planner_request(&task, &store, catalog, recipes, allow_internal);
@@ -482,8 +483,15 @@ pub(crate) fn module_catalog(
     Ok(catalog)
 }
 
-pub(crate) fn module_base_dir_for_store(store: &air_linker::ModuleStore) -> Result<PathBuf> {
-    module_base_dir_for_modules(&store.modules)
+pub(crate) fn module_base_dir_for_store_path(
+    store: &air_linker::ModuleStore,
+    store_path: &Path,
+) -> PathBuf {
+    let start_dir = store_path.parent().unwrap_or_else(|| Path::new("."));
+    let start_dir = start_dir
+        .canonicalize()
+        .unwrap_or_else(|_| start_dir.to_path_buf());
+    infer_module_base_dir(&start_dir, &store.modules)
 }
 
 pub(crate) fn module_base_dir_for_modules(

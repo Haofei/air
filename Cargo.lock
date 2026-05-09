@@ -52,6 +52,7 @@ dependencies = [
  "anyhow",
  "clap",
  "reqwest",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml",

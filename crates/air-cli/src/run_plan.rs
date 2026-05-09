@@ -1,17 +1,16 @@
 use crate::models::ModelProviderChoice;
-use crate::planner::module_base_dir_for_store;
+use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_json_object, read_run_plan_profile, resolve_profile_path};
 use crate::tools::ToolProviderChoice;
 use air_runtime::{
-    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl,
-    write_trace_jsonl_with_options, TraceEvent, TraceStatus, TraceWriteOptions,
+    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl_with_options,
+    TraceEvent, TraceStatus, TraceWriteOptions,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::collections::{hash_map::DefaultHasher, BTreeMap};
+use std::collections::BTreeMap;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
 
 pub(crate) struct RunPlanOptions {
@@ -22,6 +21,7 @@ pub(crate) struct RunPlanOptions {
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
     pub(crate) trace_redact: bool,
+    pub(crate) trace_raw: bool,
     pub(crate) state_out: Option<PathBuf>,
     pub(crate) checkpoint_out: Option<PathBuf>,
     pub(crate) jit_cache: Option<PathBuf>,
@@ -41,6 +41,7 @@ pub(crate) struct ResumePlanOptions {
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
     pub(crate) trace_redact: bool,
+    pub(crate) trace_raw: bool,
     pub(crate) state_out: Option<PathBuf>,
     pub(crate) checkpoint_out: Option<PathBuf>,
     pub(crate) log: bool,
@@ -76,6 +77,26 @@ pub(crate) struct PlanStateFile {
     pub(crate) module_outputs: BTreeMap<String, Value>,
 }
 
+fn effective_trace_redact(
+    cli_trace_redact: bool,
+    cli_trace_raw: bool,
+    profile: Option<&(PathBuf, crate::profile::RunPlanProfile)>,
+) -> bool {
+    if cli_trace_redact {
+        return true;
+    }
+    if cli_trace_raw {
+        return false;
+    }
+    if let Some((_, profile)) = profile {
+        if profile.trace_raw.unwrap_or(false) {
+            return false;
+        }
+        return profile.trace_redact.unwrap_or(true);
+    }
+    true
+}
+
 pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
     let RunPlanOptions {
         plan,
@@ -85,6 +106,7 @@ pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
         model_config,
         trace_out,
         trace_redact,
+        trace_raw,
         state_out,
         checkpoint_out,
         jit_cache,
@@ -184,11 +206,7 @@ pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
             .as_ref()
             .and_then(|(_, profile)| profile.log)
             .unwrap_or(false);
-    let trace_redact = trace_redact
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.trace_redact)
-            .unwrap_or(false);
+    let trace_redact = effective_trace_redact(trace_redact, trace_raw, profile.as_ref());
     let example_tools = example_tools
         || profile
             .as_ref()
@@ -234,8 +252,9 @@ pub(crate) fn run_plan_with_inputs(
     } = options;
 
     let original_plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
+    let store_path = store;
+    let store = air_linker::parse_module_store_file(&store_path)?;
+    let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let (plan, jit_context) = if let Some(jit_cache) = jit_cache.as_ref() {
         select_jit_cached_run_plan(original_plan, &store, &base_dir, &inputs, jit_cache, log)?
     } else {
@@ -498,9 +517,12 @@ fn jit_cache_key(
         "inputs": inputs,
     });
     let encoded = serde_json::to_string(&identity)?;
-    let mut hasher = DefaultHasher::new();
-    encoded.hash(&mut hasher);
-    Ok(format!("{:016x}", hasher.finish()))
+    let digest = ring::digest::digest(&ring::digest::SHA256, encoded.as_bytes());
+    Ok(digest
+        .as_ref()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -560,6 +582,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
         model_config,
         trace_out,
         trace_redact,
+        trace_raw,
         state_out,
         checkpoint_out,
         log,
@@ -639,11 +662,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             .as_ref()
             .and_then(|(_, profile)| profile.log)
             .unwrap_or(false);
-    let trace_redact = trace_redact
-        || profile
-            .as_ref()
-            .and_then(|(_, profile)| profile.trace_redact)
-            .unwrap_or(false);
+    let trace_redact = effective_trace_redact(trace_redact, trace_raw, profile.as_ref());
     let example_tools = example_tools
         || profile
             .as_ref()
@@ -651,8 +670,9 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             .unwrap_or(false);
 
     let plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
+    let store_path = store;
+    let store = air_linker::parse_module_store_file(&store_path)?;
+    let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
         for diagnostic in &report.diagnostics {
@@ -844,7 +864,7 @@ pub(crate) fn write_trace(
     if redact {
         write_trace_jsonl_with_options(path, trace, &TraceWriteOptions::redacted())?;
     } else {
-        write_trace_jsonl(path, trace)?;
+        write_trace_jsonl_with_options(path, trace, &TraceWriteOptions::raw())?;
     }
     Ok(())
 }
@@ -931,8 +951,9 @@ pub(crate) fn replay(options: ReplayOptions) -> Result<()> {
     if specialize_run_plan {
         let store = store
             .ok_or_else(|| anyhow::anyhow!("replay --specialize-run-plan requires --store"))?;
-        let store = air_linker::parse_module_store_file(store)?;
-        let base_dir = module_base_dir_for_store(&store)?;
+        let store_path = store;
+        let store = air_linker::parse_module_store_file(&store_path)?;
+        let base_dir = module_base_dir_for_store_path(&store, &store_path);
         let specialization = air_linker::specialize_run_plan_trace(&events, &store, &base_dir)?;
         let plan_yaml = serde_yaml::to_string(&specialization.plan)?;
         if let Some(output) = output {

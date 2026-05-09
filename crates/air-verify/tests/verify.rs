@@ -111,6 +111,29 @@ fn rejects_append_actions_to_non_array_state() {
 }
 
 #[test]
+fn rejects_model_or_tool_actions_that_write_phase() {
+    let mut module = parse_air_file("../../tests/agents/model-smoke.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let air_core::StateAction::ModelCall { output, .. } = &mut workflow.rules[1].actions[0] else {
+        panic!("expected model_call");
+    };
+    *output = "phase".to_string();
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR094"),
+        "expected AIR094, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn rejects_unsupported_state_machine_conditions() {
     let mut module = parse_air_file("../../tests/agents/conditional-loop.air.yaml").unwrap();
     let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {

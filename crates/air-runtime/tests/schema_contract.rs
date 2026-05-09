@@ -607,6 +607,38 @@ fn enforces_model_call_timeout_seconds() {
 }
 
 #[test]
+fn rejects_model_call_writing_phase_at_runtime() {
+    let mut module = load_agent("tests/agents/model-smoke.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ModelCall { output, .. } = &mut workflow.rules[1].actions[0] else {
+        panic!("expected model_call");
+    };
+    *output = "phase".to_string();
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: SchemaModels {
+            extract: json!("done"),
+            score: json!({}),
+            report: json!({}),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("prompt".to_string(), json!("route"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::ControlFieldWrite { action } if action == "model_call"
+    ));
+}
+
+#[test]
 fn enforces_tool_call_timeout_seconds() {
     let mut module = load_agent("tests/agents/tool-limit.air.yaml");
     set_first_call_timeout(&mut module, "tool_call", 0);

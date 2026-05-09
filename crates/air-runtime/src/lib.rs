@@ -39,14 +39,28 @@ pub struct TraceEvent {
     pub error: Option<String>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraceWriteOptions {
     pub redact_sensitive: bool,
     pub max_string_chars: Option<usize>,
     pub max_event_bytes: Option<usize>,
 }
 
+impl Default for TraceWriteOptions {
+    fn default() -> Self {
+        Self::redacted()
+    }
+}
+
 impl TraceWriteOptions {
+    pub fn raw() -> Self {
+        Self {
+            redact_sensitive: false,
+            max_string_chars: None,
+            max_event_bytes: None,
+        }
+    }
+
     pub fn redacted() -> Self {
         Self {
             redact_sensitive: true,
@@ -138,6 +152,9 @@ pub enum RuntimeError {
 
     #[error("append target {0} is not an array")]
     AppendTargetNotArray(String),
+
+    #[error("{action} action cannot write state.phase; use an explicit set action for state_machine transitions")]
+    ControlFieldWrite { action: String },
 
     #[error("tool {tool} is not declared by module {module}")]
     UndeclaredTool { module: String, tool: String },
@@ -564,6 +581,7 @@ where
                 );
             }
             StateAction::Append { target, value } => {
+                reject_control_field_write("append", target)?;
                 let value = resolve_input(context.state, context.outputs, value)?;
                 let mut values = context
                     .state
@@ -598,6 +616,7 @@ where
                 retry,
                 ..
             } => {
+                reject_control_field_write("model_call", output)?;
                 let input = resolve_input(context.state, context.outputs, input)?;
                 let schema = output_spec(context.module, output);
                 let max_attempts = retry
@@ -759,6 +778,7 @@ where
                 retry,
                 ..
             } => {
+                reject_control_field_write("tool_call", output)?;
                 if let Err(error) = validate_tool_capability(context.module, tool, &self.tools) {
                     context.push_event_with_meta(
                         "tool_call",
@@ -990,6 +1010,15 @@ where
 
 fn validate_output(module: &AirModule, output: &str, value: &Value) -> Result<(), RuntimeError> {
     validate_named_value(output, value, output_spec(module, output))
+}
+
+fn reject_control_field_write(action: &str, field: &str) -> Result<(), RuntimeError> {
+    if field == "phase" {
+        return Err(RuntimeError::ControlFieldWrite {
+            action: action.to_string(),
+        });
+    }
+    Ok(())
 }
 
 fn validate_state_value(

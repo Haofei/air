@@ -14,7 +14,7 @@ AIR 1.0 is not "all possible agent features." The 1.0 target is:
 
 ## Current Estimate
 
-Current completion: **1.0 scope implemented for the agreed bounded-agent target**.
+Current completion: **1.0 candidate for the agreed bounded-agent target**.
 
 The technical core, user documentation, external-provider smoke path, diagnostics for common config failures, and final release audit gate are now in place. The remaining items below are post-1.0 hardening unless the release bar changes.
 

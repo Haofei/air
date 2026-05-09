@@ -7,7 +7,7 @@ mod run_plan;
 mod tools;
 use crate::models::ModelProviderChoice;
 use crate::planner::{
-    module_base_dir_for_modules, module_base_dir_for_store, plan_task, PlanOptions,
+    module_base_dir_for_modules, module_base_dir_for_store_path, plan_task, PlanOptions,
     ValidatePlanOptions,
 };
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -105,9 +105,13 @@ enum Command {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
         #[arg(long)]
         trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact")]
+        trace_raw: bool,
 
         /// Print human-readable execution logs to stderr.
         #[arg(long)]
@@ -139,9 +143,13 @@ enum Command {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
         #[arg(long)]
         trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact")]
+        trace_raw: bool,
 
         /// Print human-readable execution logs to stderr.
         #[arg(long)]
@@ -180,9 +188,13 @@ enum Command {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
         #[arg(long)]
         trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact")]
+        trace_raw: bool,
 
         /// Optional JSON state output path for AIR resume.
         #[arg(long)]
@@ -245,9 +257,13 @@ enum Command {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out.
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
         #[arg(long)]
         trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact")]
+        trace_raw: bool,
 
         /// Optional JSON state output path for AIR resume.
         #[arg(long)]
@@ -374,6 +390,7 @@ fn main() -> Result<()> {
             model_config,
             trace_out,
             trace_redact,
+            trace_raw,
             log,
             example_tools,
             tool_config,
@@ -382,7 +399,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
-            trace_redact,
+            trace_redact || !trace_raw,
             log,
             example_tools,
             tool_config,
@@ -393,6 +410,7 @@ fn main() -> Result<()> {
             model_config,
             trace_out,
             trace_redact,
+            trace_raw,
             log,
             example_tools,
             tool_config,
@@ -401,7 +419,7 @@ fn main() -> Result<()> {
             input,
             model_config,
             trace_out,
-            trace_redact,
+            trace_redact || !trace_raw,
             log,
             example_tools,
             tool_config,
@@ -414,6 +432,7 @@ fn main() -> Result<()> {
             model_config,
             trace_out,
             trace_redact,
+            trace_raw,
             state_out,
             checkpoint_out,
             jit_cache,
@@ -429,6 +448,7 @@ fn main() -> Result<()> {
             model_config,
             trace_out,
             trace_redact,
+            trace_raw,
             state_out,
             checkpoint_out,
             jit_cache,
@@ -447,6 +467,7 @@ fn main() -> Result<()> {
             model_config,
             trace_out,
             trace_redact,
+            trace_raw,
             state_out,
             checkpoint_out,
             log,
@@ -462,6 +483,7 @@ fn main() -> Result<()> {
             model_config,
             trace_out,
             trace_redact,
+            trace_raw,
             state_out,
             checkpoint_out,
             log,
@@ -547,8 +569,9 @@ fn validate_plan(options: ValidatePlanOptions) -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("validate-plan requires --store or --profile"))?;
 
     let plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
+    let store_path = store;
+    let store = air_linker::parse_module_store_file(&store_path)?;
+    let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let report = air_linker::validate_run_plan(&plan, &store, base_dir);
 
     if report.diagnostics.is_empty() {
@@ -783,8 +806,9 @@ fn lower_plan(
     output: Option<PathBuf>,
 ) -> Result<()> {
     let plan = air_linker::parse_run_plan_file(plan)?;
-    let store = air_linker::parse_module_store_file(store)?;
-    let base_dir = module_base_dir_for_store(&store)?;
+    let store_path = store;
+    let store = air_linker::parse_module_store_file(&store_path)?;
+    let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
         for diagnostic in &report.diagnostics {
@@ -1136,6 +1160,20 @@ mod tests {
         ))
     }
 
+    fn temp_repo_file_path(root: &std::path::Path, prefix: &str, extension: &str) -> PathBuf {
+        let dir = root.join("target/generated/test-tmp");
+        fs::create_dir_all(&dir).unwrap();
+        dir.join(format!(
+            "{prefix}-{}-{}.{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            extension
+        ))
+    }
+
     #[test]
     fn writes_resume_compatible_checkpoint_state() {
         let path = std::env::temp_dir().join(format!(
@@ -1289,7 +1327,10 @@ mod tests {
         );
         let cache_dir = std::env::temp_dir().join(&unique);
         let trace_path = std::env::temp_dir().join(format!("{unique}.trace.jsonl"));
-        let store_path = std::env::temp_dir().join(format!("{unique}.store.yaml"));
+        let store_path = root
+            .join("target/generated/test-tmp")
+            .join(format!("{unique}.store.yaml"));
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
 
         let plan_path = root.join("tests/plans/dynamic-smoke.air-plan.yaml");
         let store = air_linker::parse_module_store_file(
@@ -1382,7 +1423,10 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        let store_path = std::env::temp_dir().join(format!("{unique}.store.yaml"));
+        let store_path = root
+            .join("target/generated/test-tmp")
+            .join(format!("{unique}.store.yaml"));
+        fs::create_dir_all(store_path.parent().unwrap()).unwrap();
         let trace_path = std::env::temp_dir().join(format!("{unique}.trace.jsonl"));
         let plan_path = root.join("tests/plans/approval-smoke.air-plan.yaml");
         let tool_config = root.join("tests/plans/approval-smoke.tools.json");
@@ -1470,14 +1514,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let store_path = std::env::temp_dir().join(format!(
-            "air-parallel-cli-store-{}-{}.yaml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let store_path = temp_repo_file_path(&root, "air-parallel-cli-store", "yaml");
         fs::write(
             &store_path,
             r#"store:
@@ -1532,14 +1569,7 @@ modules:
     #[test]
     fn replay_specializes_trace_to_validated_run_plan() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let trace_path = std::env::temp_dir().join(format!(
-            "air-specialize-cli-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let trace_path = temp_repo_file_path(&root, "air-specialize-cli", "jsonl");
         let output_path = trace_path.with_extension("air-plan.yaml");
         let identity_path = trace_path.with_extension("identity.json");
         let store_path = trace_path.with_extension("store.yaml");
@@ -1604,14 +1634,7 @@ modules:
     #[test]
     fn lower_plan_accepts_dynamic_run_plan_with_air_runtime() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let store_path = std::env::temp_dir().join(format!(
-            "air-dynamic-lower-store-{}-{}.yaml",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let store_path = temp_repo_file_path(&root, "air-dynamic-lower-store", "yaml");
         let output_path = store_path.with_extension("py");
         let store = air_linker::parse_module_store_file(
             root.join("examples/deep-research/module-store.air-store.yaml"),
@@ -1637,14 +1660,7 @@ modules:
     #[test]
     fn specialized_dynamic_trace_can_lower_to_generated_backends() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let trace_path = std::env::temp_dir().join(format!(
-            "air-dynamic-specialize-{}-{}.jsonl",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        let trace_path = temp_repo_file_path(&root, "air-dynamic-specialize", "jsonl");
         let store_path = trace_path.with_extension("store.yaml");
         let specialized_path = trace_path.with_extension("specialized.air-plan.yaml");
         let identity_path = trace_path.with_extension("identity.json");

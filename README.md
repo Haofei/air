@@ -31,7 +31,7 @@ AIR is usable as a local compiler/runtime prototype with bounded production-orie
 | OpenAI Agents JS strict lowering | Experimental |
 | OpenAI Agents JS semantic lowering | Limited: one module shape, local-docs RAG oriented |
 | Hard cancellation of arbitrary synchronous providers | Not yet; OpenAI/http-json providers enforce request deadlines |
-| Trace redaction and sensitive-field policy | Supported: opt-in `--trace-redact` for trace files |
+| Trace redaction and sensitive-field policy | Supported: trace files are redacted by default; use `--trace-raw` only in trusted debug runs |
 | Backend conformance suite | Supported for core strict-runtime cases via `scripts/verify_backend_conformance.sh` |
 
 ## Quick Start
@@ -141,7 +141,7 @@ Validate and run it:
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --trace-out target/generated/simple.trace.jsonl
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --trace-out target/generated/simple.redacted.trace.jsonl --trace-redact
+cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --trace-out target/generated/simple.raw.trace.jsonl --trace-raw
 ```
 
 ## Deep Research
