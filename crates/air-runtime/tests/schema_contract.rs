@@ -5,6 +5,9 @@ use air_runtime::{
     ToolProvider, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
 };
 use serde_json::{json, Value};
+use std::cell::RefCell;
+use std::rc::Rc;
+use std::time::Duration;
 
 struct SchemaModels {
     extract: Value,
@@ -43,6 +46,55 @@ impl ToolProvider for CountingTools {
             "call": self.calls,
             "query": input["query"]
         }))
+    }
+}
+
+struct TimeoutRecordingModels {
+    seen: Rc<RefCell<Option<Duration>>>,
+}
+
+impl ModelProvider for TimeoutRecordingModels {
+    fn call_model(&mut self, _name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+        panic!("runtime should call call_model_with_timeout")
+    }
+
+    fn call_model_with_timeout(
+        &mut self,
+        name: &str,
+        _input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "extractor");
+        *self.seen.borrow_mut() = Some(timeout);
+        Ok(valid_extracted())
+    }
+}
+
+struct TimeoutRecordingTools {
+    seen: Rc<RefCell<Option<Duration>>>,
+}
+
+impl ToolProvider for TimeoutRecordingTools {
+    fn call_tool(&mut self, _name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+        panic!("runtime should call call_tool_with_timeout")
+    }
+
+    fn call_tool_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "docs.search");
+        *self.seen.borrow_mut() = Some(timeout);
+        Ok(json!({
+            "query": input["query"],
+            "documents": []
+        }))
+    }
+
+    fn tool_capability(&self, name: &str) -> Option<&str> {
+        (name == "docs.search").then_some("retrieval.local")
     }
 }
 
@@ -579,6 +631,44 @@ fn enforces_tool_call_timeout_seconds() {
         } if action == "tool_call"
     ));
     assert_eq!(vm.tools.calls, 1);
+}
+
+#[test]
+fn passes_model_action_timeout_to_provider() {
+    let mut module = load_agent("tests/agents/schema-extract.air.yaml");
+    set_first_call_timeout(&mut module, "model_call", 7);
+    let seen = Rc::new(RefCell::new(None));
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: TimeoutRecordingModels { seen: seen.clone() },
+    };
+
+    vm.run(
+        &module,
+        State::from_iter([("text".to_string(), json!("billing issue"))]),
+    )
+    .unwrap();
+
+    assert_eq!(*seen.borrow(), Some(Duration::from_secs(7)));
+}
+
+#[test]
+fn passes_tool_action_timeout_to_provider() {
+    let mut module = load_agent("tests/agents/tool-capability-smoke.air.yaml");
+    set_first_call_timeout(&mut module, "tool_call", 9);
+    let seen = Rc::new(RefCell::new(None));
+    let mut vm = Vm {
+        tools: TimeoutRecordingTools { seen: seen.clone() },
+        models: CapturingModels { seen: None },
+    };
+
+    vm.run(
+        &module,
+        State::from_iter([("text".to_string(), json!("refund policy"))]),
+    )
+    .unwrap();
+
+    assert_eq!(*seen.borrow(), Some(Duration::from_secs(9)));
 }
 
 #[test]

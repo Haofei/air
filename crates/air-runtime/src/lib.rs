@@ -185,6 +185,15 @@ pub enum RuntimeError {
 pub trait ToolProvider {
     fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError>;
 
+    fn call_tool_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        _timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        self.call_tool(name, input)
+    }
+
     fn tool_capability(&self, _name: &str) -> Option<&str> {
         None
     }
@@ -204,6 +213,15 @@ pub trait ToolProvider {
 
 pub trait ModelProvider {
     fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError>;
+
+    fn call_model_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        _timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        self.call_model(name, input)
+    }
 }
 
 pub fn system_return_event(outputs: State) -> TraceEvent {
@@ -633,7 +651,11 @@ where
                         Ok(()),
                     );
                     let attempt_started_at = Instant::now();
-                    let result = match self.models.call_model(model, &attempt_input) {
+                    let result = match self.models.call_model_with_timeout(
+                        model,
+                        &attempt_input,
+                        Duration::from_secs(*timeout_seconds),
+                    ) {
                         Ok(result) => result,
                         Err(error) => {
                             let is_final_attempt = attempt == max_attempts;
@@ -791,7 +813,11 @@ where
                         Ok(()),
                     );
                     let attempt_started_at = Instant::now();
-                    let result = match self.tools.call_tool(tool, &input) {
+                    let result = match self.tools.call_tool_with_timeout(
+                        tool,
+                        &input,
+                        Duration::from_secs(*timeout_seconds),
+                    ) {
                         Ok(result) => result,
                         Err(error) => {
                             let is_final_attempt = attempt == max_attempts;

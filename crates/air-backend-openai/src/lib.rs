@@ -174,10 +174,13 @@ impl OpenAiCompatibleModelProvider {
 
         Ok(Self { config, client })
     }
-}
 
-impl ModelProvider for OpenAiCompatibleModelProvider {
-    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+    fn call_model_with_request_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        action_timeout: Option<Duration>,
+    ) -> Result<Value, RuntimeError> {
         let model_config = self
             .config
             .models
@@ -215,12 +218,16 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
             body["temperature"] = json!(temperature);
         }
 
+        let configured_timeout =
+            Duration::from_secs(model_config.request_timeout_seconds.unwrap_or(120));
+        let request_timeout = action_timeout
+            .map(|timeout| timeout.min(configured_timeout))
+            .unwrap_or(configured_timeout);
+
         let response = self
             .client
             .post(url)
-            .timeout(Duration::from_secs(
-                model_config.request_timeout_seconds.unwrap_or(120),
-            ))
+            .timeout(request_timeout)
             .bearer_auth(api_key)
             .json(&body)
             .send()
@@ -237,6 +244,21 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         }
 
         parse_chat_completion_content(&response_text)
+    }
+}
+
+impl ModelProvider for OpenAiCompatibleModelProvider {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        self.call_model_with_request_timeout(name, input, None)
+    }
+
+    fn call_model_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        self.call_model_with_request_timeout(name, input, Some(timeout))
     }
 }
 

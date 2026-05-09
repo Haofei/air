@@ -3,6 +3,7 @@ use air_runtime::{ModelProvider, RuntimeError};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub(crate) struct EchoModels;
@@ -37,6 +38,22 @@ impl ModelProvider for ModelProviderChoice {
         match self {
             ModelProviderChoice::Echo(provider) => provider.call_model(name, input),
             ModelProviderChoice::OpenAi(provider) => provider.call_model(name, input),
+        }
+    }
+
+    fn call_model_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        match self {
+            ModelProviderChoice::Echo(provider) => {
+                provider.call_model_with_timeout(name, input, timeout)
+            }
+            ModelProviderChoice::OpenAi(provider) => {
+                provider.call_model_with_timeout(name, input, timeout)
+            }
         }
     }
 }

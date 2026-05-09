@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Clone)]
 pub(crate) struct EchoTools;
@@ -43,6 +44,22 @@ impl ToolProvider for ToolProviderChoice {
         match self {
             ToolProviderChoice::Echo(provider) => provider.call_tool(name, input),
             ToolProviderChoice::Config(provider) => provider.call_tool(name, input),
+        }
+    }
+
+    fn call_tool_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        match self {
+            ToolProviderChoice::Echo(provider) => {
+                provider.call_tool_with_timeout(name, input, timeout)
+            }
+            ToolProviderChoice::Config(provider) => {
+                provider.call_tool_with_timeout(name, input, timeout)
+            }
         }
     }
 
@@ -314,6 +331,15 @@ fn validate_capability(path: &Path, field: &str, capability: Option<&str>) -> Re
 
 impl ToolProvider for ConfigTools {
     fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        self.call_tool_with_timeout(name, input, Duration::from_secs(30))
+    }
+
+    fn call_tool_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
         let Some(tool) = self.tools.get(name) else {
             return Err(RuntimeError::Provider(format!(
                 "unknown configured tool {name}"
@@ -349,6 +375,7 @@ impl ToolProvider for ConfigTools {
                     bearer_token_env: bearer_token_env.as_deref(),
                     body: body.as_ref(),
                     timeout_seconds: *timeout_seconds,
+                    action_timeout: Some(timeout),
                 },
             ),
         }
@@ -415,6 +442,7 @@ struct HttpJsonToolConfig<'a> {
     bearer_token_env: Option<&'a str>,
     body: Option<&'a Value>,
     timeout_seconds: Option<u64>,
+    action_timeout: Option<Duration>,
 }
 
 fn call_http_json_tool(
@@ -423,10 +451,13 @@ fn call_http_json_tool(
     config: HttpJsonToolConfig<'_>,
 ) -> Result<Value, RuntimeError> {
     let method = config.method.to_ascii_uppercase();
+    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(30));
+    let request_timeout = config
+        .action_timeout
+        .map(|timeout| timeout.min(configured_timeout))
+        .unwrap_or(configured_timeout);
     let client = reqwest::blocking::Client::builder()
-        .timeout(std::time::Duration::from_secs(
-            config.timeout_seconds.unwrap_or(30),
-        ))
+        .timeout(request_timeout)
         .build()
         .map_err(|error| RuntimeError::Provider(format!("tool {name} HTTP client: {error}")))?;
     let url = render_json_template(config.url, input);

@@ -23,14 +23,14 @@ AIR is usable as a local compiler/runtime prototype with bounded production-orie
 | Typed state-machine AIR modules | Supported |
 | Module schema validation | Supported, including opt-in strict object fields with `additional_properties: false` |
 | Model/tool providers and capability checks | Supported |
-| Approval gates, retry, budgets, and action timeout detection | Supported |
+| Approval gates, retry, budgets, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
 | RunPlan module composition | Supported |
 | Dynamic bounded fan-out/fan-in | Supported |
 | Checkpoint, halt/resume, replay, and JIT hot-path specialization | Supported |
 | LangGraph strict lowering | Experimental |
 | OpenAI Agents JS strict lowering | Experimental |
 | OpenAI Agents JS semantic lowering | Limited: one module shape, local-docs RAG oriented |
-| Hard cancellation of hung model/tool calls | Not yet |
+| Hard cancellation of arbitrary synchronous providers | Not yet; OpenAI/http-json providers enforce request deadlines |
 | Trace redaction and sensitive-field policy | Supported: opt-in `--trace-redact` for trace files |
 | Backend conformance suite | Supported for core strict-runtime cases via `scripts/verify_backend_conformance.sh` |
 
