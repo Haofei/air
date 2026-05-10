@@ -95,6 +95,12 @@ tools = [
     and event.get("status") == "ok"
 ]
 assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+file_ops = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.ops"
+)
+assert file_ops["input"]["allowed_paths"] == ["examples/code-agent/edit-fixture/math.js"], file_ops
 assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
 assert any(
     event.get("action") == "tool_batch_dispatch_item"
@@ -277,6 +283,12 @@ tools = [
     and event.get("status") == "ok"
 ]
 assert tools == ["test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
+file_patch = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.patch"
+)
+assert file_patch["input"]["allowed_paths"] == ["examples/code-agent/edit-fixture/math.js"], file_patch
 assert any(event.get("action") == "approval" and event.get("status") == "ok" for event in events), events
 PY
 

@@ -268,9 +268,12 @@ workflow:
                       kind: "default operation kind"
                       edits: "operations alias"
                       dry_run: "boolean"
+                      allowed_paths: "automatically injected write scope; do not override"
                   file.patch:
                     required: {patch: "unified diff"}
-                    optional: {dry_run: "boolean"}
+                    optional:
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected write scope; do not override"
                   diagnostic.context:
                     required: {}
                     optional:
@@ -314,6 +317,9 @@ workflow:
         - kind: tool_batch_dispatch
           input:
             path: decision.tool_calls
+          write_scope:
+            array:
+              - ref: target_path
           output: observation
           max_calls: 4
           timeout_seconds: 120

@@ -1676,6 +1676,57 @@ fn file_ops_applies_operations_atomically() {
 }
 
 #[test]
+fn file_ops_rejects_paths_outside_allowed_paths() {
+    let dir = temp_dir("air-tools-file-ops-allowed-paths");
+    fs::write(dir.join("allowed.txt"), "allowed\n").unwrap();
+    fs::write(dir.join("other.txt"), "other\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "other.txt"}))
+        .unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "allowed_paths": ["allowed.txt"],
+                "operations": [{
+                    "kind": "edit",
+                    "path": "other.txt",
+                    "old_string": "other",
+                    "new_string": "changed"
+                }]
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("outside allowed_paths"));
+    assert_eq!(
+        fs::read_to_string(dir.join("other.txt")).unwrap(),
+        "other\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_ops_replace_lines_edits_large_files_without_full_file_payload() {
     let dir = temp_dir("air-tools-file-ops-replace-lines");
     let prefix = (0..200)
@@ -2636,6 +2687,50 @@ fn file_patch_applies_unified_diff_after_read() {
     assert_eq!(output["file_count"], json!(1));
     assert_eq!(output["artifacts"][0]["kind"], json!("file_patch"));
     assert_eq!(tools.tool_capability("file.patch"), Some("file.write"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_patch_rejects_paths_outside_allowed_paths() {
+    let dir = temp_dir("air-tools-file-patch-allowed-paths");
+    fs::write(dir.join("allowed.txt"), "allowed\n").unwrap();
+    fs::write(dir.join("other.txt"), "other\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let patch = "diff --git a/other.txt b/other.txt\n--- a/other.txt\n+++ b/other.txt\n@@ -1 +1 @@\n-other\n+changed\n";
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "other.txt"}))
+        .unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.patch",
+            &json!({"patch": patch, "allowed_paths": ["allowed.txt"]}),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("outside allowed_paths"));
+    assert_eq!(
+        fs::read_to_string(dir.join("other.txt")).unwrap(),
+        "other\n"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

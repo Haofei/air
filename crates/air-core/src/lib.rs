@@ -144,6 +144,9 @@ pub enum StateAction {
         max_calls: u32,
 
         #[serde(default)]
+        write_scope: Option<InputSpec>,
+
+        #[serde(default)]
         retry: Option<RetryPolicy>,
 
         #[serde(default)]

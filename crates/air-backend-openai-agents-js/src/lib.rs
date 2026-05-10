@@ -470,6 +470,28 @@ function enforceApprovalRequiredBatchIsolation(module, batchValue) {
   }
 }
 
+function applyWriteScope(toolName, inputValue, writeScope) {
+  if (!['file.write', 'file.edit', 'file.ops', 'file.patch'].includes(toolName) || writeScope == null) {
+    return inputValue;
+  }
+  let allowedPaths;
+  if (typeof writeScope === 'string') {
+    allowedPaths = writeScope.trim() ? [writeScope.trim()] : [];
+  } else if (Array.isArray(writeScope)) {
+    allowedPaths = writeScope.map((path) => {
+      if (typeof path !== 'string') throw new Error('tool_batch_dispatch write_scope entries must be strings');
+      return path.trim();
+    }).filter(Boolean);
+  } else {
+    throw new Error('tool_batch_dispatch write_scope must be a string or array of strings');
+  }
+  if (allowedPaths.length === 0) return inputValue;
+  if (!inputValue || typeof inputValue !== 'object' || Array.isArray(inputValue)) {
+    throw new Error(`tool ${toolName} input must be an object`);
+  }
+  return { ...inputValue, allowed_paths: allowedPaths };
+}
+
 function enforceRepeatedToolPolicy(module, toolHistory, toolName, inputValue) {
   const limit = module.policy?.max_repeated_tool_calls;
   if (limit == null) {
@@ -976,6 +998,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         }
       } else if (action.kind === 'tool_batch_dispatch') {
         const batchValue = evalInput(localState, outputs, action.input);
+        const writeScope = action.write_scope == null ? null : evalInput(localState, outputs, action.write_scope);
         if (!Array.isArray(batchValue)) {
           throw new Error('tool_batch_dispatch input must be an array');
         }
@@ -1005,7 +1028,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
             throw error;
           }
           const dispatchedAction = { ...action, tool: dispatchValue.tool };
-          const inputValue = dispatchValue.input ?? {};
+          const inputValue = applyWriteScope(dispatchValue.tool, dispatchValue.input ?? {}, writeScope);
           try {
             validateToolCapability(module, dispatchedAction, toolConfig);
           } catch (error) {

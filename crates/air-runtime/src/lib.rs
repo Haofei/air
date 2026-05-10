@@ -918,14 +918,20 @@ where
                 output,
                 timeout_seconds,
                 max_calls,
+                write_scope,
                 retry,
                 on_error,
             } => {
                 let batch = resolve_input(context.state, context.outputs, input)?;
+                let write_scope = write_scope
+                    .as_ref()
+                    .map(|scope| resolve_input(context.state, context.outputs, scope))
+                    .transpose()?;
                 self.execute_tool_batch_dispatch(
                     context,
                     ToolBatchExecution {
                         input: batch,
+                        write_scope,
                         output,
                         timeout_seconds: *timeout_seconds,
                         max_calls: *max_calls,
@@ -1194,6 +1200,7 @@ where
     ) -> Result<(), RuntimeError> {
         let ToolBatchExecution {
             input,
+            write_scope,
             output,
             timeout_seconds,
             max_calls,
@@ -1263,6 +1270,8 @@ where
                     return Err(error);
                 }
             };
+            let tool_input =
+                apply_write_scope_to_tool_input(&tool, tool_input, write_scope.as_ref())?;
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 context.push_event_with_meta(
                     "tool_batch_dispatch_item",
@@ -2075,6 +2084,55 @@ fn resolve_tool_batch_dispatch_items(
         .collect())
 }
 
+fn apply_write_scope_to_tool_input(
+    tool: &str,
+    input: Value,
+    write_scope: Option<&Value>,
+) -> Result<Value, RuntimeError> {
+    if !matches!(tool, "file.write" | "file.edit" | "file.ops" | "file.patch") {
+        return Ok(input);
+    }
+    let Some(write_scope) = write_scope else {
+        return Ok(input);
+    };
+    let allowed_paths = normalize_write_scope_paths(write_scope)?;
+    if allowed_paths.is_empty() {
+        return Ok(input);
+    }
+    let mut object = input.as_object().cloned().ok_or_else(|| {
+        RuntimeError::SchemaViolation(format!("tool {tool} input must be an object"))
+    })?;
+    object.insert("allowed_paths".to_string(), Value::Array(allowed_paths));
+    Ok(Value::Object(object))
+}
+
+fn normalize_write_scope_paths(write_scope: &Value) -> Result<Vec<Value>, RuntimeError> {
+    let values = match write_scope {
+        Value::String(path) => vec![path.as_str()],
+        Value::Array(paths) => paths
+            .iter()
+            .map(|path| {
+                path.as_str().ok_or_else(|| {
+                    RuntimeError::SchemaViolation(
+                        "tool_batch_dispatch write_scope entries must be strings".to_string(),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?,
+        _ => {
+            return Err(RuntimeError::SchemaViolation(
+                "tool_batch_dispatch write_scope must be a string or array of strings".to_string(),
+            ))
+        }
+    };
+    Ok(values
+        .into_iter()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(|path| Value::String(path.to_string()))
+        .collect())
+}
+
 fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value {
     json!({
         "tool": tool,
@@ -2203,6 +2261,7 @@ struct ToolExecution<'a> {
 
 struct ToolBatchExecution<'a> {
     input: Value,
+    write_scope: Option<Value>,
     output: &'a str,
     timeout_seconds: u64,
     max_calls: u32,

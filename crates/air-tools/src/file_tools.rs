@@ -1077,6 +1077,8 @@ pub(super) fn call_file_write_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
     validate_git_pathspec(name, input_path)?;
+    let allowed_paths = allowed_paths_input(name, input)?;
+    enforce_allowed_path(name, "input.path", input_path, &allowed_paths)?;
     let content = required_input_string(name, input, "content")?;
     let content_bytes = content.as_bytes();
     if content_bytes.len() > options.max_bytes {
@@ -1181,6 +1183,7 @@ fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
         if let Some(dry_run) = input.get("dry_run") {
             normalized.insert("dry_run".to_string(), dry_run.clone());
         }
+        preserve_file_ops_scope_fields(input, &mut normalized);
         return Ok(Value::Object(normalized));
     }
     if let Some(edits) = input.get("edits") {
@@ -1196,6 +1199,7 @@ fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
         if let Some(dry_run) = input.get("dry_run") {
             normalized.insert("dry_run".to_string(), dry_run.clone());
         }
+        preserve_file_ops_scope_fields(input, &mut normalized);
         return Ok(Value::Object(normalized));
     }
     let Some(kind) = input.get("kind").and_then(Value::as_str) else {
@@ -1232,6 +1236,7 @@ fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
     if let Some(dry_run) = input.get("dry_run") {
         normalized.insert("dry_run".to_string(), dry_run.clone());
     }
+    preserve_file_ops_scope_fields(input, &mut normalized);
     Ok(Value::Object(normalized))
 }
 
@@ -1300,6 +1305,58 @@ fn merge_file_ops_args(
             .entry(key.to_string())
             .or_insert_with(|| value.clone());
     }
+}
+
+fn preserve_file_ops_scope_fields(input: &Value, normalized: &mut serde_json::Map<String, Value>) {
+    if let Some(allowed_paths) = input.get("allowed_paths") {
+        normalized.insert("allowed_paths".to_string(), allowed_paths.clone());
+    }
+}
+
+fn allowed_paths_input(
+    tool_name: &str,
+    input: &Value,
+) -> Result<Option<BTreeSet<String>>, RuntimeError> {
+    let Some(allowed_paths) = input.get("allowed_paths") else {
+        return Ok(None);
+    };
+    let Some(paths) = allowed_paths.as_array() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.allowed_paths must be an array of strings"
+        )));
+    };
+    let mut normalized = BTreeSet::new();
+    for (index, path) in paths.iter().enumerate() {
+        let Some(path) = path.as_str() else {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} input.allowed_paths[{index}] must be a string"
+            )));
+        };
+        let path = path.trim();
+        if path.is_empty() {
+            continue;
+        }
+        validate_git_pathspec(tool_name, path)?;
+        normalized.insert(path.to_string());
+    }
+    Ok(Some(normalized))
+}
+
+fn enforce_allowed_path(
+    tool_name: &str,
+    label: &str,
+    path: &str,
+    allowed_paths: &Option<BTreeSet<String>>,
+) -> Result<(), RuntimeError> {
+    let Some(allowed_paths) = allowed_paths else {
+        return Ok(());
+    };
+    if allowed_paths.contains(path) {
+        return Ok(());
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} {label} {path} is outside allowed_paths"
+    )))
 }
 
 fn normalize_file_ops_operation_aliases(operation: &mut serde_json::Map<String, Value>) {
@@ -1399,6 +1456,7 @@ pub(super) fn call_file_ops_tool(
     }
 
     let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
+    let allowed_paths = allowed_paths_input(name, input)?;
     let mut pending = BTreeMap::<PathBuf, FileOpsPendingFile>::new();
     let mut diff = String::new();
     let mut match_strategies = Vec::new();
@@ -1413,6 +1471,7 @@ pub(super) fn call_file_ops_tool(
         let kind = required_labeled_string_input(name, operation, &label, "kind")?;
         let input_path = required_labeled_string_input(name, operation, &label, "path")?;
         validate_git_pathspec(name, input_path)?;
+        enforce_allowed_path(name, &format!("{label}.path"), input_path, &allowed_paths)?;
         let candidate = base.join(input_path);
 
         match kind {
@@ -2135,6 +2194,8 @@ pub(super) fn call_file_edit_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
     validate_git_pathspec(name, input_path)?;
+    let allowed_paths = allowed_paths_input(name, input)?;
+    enforce_allowed_path(name, "input.path", input_path, &allowed_paths)?;
     let operations = parse_file_edit_operations(name, input, allow_replace_all)?;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
 
@@ -2291,6 +2352,7 @@ pub(super) fn call_file_patch_tool(
 
     let repo = canonicalize_tool_path(name, "repo_dir", options.repo_dir)?;
     let changed = extract_patch_paths(name, &patch)?;
+    let allowed_paths = allowed_paths_input(name, input)?;
     if changed.is_empty() {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.patch did not declare any changed files"
@@ -2305,6 +2367,7 @@ pub(super) fn call_file_patch_tool(
     }
 
     for (path, kind) in &changed {
+        enforce_allowed_path(name, "input.patch path", path, &allowed_paths)?;
         if *kind == PatchPathKind::New && !options.allow_new_files {
             return Err(RuntimeError::Provider(format!(
                 "tool {name} input.patch creates {path}, but allow_new_files is false"
