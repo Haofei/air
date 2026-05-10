@@ -938,6 +938,53 @@ fn tool_batch_dispatch_can_observe_provider_errors() {
 }
 
 #[test]
+fn tool_batch_dispatch_can_observe_undeclared_tools() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch { on_error, .. } =
+        workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *on_error = air_core::ToolErrorMode::Observe;
+
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "docs.lookup", "input": {"query": "bad"}},
+                {"tool": "docs.search", "input": {"query": "good"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 1);
+    assert_eq!(
+        result.outputs["observations"][0]["tool"],
+        json!("docs.lookup")
+    );
+    assert_eq!(result.outputs["observations"][0]["status"], json!("error"));
+    assert_eq!(
+        result.outputs["observations"][0]["error"],
+        json!("tool docs.lookup is not declared by module tool-batch-dispatch-agent")
+    );
+    assert_eq!(result.outputs["observations"][1]["status"], json!("ok"));
+    assert_eq!(
+        result.outputs["observations"][1]["output"]["query"],
+        json!("good")
+    );
+}
+
+#[test]
 fn rejects_tool_batch_dispatch_over_action_bound_before_provider_calls() {
     let module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
     let mut vm = Vm {

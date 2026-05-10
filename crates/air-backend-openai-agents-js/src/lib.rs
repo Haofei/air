@@ -1000,13 +1000,18 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
             throw new Error(`tool_batch_dispatch input[${index}].tool must be a string`);
           }
           const dispatchedAction = { ...action, tool: dispatchValue.tool };
+          const inputValue = dispatchValue.input ?? {};
           try {
             validateToolCapability(module, dispatchedAction, toolConfig);
           } catch (error) {
             emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', meta: { tool: dispatchValue.tool, index }, error: String(error?.message ?? error) });
+            if (observeErrors && String(error?.message ?? error).includes('is not declared by module')) {
+              const message = String(error?.message ?? error);
+              batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
+              continue;
+            }
             throw error;
           }
-          const inputValue = dispatchValue.input ?? {};
           try {
             enforceRepeatedToolPolicy(module, toolHistory, dispatchValue.tool, inputValue);
           } catch (error) {
@@ -1673,6 +1678,7 @@ mod tests {
         assert!(code.contains("batchOutputs.push"));
         assert!(code.contains("const observeErrors = action.on_error === 'observe'"));
         assert!(code.contains("status: 'error'"));
+        assert!(code.contains("is not declared by module"));
     }
 
     #[test]

@@ -668,6 +668,14 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
                 "            raise ValueError(f\"tool_batch_dispatch input[{index}].tool must be a string\")\n",
             );
             output.push_str("        tool_input = dispatch_value.get(\"input\", {})\n");
+            output.push_str("        if not any(tool.get(\"name\") == tool_name for tool in AIR_MODULE.get(\"tools\", [])):\n");
+            output.push_str("            error = RuntimeError(f\"tool {tool_name} is not declared by module {AIR_MODULE.get('agent', {}).get('name', '<unknown>')}\")\n");
+            if observe_errors {
+                output.push_str("            batch_outputs.append({\"tool\": tool_name, \"input\": tool_input, \"status\": \"error\", \"error\": str(error), \"output\": {\"status\": \"error\", \"error\": str(error)}})\n");
+                output.push_str("            continue\n");
+            } else {
+                output.push_str("            raise error\n");
+            }
             output.push_str("        try:\n");
             output.push_str("            result_value = call_tool(tool_name, tool_input)\n");
             output.push_str("            batch_outputs.append({\"tool\": tool_name, \"input\": tool_input, \"status\": \"ok\", \"output\": result_value})\n");
@@ -1401,6 +1409,10 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                         _air_validate_tool_capability(module, dispatched_action)
                     except Exception as error:
                         _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", meta={"tool": dispatch_value["tool"], "index": index}, error=str(error))
+                        if observe_errors and "is not declared by module" in str(error):
+                            input_value = dispatch_value.get("input", {})
+                            batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
+                            continue
                         raise
                     input_value = dispatch_value.get("input", {})
                     try:
@@ -2215,6 +2227,7 @@ mod tests {
 
         assert!(code.contains("\"status\": \"error\""));
         assert!(code.contains("\"error\": str(error)"));
+        assert!(code.contains("is not declared by module"));
     }
 
     #[test]

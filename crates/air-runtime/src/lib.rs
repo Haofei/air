@@ -1238,11 +1238,21 @@ where
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 context.push_event_with_meta(
                     "tool_batch_dispatch_item",
-                    None,
+                    Some(tool_input.clone()),
                     None,
                     Some(json!({"tool": tool, "index": index})),
                     Err(error.to_string()),
                 );
+                if on_error == ToolErrorMode::Observe
+                    && matches!(error, RuntimeError::UndeclaredTool { .. })
+                {
+                    results.push(tool_batch_error_observation(
+                        &tool,
+                        &tool_input,
+                        &error.to_string(),
+                    ));
+                    continue;
+                }
                 return Err(error);
             }
             enforce_repeated_tool_policy(context, "tool_batch_dispatch_item", &tool, &tool_input)?;
