@@ -8,8 +8,12 @@ use crate::code_input::{
 #[cfg(test)]
 use crate::code_pack::CodeAgentRouteFacts;
 use crate::code_pack::{
-    load_code_agent_pack, CodeAgentCompletion, CodeAgentInputFacts, CodeAgentPackContext,
-    CodeAgentRouteDecision,
+    load_code_agent_pack, CodeAgentInputFacts, CodeAgentPackContext, CodeAgentRouteDecision,
+};
+use crate::code_session::{
+    code_session_turn_id, code_session_turn_index, code_session_workspace_revert, CodeSessionPart,
+    CodeSessionPatchSet, CodeSessionRecovery, CodeSessionState, CodeSessionTurn,
+    CodeSessionTurnPack, CodeSessionTurnSummary, CodeSessionTurnTime,
 };
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
@@ -18,14 +22,10 @@ use crate::run_plan::{run_plan, run_plan_capture, write_trace, RunPlanOptions};
 use crate::tools::ToolProviderChoice;
 use air_runtime::{read_trace_jsonl, ToolProvider, TraceEvent, TraceStatus};
 use anyhow::{bail, Context, Result};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
@@ -450,352 +450,6 @@ pub(crate) fn code_session(options: CodeSessionOptions) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), &summary)?;
     println!();
     Ok(())
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct CodeSessionState {
-    #[serde(default = "code_session_version")]
-    version: u32,
-    #[serde(default)]
-    turns: Vec<CodeSessionTurn>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct CodeSessionTurn {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    time: CodeSessionTurnTime,
-    task: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    requested_recipe: Option<String>,
-    recipe: String,
-    profile: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pack: Option<CodeSessionTurnPack>,
-    input: Value,
-    completed: bool,
-    #[serde(default)]
-    trace_files: Vec<String>,
-    #[serde(default)]
-    summary: CodeSessionTurnSummary,
-    #[serde(default)]
-    parts: Vec<CodeSessionPart>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    patch_sets: Vec<CodeSessionPatchSet>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    recovery: Option<CodeSessionRecovery>,
-    outputs: Value,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct CodeSessionTurnPack {
-    path: String,
-    recipe: String,
-    default_profile: String,
-    profile_override: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    intent: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    completion: Option<CodeAgentCompletion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    routing_decision: Option<CodeAgentRouteDecision>,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct CodeSessionTurnTime {
-    created: u64,
-    updated: u64,
-}
-
-impl CodeSessionTurnTime {
-    fn now() -> Self {
-        let now = unix_millis();
-        Self {
-            created: now,
-            updated: now,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct CodeSessionTurnSummary {
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    models: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    tools: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    approvals: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    artifact_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    artifact_kinds: Vec<String>,
-    model_call_count: usize,
-    tool_call_count: usize,
-    approval_count: usize,
-    error_count: usize,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-struct CodeSessionPatchSet {
-    source: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    repo: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    workspace_clean_before: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    workspace_clean_after: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    preexisting_changed_files: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    changed_files: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    workspace_changed_files: Vec<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    diff: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    diff_bytes: Option<u64>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    diff_truncated: Option<bool>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    artifact_ids: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct CodeSessionRecovery {
-    reason: String,
-    status: String,
-    fork: String,
-    turn_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    failed_task_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    failed_execution: Option<Value>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    remaining_task_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    workspace_revert_argv: Vec<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-struct CodeSessionPart {
-    kind: String,
-    trace_file: String,
-    agent: String,
-    step: u32,
-    rule: String,
-    action: String,
-    status: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    model: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    tool: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    approval_for: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    files: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    artifact_ids: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    artifact_kinds: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    input_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    output_keys: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-fn code_session_version() -> u32 {
-    1
-}
-
-fn code_session_turn_id(turn_number: usize) -> String {
-    format!("turn-{turn_number:06}")
-}
-
-fn code_session_turn_index(state: &CodeSessionState, target: &str) -> Result<usize> {
-    if let Some(index) = state.turns.iter().position(|turn| turn.id == target) {
-        return Ok(index);
-    }
-    if let Ok(number) = target.parse::<usize>() {
-        if number > 0 && number <= state.turns.len() {
-            return Ok(number - 1);
-        }
-    }
-    bail!("AIR code session does not contain turn {target:?}");
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct CodeSessionWorkspaceRevertSummary {
-    turn_id: String,
-    applied: bool,
-    success: bool,
-    patch_set_count: usize,
-    results: Vec<CodeSessionWorkspaceRevertResult>,
-}
-
-#[derive(Clone, Debug, Serialize)]
-struct CodeSessionWorkspaceRevertResult {
-    source: String,
-    repo: Option<String>,
-    checked: bool,
-    applied: bool,
-    success: bool,
-    status: Option<i32>,
-    log: String,
-}
-
-fn code_session_workspace_revert(
-    state: &CodeSessionState,
-    target: &str,
-    apply_workspace: bool,
-) -> Result<CodeSessionWorkspaceRevertSummary> {
-    let index = code_session_turn_index(state, target)?;
-    let turn = &state.turns[index];
-    let mut patch_sets = turn.patch_sets.clone();
-    patch_sets.reverse();
-    let mut results = Vec::new();
-    let mut success = true;
-
-    for patch_set in &patch_sets {
-        let Some(diff) = patch_set
-            .diff
-            .as_deref()
-            .filter(|diff| !diff.trim().is_empty())
-        else {
-            continue;
-        };
-        let result = run_git_apply_reverse_check(patch_set, diff)?;
-        success &= result.success;
-        results.push(result);
-    }
-
-    if apply_workspace && success {
-        let mut apply_results = Vec::new();
-        for patch_set in &patch_sets {
-            let Some(diff) = patch_set
-                .diff
-                .as_deref()
-                .filter(|diff| !diff.trim().is_empty())
-            else {
-                continue;
-            };
-            let result = run_git_apply_reverse(patch_set, diff, true)?;
-            success &= result.success;
-            apply_results.push(result);
-        }
-        results.extend(apply_results);
-    }
-
-    Ok(CodeSessionWorkspaceRevertSummary {
-        turn_id: turn.id.clone(),
-        applied: apply_workspace && success,
-        success,
-        patch_set_count: patch_sets.len(),
-        results,
-    })
-}
-
-fn run_git_apply_reverse_check(
-    patch_set: &CodeSessionPatchSet,
-    diff: &str,
-) -> Result<CodeSessionWorkspaceRevertResult> {
-    run_git_apply_reverse(patch_set, diff, false)
-}
-
-fn run_git_apply_reverse(
-    patch_set: &CodeSessionPatchSet,
-    diff: &str,
-    apply: bool,
-) -> Result<CodeSessionWorkspaceRevertResult> {
-    let repo = patch_set.repo.as_deref().unwrap_or(".");
-    let mut command = Command::new("git");
-    command.current_dir(repo);
-    command.arg("apply").arg("--reverse");
-    if !apply {
-        command.arg("--check");
-    }
-    command.stdin(Stdio::piped());
-    command.stdout(Stdio::piped());
-    command.stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .with_context(|| format!("failed to spawn git apply in {repo}"))?;
-    {
-        let stdin = child
-            .stdin
-            .as_mut()
-            .context("failed to open git apply stdin")?;
-        stdin
-            .write_all(diff.as_bytes())
-            .context("failed to write reverse patch to git apply")?;
-    }
-    let output = child
-        .wait_with_output()
-        .context("failed to wait for git apply")?;
-    let mut log = String::new();
-    log.push_str(&String::from_utf8_lossy(&output.stdout));
-    if !output.stderr.is_empty() {
-        if !log.is_empty() {
-            log.push('\n');
-        }
-        log.push_str(&String::from_utf8_lossy(&output.stderr));
-    }
-    Ok(CodeSessionWorkspaceRevertResult {
-        source: patch_set.source.clone(),
-        repo: patch_set.repo.clone(),
-        checked: !apply,
-        applied: apply && output.status.success(),
-        success: output.status.success(),
-        status: output.status.code(),
-        log,
-    })
-}
-
-fn unix_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
-        .unwrap_or_default()
-}
-
-impl CodeSessionState {
-    fn read(path: &Path) -> Result<Self> {
-        if !path.exists() {
-            return Ok(Self {
-                version: code_session_version(),
-                turns: Vec::new(),
-            });
-        }
-        let state: Self = serde_json::from_str(&fs::read_to_string(path)?)?;
-        if state.version != code_session_version() {
-            bail!(
-                "unsupported AIR code session version {}; expected {}",
-                state.version,
-                code_session_version()
-            );
-        }
-        Ok(state)
-    }
-
-    fn write(&self, path: &Path) -> Result<()> {
-        if let Some(parent) = path
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-        {
-            fs::create_dir_all(parent)?;
-        }
-        fs::write(path, serde_json::to_string_pretty(self)?)?;
-        Ok(())
-    }
-
-    fn append_turn(&mut self, turn: CodeSessionTurn) {
-        self.version = code_session_version();
-        self.turns.push(turn);
-    }
 }
 
 fn code_session_turn_pack(
@@ -4325,8 +3979,8 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "air-code-project-dir-target-{}-{}",
             std::process::id(),
-            SystemTime::now()
-                .duration_since(UNIX_EPOCH)
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));

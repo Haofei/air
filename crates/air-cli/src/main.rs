@@ -3,6 +3,7 @@ use air_runtime::{system_return_event, Vm};
 mod code_agent;
 mod code_input;
 mod code_pack;
+mod code_session;
 mod explain;
 mod models;
 mod planner;
