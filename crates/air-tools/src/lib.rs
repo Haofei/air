@@ -2033,6 +2033,8 @@ fn call_file_read_tool(
     let total_lines = full_content.lines().count();
     let start_line = optional_positive_usize_input(name, input, "start_line")?;
     let end_line = optional_positive_usize_input(name, input, "end_line")?;
+    let contains = optional_string_input(name, input, "contains")?;
+    let context_lines = optional_positive_usize_input(name, input, "context_lines")?.unwrap_or(0);
     let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(false);
     if let (Some(start), Some(end)) = (start_line, end_line) {
         if start > end {
@@ -2041,10 +2043,41 @@ fn call_file_read_tool(
             )));
         }
     }
-    let selected = select_line_range(&full_content, start_line, end_line);
+    let (effective_start_line, effective_end_line, match_line) = if let Some(needle) = contains {
+        if start_line.is_some() || end_line.is_some() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.contains cannot be combined with input.start_line or input.end_line"
+            )));
+        }
+        if needle.is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.contains must not be empty"
+            )));
+        }
+        let Some(index) = full_content.lines().position(|line| line.contains(needle)) else {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.contains was not found"
+            )));
+        };
+        let line = index + 1;
+        let start = line.saturating_sub(context_lines).max(1);
+        let end = (line + context_lines).min(total_lines);
+        (Some(start), Some(end), Some(line))
+    } else {
+        if input.get("context_lines").is_some() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.context_lines requires input.contains"
+            )));
+        }
+        (start_line, end_line, None)
+    };
+    let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
     let (content, truncated, bytes) = bytes_to_limited_text(selected.as_bytes(), max_bytes);
     let numbered_content = if line_numbers {
-        Some(numbered_content(&content, start_line.unwrap_or(1)))
+        Some(numbered_content(
+            &content,
+            effective_start_line.unwrap_or(1),
+        ))
     } else {
         None
     };
@@ -2054,8 +2087,11 @@ fn call_file_read_tool(
         "numbered_content": numbered_content,
         "bytes": bytes,
         "source_bytes": body.len(),
-        "start_line": start_line,
-        "end_line": end_line,
+        "start_line": effective_start_line,
+        "end_line": effective_end_line,
+        "match_line": match_line,
+        "contains": contains,
+        "context_lines": context_lines,
         "total_lines": total_lines,
         "truncated": truncated,
         "line_numbers": line_numbers,
@@ -2073,8 +2109,11 @@ fn call_file_read_tool(
                 "path": path.display().to_string(),
                 "bytes": bytes,
                 "source_bytes": body.len(),
-                "start_line": start_line,
-                "end_line": end_line,
+                "start_line": effective_start_line,
+                "end_line": effective_end_line,
+                "match_line": match_line,
+                "contains": contains,
+                "context_lines": context_lines,
                 "total_lines": total_lines,
                 "truncated": truncated,
                 "line_numbers": line_numbers
@@ -6301,6 +6340,84 @@ mod tests {
         assert_eq!(output["end_line"], json!(3));
         assert_eq!(output["total_lines"], json!(4));
         assert_eq!(output["artifacts"][0]["metadata"]["start_line"], json!(2));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_can_return_context_around_contains_match() {
+        let dir = temp_dir("air-tools-file-read-contains");
+        fs::write(
+            dir.join("note.txt"),
+            "alpha\nbefore\ntarget symbol\nafter\nomega\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.read",
+                &json!({
+                    "path": "note.txt",
+                    "contains": "target",
+                    "context_lines": 1,
+                    "line_numbers": true
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["content"], json!("before\ntarget symbol\nafter"));
+        assert_eq!(output["start_line"], json!(2));
+        assert_eq!(output["end_line"], json!(4));
+        assert_eq!(output["match_line"], json!(3));
+        assert_eq!(
+            output["numbered_content"],
+            json!("00002| before\n00003| target symbol\n00004| after")
+        );
+        assert_eq!(
+            output["artifacts"][0]["metadata"]["contains"],
+            json!("target")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_rejects_missing_contains_without_returning_wrong_context() {
+        let dir = temp_dir("air-tools-file-read-contains-missing");
+        fs::write(dir.join("note.txt"), "alpha\nbeta\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.read",
+                &json!({"path": "note.txt", "contains": "gamma"}),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("input.contains was not found"));
         let _ = fs::remove_dir_all(dir);
     }
 
