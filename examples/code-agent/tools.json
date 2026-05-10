@@ -106,9 +106,9 @@
       "capability": "file.write",
       "repo_dir": "../..",
       "require_read": true,
-      "allow_new_files": false,
+      "allow_new_files": true,
       "allow_delete_files": false,
-      "max_files": 3,
+      "max_files": 6,
       "max_bytes": 65536
     },
     "diagnostic.context": {
