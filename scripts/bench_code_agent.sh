@@ -151,6 +151,27 @@ repair = repair_output["repair"]
 with (root / "repair.trace.jsonl").open(encoding="utf-8") as handle:
     repair_trace = [json.loads(line) for line in handle if line.strip()]
 
+def trace_counts(events):
+    counts = {"model_calls": 0, "tool_calls": 0, "approval_calls": 0}
+    tools = {}
+    models = {}
+    for event in events:
+        action = event.get("action")
+        meta = event.get("meta", {})
+        if action == "model_call":
+            counts["model_calls"] += 1
+            model = meta.get("model", "unknown")
+            models[model] = models.get(model, 0) + 1
+        elif action == "tool_call":
+            counts["tool_calls"] += 1
+            tool = meta.get("tool", "unknown")
+            tools[tool] = tools.get(tool, 0) + 1
+        elif action == "approval":
+            counts["approval_calls"] += 1
+    counts["models"] = dict(sorted(models.items()))
+    counts["tools"] = dict(sorted(tools.items()))
+    return counts
+
 assert review["search_quality"]["sufficient"] is True
 assert review["findings"], review
 assert explore["relevant_files"], explore
@@ -172,6 +193,7 @@ assert exploration["relevant_files"], exploration
 assert repair_context["related_files"], repair_context
 changed_paths = [entry["path"] for entry in repair["changed_files"]]
 assert repair["target_path"] in changed_paths, repair
+assert repair["target_path"] in repair["workspace_diff"]["diff"], repair
 assert any(
     event.get("action") == "model_call"
     and event.get("meta", {}).get("model") == "code_repair_context_selector"
@@ -185,7 +207,87 @@ assert any(
     for event in repair_trace
 ), repair_trace
 
+route_cases = [
+    {
+        "id": f"route.{name}",
+        "status": "passed",
+        "expected": {"component": first["id"], "source": first["source"]},
+        "actual": {
+            "component": first["id"],
+            "source": first["source"],
+            "score": first["score"],
+            "matched_terms": first["matched_terms"],
+        },
+        "artifacts": [str(root / f"route_{name}.json")],
+    }
+    for name, first in sorted(routes.items())
+]
+
+cases = route_cases + [
+    {
+        "id": "review.grounded",
+        "status": "passed",
+        "metrics": {
+            "findings": len(review["findings"]),
+            "search_sufficient": review["search_quality"]["sufficient"],
+        },
+        "artifacts": [str(root / "review.output.json")],
+    },
+    {
+        "id": "explore.repository_context",
+        "status": "passed",
+        "metrics": {
+            "relevant_files": len(explore["relevant_files"]),
+            "findings": len(explore["findings"]),
+            "has_source_ids": bool(explore["findings"][0]["source_ids"]),
+        },
+        "artifacts": [str(root / "explore.output.json")],
+    },
+    {
+        "id": "build.static_page",
+        "status": "passed",
+        "metrics": {
+            "bytes": build["bytes"],
+            "test_success": build["test_success"],
+            "audit_success": build["audit_success"],
+            "screenshots": len(build["screenshots"]),
+            "revised": build["revised"],
+            **trace_counts(build_trace),
+        },
+        "artifacts": [
+            str(root / "build.output.json"),
+            str(root / "build.trace.jsonl"),
+        ],
+    },
+    {
+        "id": "repair.explore_patch_retest",
+        "status": "passed",
+        "metrics": {
+            "initial_success": repair["initial_success"],
+            "final_success": repair["final_success"],
+            "patch_applied": repair["patch_applied"],
+            "target_changed": repair["target_path"] in changed_paths,
+            "workspace_diff_bytes": repair["workspace_diff"]["bytes"],
+            "workspace_diff_truncated": repair["workspace_diff"]["truncated"],
+            "workspace_changed_files": len(repair["workspace_changed_files"]),
+            "explored_files": len(exploration["relevant_files"]),
+            "selected_related_files": len(repair_context["related_files"]),
+            **trace_counts(repair_trace),
+        },
+        "artifacts": [
+            str(root / "repair.output.json"),
+            str(root / "repair.trace.jsonl"),
+            str(root / "repair.post_test.log"),
+        ],
+    },
+]
+
 summary = {
+    "schema_version": 1,
+    "bench": "code-agent-offline",
+    "status": "passed",
+    "case_count": len(cases),
+    "cases": cases,
     "routes": routes,
     "review": {
         "summary": review["summary"],
@@ -231,6 +333,9 @@ with (root / "summary.json").open("w", encoding="utf-8") as handle:
     json.dump(summary, handle, indent=2)
     handle.write("\n")
 print(json.dumps(summary, indent=2))
+assert summary["status"] == "passed"
+assert summary["case_count"] == len(summary["cases"])
+assert all(case["status"] == "passed" for case in summary["cases"])
 PY
 
 echo "[code-agent-bench] summary: target/generated/code-agent-bench/summary.json"

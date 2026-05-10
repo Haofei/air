@@ -288,8 +288,9 @@ Run the offline code-agent bench harness:
 bash scripts/bench_code_agent.sh
 ```
 
-The bench writes route decisions and offline review/explore/repair outputs under
-`target/generated/code-agent-bench/`, then emits `summary.json`. Set
+The bench writes route decisions and offline review/explore/build/repair outputs under
+`target/generated/code-agent-bench/`, then emits a machine-readable `summary.json` with
+`status`, `cases[]`, metrics, and artifact paths. Set
 `AIR_CODE_AGENT_BENCH_REAL_BUILD=1` to include the real-model page build path.
 
 Set `AIR_CODE_AGENT_REAL=1` to include the real-model repair smoke; the script restores the repair
