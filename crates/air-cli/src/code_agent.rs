@@ -30,6 +30,8 @@ pub(crate) enum CodeRecipe {
     Review,
     /// Core repair loop: explore, select context, patch, and retest.
     Repair,
+    /// Behavior-preserving refactor loop: explore, patch intentionally, and retest.
+    Refactor,
     /// Build one bounded static page and verify it.
     Build,
 }
@@ -126,6 +128,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
 
     let requested_recipe = recipe;
     let recipe = resolve_recipe(
+        &task,
         recipe,
         target.as_ref(),
         test.as_ref(),
@@ -1886,6 +1889,7 @@ fn task_recipe(task: &Value) -> Result<CodeRecipe> {
         "explore" => Ok(CodeRecipe::Explore),
         "review" => Ok(CodeRecipe::Review),
         "repair" => Ok(CodeRecipe::Repair),
+        "refactor" => Ok(CodeRecipe::Refactor),
         "build" => Ok(CodeRecipe::Build),
         other => bail!("unsupported planned task recipe {other:?}"),
     }
@@ -3127,7 +3131,7 @@ fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
             .pointer("/review/search_quality/sufficient")
             .and_then(Value::as_bool)
             .unwrap_or_else(|| outputs.get("review").is_some()),
-        CodeRecipe::Repair => outputs
+        CodeRecipe::Repair | CodeRecipe::Refactor => outputs
             .pointer("/repair/final_success")
             .and_then(Value::as_bool)
             .unwrap_or(false),
@@ -3210,6 +3214,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
     } = options;
 
     let recipe = resolve_recipe(
+        &task,
         recipe,
         target.as_ref(),
         test.as_ref(),
@@ -3262,7 +3267,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
             input.insert("related_files".to_string(), path_array(related));
             Ok(input)
         }
-        CodeRecipe::Repair => {
+        CodeRecipe::Repair | CodeRecipe::Refactor => {
             let target = required_path(target, "--target", recipe)?;
             let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
@@ -3280,7 +3285,10 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("test_command".to_string(), Value::String(test));
-            input.insert("force_patch".to_string(), Value::Bool(force_patch));
+            input.insert(
+                "force_patch".to_string(),
+                Value::Bool(force_patch || recipe == CodeRecipe::Refactor),
+            );
             Ok(input)
         }
         CodeRecipe::Build => {
@@ -3332,6 +3340,7 @@ fn default_profile(recipe: CodeRecipe) -> PathBuf {
         CodeRecipe::Explore => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
         CodeRecipe::Review => PathBuf::from("examples/code-agent/profile.air-profile.yaml"),
         CodeRecipe::Repair => PathBuf::from("examples/code-agent/repair-core.air-profile.yaml"),
+        CodeRecipe::Refactor => PathBuf::from("examples/code-agent/refactor-core.air-profile.yaml"),
         CodeRecipe::Build => PathBuf::from("examples/code-agent/apple-build.air-profile.yaml"),
     }
 }
@@ -3343,12 +3352,14 @@ fn recipe_name(recipe: CodeRecipe) -> &'static str {
         CodeRecipe::Explore => "explore",
         CodeRecipe::Review => "review",
         CodeRecipe::Repair => "repair",
+        CodeRecipe::Refactor => "refactor",
         CodeRecipe::Build => "build",
     }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_recipe(
+    task: &str,
     recipe: CodeRecipe,
     target: Option<&PathBuf>,
     test: Option<&String>,
@@ -3365,6 +3376,13 @@ fn resolve_recipe(
     }
     if output.is_some() || brand.is_some() || product.is_some() || !constraints.is_empty() {
         return CodeRecipe::Build;
+    }
+    if test.is_some()
+        && task
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .any(|token| token.eq_ignore_ascii_case("refactor"))
+    {
+        return CodeRecipe::Refactor;
     }
     if test.is_some() {
         return CodeRecipe::Repair;
@@ -3522,6 +3540,61 @@ mod tests {
             Value::String("EchoTools|ToolProviderChoice|provider|module|air|tools".to_string())
         );
         assert_eq!(input["force_patch"], Value::Bool(true));
+    }
+
+    #[test]
+    fn refactor_input_forces_patch_even_when_flag_is_absent() {
+        let input = build_input(CodeInputOptions {
+            task: "refactor provider".to_string(),
+            recipe: CodeRecipe::Refactor,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: Some("unit".to_string()),
+            query: None,
+            related: vec![PathBuf::from("src/lib_test.rs")],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(input["force_patch"], Value::Bool(true));
+        assert_eq!(
+            input["target_path"],
+            Value::String("src/lib.rs".to_string())
+        );
+        assert_eq!(
+            input["related_files"],
+            Value::Array(vec![Value::String("src/lib_test.rs".to_string())])
+        );
+    }
+
+    #[test]
+    fn auto_recipe_selects_refactor_when_task_and_test_request_it() {
+        let input = build_input(CodeInputOptions {
+            task: "refactor the provider and keep tests passing".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: Some("unit".to_string()),
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(input["force_patch"], Value::Bool(true));
+        assert_eq!(input["test_command"], Value::String("unit".to_string()));
     }
 
     #[test]

@@ -172,6 +172,73 @@ recipes:
         - id: use-core-code-repair-loop
           rationale: "Use the higher-level repair recipe so the primary coding agent explores first, adapts context explicitly, then edits and retests."
           selected: [code.core_repair@0.1.0]
+  - id: code.core_refactor@0.1.0
+    visibility: public
+    description: "Core coding-agent refactor loop: gather read-only context, intentionally patch a passing target, and retest to preserve behavior."
+    tags: [coding, refactor, behavior_preserving, file_ops, test]
+    covers: [code_refactor, behavior_preserving_change, bounded_file_ops, retest]
+    priority: 145
+    plan:
+      plan:
+        name: code-refactor-with-explore-recipe
+        version: 0.1.0
+      requires:
+        capabilities: [task.progress, network.search, file.read, file.write, code.read, code.test]
+      nodes:
+        - id: explore
+          module: code.explore@0.1.0
+        - id: select_context
+          module: code.repair_context@0.1.0
+        - id: repair
+          module: code.repair@0.1.0
+      entry: explore
+      edges:
+        - from: explore
+          to: select_context
+        - from: select_context
+          to: repair
+      connect:
+        - from: $input.task
+          to: explore.task
+        - from: $input.query
+          to: explore.query
+        - from: $input.target_path
+          to: explore.target_path
+        - from: $input.task
+          to: select_context.task
+        - from: $input.target_path
+          to: select_context.target_path
+        - to: select_context.related_files
+          value:
+            coalesce:
+              - from: $input.related_files
+              - literal: []
+        - from: explore.exploration
+          to: select_context.exploration
+        - from: $input.task
+          to: repair.task
+        - from: $input.query
+          to: repair.query
+        - from: select_context.repair_context.target_path
+          to: repair.target_path
+        - from: $input.target_search_pattern
+          to: repair.target_search_pattern
+        - from: select_context.repair_context.related_files
+          to: repair.related_files
+        - from: $input.test_command
+          to: repair.test_command
+        - to: repair.force_patch
+          value:
+            literal: true
+      outputs:
+        exploration: explore.exploration
+        repair_context: select_context.repair_context
+        refactor: repair.repair
+        repair: repair.repair
+      decisions:
+        - id: use-core-code-refactor-loop
+          rationale: "Use the higher-level refactor recipe so the primary coding agent explores first, applies an intentional behavior-preserving patch, and retests."
+          selected: [code.core_refactor@0.1.0]
   - id: code.review_with_std_context@0.1.0
     visibility: public
     description: "Grounded code review workflow that composes evidence gathering, the AIR standard context compactor, and final analysis."

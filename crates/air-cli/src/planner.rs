@@ -410,6 +410,7 @@ fn task_is_read_only_exploration(task_terms: &BTreeSet<String>) -> bool {
         "fix",
         "repair",
         "patch",
+        "refactor",
         "edit",
         "write",
         "build",

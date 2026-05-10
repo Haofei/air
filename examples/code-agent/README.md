@@ -21,6 +21,9 @@ This example contains bounded AIR coding agents and one preferred composed revie
   opencode-style core loop: run read-only exploration, pass that output through an explicit
   semantic adapter that selects bounded repair context files, then invoke `code.repair@0.1.0`
   to edit and retest.
+- `code.core_refactor@0.1.0` reuses the same checked loop for behavior-preserving changes:
+  exploration and context selection run first, then `code.repair@0.1.0` is invoked with
+  `force_patch=true` so a passing test does not short-circuit an intentional refactor.
 - `code.repair@0.1.0` reads a target file plus bounded related files, runs an allowlisted test,
   uses structured diagnostics to gather nearby source context, asks the model for structured
   `file.ops` edits, validates them with a dry-run, applies them through constrained `file.ops`,
@@ -344,6 +347,12 @@ cargo run -p air-cli -- code "review the Playwright search tool" \
   --search-query "Playwright browser search result extraction timeout Node.js" \
   --required-term playwright
 
+cargo run -p air-cli -- code "refactor the sum implementation while keeping tests passing" \
+  --recipe refactor \
+  --target examples/code-agent/refactor-fixture/math.js \
+  --test refactor_fixture_test \
+  --related examples/code-agent/refactor-fixture/test.js
+
 cargo run -p air-cli -- code "build a premium product landing page" \
   --recipe build \
   --output examples/apple-landing/index.html \
@@ -396,6 +405,18 @@ cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-core.air-p
 
 This profile also modifies `examples/code-agent/repair-fixture/math.js`; reset or restore the
 fixture after manual runs.
+
+Run the behavior-preserving refactor fixture. The test starts passing, but the refactor recipe
+still forces a bounded patch and then reruns the same allowlisted test:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
+
+cargo run -p air-cli -- run-plan --profile examples/code-agent/refactor-core.air-profile.yaml --log
+```
+
+This profile modifies `examples/code-agent/refactor-fixture/math.js`; reset or restore the fixture
+after manual runs.
 
 Run the bounded multi-file repair fixture:
 

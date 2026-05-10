@@ -1852,14 +1852,19 @@ impl ToolProvider for ConfigTools {
                 max_diagnostics,
                 context_lines,
                 max_bytes,
-            } => call_diagnostic_context_tool(
-                name,
-                input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
-                max_diagnostics.unwrap_or(20),
-                context_lines.unwrap_or(4),
-                max_bytes.unwrap_or(256 * 1024),
-            ),
+            } => {
+                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let output = call_diagnostic_context_tool(
+                    name,
+                    input,
+                    &repo_dir,
+                    max_diagnostics.unwrap_or(20),
+                    context_lines.unwrap_or(4),
+                    max_bytes.unwrap_or(256 * 1024),
+                )?;
+                self.remember_repo_output_paths(&repo_dir, &output)?;
+                Ok(output)
+            }
             ToolConfig::TodoWrite {
                 capability: _,
                 max_items,

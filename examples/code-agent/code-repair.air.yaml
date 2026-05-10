@@ -796,7 +796,7 @@ workflow:
                 target_path:
                   ref: target_path
                 initial_success:
-                  literal: false
+                  ref: test_results.success
                 final_success:
                   ref: final_test_results.success
                 patch_applied:
@@ -1043,7 +1043,7 @@ workflow:
                 target_path:
                   ref: target_path
                 initial_success:
-                  literal: false
+                  ref: test_results.success
                 final_success:
                   ref: final_test_results_retry.success
                 patch_applied:

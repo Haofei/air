@@ -2926,6 +2926,134 @@ fn diagnostic_context_returns_source_snippets_for_command_diagnostics() {
 }
 
 #[test]
+fn diagnostic_context_satisfies_read_before_file_ops_edit() {
+    let dir = temp_dir("air-tools-diagnostic-context-read-before-edit");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn broken() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "diagnostic.context": {
+                  "kind": "diagnostic_context",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    tools
+        .call_tool(
+            "diagnostic.context",
+            &json!({
+                "diagnostics": [{
+                    "source": "command_run",
+                    "severity": "error",
+                    "path": "src/lib.rs",
+                    "line": 1,
+                    "column": 8,
+                    "message": "broken function"
+                }]
+            }),
+        )
+        .unwrap();
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "edit",
+                    "path": "src/lib.rs",
+                    "old_string": "broken",
+                    "new_string": "fixed"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["applied"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "pub fn fixed() {}\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn diagnostic_context_read_snapshot_rejects_stale_file_ops_edit() {
+    let dir = temp_dir("air-tools-diagnostic-context-stale-edit");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn broken() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "diagnostic.context": {
+                  "kind": "diagnostic_context",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool(
+            "diagnostic.context",
+            &json!({
+                "diagnostics": [{
+                    "source": "command_run",
+                    "severity": "error",
+                    "path": "src/lib.rs",
+                    "line": 1,
+                    "column": 8,
+                    "message": "broken function"
+                }]
+            }),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(dir.join("src/lib.rs"), "pub fn externally_changed() {}\n").unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "edit",
+                    "path": "src/lib.rs",
+                    "old_string": "broken",
+                    "new_string": "fixed"
+                }]
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("modified after it was last read"));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "pub fn externally_changed() {}\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn diagnostic_context_skips_paths_outside_repo() {
     let dir = temp_dir("air-tools-diagnostic-context-boundary");
     fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();

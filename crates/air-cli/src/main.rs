@@ -1803,6 +1803,50 @@ mod tests {
     }
 
     #[test]
+    fn code_command_accepts_refactor_recipe_input() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "refactor sum while keeping tests passing",
+            "--recipe",
+            "refactor",
+            "--target",
+            "examples/code-agent/refactor-fixture/math.js",
+            "--test",
+            "refactor_fixture_test",
+            "--related",
+            "examples/code-agent/refactor-fixture/test.js",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            recipe,
+            target,
+            test,
+            related,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert_eq!(recipe, CodeRecipe::Refactor);
+        assert_eq!(
+            target,
+            Some(std::path::PathBuf::from(
+                "examples/code-agent/refactor-fixture/math.js"
+            ))
+        );
+        assert_eq!(test, Some("refactor_fixture_test".to_string()));
+        assert_eq!(
+            related,
+            vec![std::path::PathBuf::from(
+                "examples/code-agent/refactor-fixture/test.js"
+            )]
+        );
+    }
+
+    #[test]
     fn code_command_accepts_explain_flag() {
         let cli = Cli::try_parse_from([
             "air",

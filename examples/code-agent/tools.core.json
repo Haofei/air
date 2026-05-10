@@ -152,6 +152,10 @@
         "repair_multifile_test": [
           "node",
           "examples/code-agent/repair-multifile/test.js"
+        ],
+        "refactor_fixture_test": [
+          "node",
+          "examples/code-agent/refactor-fixture/test.js"
         ]
       },
       "timeout_seconds": 30,

@@ -19,6 +19,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-bui
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-multifile.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs
@@ -799,6 +800,11 @@ check_code_agent_route \
   "code.core_repair@0.1.0" \
   "recipe"
 check_code_agent_route \
+  "refactor" \
+  "Refactor a passing implementation while preserving behavior with an allowlisted test." \
+  "code.core_refactor@0.1.0" \
+  "recipe"
+check_code_agent_route \
   "build" \
   "Build an Apple-style landing page as a single HTML file and verify screenshots." \
   "code.build_page@0.1.0" \
@@ -987,6 +993,9 @@ fi
 grep -q "examples/code-agent/repair-multifile/math.js:4:10: error:" \
   target/generated/code_agent_repair_multifile_fixture.log
 
+echo "[code-agent] refactor fixture starts passing before forced patch"
+node examples/code-agent/refactor-fixture/test.js > target/generated/code_agent_refactor_fixture.log
+
 echo "[code-agent] core explore-repair offline run"
 repair_fixture_backup="$(mktemp)"
 repair_fixture_user_dirty_backup="$(mktemp)"
@@ -1073,6 +1082,96 @@ assert any(
     todo["id"] == "repair" and todo["status"] == "in_progress"
     for todo in repair_calls[0]["input"]["progress"]["todos"]
 ), repair_calls[0]["input"]
+PY
+
+echo "[code-agent] core refactor offline run"
+refactor_fixture_backup="$(mktemp)"
+cp examples/code-agent/refactor-fixture/math.js "$refactor_fixture_backup"
+restore_refactor_fixture() {
+  cp "$refactor_fixture_backup" examples/code-agent/refactor-fixture/math.js
+  rm -f "$refactor_fixture_backup"
+}
+trap restore_refactor_fixture EXIT
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/refactor-core.air-profile.yaml \
+  --trace-out target/generated/code_agent_refactor_core.trace.jsonl \
+  > target/generated/code_agent_refactor_core.output.json
+node examples/code-agent/refactor-fixture/test.js > target/generated/code_agent_refactor_core.post_test.log
+restore_refactor_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_refactor_core.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+with open("target/generated/code_agent_refactor_core.trace.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+
+repair = output["repair"]
+refactor = output["refactor"]
+assert repair == refactor, output
+assert repair["initial_success"] is True, repair
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert repair["changed_files"], repair
+assert any(
+    entry["path"] == "examples/code-agent/refactor-fixture/math.js"
+    for entry in repair["changed_files"]
+), repair
+assert "reduce" in repair["rationale"], repair
+assert any(
+    event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_repairer"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "test.run"
+    and event.get("status") == "ok"
+    and event.get("output", {}).get("success") is True
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+PY
+
+echo "[code-agent] user-facing refactor command offline run"
+refactor_command_backup="$(mktemp)"
+cp examples/code-agent/refactor-fixture/math.js "$refactor_command_backup"
+restore_refactor_command_fixture() {
+  cp "$refactor_command_backup" examples/code-agent/refactor-fixture/math.js
+  rm -f "$refactor_command_backup"
+}
+trap restore_refactor_command_fixture EXIT
+cargo run -q -p air-cli -- code "refactor the sum implementation while keeping tests passing" \
+  --recipe refactor \
+  --target examples/code-agent/refactor-fixture/math.js \
+  --test refactor_fixture_test \
+  --related examples/code-agent/refactor-fixture/test.js \
+  --model-config examples/code-agent/model-fixtures.refactor.json \
+  --tool-config examples/code-agent/tools.core.json \
+  > target/generated/code_agent_refactor_command.output.json
+node examples/code-agent/refactor-fixture/test.js > target/generated/code_agent_refactor_command.post_test.log
+restore_refactor_command_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_refactor_command.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+repair = output["repair"]
+assert output["refactor"] == repair, output
+assert repair["initial_success"] is True, repair
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert any(
+    entry["path"] == "examples/code-agent/refactor-fixture/math.js"
+    for entry in repair["changed_files"]
+), repair
 PY
 
 echo "[code-agent] user-facing code command offline run"
