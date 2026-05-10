@@ -21,6 +21,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-co
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-multifile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refactor.air-profile.yaml
+cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs

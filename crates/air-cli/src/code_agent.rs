@@ -17,6 +17,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
+const CODE_AGENT_PACK_YAML: &str =
+    include_str!("../../../examples/code-agent/code-agent.air-pack.yaml");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeRecipe {
@@ -86,6 +88,17 @@ pub(crate) struct CodeSessionOptions {
 struct CodeBudgetLimits {
     max_estimated_model_calls: Option<usize>,
     max_estimated_tool_calls: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeAgentPack {
+    recipes: Vec<CodeAgentPackRecipe>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CodeAgentPackRecipe {
+    id: String,
+    default_profile: PathBuf,
 }
 
 pub(crate) fn code(options: CodeOptions) -> Result<()> {
@@ -3440,18 +3453,21 @@ fn required_string(value: Option<String>, flag: &str, recipe: CodeRecipe) -> Res
 }
 
 fn default_profile(recipe: CodeRecipe) -> PathBuf {
-    match recipe {
-        CodeRecipe::Auto => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
-        CodeRecipe::Plan => PathBuf::from("examples/code-agent/project-plan.air-profile.yaml"),
-        CodeRecipe::Explore => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
-        CodeRecipe::Review => PathBuf::from("examples/code-agent/profile.air-profile.yaml"),
-        CodeRecipe::Repair => PathBuf::from("examples/code-agent/repair-core.air-profile.yaml"),
-        CodeRecipe::Refactor => PathBuf::from("examples/code-agent/refactor-core.air-profile.yaml"),
-        CodeRecipe::OpenRefactor => {
-            PathBuf::from("examples/code-agent/open-refactor.air-profile.yaml")
-        }
-        CodeRecipe::Build => PathBuf::from("examples/code-agent/apple-build.air-profile.yaml"),
-    }
+    default_code_agent_pack()
+        .recipes
+        .into_iter()
+        .find(|pack_recipe| pack_recipe.id == recipe_name(recipe))
+        .map(|pack_recipe| pack_recipe.default_profile)
+        .unwrap_or_else(|| {
+            panic!(
+                "code-agent pack is missing recipe {}",
+                recipe_name(recipe)
+            )
+        })
+}
+
+fn default_code_agent_pack() -> CodeAgentPack {
+    serde_yaml::from_str(CODE_AGENT_PACK_YAML).expect("invalid code-agent AIR pack manifest")
 }
 
 fn recipe_name(recipe: CodeRecipe) -> &'static str {
@@ -3564,6 +3580,42 @@ fn push_search_token(tokens: &mut Vec<String>, token: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_agent_pack_declares_all_default_profiles() {
+        let pack = default_code_agent_pack();
+        let recipes = [
+            CodeRecipe::Auto,
+            CodeRecipe::Plan,
+            CodeRecipe::Explore,
+            CodeRecipe::Review,
+            CodeRecipe::Repair,
+            CodeRecipe::Refactor,
+            CodeRecipe::OpenRefactor,
+            CodeRecipe::Build,
+        ];
+
+        let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        assert_eq!(pack.recipes.len(), recipes.len());
+        for recipe in recipes {
+            let profile = default_profile(recipe);
+            assert!(
+                workspace_root.join(&profile).exists(),
+                "default profile for {} does not exist: {}",
+                recipe_name(recipe),
+                profile.display()
+            );
+            assert!(
+                pack.recipes.iter().any(|pack_recipe| {
+                    pack_recipe.id == recipe_name(recipe)
+                        && pack_recipe.default_profile == profile
+                }),
+                "pack is missing {} -> {}",
+                recipe_name(recipe),
+                profile.display()
+            );
+        }
+    }
 
     #[test]
     fn builds_repair_input() {

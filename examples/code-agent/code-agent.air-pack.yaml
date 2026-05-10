@@ -1,0 +1,30 @@
+agent:
+  name: air-code-agent
+  version: 0.2.0
+  description: "Pack manifest for AIR's bounded coding-agent recipes."
+
+recipes:
+  - id: auto
+    default_profile: examples/code-agent/explore.air-profile.yaml
+    intent: "Fallback read-only exploration profile used before CLI recipe inference."
+  - id: plan
+    default_profile: examples/code-agent/project-plan.air-profile.yaml
+    intent: "Ground an open-ended coding goal into a task graph, files, and acceptance checks."
+  - id: explore
+    default_profile: examples/code-agent/explore.air-profile.yaml
+    intent: "Read-only repository exploration."
+  - id: review
+    default_profile: examples/code-agent/profile.air-profile.yaml
+    intent: "Grounded code review with repository and external evidence."
+  - id: repair
+    default_profile: examples/code-agent/repair-core.air-profile.yaml
+    intent: "Patch one bounded target and retest it."
+  - id: refactor
+    default_profile: examples/code-agent/refactor-core.air-profile.yaml
+    intent: "Behavior-preserving refactor of a known target and test."
+  - id: open-refactor
+    default_profile: examples/code-agent/open-refactor.air-profile.yaml
+    intent: "Select one bounded refactor target, patch it, and retest it."
+  - id: build
+    default_profile: examples/code-agent/apple-build.air-profile.yaml
+    intent: "Build one bounded static page and verify it."
