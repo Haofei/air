@@ -241,6 +241,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         })?
     } else if loop_enabled {
         run_code_loop(CodeLoopOptions {
+            pack: pack.clone(),
             recipe,
             profile: profile.clone(),
             input,
@@ -329,7 +330,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             profile: path_ref_to_input_string(&profile),
             pack: code_session_turn_pack(&pack, recipe, &profile),
             input: Value::Object(session_input),
-            completed: code_outputs_complete(recipe, &outputs),
+            completed: code_outputs_complete(&pack, recipe, &outputs)?,
             trace_files: trace_files
                 .iter()
                 .map(|path| path_ref_to_input_string(path))
@@ -1423,6 +1424,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
             "default_profile": pack_default_profile,
             "profile_override": active_profile != pack_default_profile,
             "intent": pack_recipe.intent,
+            "completion": pack_recipe.completion,
         },
         "profile": active_profile,
         "plan": path_ref_to_input_string(&metadata.plan),
@@ -1574,6 +1576,7 @@ fn is_workspace_write_capability(capability: &str) -> bool {
 }
 
 struct CodeLoopOptions {
+    pack: CodeAgentPackContext,
     recipe: CodeRecipe,
     profile: PathBuf,
     input: Map<String, Value>,
@@ -1899,7 +1902,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 )?;
                 let acceptance_completed = acceptance_checks_completed(&acceptance);
                 let task_completed =
-                    code_outputs_complete(recipe, &outputs) && acceptance_completed;
+                    code_outputs_complete(&options.pack, recipe, &outputs)? && acceptance_completed;
                 completed &= task_completed;
                 let execution = json!({
                     "task_id": task_id,
@@ -3032,7 +3035,7 @@ fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
             example_tools: false,
             tool_config: options.tool_config.clone(),
         })?;
-        completed = code_outputs_complete(options.recipe, &outputs);
+        completed = code_outputs_complete(&options.pack, options.recipe, &outputs)?;
         final_outputs = outputs.clone();
         iterations.push(json!({
             "iteration": iteration,
@@ -3278,38 +3281,12 @@ fn truncate_for_context(value: &str, max_chars: usize) -> String {
     truncated
 }
 
-fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
-    match recipe {
-        CodeRecipe::Auto => false,
-        CodeRecipe::Plan => outputs
-            .pointer("/project/completed")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| {
-                outputs
-                    .pointer("/project_plan/tasks")
-                    .and_then(Value::as_array)
-                    .is_some_and(|tasks| !tasks.is_empty())
-            }),
-        CodeRecipe::Explore => outputs.get("exploration").is_some(),
-        CodeRecipe::Review => outputs
-            .pointer("/review/search_quality/sufficient")
-            .and_then(Value::as_bool)
-            .unwrap_or_else(|| outputs.get("review").is_some()),
-        CodeRecipe::Repair | CodeRecipe::Refactor | CodeRecipe::OpenRefactor => outputs
-            .pointer("/repair/final_success")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        CodeRecipe::Build => {
-            outputs
-                .pointer("/build/test_success")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-                && outputs
-                    .pointer("/build/audit_success")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-        }
-    }
+fn code_outputs_complete(
+    pack: &CodeAgentPackContext,
+    recipe: CodeRecipe,
+    outputs: &Value,
+) -> Result<bool> {
+    pack.recipe_complete(recipe_name(recipe), outputs)
 }
 
 fn iteration_path(path: &Path, iteration: usize) -> PathBuf {
@@ -4069,30 +4046,43 @@ mod tests {
 
     #[test]
     fn completion_detection_matches_recipe_outputs() {
+        let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(
+            &pack,
             CodeRecipe::Repair,
             &json!({"repair": {"final_success": true}})
-        ));
+        )
+        .unwrap());
         assert!(!code_outputs_complete(
+            &pack,
             CodeRecipe::Repair,
             &json!({"repair": {"final_success": false}})
-        ));
+        )
+        .unwrap());
         assert!(code_outputs_complete(
+            &pack,
             CodeRecipe::Build,
             &json!({"build": {"test_success": true, "audit_success": true}})
-        ));
+        )
+        .unwrap());
         assert!(!code_outputs_complete(
+            &pack,
             CodeRecipe::Build,
             &json!({"build": {"test_success": true, "audit_success": false}})
-        ));
+        )
+        .unwrap());
         assert!(code_outputs_complete(
+            &pack,
             CodeRecipe::Plan,
             &json!({"project_plan": {"tasks": [{"id": "t1"}]}})
-        ));
+        )
+        .unwrap());
         assert!(!code_outputs_complete(
+            &pack,
             CodeRecipe::Plan,
             &json!({"project_plan": {"tasks": []}})
-        ));
+        )
+        .unwrap());
     }
 
     #[test]

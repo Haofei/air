@@ -43,6 +43,7 @@ assert output["pack"]["recipe"] == "plan", output
 assert output["pack"]["default_profile"] == "target/generated/examples/code-agent/project-plan.air-profile.yaml", output
 assert output["profile"] == "target/generated/examples/code-agent/project-plan.air-profile.yaml", output
 assert output["pack"]["profile_override"] is False, output
+assert output["pack"]["completion"]["any"][1]["all"][1]["non_empty_array"] == "/project_plan/tasks", output
 PY
 
 echo "[code-agent] deterministic tool coverage"
@@ -913,6 +914,7 @@ assert output["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml",
 assert output["pack"]["recipe"] == "repair", output
 assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["pack"]["profile_override"] is False, output
+assert output["pack"]["completion"]["any"][0]["equals"]["path"] == "/repair/final_success", output
 assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["plan"].endswith("examples/code-agent/code-repair.air-plan.yaml"), output
 assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml"), output

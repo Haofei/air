@@ -7,24 +7,69 @@ recipes:
   - id: auto
     default_profile: explore.air-profile.yaml
     intent: "Fallback read-only exploration profile used before CLI recipe inference."
+    completion:
+      any:
+        - exists: /exploration
   - id: plan
     default_profile: project-plan.air-profile.yaml
     intent: "Ground an open-ended coding goal into a task graph, files, and acceptance checks."
+    completion:
+      any:
+        - equals:
+            path: /project/completed
+            value: true
+        - all:
+            - missing: /project/completed
+            - non_empty_array: /project_plan/tasks
   - id: explore
     default_profile: explore.air-profile.yaml
     intent: "Read-only repository exploration."
+    completion:
+      any:
+        - exists: /exploration
   - id: review
     default_profile: profile.air-profile.yaml
     intent: "Grounded code review with repository and external evidence."
+    completion:
+      any:
+        - equals:
+            path: /review/search_quality/sufficient
+            value: true
+        - all:
+            - missing: /review/search_quality/sufficient
+            - exists: /review
   - id: repair
     default_profile: repair-core.air-profile.yaml
     intent: "Patch one bounded target and retest it."
+    completion:
+      any:
+        - equals:
+            path: /repair/final_success
+            value: true
   - id: refactor
     default_profile: refactor-core.air-profile.yaml
     intent: "Behavior-preserving refactor of a known target and test."
+    completion:
+      any:
+        - equals:
+            path: /repair/final_success
+            value: true
   - id: open-refactor
     default_profile: open-refactor.air-profile.yaml
     intent: "Select one bounded refactor target, patch it, and retest it."
+    completion:
+      any:
+        - equals:
+            path: /repair/final_success
+            value: true
   - id: build
     default_profile: apple-build.air-profile.yaml
     intent: "Build one bounded static page and verify it."
+    completion:
+      all:
+        - equals:
+            path: /build/test_success
+            value: true
+        - equals:
+            path: /build/audit_success
+            value: true
