@@ -54,6 +54,15 @@
       "max_symbols": 120,
       "max_bytes": 65536
     },
+    "repo.references": {
+      "kind": "repo_references",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 120,
+      "max_files": 8,
+      "context_lines": 4,
+      "max_bytes": 65536
+    },
     "repo.context": {
       "kind": "repo_context",
       "capability": "code.read",
@@ -84,6 +93,12 @@
     "todo.read": {
       "kind": "todo_read",
       "capability": "task.progress"
+    },
+    "context.measure": {
+      "kind": "context_measure",
+      "capability": "context.manage",
+      "max_context_chars": 45000,
+      "threshold_percent": 80
     },
     "test.run": {
       "kind": "command_run",

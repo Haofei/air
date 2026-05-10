@@ -340,6 +340,24 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    RepoReferences {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_matches: Option<usize>,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+
+        #[serde(default)]
+        context_lines: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
     DiagnosticContext {
         #[serde(default)]
         capability: Option<String>,
@@ -368,6 +386,16 @@ enum ToolConfig {
     TodoRead {
         #[serde(default)]
         capability: Option<String>,
+    },
+    ContextMeasure {
+        #[serde(default)]
+        capability: Option<String>,
+
+        #[serde(default)]
+        max_context_chars: Option<usize>,
+
+        #[serde(default)]
+        threshold_percent: Option<u64>,
     },
     CommandRun {
         #[serde(default)]
@@ -403,9 +431,11 @@ impl ToolConfig {
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
             | ToolConfig::RepoSymbols { capability, .. }
+            | ToolConfig::RepoReferences { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::TodoRead { capability }
+            | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -870,6 +900,29 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 validate_positive_usize(path, &format!("tools.{name}.max_symbols"), *max_symbols)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
+            ToolConfig::RepoReferences {
+                repo_dir,
+                max_matches,
+                max_files,
+                context_lines,
+                max_bytes,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.context_lines"),
+                    *context_lines,
+                )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
             ToolConfig::DiagnosticContext {
                 repo_dir,
                 max_diagnostics,
@@ -908,6 +961,22 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 )?;
             }
             ToolConfig::TodoRead { .. } => {}
+            ToolConfig::ContextMeasure {
+                max_context_chars,
+                threshold_percent,
+                ..
+            } => {
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_context_chars"),
+                    *max_context_chars,
+                )?;
+                validate_threshold_percent(
+                    path,
+                    &format!("tools.{name}.threshold_percent"),
+                    *threshold_percent,
+                )?;
+            }
             ToolConfig::CommandRun {
                 cwd,
                 commands,
@@ -987,6 +1056,16 @@ fn validate_positive_usize(path: &Path, field: &str, value: Option<usize>) -> Re
     if value.is_some_and(|value| value == 0) {
         anyhow::bail!(
             "tool config {} {field} must be greater than 0",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_threshold_percent(path: &Path, field: &str, value: Option<u64>) -> Result<()> {
+    if value.is_some_and(|value| value == 0 || value > 100) {
+        anyhow::bail!(
+            "tool config {} {field} must be between 1 and 100",
             path.display()
         );
     }
@@ -1331,6 +1410,22 @@ impl ToolProvider for ConfigTools {
                 max_symbols.unwrap_or(200),
                 max_bytes.unwrap_or(256 * 1024),
             ),
+            ToolConfig::RepoReferences {
+                capability: _,
+                repo_dir,
+                max_matches,
+                max_files,
+                context_lines,
+                max_bytes,
+            } => call_repo_references_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_matches.unwrap_or(120),
+                max_files.unwrap_or(12),
+                context_lines.unwrap_or(4),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
             ToolConfig::DiagnosticContext {
                 capability: _,
                 repo_dir,
@@ -1366,6 +1461,16 @@ impl ToolProvider for ConfigTools {
             ToolConfig::TodoRead { capability: _ } => {
                 Ok(call_todo_read_tool(name, &self.current_todos))
             }
+            ToolConfig::ContextMeasure {
+                capability: _,
+                max_context_chars,
+                threshold_percent,
+            } => call_context_measure_tool(
+                name,
+                input,
+                max_context_chars.unwrap_or(64 * 1024),
+                threshold_percent.unwrap_or(80),
+            ),
             ToolConfig::CommandRun {
                 capability: _,
                 cwd,
@@ -1400,9 +1505,11 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
             | ToolConfig::RepoSymbols { capability, .. }
+            | ToolConfig::RepoReferences { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::TodoRead { capability }
+            | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -3322,6 +3429,201 @@ fn parse_symbol_declaration(line: &str) -> Option<(&'static str, String)> {
     (!name.is_empty()).then_some((kind, name))
 }
 
+fn call_repo_references_tool(
+    name: &str,
+    input: &Value,
+    repo_dir: &Path,
+    max_matches: usize,
+    max_files: usize,
+    context_lines: usize,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    let symbol = required_input_string(name, input, "symbol")?.trim();
+    if !is_identifier_like(symbol) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.symbol must be an identifier-like token"
+        )));
+    }
+    let effective_max_matches =
+        optional_bounded_usize_input(name, input, "max_matches", max_matches)?
+            .unwrap_or(max_matches);
+    let effective_max_files =
+        optional_bounded_usize_input(name, input, "max_files", max_files)?.unwrap_or(max_files);
+    let effective_context_lines =
+        optional_bounded_usize_input(name, input, "context_lines", context_lines)?
+            .unwrap_or(context_lines);
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let paths = repo_tool_paths(name, input)?;
+    let mut command = Command::new("rg");
+    command.args([
+        "--line-number",
+        "--column",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+        "--fixed-strings",
+        symbol,
+    ]);
+    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+        validate_git_pathspec(name, glob)?;
+        command.arg("-g").arg(glob);
+    }
+    if !paths.is_empty() {
+        command.args(&paths);
+    }
+    let output = command
+        .current_dir(&repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo references: {error}")))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} repo references failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut references = Vec::new();
+    let mut definitions = Vec::new();
+    let mut match_lines_by_path: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut selected_paths = Vec::new();
+    let mut token_match_count = 0usize;
+    for line in raw.lines() {
+        let item = parse_rg_vimgrep_line(line);
+        let text = item["text"].as_str().unwrap_or_default();
+        if !contains_identifier_token(text, symbol) {
+            continue;
+        }
+        token_match_count += 1;
+        if references.len() >= effective_max_matches {
+            continue;
+        }
+        let path = item["path"].as_str().unwrap_or_default().to_string();
+        let line_number = item["line"].as_u64().unwrap_or_default() as usize;
+        let definition_kind = parse_symbol_declaration(text)
+            .and_then(|(kind, declaration)| (declaration == symbol).then_some(kind));
+        let reference = json!({
+            "path": item["path"],
+            "line": item["line"],
+            "column": item["column"],
+            "text": text,
+            "definition": definition_kind.is_some(),
+            "kind": definition_kind.unwrap_or("reference")
+        });
+        if definition_kind.is_some() {
+            definitions.push(reference.clone());
+        }
+        references.push(reference);
+        if path.is_empty() || line_number == 0 {
+            continue;
+        }
+        if !match_lines_by_path.contains_key(&path) {
+            if selected_paths.len() >= effective_max_files {
+                continue;
+            }
+            selected_paths.push(path.clone());
+        }
+        match_lines_by_path
+            .entry(path)
+            .or_default()
+            .push(line_number);
+    }
+
+    let mut snippets = Vec::new();
+    let mut rendered = String::new();
+    for path in selected_paths {
+        let Some(lines) = match_lines_by_path.get(&path) else {
+            continue;
+        };
+        let candidate = repo.join(&path);
+        let file_path = canonicalize_tool_path(name, "repo reference path", &candidate)?;
+        if !file_path.starts_with(&repo) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} repo reference path is outside configured repo_dir"
+            )));
+        }
+        let body = fs::read(&file_path)
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
+        let full_content = String::from_utf8_lossy(&body).to_string();
+        let total_lines = full_content.lines().count();
+        let ranges = merge_line_ranges(lines, total_lines, effective_context_lines);
+        for (start_line, end_line) in ranges {
+            let content = numbered_line_range(&full_content, start_line, end_line);
+            if !rendered.is_empty() {
+                rendered.push('\n');
+            }
+            rendered.push_str(&format!("--- {path}:{start_line}-{end_line} ---\n"));
+            rendered.push_str(&content);
+            snippets.push(json!({
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "match_lines": lines
+                    .iter()
+                    .copied()
+                    .filter(|line| *line >= start_line && *line <= end_line)
+                    .collect::<Vec<_>>(),
+                "content": content,
+                "total_lines": total_lines,
+            }));
+        }
+    }
+
+    let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
+    let truncated = token_match_count > references.len() || truncated_bytes;
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "symbol": symbol,
+        "definitions": definitions,
+        "references": references,
+        "snippets": snippets,
+        "bytes": bytes,
+        "truncated": truncated,
+        "artifacts": [{
+            "id": format!("repo-references:{}:{}", repo.display(), symbol),
+            "kind": "repo_references",
+            "title": format!("repo references: {symbol}"),
+            "uri": repo.display().to_string(),
+            "content": content,
+            "metadata": {
+                "provider": "repo_references",
+                "repo": repo.display().to_string(),
+                "symbol": symbol,
+                "paths": paths,
+                "max_matches": effective_max_matches,
+                "max_files": effective_max_files,
+                "context_lines": effective_context_lines,
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }]
+    }))
+}
+
+fn is_identifier_like(symbol: &str) -> bool {
+    let mut chars = symbol.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_' || first == '$') {
+        return false;
+    }
+    chars.all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '$')
+}
+
+fn contains_identifier_token(line: &str, symbol: &str) -> bool {
+    line.match_indices(symbol).any(|(index, _)| {
+        let before = line[..index].chars().next_back();
+        let after = line[index + symbol.len()..].chars().next();
+        !before.is_some_and(is_identifier_character) && !after.is_some_and(is_identifier_character)
+    })
+}
+
+fn is_identifier_character(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_' || character == '$'
+}
+
 fn call_diagnostic_context_tool(
     name: &str,
     input: &Value,
@@ -3990,6 +4292,27 @@ fn optional_bounded_usize_input(
     Ok(Some(value.min(configured_max)))
 }
 
+fn optional_threshold_percent_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+) -> Result<Option<u64>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must be a positive integer"
+        )));
+    };
+    if number == 0 || number > 100 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must be between 1 and 100"
+        )));
+    }
+    Ok(Some(number))
+}
+
 fn optional_bool_input(
     tool_name: &str,
     input: &Value,
@@ -4380,6 +4703,78 @@ fn call_todo_read_tool(name: &str, current_todos: &[Value]) -> Value {
     todo_list_output(name, "todo_read", current_todos.to_vec(), counts)
 }
 
+fn call_context_measure_tool(
+    name: &str,
+    input: &Value,
+    max_context_chars: usize,
+    threshold_percent: u64,
+) -> Result<Value, RuntimeError> {
+    if threshold_percent == 0 || threshold_percent > 100 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} threshold_percent must be between 1 and 100"
+        )));
+    }
+    let effective_max_context_chars =
+        optional_bounded_usize_input(name, input, "max_context_chars", max_context_chars)?
+            .unwrap_or(max_context_chars);
+    let effective_threshold_percent =
+        optional_threshold_percent_input(name, input, "threshold_percent")?
+            .unwrap_or(threshold_percent);
+    let payload = input.get("payload").unwrap_or(input);
+    let chars = json_char_count(payload);
+    let threshold_chars =
+        effective_max_context_chars.saturating_mul(effective_threshold_percent as usize) / 100;
+    let should_compact = chars >= threshold_chars;
+    let fields = payload
+        .as_object()
+        .map(|object| {
+            object
+                .iter()
+                .map(|(field, value)| {
+                    json!({
+                        "field": field,
+                        "chars": json_char_count(value)
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let content = format!(
+        "chars: {chars}\nmax_context_chars: {effective_max_context_chars}\nthreshold_percent: {effective_threshold_percent}\nthreshold_chars: {threshold_chars}\nshould_compact: {should_compact}"
+    );
+    Ok(json!({
+        "chars": chars,
+        "max_context_chars": effective_max_context_chars,
+        "threshold_percent": effective_threshold_percent,
+        "threshold_chars": threshold_chars,
+        "usage_ratio": chars as f64 / effective_max_context_chars.max(1) as f64,
+        "should_compact": should_compact,
+        "fields": fields,
+        "artifacts": [{
+            "id": format!("context-measure:{chars}:{threshold_chars}"),
+            "kind": "context_measure",
+            "title": "context measure",
+            "uri": "air://context/measure",
+            "content": content,
+            "metadata": {
+                "provider": "context_measure",
+                "chars": chars,
+                "max_context_chars": effective_max_context_chars,
+                "threshold_percent": effective_threshold_percent,
+                "threshold_chars": threshold_chars,
+                "should_compact": should_compact
+            }
+        }]
+    }))
+}
+
+fn json_char_count(value: &Value) -> usize {
+    serde_json::to_string(value)
+        .unwrap_or_default()
+        .chars()
+        .count()
+}
+
 #[derive(Debug, Clone, Copy)]
 struct TodoCounts {
     pending: usize,
@@ -4614,6 +5009,74 @@ mod tests {
         assert_eq!(output["completed_count"], json!(1));
         assert_eq!(output["todos"][1]["id"], json!("verify"));
         assert_eq!(tools.tool_capability("todo.read"), Some("task.progress"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn context_measure_triggers_when_payload_crosses_threshold() {
+        let dir = temp_dir("air-tools-context-measure");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "context.measure": {
+                  "kind": "context_measure",
+                  "capability": "context.manage",
+                  "max_context_chars": 100,
+                  "threshold_percent": 80
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "context.measure",
+                &json!({"payload": {"large": "x".repeat(100), "small": "ok"}}),
+            )
+            .unwrap();
+
+        assert_eq!(output["should_compact"], json!(true));
+        assert_eq!(output["threshold_chars"], json!(80));
+        assert_eq!(output["artifacts"][0]["kind"], json!("context_measure"));
+        assert_eq!(
+            tools.tool_capability("context.measure"),
+            Some("context.manage")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn context_measure_respects_input_threshold_override() {
+        let dir = temp_dir("air-tools-context-measure-override");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "context.measure": {
+                  "kind": "context_measure",
+                  "max_context_chars": 1000,
+                  "threshold_percent": 80
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "context.measure",
+                &json!({
+                    "payload": {"small": "ok"},
+                    "max_context_chars": 100,
+                    "threshold_percent": 1
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["should_compact"], json!(true));
+        assert_eq!(output["threshold_percent"], json!(1));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -6017,6 +6480,83 @@ mod tests {
 
         assert_eq!(output["symbols"].as_array().unwrap().len(), 1);
         assert_eq!(output["symbols"][0]["path"], json!("src/app.ts"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_references_returns_definition_references_and_snippets() {
+        let dir = temp_dir("air-tools-repo-references");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub struct Alpha {}\nimpl Alpha { fn new() -> Alpha { Alpha {} } }\nlet Alphabet = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/app.ts"),
+            "function useAlpha(value: Alpha) { return value }\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.references": {
+                  "kind": "repo_references",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 10,
+                  "max_files": 4,
+                  "context_lines": 1,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("repo.references", &json!({"symbol": "Alpha"}))
+            .unwrap();
+
+        assert_eq!(output["symbol"], json!("Alpha"));
+        assert_eq!(output["definitions"].as_array().unwrap().len(), 1);
+        assert_eq!(output["definitions"][0]["kind"], json!("struct"));
+        assert_eq!(output["references"].as_array().unwrap().len(), 3);
+        assert!(output["references"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|reference| reference["text"] != json!("let Alphabet = 1;")));
+        assert!(!output["snippets"].as_array().unwrap().is_empty());
+        assert_eq!(output["artifacts"][0]["kind"], json!("repo_references"));
+        assert_eq!(tools.tool_capability("repo.references"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_references_rejects_non_identifier_symbols() {
+        let dir = temp_dir("air-tools-repo-references-invalid");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.references": {
+                  "kind": "repo_references",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("repo.references", &json!({"symbol": "Alpha Beta"}))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("input.symbol must be an identifier-like token"));
         let _ = fs::remove_dir_all(dir);
     }
 

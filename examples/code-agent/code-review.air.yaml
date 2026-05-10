@@ -49,12 +49,12 @@ outputs:
         items: string
 
 requires:
-  capabilities: [task.progress, network.search, file.read, code.read, code.test]
+  capabilities: [task.progress, context.manage, network.search, file.read, code.read, code.test]
 
 state:
   phase:
     type: enum
-    enum: [init, plan, search, list_files, inspect_symbols, search_repo, read_context, read_file, read_diff, read_status, run_tests, read_todos, analyze, done, failed]
+    enum: [init, plan, search, list_files, inspect_symbols, inspect_references, search_repo, read_context, read_file, read_diff, read_status, run_tests, read_todos, measure_context, compact_route, compact, analyze_compacted, analyze_raw, done, failed]
   plan_status:
     type: object
     required: [todos, total, open_count, artifacts]
@@ -145,6 +145,26 @@ state:
       artifacts:
         type: array
         items: object
+  repo_references:
+    type: object
+    required: [repo, symbol, definitions, references, snippets, artifacts]
+    properties:
+      repo: string
+      symbol: string
+      definitions:
+        type: array
+        items: object
+      references:
+        type: array
+        items: object
+      snippets:
+        type: array
+        items: object
+      bytes: integer
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
   repo_context:
     type: object
     required: [repo, query, matches, snippets, artifacts]
@@ -211,6 +231,49 @@ state:
       artifacts:
         type: array
         items: object
+  context_budget:
+    type: object
+    required: [chars, max_context_chars, threshold_percent, threshold_chars, usage_ratio, should_compact, fields, artifacts]
+    properties:
+      chars: integer
+      max_context_chars: integer
+      threshold_percent: integer
+      threshold_chars: integer
+      usage_ratio: number
+      should_compact: boolean
+      fields:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  compact_context:
+    type: object
+    required: [summary, retained_facts, source_ids, open_tasks, risks, limitations]
+    properties:
+      summary: string
+      retained_facts:
+        type: array
+        items:
+          type: object
+          required: [fact, source_ids]
+          properties:
+            fact: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      open_tasks:
+        type: array
+        items: string
+      risks:
+        type: array
+        items: string
+      limitations:
+        type: array
+        items: string
   review:
     type: object
     required: [summary, findings, source_ids, search_quality, next_steps]
@@ -253,6 +316,9 @@ tools:
   - name: todo.read
     capability: task.progress
     timeout_ms: 10000
+  - name: context.measure
+    capability: context.manage
+    timeout_ms: 10000
   - name: web.search
     capability: network.search
     timeout_ms: 120000
@@ -266,6 +332,9 @@ tools:
     capability: code.read
     timeout_ms: 10000
   - name: repo.symbols
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.references
     capability: code.read
     timeout_ms: 10000
   - name: repo.context
@@ -284,7 +353,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 14
+  max_steps: 18
   terminal: [done, failed]
   rules:
     - id: init
@@ -397,6 +466,29 @@ workflow:
               max_symbols:
                 literal: 80
           output: repo_symbols
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: inspect_references
+
+    - id: inspect_references
+      when: phase == "inspect_references"
+      actions:
+        - kind: tool_call
+          tool: repo.references
+          input:
+            object:
+              symbol:
+                ref: repo_query
+              max_matches:
+                literal: 80
+              max_files:
+                literal: 6
+              context_lines:
+                literal: 4
+          output: repo_references
           timeout_seconds: 10
           retry:
             max_attempts: 1
@@ -525,10 +617,139 @@ workflow:
             max_attempts: 1
         - kind: set
           values:
-            phase: analyze
+            phase: measure_context
 
-    - id: analyze
-      when: phase == "analyze"
+    - id: measure_context
+      when: phase == "measure_context"
+      actions:
+        - kind: tool_call
+          tool: context.measure
+          input:
+            object:
+              payload:
+                object:
+                  task:
+                    ref: task
+                  target_file:
+                    ref: target_file
+                  search_results:
+                    ref: search_results
+                  repo_files:
+                    ref: repo_files
+                  repo_search:
+                    ref: repo_search
+                  repo_symbols:
+                    ref: repo_symbols
+                  repo_references:
+                    ref: repo_references
+                  repo_context:
+                    ref: repo_context
+                  file_context:
+                    ref: file_context
+                  diff_context:
+                    ref: diff_context
+                  workspace_status:
+                    ref: workspace_status
+                  test_results:
+                    ref: test_results
+                  plan_status:
+                    ref: plan_status
+                  todo_snapshot:
+                    ref: todo_snapshot
+          output: context_budget
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: compact_route
+
+    - id: compact-route-over-threshold
+      when: phase == "compact_route" && context_budget.should_compact == true
+      actions:
+        - kind: set
+          values:
+            phase: compact
+
+    - id: compact-route-under-threshold
+      when: phase == "compact_route" && context_budget.should_compact == false
+      actions:
+        - kind: set
+          values:
+            phase: analyze_raw
+
+    - id: compact
+      when: phase == "compact"
+      actions:
+        - kind: model_call
+          model: context_compactor
+          input:
+            object:
+              task:
+                ref: task
+              target_file:
+                ref: target_file
+              search_results:
+                ref: search_results
+              repo_files:
+                ref: repo_files
+              repo_search:
+                ref: repo_search
+              repo_symbols:
+                ref: repo_symbols
+              repo_references:
+                ref: repo_references
+              repo_context:
+                ref: repo_context
+              file_context:
+                ref: file_context
+              diff_context:
+                ref: diff_context
+              workspace_status:
+                ref: workspace_status
+              test_results:
+                ref: test_results
+              plan_status:
+                ref: plan_status
+              todo_snapshot:
+                ref: todo_snapshot
+              context_budget:
+                ref: context_budget
+          output: compact_context
+          timeout_seconds: 120
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: analyze_compacted
+
+    - id: analyze_compacted
+      when: phase == "analyze_compacted"
+      actions:
+        - kind: model_call
+          model: code_reviewer
+          input:
+            object:
+              task:
+                ref: task
+              target_file:
+                ref: target_file
+              compact_context:
+                ref: compact_context
+              context_budget:
+                ref: context_budget
+              todo_snapshot:
+                ref: todo_snapshot
+          output: review
+          timeout_seconds: 120
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+
+    - id: analyze_raw
+      when: phase == "analyze_raw"
       actions:
         - kind: model_call
           model: code_reviewer
@@ -546,6 +767,8 @@ workflow:
                 ref: repo_search
               repo_symbols:
                 ref: repo_symbols
+              repo_references:
+                ref: repo_references
               repo_context:
                 ref: repo_context
               file_context:
@@ -560,6 +783,8 @@ workflow:
                 ref: plan_status
               todo_snapshot:
                 ref: todo_snapshot
+              context_budget:
+                ref: context_budget
           output: review
           timeout_seconds: 120
           retry:

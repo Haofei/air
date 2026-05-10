@@ -19,11 +19,19 @@ The review agent uses:
 - `repo.files` for relevant repository paths;
 - `repo.search` for symbol or text matches, with explicit regex mode available for grep-style discovery;
 - `repo.symbols` for a lightweight repository symbol map without requiring LSP setup;
+- `repo.references` for LSP-lite definition/reference lookup around an identifier token, with bounded snippets;
 - `repo.context` for automatically selected nearby code snippets around repository matches, also with explicit regex mode;
 - `file.read` for the target source file, with optional numbered output for diagnostics;
 - `git.diff` for local changes to that file.
 - `git.status` for structured workspace change awareness.
 - `test.run` for an allowlisted verification command.
+
+Before final analysis, the review agent runs a generic context-budget check with `context.measure`.
+If the evidence bundle crosses the configured threshold, the `context_compactor` model converts it
+into a bounded `compact_context` object with retained facts and exact `source_ids`. The final
+reviewer consumes that compact object instead of the raw search/file/test payloads. If the bundle
+is under threshold, the reviewer skips the extra model call and uses the raw evidence directly.
+This keeps context growth explicit and auditable without adding a new AIR instruction.
 
 For editing agents, prefer the opencode-style tool split already available in `air-tools`:
 `todo.write` and `todo.read` for explicit task tracking on non-trivial work,

@@ -60,7 +60,17 @@
       "model": "GLM-5.1",
       "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
-      "system_prompt": "You are code-review-agent. Return ONLY a JSON object with exactly these keys: summary (string), findings (array of objects), source_ids (array of strings), search_quality (object), next_steps (array of strings). Each finding object must contain severity (one of info, low, medium, high, critical), title (string), evidence (string), source_ids (array of strings), and recommendation (string). Use only supplied search_results, repo_files, repo_search, repo_symbols, repo_context, file_context, diff_context, workspace_status, test_results, plan_status, and todo_snapshot. Every source_ids entry must be an exact artifact id from supplied artifacts; cite web docs for external claims, repo search/list/context/symbol artifacts for repository-wide or related-code claims, file artifacts for target-file claims, git diff and git status artifacts for workspace/change claims, todo artifacts for task-progress claims, and test_log artifacts for verification claims. search_quality must contain sufficient (boolean) and gaps (array of strings). If evidence is weak, say so instead of inventing facts. Do not include markdown."
+      "system_prompt": "You are code-review-agent. Return ONLY a JSON object with exactly these keys: summary (string), findings (array of objects), source_ids (array of strings), search_quality (object), next_steps (array of strings). Each finding object must contain severity (one of info, low, medium, high, critical), title (string), evidence (string), source_ids (array of strings), and recommendation (string). Use only supplied task, target_file, context_budget, todo_snapshot, and either compact_context or the supplied raw search/repo/file/diff/status/test evidence. If compact_context is present, prefer it and cite only source ids from compact_context.source_ids or compact_context.retained_facts[].source_ids. If compact_context is absent, cite exact artifact ids from the supplied raw evidence artifacts. search_quality must contain sufficient (boolean) and gaps (array of strings). If evidence is weak, say so instead of inventing facts. Do not include markdown."
+    },
+    "context_compactor": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "request_timeout_seconds": 120,
+      "system_prompt": "You are code-context-compact-agent. Return ONLY a JSON object with exactly these keys: summary (string), retained_facts (array of objects), source_ids (array of strings), open_tasks (array of strings), risks (array of strings), limitations (array of strings). Each retained_facts item must contain fact (string) and source_ids (array of strings). Compact the supplied web, repository, file, diff, status, test, todo, and context_budget evidence into a review-ready brief. Preserve concrete file paths, failing commands, diagnostics, changed files, relevant symbol/reference context, uncertainty, and whether compaction was triggered by the budget. Every source_ids entry must be an exact artifact id from supplied artifacts. Do not invent citations. Do not include markdown."
     },
     "page_builder": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",

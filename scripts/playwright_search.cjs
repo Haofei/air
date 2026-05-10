@@ -30,7 +30,7 @@ async function run(input) {
   const maxPerDomain = positiveInt(input.max_per_domain, 2);
   const maxContentChars = positiveInt(input.max_content_chars, 12000);
   const navigationTimeoutMs = positiveInt(input.navigation_timeout_ms, 20000);
-  const overallTimeoutMs = positiveInt(input.overall_timeout_ms, 0);
+  const overallTimeoutMs = positiveInt(input.overall_timeout_ms, 120000);
   const searchDelayMs = nonNegativeInt(input.search_delay_ms, 0);
   const pageConcurrency = positiveInt(input.page_concurrency, 3);
   const retryCount = nonNegativeInt(input.retry_count, 1);

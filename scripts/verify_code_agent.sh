@@ -20,8 +20,10 @@ cargo test -q -p air-tools stale_read
 cargo test -q -p air-tools git_status
 cargo test -q -p air-tools todo_write
 cargo test -q -p air-tools todo_read
+cargo test -q -p air-tools context_measure
 cargo test -q -p air-tools repo_search
 cargo test -q -p air-tools repo_symbols
+cargo test -q -p air-tools repo_references
 cargo test -q -p air-tools repo_context
 cargo test -q -p air-tools diagnostic_context
 cargo test -q -p air-tools command_run_extracts_structured_diagnostics
