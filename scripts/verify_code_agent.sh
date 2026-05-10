@@ -585,6 +585,15 @@ node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_co
 cargo run -q -p air-cli -- code-session target/generated/code_agent_code_command.session.json \
   --revert-workspace-turn turn-000001 \
   > target/generated/code_agent_code_command.revert_check.json
+cargo run -q -p air-cli -- code-session target/generated/code_agent_code_command.session.json \
+  --revert-workspace-turn turn-000001 \
+  --apply-workspace \
+  > target/generated/code_agent_code_command.revert_apply.json
+if node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_code_command.reverted_test.log 2>&1; then
+  echo "repair fixture unexpectedly passed after reverse patch apply" >&2
+  cat target/generated/code_agent_code_command.reverted_test.log >&2
+  exit 1
+fi
 restore_code_command_fixture
 trap - EXIT
 "${PYTHON:-python3}" - <<'PY'
@@ -597,6 +606,8 @@ with open("target/generated/code_agent_code_command.session.json", encoding="utf
     session = json.load(handle)
 with open("target/generated/code_agent_code_command.revert_check.json", encoding="utf-8") as handle:
     revert_check = json.load(handle)
+with open("target/generated/code_agent_code_command.revert_apply.json", encoding="utf-8") as handle:
+    revert_apply = json.load(handle)
 assert len(session["turns"]) == 1, session
 turn = session["turns"][0]
 assert turn["trace_files"], turn
@@ -629,6 +640,15 @@ assert workspace_revert["applied"] is False, workspace_revert
 assert workspace_revert["results"], workspace_revert
 assert workspace_revert["results"][0]["checked"] is True, workspace_revert
 assert workspace_revert["results"][0]["success"] is True, workspace_revert
+assert revert_apply["workspace_reverted"] is True, revert_apply
+workspace_apply = revert_apply["workspace_revert"]
+assert workspace_apply["turn_id"] == "turn-000001", workspace_apply
+assert workspace_apply["success"] is True, workspace_apply
+assert workspace_apply["applied"] is True, workspace_apply
+assert len(workspace_apply["results"]) == 2, workspace_apply
+assert workspace_apply["results"][0]["checked"] is True, workspace_apply
+assert workspace_apply["results"][1]["applied"] is True, workspace_apply
+assert workspace_apply["results"][1]["success"] is True, workspace_apply
 with open(turn["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 
