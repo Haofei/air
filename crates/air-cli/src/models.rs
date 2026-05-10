@@ -22,15 +22,38 @@ impl ModelProvider for EchoModels {
 
 #[derive(Clone)]
 pub(crate) struct FixtureModels {
-    fixtures: BTreeMap<String, Value>,
+    fixtures: BTreeMap<String, FixtureModelOutput>,
+}
+
+#[derive(Clone)]
+enum FixtureModelOutput {
+    Static(Value),
+    Sequence { values: Vec<Value>, index: usize },
 }
 
 impl ModelProvider for FixtureModels {
     fn call_model(&mut self, name: &str, _input: &Value) -> Result<Value, RuntimeError> {
-        self.fixtures
-            .get(name)
-            .cloned()
-            .ok_or_else(|| RuntimeError::Provider(format!("missing fixture model {name}")))
+        let Some(output) = self.fixtures.get_mut(name) else {
+            return Err(RuntimeError::Provider(format!(
+                "missing fixture model {name}"
+            )));
+        };
+        match output {
+            FixtureModelOutput::Static(value) => Ok(value.clone()),
+            FixtureModelOutput::Sequence { values, index } => {
+                if values.is_empty() {
+                    return Err(RuntimeError::Provider(format!(
+                        "fixture model {name} sequence must not be empty"
+                    )));
+                }
+                let value = values
+                    .get(*index)
+                    .unwrap_or_else(|| values.last().expect("non-empty sequence"))
+                    .clone();
+                *index = index.saturating_add(1);
+                Ok(value)
+            }
+        }
     }
 }
 
@@ -93,7 +116,9 @@ struct FixtureModelConfig {
     fixtures: Option<BTreeMap<String, Value>>,
 }
 
-fn parse_fixture_model_config(path: &PathBuf) -> Result<Option<BTreeMap<String, Value>>> {
+fn parse_fixture_model_config(
+    path: &PathBuf,
+) -> Result<Option<BTreeMap<String, FixtureModelOutput>>> {
     let source = fs::read_to_string(path)
         .with_context(|| format!("failed to read model config {}", path.display()))?;
     let config: FixtureModelConfig = serde_json::from_str(&source)
@@ -104,9 +129,27 @@ fn parse_fixture_model_config(path: &PathBuf) -> Result<Option<BTreeMap<String, 
     let base_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut resolved = BTreeMap::new();
     for (name, fixture) in fixtures {
-        resolved.insert(name, resolve_fixture_files(fixture, base_dir)?);
+        let fixture = resolve_fixture_files(fixture, base_dir)?;
+        resolved.insert(name, fixture_model_output(fixture)?);
     }
     Ok(Some(resolved))
+}
+
+fn fixture_model_output(value: Value) -> Result<FixtureModelOutput> {
+    if let Some(object) = value.as_object() {
+        if object.len() == 1 && object.contains_key("$sequence") {
+            let values = object
+                .get("$sequence")
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| anyhow::anyhow!("fixture $sequence value must be an array"))?;
+            if values.is_empty() {
+                anyhow::bail!("fixture $sequence value must not be empty");
+            }
+            return Ok(FixtureModelOutput::Sequence { values, index: 0 });
+        }
+    }
+    Ok(FixtureModelOutput::Static(value))
 }
 
 fn resolve_fixture_files(value: Value, base_dir: &Path) -> Result<Value> {
@@ -244,5 +287,33 @@ mod tests {
             .unwrap();
         assert_eq!(output["content"], json!("<!doctype html>\n<html></html>\n"));
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn fixture_model_config_supports_sequences() {
+        let path = temp_file("sequence");
+        fs::write(
+            &path,
+            r#"{
+              "fixtures": {
+                "planner": {
+                  "$sequence": [
+                    { "complete": false, "step": 1 },
+                    { "complete": true, "step": 2 }
+                  ]
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let mut provider = ModelProviderChoice::from_config_file(path).unwrap();
+        let first = provider.call_model("planner", &json!({})).unwrap();
+        let second = provider.call_model("planner", &json!({})).unwrap();
+        let third = provider.call_model("planner", &json!({})).unwrap();
+
+        assert_eq!(first["step"], json!(1));
+        assert_eq!(second["step"], json!(2));
+        assert_eq!(third["step"], json!(2));
     }
 }

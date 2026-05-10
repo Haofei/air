@@ -1,0 +1,203 @@
+agent:
+  name: code-dynamic-explore-agent
+  version: 0.1.0
+  description: "Bounded plan-act-observe code exploration with model-selected declared tools."
+
+inputs:
+  task: string
+  query: string
+  target_path: string
+
+outputs:
+  exploration:
+    type: object
+    required: [summary, relevant_files, findings, source_ids, next_steps]
+    properties:
+      summary: string
+      relevant_files:
+        type: array
+        items:
+          type: object
+          required: [path, reason]
+          properties:
+            path: string
+            reason: string
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, evidence, source_ids]
+          properties:
+            title: string
+            evidence: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      next_steps:
+        type: array
+        items: string
+
+requires:
+  capabilities: [file.read, code.read]
+
+state:
+  phase:
+    type: enum
+    enum: [init, choose, route, done, failed]
+  observations:
+    type: array
+    items: object
+  decision:
+    type: object
+    required: [complete, tool, input, rationale]
+    properties:
+      complete: boolean
+      tool: string
+      input: object
+      rationale: string
+  observation: object
+  exploration:
+    type: object
+    required: [summary, relevant_files, findings, source_ids, next_steps]
+    properties:
+      summary: string
+      relevant_files:
+        type: array
+        items:
+          type: object
+          required: [path, reason]
+          properties:
+            path: string
+            reason: string
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, evidence, source_ids]
+          properties:
+            title: string
+            evidence: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      next_steps:
+        type: array
+        items: string
+
+tools:
+  - name: repo.search
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.context
+    capability: code.read
+    timeout_ms: 10000
+  - name: file.read
+    capability: file.read
+    timeout_ms: 10000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 8
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            observations: []
+            phase: choose
+
+    - id: choose
+      when: phase == "choose"
+      actions:
+        - kind: model_call
+          model: code_tool_planner
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              observations:
+                ref: observations
+              allowed_tools:
+                array:
+                  - literal: repo.search
+                  - literal: repo.context
+                  - literal: file.read
+          output: decision
+          timeout_seconds: 30
+        - kind: set
+          values:
+            phase: route
+
+    - id: act
+      when: phase == "route" && decision.complete == false
+      actions:
+        - kind: tool_dispatch
+          input:
+            object:
+              tool:
+                path: decision.tool
+              input:
+                path: decision.input
+          output: observation
+          timeout_seconds: 10
+        - kind: append
+          target: observations
+          value:
+            object:
+              tool:
+                path: decision.tool
+              input:
+                path: decision.input
+              rationale:
+                path: decision.rationale
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: summarize
+      when: phase == "route" && decision.complete == true
+      actions:
+        - kind: model_call
+          model: code_dynamic_summarizer
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              observations:
+                ref: observations
+              final_decision:
+                ref: decision
+          output: exploration
+          timeout_seconds: 30
+        - kind: set
+          values:
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: exploration
+
+policy:
+  max_model_calls: 4
+  max_tool_calls: 3

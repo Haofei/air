@@ -1,0 +1,53 @@
+{
+  "fixtures": {
+    "code_tool_planner": {
+      "$sequence": [
+        {
+          "complete": false,
+          "tool": "repo.search",
+          "input": {
+            "query": "tool_dispatch",
+            "mode": "fixed",
+            "max_matches": 20
+          },
+          "rationale": "Search for the new governed dispatch action before summarizing how the kernel handles it."
+        },
+        {
+          "complete": true,
+          "tool": "repo.search",
+          "input": {},
+          "rationale": "The first observation is enough for the fixture run; summarize the bounded dispatch behavior."
+        }
+      ]
+    },
+    "code_dynamic_summarizer": {
+      "summary": "Fixture dynamic exploration completed: the model selected repo.search through tool_dispatch, and AIR executed only the declared read-only tool under capability and budget checks.",
+      "relevant_files": [
+        {
+          "path": "crates/air-core/src/lib.rs",
+          "reason": "Defines the tool_dispatch state action as part of the AIR IR."
+        },
+        {
+          "path": "crates/air-runtime/src/lib.rs",
+          "reason": "Executes model-selected tool dispatch through the same governed path as static tool_call."
+        },
+        {
+          "path": "crates/air-verify/src/lib.rs",
+          "reason": "Verifies tool_dispatch inputs, outputs, timeouts, retries, and approval-path requirements."
+        }
+      ],
+      "findings": [
+        {
+          "title": "Dynamic tool choice stays inside AIR contracts",
+          "evidence": "tool_dispatch accepts a typed {tool, input} choice, but runtime still rejects undeclared tools, mismatched capabilities, over-budget calls, schema-invalid outputs, and unsafe phase writes.",
+          "source_ids": []
+        }
+      ],
+      "source_ids": [],
+      "next_steps": [
+        "Use this pattern to replace fixed read-only gathering stages with a bounded plan-act-observe loop.",
+        "Keep write tools out of dynamic dispatch until a module has an explicit approval path and narrow patch policy."
+      ]
+    }
+  }
+}

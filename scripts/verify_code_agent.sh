@@ -13,6 +13,7 @@ cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review.air-pla
 cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review-composed.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
@@ -206,6 +207,29 @@ exploration = output["exploration"]
 assert exploration["summary"].startswith("Fixture exploration completed")
 assert any(item["path"] == "crates/air-tools/src/lib.rs" for item in exploration["relevant_files"])
 assert exploration["findings"][0]["source_ids"]
+PY
+
+echo "[code-agent] dynamic read-only explore offline run"
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml \
+  --trace-out target/generated/code_dynamic_explore_fixture.trace.jsonl \
+  > target/generated/code_dynamic_explore_fixture.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_dynamic_explore_fixture.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+exploration = output["exploration"]
+assert exploration["summary"].startswith("Fixture dynamic exploration completed")
+assert any(item["path"] == "crates/air-runtime/src/lib.rs" for item in exploration["relevant_files"])
+
+with open("target/generated/code_dynamic_explore_fixture.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+dispatches = [
+    event for event in events
+    if event.get("action") == "tool_dispatch"
+    and event.get("meta", {}).get("tool") == "repo.search"
+]
+assert dispatches, "expected governed repo.search tool_dispatch trace event"
 PY
 
 echo "[code-agent] user-facing explore command offline run"

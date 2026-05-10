@@ -5,6 +5,9 @@ This example contains bounded AIR coding agents and one preferred composed revie
 - `code.explore@0.1.0` is a read-only exploration subagent for open-ended repository questions.
   It mirrors the opencode pattern of delegating broad codebase search to a specialized child agent:
   gather web/repo/file/symbol context, then return a concise answer with exact source ids.
+- `code.dynamic_explore@0.1.0` is a bounded plan-act-observe exploration module. A model emits
+  `{tool, input}` choices, `tool_dispatch` runs only declared read-only tools, and AIR still enforces
+  capabilities, budgets, timeouts, output schemas, and trace metadata.
 - `code.review_with_std_context@0.1.0` is the preferred review recipe. It composes
   `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
   `code.review_analyze@0.1.0`.
@@ -144,6 +147,16 @@ with typed output instead of becoming hidden linker behavior.
 
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
 search quality, source grounding, and local-code evidence can be tested.
+
+For cases where the static gather sequence is too rigid, use `dynamic-explore.air-profile.yaml`.
+It demonstrates the same read-only boundary with model-selected tools:
+
+```bash
+cargo run -p air-cli -- run-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml --log
+```
+
+This is the AIR kernel version of opencode's next-action loop: the model can choose the next
+declared tool, but the AIR module remains typed, bounded, and auditable.
 
 ## User input shape
 

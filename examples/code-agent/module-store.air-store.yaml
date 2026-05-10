@@ -14,6 +14,14 @@ modules:
     tags: [coding, explore, search, code_read, provenance]
     covers: [code_exploration, repository_question_answering, documentation_lookup, source_grounding]
     priority: 110
+  code.dynamic_explore@0.1.0:
+    path: examples/code-agent/code-dynamic-explore.air.yaml
+    kind: composite
+    visibility: public
+    description: "Read-only plan-act-observe code exploration where the model selects among declared tools through governed AIR tool_dispatch."
+    tags: [coding, explore, dynamic_tools, plan_act_observe, code_read, provenance]
+    covers: [code_exploration, repository_question_answering, dynamic_tool_choice, bounded_plan_act_observe]
+    priority: 105
   code.repair_context@0.1.0:
     path: examples/code-agent/code-repair-context.air.yaml
     kind: primitive
