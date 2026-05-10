@@ -168,6 +168,8 @@ workflow:
                 ref: observations
               allowed_tools:
                 array:
+                  - literal: todo.write
+                  - literal: todo.read
                   - literal: repo.files
                   - literal: repo.search
                   - literal: repo.context
@@ -183,6 +185,7 @@ workflow:
                   - literal: test.run
               tool_policy:
                 literal:
+                  plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
                   discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
                   small_steps: "Choose exactly one tool per turn. Do not request whole large files."

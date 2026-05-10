@@ -2307,6 +2307,8 @@ mod tests {
             .collect::<HashSet<_>>();
 
         for tool in [
+            "todo.write",
+            "todo.read",
             "repo.files",
             "repo.search",
             "repo.context",
