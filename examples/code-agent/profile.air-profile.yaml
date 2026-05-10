@@ -1,4 +1,4 @@
-plan: code-review.air-plan.yaml
+plan: code-review-composed.air-plan.yaml
 store: module-store.air-store.yaml
 input_file: input.json
 model_config: ../bigmodel-openai-compatible.json

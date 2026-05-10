@@ -1,0 +1,133 @@
+agent:
+  name: code-review-analyze-agent
+  version: 0.1.0
+  description: "Analyze a standard AIR compacted context object into grounded code review guidance."
+
+inputs:
+  task: string
+  target_file: string
+  context: object
+
+outputs:
+  review:
+    type: object
+    required: [summary, findings, source_ids, search_quality, next_steps]
+    properties:
+      summary: string
+      findings:
+        type: array
+        items:
+          type: object
+          required: [severity, title, evidence, source_ids, recommendation]
+          properties:
+            severity:
+              type: enum
+              enum: [info, low, medium, high, critical]
+            title: string
+            evidence: string
+            source_ids:
+              type: array
+              items: string
+            recommendation: string
+      source_ids:
+        type: array
+        items: string
+      search_quality:
+        type: object
+        required: [sufficient, gaps]
+        properties:
+          sufficient: boolean
+          gaps:
+            type: array
+            items: string
+      next_steps:
+        type: array
+        items: string
+
+requires:
+  capabilities: []
+
+state:
+  phase:
+    type: enum
+    enum: [init, analyze, done, failed]
+  review:
+    type: object
+    required: [summary, findings, source_ids, search_quality, next_steps]
+    properties:
+      summary: string
+      findings:
+        type: array
+        items:
+          type: object
+          required: [severity, title, evidence, source_ids, recommendation]
+          properties:
+            severity:
+              type: enum
+              enum: [info, low, medium, high, critical]
+            title: string
+            evidence: string
+            source_ids:
+              type: array
+              items: string
+            recommendation: string
+      source_ids:
+        type: array
+        items: string
+      search_quality:
+        type: object
+        required: [sufficient, gaps]
+        properties:
+          sufficient: boolean
+          gaps:
+            type: array
+            items: string
+      next_steps:
+        type: array
+        items: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 4
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: analyze
+
+    - id: analyze
+      when: phase == "analyze"
+      actions:
+        - kind: model_call
+          model: code_reviewer
+          input:
+            object:
+              task:
+                ref: task
+              target_file:
+                ref: target_file
+              context:
+                ref: context
+          output: review
+          timeout_seconds: 120
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: review
+
+policy:
+  timeout_seconds: 180
+
+observability:
+  traces: true

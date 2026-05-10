@@ -8,6 +8,10 @@ mkdir -p target/generated
 
 echo "[code-agent] validate packaged profiles"
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml
+cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review-composed.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
 

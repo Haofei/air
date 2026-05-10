@@ -11,6 +11,30 @@ modules:
     tags: [coding, review, search, provenance]
     covers: [code_review, documentation_lookup, diff_review, grounded_recommendations]
     priority: 100
+  code.review_gather@0.1.0:
+    path: examples/code-agent/code-review-gather.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Gather bounded code-review evidence before shared context compaction."
+    tags: [coding, review, evidence, search, provenance]
+    covers: [code_review_evidence, documentation_lookup, diff_review, test_evidence]
+    priority: 70
+  code.review_analyze@0.1.0:
+    path: examples/code-agent/code-review-analyze.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Analyze a standard AIR context object into grounded code-review findings."
+    tags: [coding, review, analysis, provenance]
+    covers: [code_review_analysis, grounded_recommendations]
+    priority: 70
+  context.compact@0.1.0:
+    path: modules/std/context/compact.air.yaml
+    kind: primitive
+    visibility: public
+    description: "Generic AIR standard context budget gate and semantic compaction module."
+    tags: [context, compaction, standard]
+    covers: [measure_context, compact_context, preserve_provenance]
+    priority: 80
   code.build_page@0.1.0:
     path: examples/code-agent/code-build-page.air.yaml
     kind: composite
@@ -27,3 +51,68 @@ modules:
     tags: [coding, repair, diagnostics, patch, test]
     covers: [code_fix, diagnostics_loop, bounded_patch, retest]
     priority: 95
+
+recipes:
+  - id: code.review_with_std_context@0.1.0
+    description: "Grounded code review workflow that composes evidence gathering, the AIR standard context compactor, and final analysis."
+    tags: [coding, review, context_compaction, provenance]
+    covers: [code_review, documentation_lookup, diff_review, compact_context, grounded_recommendations]
+    priority: 180
+    plan:
+      plan:
+        name: code-review-with-std-context-recipe
+        version: 0.1.0
+      requires:
+        capabilities: [task.progress, context.manage, network.search, file.read, code.read, code.test]
+      nodes:
+        - id: gather
+          module: code.review_gather@0.1.0
+        - id: compact
+          module: context.compact@0.1.0
+        - id: analyze
+          module: code.review_analyze@0.1.0
+      entry: gather
+      edges:
+        - from: gather
+          to: compact
+        - from: compact
+          to: analyze
+      connect:
+        - from: $input.task
+          to: gather.task
+        - from: $input.search_query
+          to: gather.search_query
+        - from: $input.repo_query
+          to: gather.repo_query
+        - from: $input.required_terms
+          to: gather.required_terms
+        - from: $input.target_file
+          to: gather.target_file
+        - to: gather.related_files
+          value:
+            coalesce:
+              - from: $input.related_files
+              - literal: []
+        - from: gather.evidence
+          to: compact.payload
+        - to: compact.compact_for
+          value:
+            literal: a downstream code-review agent that needs concise, source-grounded repository evidence
+        - to: compact.max_context_chars
+          value:
+            literal: 45000
+        - to: compact.threshold_percent
+          value:
+            literal: 80
+        - from: $input.task
+          to: analyze.task
+        - from: $input.target_file
+          to: analyze.target_file
+        - from: compact.context
+          to: analyze.context
+      outputs:
+        review: analyze.review
+      decisions:
+        - id: use-std-context-review-recipe
+          rationale: "Use the higher-level recipe so the planner selects a reusable AIR standard compaction module instead of hand-assembling compaction logic inside one coding agent."
+          selected: [code.review_with_std_context@0.1.0]

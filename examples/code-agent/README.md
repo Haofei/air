@@ -1,8 +1,11 @@
 # Code Agent Example
 
-This example contains two bounded AIR coding agents:
+This example contains three bounded AIR coding agents:
 
-- `code.review@0.1.0` gathers evidence and returns review guidance that cites concrete artifacts.
+- `code.review_with_std_context@0.1.0` is the preferred review recipe. It composes
+  `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
+  `code.review_analyze@0.1.0`.
+- `code.review@0.1.0` is the older monolithic review module kept for comparison.
 - `code.repair@0.1.0` reads a target file, runs an allowlisted test, uses structured diagnostics to
   gather nearby source context, generates a unified diff, validates it with `file.patch` dry-run,
   applies it through constrained `file.patch`, then retests with one bounded retry pass if the
@@ -30,12 +33,13 @@ The review agent uses:
 - `git.status` for structured workspace change awareness.
 - `test.run` for an allowlisted verification command.
 
-Before final analysis, the review agent runs a generic context-budget check with `context.measure`.
-If the evidence bundle crosses the configured threshold, the `context_compactor` model converts it
-into a bounded `compact_context` object with retained facts and exact `source_ids`. The final
-reviewer consumes that compact object instead of the raw search/file/test payloads. If the bundle
-is under threshold, the reviewer skips the extra model call and uses the raw evidence directly.
-This keeps context growth explicit and auditable without adding a new AIR instruction.
+Before final analysis, the preferred composed review plan sends the evidence bundle through the
+shared `modules/std/context/compact.air.yaml` module. That module first runs deterministic
+`context.measure`; if the bundle crosses the configured threshold, the `context_compactor` model
+converts it into a bounded context object with retained facts and exact `source_ids`. If the bundle
+is under threshold, the standard module returns the raw payload in `context.raw_payload` and skips
+the extra model call. This keeps context growth explicit, reusable, and auditable without adding a
+new AIR instruction or baking compaction into one coding agent.
 
 For editing agents, prefer the opencode-style tool split already available in `air-tools`:
 `todo.write` and `todo.read` for explicit task tracking on non-trivial work,
@@ -73,7 +77,7 @@ result pages.
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
 
-cargo run -p air-cli -- run-plan examples/code-agent/code-review.air-plan.yaml \
+cargo run -p air-cli -- run-plan examples/code-agent/code-review-composed.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/input.json \
   --model-config examples/bigmodel-openai-compatible.json \
