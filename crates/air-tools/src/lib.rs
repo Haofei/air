@@ -2868,11 +2868,7 @@ fn call_repo_files_tool(
     max_files: usize,
 ) -> Result<Value, RuntimeError> {
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let raw_query = input
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .trim();
+    let (raw_query, query_source, pattern_glob) = repo_files_query_input(name, input)?;
     let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
     if !matches!(mode, "fixed" | "smart") {
         return Err(RuntimeError::Provider(format!(
@@ -2897,9 +2893,10 @@ fn call_repo_files_tool(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let paths = repo_tool_paths(name, input)?;
+    let (glob, glob_source) = repo_files_glob_input(name, input, pattern_glob)?;
     let mut command = Command::new("rg");
     command.arg("--files");
-    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+    if let Some(glob) = glob {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
     }
@@ -2949,7 +2946,10 @@ fn call_repo_files_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": raw_query,
+        "query_source": query_source,
         "effective_query": effective_query,
+        "glob": glob,
+        "glob_source": glob_source,
         "mode": mode,
         "files": files,
         "include_all": include_all,
@@ -2964,13 +2964,75 @@ fn call_repo_files_tool(
                 "provider": "repo_files",
                 "repo": repo.display().to_string(),
                 "query": raw_query,
+                "query_source": query_source,
                 "effective_query": effective_query,
+                "glob": glob,
+                "glob_source": glob_source,
                 "mode": mode,
                 "max_files": effective_max_files,
                 "include_all": include_all
             }
         }]
     }))
+}
+
+fn repo_files_query_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+) -> Result<(&'a str, &'static str, Option<&'a str>), RuntimeError> {
+    if let Some(query) = input.get("query") {
+        return query
+            .as_str()
+            .map(|query| (query.trim(), "query", None))
+            .ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
+            });
+    }
+    if input.get("glob").is_none() && input.get("file_glob").is_none() {
+        if let Some(pattern) = input.get("pattern") {
+            let pattern = pattern.as_str().ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {tool_name} input.pattern must be a string"))
+            })?;
+            let pattern = pattern.trim();
+            if repo_files_pattern_looks_like_glob(pattern) {
+                return Ok(("", "none", Some(pattern)));
+            }
+            return Ok((pattern, "pattern", None));
+        }
+    }
+    Ok(("", "none", None))
+}
+
+fn repo_files_glob_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    pattern_glob: Option<&'a str>,
+) -> Result<(Option<&'a str>, &'static str), RuntimeError> {
+    if let Some(glob) = input.get("glob") {
+        return glob
+            .as_str()
+            .map(|glob| (Some(glob), "glob"))
+            .ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {tool_name} input.glob must be a string"))
+            });
+    }
+    if let Some(glob) = input.get("file_glob") {
+        return glob
+            .as_str()
+            .map(|glob| (Some(glob), "file_glob"))
+            .ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {tool_name} input.file_glob must be a string"))
+            });
+    }
+    Ok((pattern_glob, pattern_glob.map_or("none", |_| "pattern")))
+}
+
+fn repo_files_pattern_looks_like_glob(pattern: &str) -> bool {
+    pattern.contains('*')
+        || pattern.contains('?')
+        || pattern.contains('[')
+        || pattern.contains('/')
+        || pattern.contains('\\')
 }
 
 fn repo_file_match_score(path: &str, terms: &[String]) -> usize {

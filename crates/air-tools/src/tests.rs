@@ -3247,6 +3247,77 @@ fn repo_files_lists_and_filters_repo_paths() {
 }
 
 #[test]
+fn repo_files_accepts_pattern_alias_for_query() {
+    let dir = temp_dir("air-tools-repo-files-pattern-query");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    fs::write(dir.join("README.md"), "alpha docs\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.files", &json!({"pattern": "lib"}))
+        .unwrap();
+
+    assert_eq!(output["files"], json!(["src/lib.rs"]));
+    assert_eq!(output["query"], json!("lib"));
+    assert_eq!(output["query_source"], json!("pattern"));
+    assert_eq!(output["glob"], Value::Null);
+    assert_eq!(output["glob_source"], json!("none"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_files_accepts_pattern_alias_for_glob() {
+    let dir = temp_dir("air-tools-repo-files-pattern-glob");
+    fs::create_dir_all(dir.join("examples/code-agent")).unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("examples/code-agent/README.md"), "docs\n").unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.files", &json!({"pattern": "examples/code-agent/**"}))
+        .unwrap();
+
+    assert_eq!(output["files"], json!(["examples/code-agent/README.md"]));
+    assert_eq!(output["query"], json!(""));
+    assert_eq!(output["query_source"], json!("none"));
+    assert_eq!(output["glob"], json!("examples/code-agent/**"));
+    assert_eq!(output["glob_source"], json!("pattern"));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["glob_source"],
+        json!("pattern")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_files_can_include_all_paths_for_open_ended_exploration() {
     let dir = temp_dir("air-tools-repo-files-include-all");
     fs::create_dir_all(dir.join("src")).unwrap();
