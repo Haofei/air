@@ -218,6 +218,26 @@ AIR uses OpenAI-compatible model config for real model calls:
 
 `request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout for each HTTP request. AIR also records elapsed-time violations in the runtime trace.
 
+For deterministic offline smoke tests, the native CLI also accepts fixture model configs:
+
+```json
+{
+  "fixtures": {
+    "code_reviewer": {
+      "summary": "fixture review",
+      "findings": [],
+      "source_ids": [],
+      "search_quality": { "sufficient": true, "gaps": [] },
+      "next_steps": []
+    }
+  }
+}
+```
+
+Fixture models return the configured JSON for a model alias and still go through AIR schema
+validation, trace, timeout, and retry handling. They are intended for orchestration tests, not for
+quality evaluation.
+
 Run with:
 
 ```bash

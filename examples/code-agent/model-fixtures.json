@@ -1,0 +1,67 @@
+{
+  "fixtures": {
+    "context_compactor": {
+      "summary": "Fixture compacted code-review evidence covering search relevance, timeouts, provenance, diagnostics, and local verification.",
+      "retained_facts": [
+        {
+          "fact": "The evidence bundle includes local documents about Playwright timeouts, search relevance, provenance, and browser-backed cost controls.",
+          "source_ids": [
+            "docs-playwright-timeouts",
+            "docs-search-relevance",
+            "docs-browser-cost"
+          ]
+        },
+        {
+          "fact": "The code-review gather step also reads the target script, related config, repository matches, git diff/status, and an allowlisted air-tools test result.",
+          "source_ids": [
+            "docs-playwright-timeouts",
+            "docs-search-relevance"
+          ]
+        }
+      ],
+      "source_ids": [
+        "docs-playwright-timeouts",
+        "docs-search-relevance",
+        "docs-browser-cost"
+      ],
+      "open_tasks": [],
+      "risks": [
+        "Fixture models are deterministic and only prove orchestration/schema behavior, not model reasoning quality."
+      ],
+      "limitations": [
+        "This fixture output is intentionally static for offline regression."
+      ]
+    },
+    "code_reviewer": {
+      "summary": "Fixture review completed: the composed code-review workflow gathered evidence, routed it through the standard context module, and produced schema-valid grounded guidance.",
+      "findings": [
+        {
+          "severity": "info",
+          "title": "Offline composed review path is executable",
+          "evidence": "The fixture run exercises search, repository context, file reads, diff/status, test execution, standard context compaction routing, and final review output.",
+          "source_ids": [
+            "docs-playwright-timeouts",
+            "docs-search-relevance",
+            "docs-browser-cost"
+          ],
+          "recommendation": "Use this fixture run as a deterministic regression gate, and use the OpenAI-compatible config for real review quality checks."
+        }
+      ],
+      "source_ids": [
+        "docs-playwright-timeouts",
+        "docs-search-relevance",
+        "docs-browser-cost"
+      ],
+      "search_quality": {
+        "sufficient": true,
+        "gaps": [
+          "Static fixture output does not evaluate live web search quality."
+        ]
+      },
+      "next_steps": [
+        "Run the same profile with examples/bigmodel-openai-compatible.json for a real model review.",
+        "Keep fixture output small and stable so CI can assert orchestration behavior."
+      ]
+    }
+  }
+}

@@ -66,6 +66,8 @@ diagnostics back into one bounded revision pass instead of relying only on strin
 
 The default `tools.json` uses deterministic local search documents so release verification does
 not depend on network access. For real research, switch to `tools.playwright.json`.
+`model-fixtures.json` provides deterministic schema-valid outputs for `context_compactor` and
+`code_reviewer`, so the composed review plan can run end-to-end offline in CI without an API key.
 The verification script also runs `scripts/playwright_search_fixture_test.cjs` and
 `scripts/playwright_page_audit_fixture_test.cjs` when a local
 Playwright Chromium browser is installed; that fixture serves Bing-like HTML from localhost and
@@ -83,6 +85,16 @@ cargo run -p air-cli -- run-plan examples/code-agent/code-review-composed.air-pl
   --model-config examples/bigmodel-openai-compatible.json \
   --tool-config examples/code-agent/tools.playwright.json \
   --trace-out target/generated/code_agent.trace.jsonl
+```
+
+Run the composed review path fully offline with deterministic model fixtures:
+
+```bash
+cargo run -p air-cli -- run-plan examples/code-agent/code-review-composed.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/input.json \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json
 ```
 
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so

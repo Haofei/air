@@ -43,6 +43,24 @@ cargo test -q -p air-tools extract_command_diagnostics_parses_python_tracebacks
 cargo test -q -p air-tools extract_command_diagnostics_parses_line_only_colon_diagnostics
 cargo test -q -p air-tools extract_command_diagnostics_parses_file_context_lint_blocks
 
+echo "[code-agent] composed review offline run"
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-review-composed.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/input.json \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  > target/generated/code_review_composed_fixture.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_review_composed_fixture.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+review = output["review"]
+assert review["summary"].startswith("Fixture review completed")
+assert review["findings"][0]["severity"] == "info"
+assert review["search_quality"]["sufficient"] is True
+PY
+
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"
 if node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_repair_fixture.log 2>&1; then
   echo "repair fixture unexpectedly passed; it should start from a failing implementation" >&2

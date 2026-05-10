@@ -273,8 +273,7 @@ pub(crate) fn run_plan_with_inputs(
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if parallel {
         if let Some(model_config) = model_config {
-            let config = air_backend_openai::parse_config_file(model_config)?;
-            let models = ModelProviderChoice::openai(config)?;
+            let models = ModelProviderChoice::from_config_file(model_config)?;
             run_plan_parallel(
                 &plan,
                 &store,
@@ -306,7 +305,7 @@ pub(crate) fn run_plan_with_inputs(
             )?
         }
     } else if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file(model_config)?;
         if observe {
             let result = air_linker::run_run_plan_with_observer_and_checkpoint(
                 &plan,
@@ -314,7 +313,7 @@ pub(crate) fn run_plan_with_inputs(
                 base_dir.clone(),
                 inputs,
                 tools,
-                ModelProviderChoice::openai(config)?,
+                models,
                 |event| observe_event(event, log, &mut observed_trace),
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
@@ -329,7 +328,7 @@ pub(crate) fn run_plan_with_inputs(
                 base_dir.clone(),
                 inputs,
                 tools,
-                ModelProviderChoice::openai(config)?,
+                models,
                 |_| {},
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             )?
@@ -715,7 +714,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file(model_config)?;
         if observe {
             let result = air_linker::resume_run_plan_with_observer_and_checkpoint(
                 &plan,
@@ -724,7 +723,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
                 inputs,
                 resume,
                 tools,
-                ModelProviderChoice::openai(config)?,
+                models,
                 |event| observe_event(event, log, &mut observed_trace),
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
@@ -740,7 +739,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
                 inputs,
                 resume,
                 tools,
-                ModelProviderChoice::openai(config)?,
+                models,
                 |_| {},
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             )?

@@ -657,11 +657,8 @@ fn run(
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
-        let mut vm = Vm {
-            tools,
-            models: ModelProviderChoice::openai(config)?,
-        };
+        let models = ModelProviderChoice::from_config_file(model_config)?;
+        let mut vm = Vm { tools, models };
         if observe {
             let result = vm.run_with_observer(&module, inputs, |event| {
                 observe_event(event, log, &mut observed_trace)
@@ -729,14 +726,14 @@ fn run_system(
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if let Some(model_config) = model_config {
-        let config = air_backend_openai::parse_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file(model_config)?;
         if observe {
             let result = air_linker::run_system_with_observer(
                 &system,
                 base_dir,
                 inputs,
                 tools,
-                ModelProviderChoice::openai(config)?,
+                models,
                 |event| observe_event(event, log, &mut observed_trace),
             );
             if result.is_err() {
@@ -744,13 +741,7 @@ fn run_system(
             }
             result?
         } else {
-            air_linker::run_system(
-                &system,
-                base_dir,
-                inputs,
-                tools,
-                ModelProviderChoice::openai(config)?,
-            )?
+            air_linker::run_system(&system, base_dir, inputs, tools, models)?
         }
     } else if observe {
         let result = air_linker::run_system_with_observer(
