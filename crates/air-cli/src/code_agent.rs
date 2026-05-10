@@ -176,6 +176,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         if recipe != CodeRecipe::Plan {
             bail!("air code --execute-plan requires the resolved recipe to be plan");
         }
+        let resume = session_state.as_ref().and_then(code_session_project_resume);
         run_code_project(CodeProjectOptions {
             plan_profile: profile.clone(),
             input,
@@ -190,6 +191,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             log,
             tool_config: tool_config.clone(),
             max_tasks: max_iterations,
+            resume,
         })?
     } else if loop_enabled {
         run_code_loop(CodeLoopOptions {
@@ -783,6 +785,39 @@ fn code_session_insert_recovery(outputs: &mut Value, recovery: &CodeSessionRecov
     Ok(())
 }
 
+fn code_session_project_resume(state: &CodeSessionState) -> Option<CodeProjectResume> {
+    let turn = state.turns.iter().rev().find(|turn| {
+        turn.recipe == "plan"
+            && turn
+                .outputs
+                .pointer("/project/status")
+                .and_then(Value::as_str)
+                == Some("max_tasks_exhausted")
+    })?;
+    let project_plan = turn.outputs.get("project_plan")?.clone();
+    let executions = turn
+        .outputs
+        .pointer("/project/executions")
+        .and_then(Value::as_array)?
+        .iter()
+        .filter(|execution| {
+            execution
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    if executions.is_empty() {
+        return None;
+    }
+    Some(CodeProjectResume {
+        turn_id: turn.id.clone(),
+        project_plan,
+        executions,
+    })
+}
+
 fn ensure_parent_dir(path: &Path) -> Result<()> {
     if let Some(parent) = path
         .parent()
@@ -1176,6 +1211,14 @@ struct CodeProjectOptions {
     log: bool,
     tool_config: Option<PathBuf>,
     max_tasks: usize,
+    resume: Option<CodeProjectResume>,
+}
+
+#[derive(Clone, Debug)]
+struct CodeProjectResume {
+    turn_id: String,
+    project_plan: Value,
+    executions: Vec<Value>,
 }
 
 fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
@@ -1184,45 +1227,63 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
     }
 
     let mut trace_files = Vec::new();
-    let plan_trace = options
-        .trace_out
-        .as_ref()
-        .map(|path| labeled_trace_path(path, "plan"));
-    if let Some(path) = plan_trace.as_ref() {
-        trace_files.push(path_ref_to_input_string(path));
-    }
+    let mut resumed_from_turn = None;
+    let (project_plan, mut executions, mut prior_executions) =
+        if let Some(resume) = options.resume.clone() {
+            if options.log {
+                eprintln!(
+                    "[air-code-project] step=resume from_turn={}",
+                    resume.turn_id
+                );
+            }
+            resumed_from_turn = Some(resume.turn_id);
+            (
+                resume.project_plan,
+                resume.executions.clone(),
+                resume.executions,
+            )
+        } else {
+            let plan_trace = options
+                .trace_out
+                .as_ref()
+                .map(|path| labeled_trace_path(path, "plan"));
+            if let Some(path) = plan_trace.as_ref() {
+                trace_files.push(path_ref_to_input_string(path));
+            }
 
-    if options.log {
-        eprintln!("[air-code-project] step=plan recipe=plan");
-    }
-    let plan_outputs = run_plan_capture(RunPlanOptions {
-        plan: None,
-        profile: Some(options.plan_profile.clone()),
-        store: None,
-        input: None,
-        input_values: Some(options.input.clone()),
-        model_config: options.model_config.clone(),
-        trace_out: plan_trace,
-        trace_redact: options.trace_redact,
-        trace_raw: options.trace_raw,
-        state_out: options
-            .state_out
-            .as_ref()
-            .map(|path| labeled_trace_path(path, "plan")),
-        checkpoint_out: options
-            .checkpoint_out
-            .as_ref()
-            .map(|path| labeled_trace_path(path, "plan")),
-        jit_cache: options.jit_cache.clone(),
-        parallel: options.parallel,
-        log: options.log,
-        example_tools: false,
-        tool_config: options.tool_config.clone(),
-    })?;
-    let project_plan = plan_outputs
-        .get("project_plan")
-        .cloned()
-        .context("project plan run did not return project_plan")?;
+            if options.log {
+                eprintln!("[air-code-project] step=plan recipe=plan");
+            }
+            let plan_outputs = run_plan_capture(RunPlanOptions {
+                plan: None,
+                profile: Some(options.plan_profile.clone()),
+                store: None,
+                input: None,
+                input_values: Some(options.input.clone()),
+                model_config: options.model_config.clone(),
+                trace_out: plan_trace,
+                trace_redact: options.trace_redact,
+                trace_raw: options.trace_raw,
+                state_out: options
+                    .state_out
+                    .as_ref()
+                    .map(|path| labeled_trace_path(path, "plan")),
+                checkpoint_out: options
+                    .checkpoint_out
+                    .as_ref()
+                    .map(|path| labeled_trace_path(path, "plan")),
+                jit_cache: options.jit_cache.clone(),
+                parallel: options.parallel,
+                log: options.log,
+                example_tools: false,
+                tool_config: options.tool_config.clone(),
+            })?;
+            let project_plan = plan_outputs
+                .get("project_plan")
+                .cloned()
+                .context("project plan run did not return project_plan")?;
+            (project_plan, Vec::new(), Vec::new())
+        };
     let tasks = project_plan
         .get("tasks")
         .and_then(Value::as_array)
@@ -1254,15 +1315,28 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .map(|task| Value::String(task.id.clone()))
         .collect::<Vec<_>>();
 
-    let mut executions = Vec::new();
-    let mut prior_executions = Vec::new();
     let mut acceptance_events = Vec::new();
     let mut acceptance_step = 0u32;
     let mut acceptance_tools: Option<ToolProviderChoice> = None;
-    let mut completed = true;
+    let mut completed = prior_executions_completed(&prior_executions);
     let mut stopped = false;
-    for (index, task) in scheduled_tasks.iter().take(options.max_tasks).enumerate() {
-        let task_number = index + 1;
+    let starting_execution_count = executions.len();
+    let completed_task_ids = prior_executions
+        .iter()
+        .filter(|execution| {
+            execution
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .filter_map(|execution| execution.get("task_id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let pending_tasks = scheduled_tasks
+        .iter()
+        .filter(|task| !completed_task_ids.contains(task.id.as_str()))
+        .collect::<Vec<_>>();
+    for (index, task) in pending_tasks.iter().take(options.max_tasks).enumerate() {
+        let task_number = starting_execution_count + index + 1;
         let task_id = task.id.clone();
         let title = task
             .definition
@@ -1386,6 +1460,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
     }
 
     let executed = executions.len();
+    let executed_this_run = executed.saturating_sub(starting_execution_count);
     let project_acceptance = if !stopped && executed == scheduled_tasks.len() {
         let acceptance = run_acceptance_checks(
             &mut acceptance_tools,
@@ -1425,7 +1500,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .collect::<Vec<_>>();
     let status = if stopped {
         "stopped"
-    } else if scheduled_tasks.len() > executed {
+    } else if pending_tasks.len() > executed_this_run {
         completed = false;
         "max_tasks_exhausted"
     } else if completed {
@@ -1441,6 +1516,8 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "completed": completed,
             "max_tasks": options.max_tasks,
             "executed_tasks": executed,
+            "executed_this_run": executed_this_run,
+            "resumed_from_turn": resumed_from_turn,
             "scheduled_task_ids": scheduled_task_ids,
             "remaining_task_ids": remaining_task_ids,
             "acceptance": project_acceptance,
@@ -1555,6 +1632,15 @@ fn code_project_task_schedule(tasks: &[Value]) -> Result<Vec<CodeProjectSchedule
     }
 
     Ok(scheduled)
+}
+
+fn prior_executions_completed(executions: &[Value]) -> bool {
+    executions.iter().all(|execution| {
+        execution
+            .get("completed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
 }
 
 fn code_project_task_input(
@@ -2630,6 +2716,53 @@ mod tests {
             &stopped,
         )
         .is_none());
+    }
+
+    #[test]
+    fn session_project_resume_uses_latest_exhausted_plan_turn() {
+        let mut state = CodeSessionState::default();
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000001".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "run two tasks".to_string(),
+            recipe: "plan".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: false,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            patch_sets: Vec::new(),
+            recovery: None,
+            outputs: json!({
+                "project_plan": {
+                    "tasks": [
+                        {"id": "t1", "depends_on": []},
+                        {"id": "t2", "depends_on": ["t1"]}
+                    ]
+                },
+                "project": {
+                    "status": "max_tasks_exhausted",
+                    "executions": [
+                        {"task_id": "t1", "completed": true},
+                        {"task_id": "bad", "completed": false}
+                    ]
+                }
+            }),
+        });
+
+        let resume = code_session_project_resume(&state).unwrap();
+
+        assert_eq!(resume.turn_id, "turn-000001");
+        assert_eq!(
+            resume.project_plan["tasks"][1]["id"],
+            Value::String("t2".to_string())
+        );
+        assert_eq!(resume.executions.len(), 1);
+        assert_eq!(
+            resume.executions[0]["task_id"],
+            Value::String("t1".to_string())
+        );
     }
 
     #[test]

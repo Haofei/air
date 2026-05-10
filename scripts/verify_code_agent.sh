@@ -194,6 +194,62 @@ assert any(event.get("meta", {}).get("model") == "code_explorer" for event in ta
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 
+echo "[code-agent] project execution resumes exhausted sessions"
+rm -f target/generated/code_project_resume.session.json \
+  target/generated/code_project_resume.first.output.json \
+  target/generated/code_project_resume.second.output.json
+rm -rf target/generated/code_project_resume.session.traces
+cargo run -q -p air-cli -- code "plan and execute a project-level task graph across turns" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 2 \
+  --query "code agent project plan task graph" \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --session target/generated/code_project_resume.session.json \
+  > target/generated/code_project_resume.first.output.json
+cargo run -q -p air-cli -- code "continue executing the same project-level task graph" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 2 \
+  --query "code agent project plan task graph" \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --session target/generated/code_project_resume.session.json \
+  > target/generated/code_project_resume.second.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_resume.first.output.json", encoding="utf-8") as handle:
+    first = json.load(handle)
+assert first["project"]["status"] == "max_tasks_exhausted", first["project"]
+assert first["project"]["executed_tasks"] == 2, first["project"]
+assert first["project"]["executed_this_run"] == 2, first["project"]
+
+with open("target/generated/code_project_resume.second.output.json", encoding="utf-8") as handle:
+    second = json.load(handle)
+project = second["project"]
+assert project["status"] == "completed", project
+assert project["completed"] is True, project
+assert project["resumed_from_turn"] == "turn-000001", project
+assert project["executed_tasks"] == 4, project
+assert project["executed_this_run"] == 2, project
+assert [item["task_id"] for item in project["executions"]] == ["t1", "t2", "t3", "t4"], project
+assert project["remaining_task_ids"] == [], project
+trace_files = [Path(path) for path in second["trace_files"]]
+assert trace_files, second
+assert all(".plan." not in path.name for path in trace_files), trace_files
+assert all(path.exists() for path in trace_files), trace_files
+
+with open("target/generated/code_project_resume.session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
+assert len(session["turns"]) == 2, session
+assert session["turns"][0]["outputs"]["project"]["status"] == "max_tasks_exhausted", session
+assert session["turns"][1]["outputs"]["project"]["status"] == "completed", session
+assert session["turns"][1]["outputs"]["project"]["resumed_from_turn"] == "turn-000001", session
+PY
+
 echo "[code-agent] project execution respects task dependencies"
 cat > target/generated/code_project_dependency_model_fixtures.json <<'JSON'
 {
