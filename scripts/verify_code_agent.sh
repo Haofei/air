@@ -115,9 +115,34 @@ assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml
 assert "file.write" in output["capabilities"], output
 assert output["read_only"] is False, output
 assert output["writes_workspace"] is True, output
+assert output["budget"]["per_iteration"]["max_estimated_model_calls"] > 0, output
+assert output["budget"]["per_iteration"]["max_estimated_tool_calls"] > 0, output
+assert output["budget"]["total"]["iterations"] == 1, output
+assert output["budget"]["total"]["max_estimated_tool_calls"] == output["budget"]["per_iteration"]["max_estimated_tool_calls"], output
 assert output["loop"]["enabled"] is False, output
 assert output["loop"]["max_iterations"] == 3, output
 assert output["input"]["test_command"] == "repair_fixture_test", output
+PY
+
+cargo run -q -p air-cli -- code "fix the failing add function until tests pass" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --loop \
+  --max-iterations 2 \
+  --explain \
+  > target/generated/code_command_loop_explain.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_command_loop_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+
+per = output["budget"]["per_iteration"]
+total = output["budget"]["total"]
+assert output["loop"]["enabled"] is True, output
+assert total["iterations"] == 2, output
+assert total["max_estimated_model_calls"] == per["max_estimated_model_calls"] * 2, output
+assert total["max_estimated_tool_calls"] == per["max_estimated_tool_calls"] * 2, output
 PY
 
 check_code_agent_route() {

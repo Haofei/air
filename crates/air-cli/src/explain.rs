@@ -275,6 +275,16 @@ pub(crate) fn format_plan_explanation(explanation: &PlanExplanation) -> String {
     output
 }
 
+impl PlanExplanation {
+    pub(crate) fn max_estimated_model_calls(&self) -> usize {
+        self.max_estimated_model_calls
+    }
+
+    pub(crate) fn max_estimated_tool_calls(&self) -> usize {
+        self.max_estimated_tool_calls
+    }
+}
+
 fn estimate_plan_risk(
     required_approvals: &[String],
     max_estimated_model_calls: usize,

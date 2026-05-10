@@ -1,3 +1,5 @@
+use crate::explain::build_plan_explanation;
+use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::run_plan::{run_plan, run_plan_capture, RunPlanOptions};
 use anyhow::{bail, Result};
@@ -170,6 +172,7 @@ fn print_explain(
     max_iterations: usize,
 ) -> Result<()> {
     let metadata = explain_metadata_for_profile(profile)?;
+    let budget_iterations = if loop_enabled { max_iterations } else { 1 };
     let explanation = json!({
         "command": "code",
         "will_run": false,
@@ -181,6 +184,17 @@ fn print_explain(
         "capabilities": metadata.capabilities,
         "read_only": metadata.read_only,
         "writes_workspace": metadata.writes_workspace,
+        "budget": {
+            "per_iteration": {
+                "max_estimated_model_calls": metadata.max_estimated_model_calls,
+                "max_estimated_tool_calls": metadata.max_estimated_tool_calls
+            },
+            "total": {
+                "iterations": budget_iterations,
+                "max_estimated_model_calls": metadata.max_estimated_model_calls.saturating_mul(budget_iterations),
+                "max_estimated_tool_calls": metadata.max_estimated_tool_calls.saturating_mul(budget_iterations)
+            }
+        },
         "loop": {
             "enabled": loop_enabled,
             "max_iterations": max_iterations
@@ -198,6 +212,8 @@ struct CodeExplainMetadata {
     capabilities: Vec<String>,
     read_only: bool,
     writes_workspace: bool,
+    max_estimated_model_calls: usize,
+    max_estimated_tool_calls: usize,
 }
 
 fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
@@ -206,6 +222,9 @@ fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
     let plan_path = resolve_profile_path(&profile_path, &profile.plan);
     let store_path = resolve_profile_path(&profile_path, &profile.store);
     let plan = air_linker::parse_run_plan_file(&plan_path)?;
+    let store = air_linker::parse_module_store_file(&store_path)?;
+    let base_dir = module_base_dir_for_store_path(&store, &store_path);
+    let plan_explanation = build_plan_explanation(&plan, &store, &base_dir)?;
     let mut capabilities = plan.requires.capabilities;
     capabilities.sort();
     capabilities.dedup();
@@ -218,6 +237,8 @@ fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
         capabilities,
         read_only: !writes_workspace,
         writes_workspace,
+        max_estimated_model_calls: plan_explanation.max_estimated_model_calls(),
+        max_estimated_tool_calls: plan_explanation.max_estimated_tool_calls(),
     })
 }
 
@@ -815,6 +836,8 @@ mod tests {
             .any(|capability| capability == "file.write"));
         assert!(metadata.writes_workspace);
         assert!(!metadata.read_only);
+        assert!(metadata.max_estimated_model_calls > 0);
+        assert!(metadata.max_estimated_tool_calls > 0);
         assert!(metadata
             .plan
             .ends_with("code-repair-with-explore.air-plan.yaml"));
