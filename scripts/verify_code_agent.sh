@@ -64,6 +64,26 @@ assert review["findings"][0]["severity"] == "info"
 assert review["search_quality"]["sufficient"] is True
 PY
 
+echo "[code-agent] user-facing review command offline run"
+cargo run -q -p air-cli -- code "review the Playwright search tool" \
+  --recipe review \
+  --target scripts/playwright_search.cjs \
+  --query playwright_search \
+  --search-query "Playwright browser search result extraction timeout Node.js" \
+  --required-term playwright \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  > target/generated/code_command_review.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_command_review.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+review = output["review"]
+assert review["summary"].startswith("Fixture review completed")
+assert review["search_quality"]["sufficient"] is True
+PY
+
 check_code_agent_route() {
   local name="$1"
   local task="$2"
@@ -125,6 +145,23 @@ exploration = output["exploration"]
 assert exploration["summary"].startswith("Fixture exploration completed")
 assert any(item["path"] == "crates/air-tools/src/lib.rs" for item in exploration["relevant_files"])
 assert exploration["findings"][0]["source_ids"]
+PY
+
+echo "[code-agent] user-facing explore command offline run"
+cargo run -q -p air-cli -- code "explore command_run safety" \
+  --recipe explore \
+  --target crates/air-tools/src/lib.rs \
+  --query command_run \
+  > target/generated/code_command_explore.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_command_explore.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+exploration = output["exploration"]
+assert exploration["summary"].startswith("Fixture exploration completed")
+assert any(item["path"] == "crates/air-tools/src/lib.rs" for item in exploration["relevant_files"])
+assert exploration["next_steps"], exploration
 PY
 
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"

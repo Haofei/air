@@ -160,7 +160,7 @@ For a repair task, the current input looks like this:
 }
 ```
 
-Run the user-facing wrapper:
+Run the user-facing wrapper. The default recipe is `repair`:
 
 ```bash
 cargo run -p air-cli -- code "fix the failing add function and retest" \
@@ -168,6 +168,28 @@ cargo run -p air-cli -- code "fix the failing add function and retest" \
   --test repair_fixture_test \
   --related examples/code-agent/repair-fixture/test.js \
   --log
+```
+
+The same command can select the other public coding-agent recipes:
+
+```bash
+cargo run -p air-cli -- code "explore command_run safety" \
+  --recipe explore \
+  --target crates/air-tools/src/lib.rs \
+  --query command_run
+
+cargo run -p air-cli -- code "review the Playwright search tool" \
+  --recipe review \
+  --target scripts/playwright_search.cjs \
+  --query playwright_search \
+  --search-query "Playwright browser search result extraction timeout Node.js" \
+  --required-term playwright
+
+cargo run -p air-cli -- code "build a premium product landing page" \
+  --recipe build \
+  --output examples/apple-landing/index.html \
+  --brand Apple \
+  --product "Apple Nova"
 ```
 
 The wrapper only assembles the same typed input and runs the selected AIR recipe. The AIR module

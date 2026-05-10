@@ -7,7 +7,7 @@ mod planner;
 mod profile;
 mod run_plan;
 mod tools;
-use crate::code_agent::{code, CodeOptions};
+use crate::code_agent::{code, CodeOptions, CodeRecipe};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -36,18 +36,22 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
-    /// Run the default AIR coding-agent repair loop from a task and typed context.
+    /// Run an AIR coding-agent recipe from a task and typed context.
     Code {
         /// Natural-language coding task.
         task: String,
 
-        /// Primary file the coding agent is allowed to inspect and repair.
+        /// Coding recipe to run.
+        #[arg(long, value_enum, default_value = "repair")]
+        recipe: CodeRecipe,
+
+        /// Primary file the coding agent is allowed to inspect.
         #[arg(long)]
-        target: PathBuf,
+        target: Option<PathBuf>,
 
         /// Allowlisted test command alias from the selected tool config.
         #[arg(long)]
-        test: String,
+        test: Option<String>,
 
         /// Optional search/query string. Defaults to the task.
         #[arg(long)]
@@ -57,12 +61,37 @@ enum Command {
         #[arg(long)]
         related: Vec<PathBuf>,
 
-        /// Coding-agent run profile.
-        #[arg(
-            long,
-            default_value = "examples/code-agent/repair-core.air-profile.yaml"
-        )]
-        profile: PathBuf,
+        /// External search query for review recipes. Defaults to the task.
+        #[arg(long)]
+        search_query: Option<String>,
+
+        /// Repository search query for review recipes. Defaults to --query or --target.
+        #[arg(long)]
+        repo_query: Option<String>,
+
+        /// Required review term. May be repeated.
+        #[arg(long = "required-term")]
+        required_terms: Vec<String>,
+
+        /// Output file for build recipes.
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// Brand name for build recipes.
+        #[arg(long)]
+        brand: Option<String>,
+
+        /// Product name for build recipes. Defaults to --brand.
+        #[arg(long)]
+        product: Option<String>,
+
+        /// Build constraint. May be repeated.
+        #[arg(long = "constraint")]
+        constraints: Vec<String>,
+
+        /// Coding-agent run profile. Defaults from --recipe.
+        #[arg(long)]
+        profile: Option<PathBuf>,
 
         /// Optional OpenAI-compatible model config JSON.
         #[arg(long)]
@@ -438,10 +467,18 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Code {
             task,
+            recipe,
             target,
             test,
             query,
             related,
+            search_query,
+            repo_query,
+            required_terms,
+            output,
+            brand,
+            product,
+            constraints,
             profile,
             model_config,
             trace_out,
@@ -455,10 +492,18 @@ fn main() -> Result<()> {
             tool_config,
         } => code(CodeOptions {
             task,
+            recipe,
             target,
             test,
             query,
             related,
+            search_query,
+            repo_query,
+            required_terms,
+            output,
+            brand,
+            product,
+            constraints,
             profile,
             model_config,
             trace_out,
@@ -1515,6 +1560,7 @@ mod tests {
 
         let Command::Code {
             task,
+            recipe,
             target,
             test,
             related,
@@ -1526,21 +1572,108 @@ mod tests {
         };
 
         assert_eq!(task, "fix the failing add function and retest");
+        assert_eq!(recipe, CodeRecipe::Repair);
         assert_eq!(
             target,
-            std::path::PathBuf::from("examples/code-agent/repair-fixture/math.js")
+            Some(std::path::PathBuf::from(
+                "examples/code-agent/repair-fixture/math.js"
+            ))
         );
-        assert_eq!(test, "repair_fixture_test");
+        assert_eq!(test, Some("repair_fixture_test".to_string()));
         assert_eq!(
             related,
             vec![std::path::PathBuf::from(
                 "examples/code-agent/repair-fixture/test.js"
             )]
         );
+        assert_eq!(profile, None);
+    }
+
+    #[test]
+    fn code_command_accepts_build_recipe_input() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "build a landing page",
+            "--recipe",
+            "build",
+            "--output",
+            "examples/apple-landing/index.html",
+            "--brand",
+            "Apple",
+            "--product",
+            "Apple Nova",
+            "--constraint",
+            "single HTML file",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            recipe,
+            output,
+            brand,
+            product,
+            constraints,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert_eq!(recipe, CodeRecipe::Build);
         assert_eq!(
-            profile,
-            std::path::PathBuf::from("examples/code-agent/repair-core.air-profile.yaml")
+            output,
+            Some(std::path::PathBuf::from(
+                "examples/apple-landing/index.html"
+            ))
         );
+        assert_eq!(brand, Some("Apple".to_string()));
+        assert_eq!(product, Some("Apple Nova".to_string()));
+        assert_eq!(constraints, vec!["single HTML file".to_string()]);
+    }
+
+    #[test]
+    fn code_command_accepts_review_recipe_input() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "review the search tool",
+            "--recipe",
+            "review",
+            "--target",
+            "scripts/playwright_search.cjs",
+            "--query",
+            "playwright_search",
+            "--search-query",
+            "Playwright timeout behavior",
+            "--required-term",
+            "playwright",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            recipe,
+            target,
+            query,
+            search_query,
+            required_terms,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert_eq!(recipe, CodeRecipe::Review);
+        assert_eq!(
+            target,
+            Some(std::path::PathBuf::from("scripts/playwright_search.cjs"))
+        );
+        assert_eq!(query, Some("playwright_search".to_string()));
+        assert_eq!(
+            search_query,
+            Some("Playwright timeout behavior".to_string())
+        );
+        assert_eq!(required_terms, vec!["playwright".to_string()]);
     }
 
     #[test]
