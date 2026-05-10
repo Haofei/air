@@ -54,6 +54,7 @@ modules:
 
 recipes:
   - id: deep_research.four_topic_report@0.1.0
+    visibility: public
     description: "Bounded deep-research workflow for a task with four named research topics: plan an array, fan out four reusable researchers, append notes, and synthesize a final report."
     tags: [deep_research, four_topic, fanout, report]
     covers: [deep_research_report, plan_research_topics, web_research, compress_research, synthesize_report]

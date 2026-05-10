@@ -62,20 +62,54 @@ assert review["findings"][0]["severity"] == "info"
 assert review["search_quality"]["sufficient"] is True
 PY
 
-echo "[code-agent] planner component selection explain"
-cargo run -q -p air-cli -- plan --explain \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --task "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
-  > target/generated/code_agent_plan_explain.json
-"${PYTHON:-python3}" - <<'PY'
-import json
+check_code_agent_route() {
+  local name="$1"
+  local task="$2"
+  local expected_id="$3"
+  local expected_source="$4"
+  local output="target/generated/code_agent_plan_${name}.json"
 
-with open("target/generated/code_agent_plan_explain.json", encoding="utf-8") as handle:
+  cargo run -q -p air-cli -- plan --explain \
+    --store examples/code-agent/module-store.air-store.yaml \
+    --task "$task" \
+    > "$output"
+  "${PYTHON:-python3}" - "$output" "$expected_id" "$expected_source" <<'PY'
+import json
+import sys
+
+path, expected_id, expected_source = sys.argv[1:4]
+with open(path, encoding="utf-8") as handle:
     output = json.load(handle)
 first = output["component_selection"]["first_choice"]
-assert first["id"] == "code.repair@0.1.0"
+assert first["id"] == expected_id, first
+assert first["source"] == expected_source, first
 assert first["tier"] == "large_component"
+for candidate in output["component_selection"]["recommended"]:
+    assert candidate["matched_terms"], candidate
 PY
+}
+
+echo "[code-agent] primary component routing explain"
+check_code_agent_route \
+  "review" \
+  "Review the command_run implementation for safety, provenance, and diagnostics." \
+  "code.review_with_std_context@0.1.0" \
+  "recipe"
+check_code_agent_route \
+  "repair" \
+  "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
+  "code.repair@0.1.0" \
+  "module"
+check_code_agent_route \
+  "build" \
+  "Build an Apple-style landing page as a single HTML file and verify screenshots." \
+  "code.build_page@0.1.0" \
+  "module"
+check_code_agent_route \
+  "explore" \
+  "Explore how command_run is implemented and identify relevant repository files." \
+  "code.explore@0.1.0" \
+  "module"
 
 echo "[code-agent] read-only explore offline run"
 cargo run -q -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml \

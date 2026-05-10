@@ -144,6 +144,9 @@ pub struct PlanRecipe {
     pub id: String,
 
     #[serde(default)]
+    pub visibility: ModuleVisibility,
+
+    #[serde(default)]
     pub description: Option<String>,
 
     #[serde(default)]

@@ -120,6 +120,12 @@ cargo run -p air-cli -- plan --explain \
   --task "Fix a failing test using diagnostics and retest"
 ```
 
+This is the code-agent primary routing layer. It mirrors opencode's shape: a primary agent first
+chooses a large component or recipe, then only falls back to smaller building blocks when no large
+component covers the task. `plan --explain` is deterministic and model-free, so bench harnesses can
+assert that review, repair, page-build, and read-only exploration tasks route to the intended AIR
+component before any model is asked to generate a RunPlan.
+
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
 search quality, source grounding, and local-code evidence can be tested.
 

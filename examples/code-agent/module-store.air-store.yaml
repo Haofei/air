@@ -57,6 +57,7 @@ modules:
 
 recipes:
   - id: code.review_with_std_context@0.1.0
+    visibility: public
     description: "Grounded code review workflow that composes evidence gathering, the AIR standard context compactor, and final analysis."
     tags: [coding, review, context_compaction, provenance]
     covers: [code_review, documentation_lookup, diff_review, compact_context, grounded_recommendations]

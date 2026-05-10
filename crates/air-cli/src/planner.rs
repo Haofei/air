@@ -271,6 +271,10 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
             .get("priority")
             .and_then(Value::as_i64)
             .unwrap_or_default();
+        let visibility = recipe
+            .get("visibility")
+            .and_then(Value::as_str)
+            .unwrap_or("public");
         let matched_terms = matched_component_terms(
             &task_terms,
             &[
@@ -287,6 +291,7 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
             "source": "recipe",
             "tier": "large_component",
             "kind": "recipe",
+            "visibility": visibility,
             "priority": priority,
             "score": score,
             "matched_terms": matched_terms,
@@ -370,7 +375,12 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
     });
 
     let first_choice = candidates.first().cloned().unwrap_or(Value::Null);
-    let recommended = candidates.into_iter().take(8).collect::<Vec<_>>();
+    let has_term_matches = candidates.iter().any(candidate_has_matched_terms);
+    let recommended = candidates
+        .into_iter()
+        .filter(|candidate| !has_term_matches || candidate_has_matched_terms(candidate))
+        .take(8)
+        .collect::<Vec<_>>();
     json!({
         "selection_ladder": [
             "1. recipe: pre-validated topology, select with recipe_id when it covers the task",
@@ -382,6 +392,13 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
         "recommended": recommended,
         "fallback_requirement": "If using lower-tier components while a higher-tier candidate is present, explain the missing contract in decisions."
     })
+}
+
+fn candidate_has_matched_terms(candidate: &Value) -> bool {
+    candidate
+        .get("matched_terms")
+        .and_then(Value::as_array)
+        .is_some_and(|terms| !terms.is_empty())
 }
 
 fn tokenize_for_component_match(value: &str) -> BTreeSet<String> {
@@ -442,8 +459,9 @@ fn normalize_component_token(value: &str) -> Option<String> {
 }
 
 const COMPONENT_STOP_WORDS: &[&str] = &[
-    "agent", "agents", "air", "and", "are", "code", "coding", "for", "from", "into", "module",
-    "modules", "one", "task", "the", "this", "that", "tool", "tools", "using", "with", "when",
+    "agent", "agents", "air", "and", "are", "code", "coding", "file", "files", "for", "from",
+    "into", "module", "modules", "one", "task", "the", "this", "that", "tool", "tools", "using",
+    "with", "when",
 ];
 
 pub(crate) fn module_catalog(
@@ -554,7 +572,7 @@ pub(crate) fn recipe_catalog(
     let mut recipes = Vec::new();
 
     for recipe in &store.recipes {
-        if !allow_internal && recipe_uses_internal_modules(recipe, store) {
+        if !allow_internal && recipe.visibility == air_linker::ModuleVisibility::Internal {
             continue;
         }
 
@@ -569,6 +587,7 @@ pub(crate) fn recipe_catalog(
 
         recipes.push(json!({
             "id": recipe.id,
+            "visibility": recipe.visibility,
             "description": recipe.description,
             "tags": recipe.tags,
             "covers": recipe.covers,
@@ -657,7 +676,7 @@ fn materialize_recipe_selection(
         .find(|recipe| recipe.id == recipe_id)
         .ok_or_else(|| anyhow::anyhow!("planner selected unknown recipe {recipe_id}"))?;
 
-    if !allow_internal && recipe_uses_internal_modules(recipe, store) {
+    if !allow_internal && recipe.visibility == air_linker::ModuleVisibility::Internal {
         anyhow::bail!("planner selected internal recipe {recipe_id} without --allow-internal");
     }
 
@@ -683,17 +702,6 @@ fn materialize_recipe_selection(
         },
     );
     Ok(plan)
-}
-
-fn recipe_uses_internal_modules(
-    recipe: &air_linker::PlanRecipe,
-    store: &air_linker::ModuleStore,
-) -> bool {
-    recipe.plan.nodes.iter().any(|node| {
-        store.modules.get(&node.module).is_some_and(|module_ref| {
-            module_ref.visibility == air_linker::ModuleVisibility::Internal
-        })
-    })
 }
 
 fn normalize_planner_run_plan(plan: &mut air_linker::RunPlan) {

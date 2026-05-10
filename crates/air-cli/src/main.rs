@@ -884,10 +884,11 @@ mod tests {
     #[test]
     fn rejects_internal_recipe_selection_without_allow_internal() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let store = air_linker::parse_module_store_file(
+        let mut store = air_linker::parse_module_store_file(
             root.join("examples/deep-research/module-store.air-store.yaml"),
         )
         .unwrap();
+        store.recipes[0].visibility = air_linker::ModuleVisibility::Internal;
 
         let error = parse_planner_response(
             json!({"recipe_id": "deep_research.four_topic_report@0.1.0"}),
@@ -1119,6 +1120,37 @@ mod tests {
                 "task should route through {expected_source}: {task}"
             );
         }
+    }
+
+    #[test]
+    fn planner_request_hides_unmatched_code_agent_components_from_recommendations() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let store = air_linker::parse_module_store_file(
+            root.join("examples/code-agent/module-store.air-store.yaml"),
+        )
+        .unwrap();
+        let catalog = module_catalog(&store, &root, true).unwrap();
+        let recipes = recipe_catalog(&store, &root, true).unwrap();
+
+        let request = planner_request(
+            "Build an Apple-style landing page as a single HTML file and verify screenshots.",
+            &store,
+            catalog,
+            recipes,
+            true,
+        );
+        let recommended = request["module_store"]["component_selection"]["recommended"]
+            .as_array()
+            .unwrap();
+
+        assert!(recommended
+            .iter()
+            .all(|candidate| candidate["matched_terms"]
+                .as_array()
+                .is_some_and(|terms| !terms.is_empty())));
+        assert!(!recommended
+            .iter()
+            .any(|candidate| candidate["id"] == json!("context.compact@0.1.0")));
     }
 
     #[test]
