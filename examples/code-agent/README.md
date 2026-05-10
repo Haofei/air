@@ -20,11 +20,11 @@ This example contains bounded AIR coding agents and one preferred composed revie
 - `code.core_repair@0.1.0` is the preferred repair recipe and the smallest
   opencode-style core loop: run read-only exploration, pass that output through an explicit
   semantic adapter that selects bounded repair context files, then invoke `code.repair@0.1.0`
-  to patch and retest.
+  to edit and retest.
 - `code.repair@0.1.0` reads a target file plus bounded related files, runs an allowlisted test,
-  uses structured diagnostics to gather nearby source context, generates a unified diff, validates
-  it with `file.patch` dry-run, applies it through constrained `file.patch`, then retests with one
-  bounded retry pass if the first patch does not fix the test. It finishes by calling `git.status`
+  uses structured diagnostics to gather nearby source context, asks the model for structured
+  `file.ops` edits, validates them with a dry-run, applies them through constrained `file.ops`,
+  then retests with one bounded retry pass if the first edit set does not fix the test. It finishes by calling `git.status`
   so the returned summary includes workspace cleanliness and changed files.
 - `code.build_page@0.1.0` generates one static HTML file, writes it through constrained `file.write`,
   runs an allowlisted smoke test, renders desktop/mobile screenshots through `browser.audit`, and
@@ -51,7 +51,7 @@ The plan/explore/review/repair agents use:
 
 The repair module writes a todo artifact before reading files, updates it before invoking the
 repair model, re-reads it into the model input, and records those progress events in the trace. It
-also requires `file.write` approval before `file.patch` can run. That mirrors opencode's explicit
+also requires `file.write` approval before `file.ops` can run. That mirrors opencode's explicit
 task tracking while keeping progress and write permission state inside AIR's typed tool, approval,
 and capability boundary.
 
@@ -71,7 +71,8 @@ string but should not guess line numbers, `file.read_many` for bounded multi-fil
 whitespace-tolerant strategies for indentation drift. Use `file.edit` with `edits[]` for atomic
 multi-point changes in one file; if any edit fails, the file is left unchanged. Each edit still
 emits bounded diff output for audit,
-`file.patch` for reviewed multi-file unified diffs, and `file.write` for bounded file creation or
+`file.ops` for atomic multi-file structured edits/writes with dry-run validation and conservative
+auto matching, `file.patch` for reviewed multi-file unified diffs, and `file.write` for bounded file creation or
 explicit overwrites. Keep shell execution behind `command_run` aliases instead of giving the model
 a raw shell. `command_run` returns both raw logs and structured `diagnostics[]`, so repair loops can
 focus on file/line/column errors instead of re-parsing terminal output from scratch.
@@ -80,10 +81,10 @@ models grounded without forcing them to calculate line ranges by hand.
 `command_run` can also expose constrained argv templates such as
 `["cargo", "test", "-q", "-p", "air-tools", "{{test_filter}}"]`; every placeholder must have a
 declared parameter policy, so agents can target one test without receiving raw shell access.
-When `require_read` is enabled, `file.write`, `file.edit`, and `file.patch` reject edits to files
-that were not read or were modified after the last read. `file.patch` also supports `dry_run: true`
-for `git apply --check` validation without mutating files; the repair agent uses that check before
-every patch apply.
+When `require_read` is enabled, `file.write`, `file.edit`, `file.ops`, and `file.patch` reject edits to files
+that were not read or were modified after the last read. `file.ops` and `file.patch` both support
+`dry_run: true` validation without mutating files; the repair agent uses `file.ops` dry-run before
+every apply.
 For frontend agents, `browser.audit` uses Playwright to open a local file or URL, capture desktop
 and mobile screenshots, and return structured layout diagnostics for console errors, page errors,
 horizontal overflow, and coarse text/click-target overlap. The build-page agent feeds those
@@ -189,7 +190,7 @@ For a repair task, the current input looks like this:
 
 ```json
 {
-  "task": "fix the failing add function using repository exploration, structured diagnostics, a bounded patch, and retest",
+  "task": "fix the failing add function using repository exploration, structured diagnostics, bounded file operations, and retest",
   "query": "repair fixture add function test",
   "target_path": "examples/code-agent/repair-fixture/math.js",
   "related_files": [],
@@ -404,9 +405,9 @@ cargo run -p air-cli -- validate-plan --profile examples/code-agent/repair-multi
 cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-multifile.air-profile.yaml --log
 ```
 
-This uses the same core repair recipe, but `tools.core.json` allows a patch touching at most two
+This uses the same core repair recipe, but `tools.core.json` allows structured file operations touching at most two
 existing files. The fixture starts with failures split across `math.js` and `normalize.js`; the
-verification gate asserts that the patch event reports `file_count == 2` and that the retest passes.
+verification gate asserts that the `file.ops` event reports `file_count == 2` and that the retest passes.
 
 Deterministic verification for these examples:
 

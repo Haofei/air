@@ -1,5 +1,5 @@
 {
-  "task": "fix the failing add function using repository exploration, structured diagnostics, a bounded patch, and retest",
+  "task": "fix the failing add function using repository exploration, structured diagnostics, bounded file operations, and retest",
   "query": "repair fixture add function test",
   "target_path": "examples/code-agent/repair-fixture/math.js",
   "target_search_pattern": "repair|fixture|add|function|test",

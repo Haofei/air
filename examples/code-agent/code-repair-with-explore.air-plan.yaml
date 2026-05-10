@@ -62,5 +62,5 @@ outputs:
 
 decisions:
   - id: choose-core-coding-loop
-    rationale: "The task asks for a code fix, so use the core loop: read-only exploration, explicit context selection, bounded patching, and retest."
+    rationale: "The task asks for a code fix, so use the core loop: read-only exploration, explicit context selection, bounded file operations, and retest."
     selected: [explore, select_context, repair]

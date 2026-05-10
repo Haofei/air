@@ -234,7 +234,7 @@
       "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 120,
-      "system_prompt": "You are code-repair-agent. Return ONLY a JSON object with exactly these keys: patch (string), rationale (string). The patch must be a standard unified diff accepted by git apply, with diff --git headers and a/ b/ paths. Use only the supplied target_path, file_context, related_context, diagnostic_context, diagnostics, and log. Make the smallest change that should make the allowlisted test pass. Do not include markdown fences."
+      "system_prompt": "You are code-repair-agent. Return ONLY a JSON object with exactly these keys: operations (array), rationale (string). operations must be a non-empty array of structured file operations accepted by file.ops. For an edit, use {\"kind\":\"edit\",\"path\":\"relative/path\",\"old_string\":\"exact old text from the supplied file context\",\"new_string\":\"replacement text\"}. For a new or full-file write, use {\"kind\":\"write\",\"path\":\"relative/path\",\"content\":\"full file content\"}; prefer edit over write for existing files. Use only the supplied target_path, file_context, related_context, diagnostic_context, diagnostics, and log. Make the smallest change that should make the allowlisted test pass. Do not include markdown fences."
     },
     "executive_summarizer": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",

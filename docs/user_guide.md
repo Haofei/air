@@ -321,6 +321,7 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `file_read_many` | `file.read_many` | `{ "files": ["src/a.rs", { "path": "src/b.rs", "contains": "fn run", "context_lines": 8 }] }` | `{ files[], file_count, bytes, truncated, artifacts[] }` | Batch variant of `file.read` for bounded multi-file context gathering. Each entry is validated with the same path, UTF-8, binary, range, and `contains` rules as `file.read`; `max_files` keeps one call from flooding context. |
 | `file_write` | `file.write` | `{ "path": "relative/file.txt", "content": "..." }` | `{ path, bytes, created, overwritten, artifacts[] }` | Write tool constrained to configured `base_dir`; optional directory creation, overwrite policy, and read-before-overwrite policy are set in tool config. When `require_read` is enabled, overwrites are rejected if the file changed after the last `file.read`. |
 | `file_edit` | `file.edit` | `{ "path": "relative/file.txt", "old_string": "...", "new_string": "...", "match_strategy": "exact" }` or `{ "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }` | `{ path, bytes, replacements, edit_count, match_strategy, match_strategies[], diff, diff_truncated, artifacts[] }` | Edit constrained to configured `base_dir`; requires a fresh prior `file.read` by default. The default `exact` strategy uses literal matching; explicit `line_trimmed` or `indentation_flexible` strategies support conservative whitespace-tolerant block replacement. `edits[]` applies multiple same-file replacements atomically: any failed edit rejects the call without writing. Emits bounded unified-diff output for audit. No-op edits and ambiguous multiple matches are rejected unless `replace_all` is explicitly allowed. |
+| `file_ops` | `file.ops` | `{ "operations": [{ "kind": "edit", "path": "...", "old_string": "...", "new_string": "..." }], "dry_run": true }` | `{ repo, success, checked, applied, files[], file_count, diagnostics[], match_strategies[], diff, diff_truncated, artifacts[] }` | Atomic multi-file structured edits/writes constrained to configured `base_dir`; requires fresh prior reads for existing files when enabled. Edit operations default to conservative `auto` matching: exact first, then whitespace-tolerant strategies only when they identify a safe match. Failed dry-runs return `success:false` diagnostics without mutating files. |
 | `file_patch` | `file.patch` | `{ "patch": "diff --git ...", "dry_run": true }` | `{ repo, success, checked, applied, files[], file_count, diagnostics[], bytes, artifacts[] }` | Applies a unified diff through `git apply --check` then `git apply`; validates changed paths, max files, new/delete policy, and fresh read-before-patch for existing files. In `dry_run` mode failed patch checks return `success:false` with diagnostics instead of mutating files. |
 | `git_diff` | `git.diff` | `{ "path": "...", "paths": ["..."], "files": [{ "path": "..." }], "staged": false }` | `{ repo, diff, bytes, truncated, artifacts[] }` | Read-only diff; path filters must stay inside `repo_dir`. The `files` form accepts `file.patch` changed-file objects so coding agents can audit only the paths they changed instead of the whole dirty workspace. |
 | `git_status` | `git.status` | `{}` | `{ repo, clean, entries[], file_count, truncated, artifacts[] }` | Read-only workspace status through `git status --porcelain=v1`; returns structured index/worktree entries for review, repair, and final summaries. |
@@ -349,7 +350,7 @@ Artifact-producing tools return a common shape:
   "artifacts": [
     {
       "id": "doc-1",
-      "kind": "web_page | browser_screenshot | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | repo_symbols | repo_references | code_context | diagnostic_context | todo_list | context_measure | git_diff | git_status | test_log",
+      "kind": "web_page | browser_screenshot | doc_chunk | file_span | file_write | file_edit | file_ops | file_patch | repo_listing | repo_search | repo_symbols | repo_references | code_context | diagnostic_context | todo_list | context_measure | git_diff | git_status | test_log",
       "title": "Readable title",
       "uri": "file-or-web-location",
       "content": "Evidence text",
@@ -376,8 +377,8 @@ snippets, inspect a target file and diff, run one allowlisted verification comma
 for review findings that cite exact artifact ids. Build agents can generate a bounded artifact,
 write it through `file.write`, run an allowlisted smoke command, render browser screenshots, and
 perform one bounded revision from smoke-test or browser-audit feedback. Repair agents use a target
-file plus bounded related-file context, diagnostics, source snippets, patch dry-runs, constrained
-patch apply, retest, and workspace status.
+file plus bounded related-file context, diagnostics, source snippets, `file.ops` dry-runs,
+constrained structured edits, retest, and workspace status.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 
@@ -471,6 +472,17 @@ Example read-only file and git tools:
       "capability": "file.write",
       "base_dir": ".",
       "allow_replace_all": false,
+      "max_bytes": 262144
+    },
+    "file.ops": {
+      "kind": "file_ops",
+      "capability": "file.write",
+      "base_dir": ".",
+      "require_read": true,
+      "allow_new_files": true,
+      "allow_overwrite": true,
+      "allow_replace_all": false,
+      "max_files": 20,
       "max_bytes": 262144
     },
     "file.patch": {

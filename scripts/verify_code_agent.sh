@@ -794,7 +794,7 @@ check_code_agent_route \
   "recipe"
 check_code_agent_route \
   "repair" \
-  "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
+  "Fix a failing test using structured diagnostics, apply bounded file operations, and retest." \
   "code.core_repair@0.1.0" \
   "recipe"
 check_code_agent_route \

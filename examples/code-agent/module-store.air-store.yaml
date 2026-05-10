@@ -74,9 +74,9 @@ modules:
     path: examples/code-agent/code-repair.air.yaml
     kind: composite
     visibility: public
-    description: "Bounded code repair agent using structured diagnostics, constrained file.patch, and retest."
-    tags: [coding, repair, diagnostics, patch, test]
-    covers: [code_fix, diagnostics_loop, bounded_patch, retest]
+    description: "Bounded code repair agent using structured diagnostics, constrained file.ops, and retest."
+    tags: [coding, repair, diagnostics, file_ops, test]
+    covers: [code_fix, diagnostics_loop, bounded_file_ops, retest]
     priority: 95
 
 recipes:
@@ -109,9 +109,9 @@ recipes:
           selected: [code.project_plan_recipe@0.1.0]
   - id: code.core_repair@0.1.0
     visibility: public
-    description: "Core coding-agent repair loop: gather read-only context, select bounded repair files, apply a constrained patch, and retest."
-    tags: [coding, repair, fix, diagnostics, patch, test]
-    covers: [code_fix, failing_test_repair, diagnostics_loop, bounded_patch, retest]
+    description: "Core coding-agent repair loop: gather read-only context, select bounded repair files, apply constrained file operations, and retest."
+    tags: [coding, repair, fix, diagnostics, file_ops, test]
+    covers: [code_fix, failing_test_repair, diagnostics_loop, bounded_file_ops, retest]
     priority: 150
     plan:
       plan:
@@ -170,7 +170,7 @@ recipes:
         repair: repair.repair
       decisions:
         - id: use-core-code-repair-loop
-          rationale: "Use the higher-level repair recipe so the primary coding agent explores first, adapts context explicitly, then patches and retests."
+          rationale: "Use the higher-level repair recipe so the primary coding agent explores first, adapts context explicitly, then edits and retests."
           selected: [code.core_repair@0.1.0]
   - id: code.review_with_std_context@0.1.0
     visibility: public

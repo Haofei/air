@@ -41,7 +41,7 @@ run_route \
   "recipe"
 run_route \
   "repair" \
-  "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
+  "Fix a failing test using structured diagnostics, apply bounded file operations, and retest." \
   "code.core_repair@0.1.0" \
   "recipe"
 run_route \
@@ -269,7 +269,14 @@ cat > target/generated/code-agent-bench/project_recover_model_fixtures.json <<'J
       "rationale": "The test file is the minimal related context needed to repair add."
     },
     "code_repairer": {
-      "patch": "diff --git a/examples/code-agent/repair-fixture/math.js b/examples/code-agent/repair-fixture/math.js\n--- a/examples/code-agent/repair-fixture/math.js\n+++ b/examples/code-agent/repair-fixture/math.js\n@@ -1,5 +1,5 @@\n function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n \n module.exports = { add };\n",
+      "operations": [
+        {
+          "kind": "edit",
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "old_string": "function add(a, b) {\n  return a - b;\n}",
+          "new_string": "function add(a, b) {\n  return a + b;\n}"
+        }
+      ],
       "rationale": "The failed diagnostic shows add subtracts instead of summing; replace subtraction with addition."
     }
   }
