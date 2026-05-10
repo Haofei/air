@@ -1285,6 +1285,16 @@ fn file_ops_is_atomic_when_later_operation_fails() {
         .as_str()
         .unwrap()
         .contains("input.operations[1].old_string was not found"));
+    assert_eq!(output["diagnostics"][0]["operation_index"], json!(1));
+    assert_eq!(
+        output["diagnostics"][0]["operation_label"],
+        json!("input.operations[1]")
+    );
+    assert_eq!(output["diagnostics"][0]["path"], json!("note.txt"));
+    assert_eq!(output["diagnostics"][0]["kind"], json!("edit"));
+    assert_eq!(output["diagnostics"][0]["field"], json!("old_string"));
+    assert_eq!(output["diagnostics"][0]["match_strategy"], json!("auto"));
+    assert_eq!(output["diagnostics"][0]["match_count"], json!(0));
     assert_eq!(
         fs::read_to_string(dir.join("note.txt")).unwrap(),
         "hello AIR\n"

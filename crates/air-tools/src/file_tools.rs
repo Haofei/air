@@ -958,10 +958,19 @@ pub(super) fn call_file_ops_tool(
                         operations.len(),
                         &pending,
                         &diff,
-                        format!(
-                            "{label}.old_string was not found with match_strategy={}",
-                            match_strategy.as_str()
-                        ),
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "edit",
+                            "old_string",
+                            format!(
+                                "{label}.old_string was not found with match_strategy={}",
+                                match_strategy.as_str()
+                            ),
+                        )
+                        .with_match_strategy(match_strategy.as_str())
+                        .with_match_count(0),
                     ));
                 }
                 if matches.len() > 1 && !replace_all {
@@ -971,11 +980,21 @@ pub(super) fn call_file_ops_tool(
                         operations.len(),
                         &pending,
                         &diff,
-                        format!(
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "edit",
+                            "old_string",
+                            format!(
                             "{label}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
                         matches.len(),
                         effective_match_strategy.as_str()
-                        ),
+                            ),
+                        )
+                        .with_match_strategy(match_strategy.as_str())
+                        .with_effective_match_strategy(effective_match_strategy.as_str())
+                        .with_match_count(matches.len()),
                     ));
                 }
                 let selected = selected_edit_matches(&matches, replace_all);
@@ -991,9 +1010,16 @@ pub(super) fn call_file_ops_tool(
                         operations.len(),
                         &pending,
                         &diff,
-                        format!(
-                            "{label} edited content exceeds max_bytes={}",
-                            options.max_bytes
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "edit",
+                            "new_string",
+                            format!(
+                                "{label} edited content exceeds max_bytes={}",
+                                options.max_bytes
+                            ),
                         ),
                     ));
                 }
@@ -1016,7 +1042,14 @@ pub(super) fn call_file_ops_tool(
                         operations.len(),
                         &pending,
                         &diff,
-                        format!("{label}.content exceeds max_bytes={}", options.max_bytes),
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "write",
+                            "content",
+                            format!("{label}.content exceeds max_bytes={}", options.max_bytes),
+                        ),
                     ));
                 }
                 let (path, existed, old_content) =
@@ -1140,7 +1173,7 @@ fn file_ops_failure_output(
     operation_count: usize,
     pending: &BTreeMap<PathBuf, FileOpsPendingFile>,
     diff: &str,
-    message: String,
+    diagnostic: FileOpsDiagnostic,
 ) -> Value {
     let files = pending
         .values()
@@ -1153,6 +1186,7 @@ fn file_ops_failure_output(
         .collect::<Vec<_>>();
     let (diff_content, diff_truncated, diff_bytes) =
         bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
+    let diagnostic = diagnostic.into_json(name);
     json!({
         "repo": base.display().to_string(),
         "success": false,
@@ -1160,11 +1194,7 @@ fn file_ops_failure_output(
         "applied": false,
         "files": files,
         "file_count": pending.len(),
-        "diagnostics": [{
-            "source": name,
-            "severity": "error",
-            "message": message,
-        }],
+        "diagnostics": [diagnostic],
         "bytes": diff_bytes,
         "diff": diff_content,
         "diff_truncated": diff_truncated,
@@ -1187,6 +1217,73 @@ fn file_ops_failure_output(
             }
         }]
     })
+}
+
+#[derive(Debug, Clone)]
+struct FileOpsDiagnostic {
+    operation_index: usize,
+    operation_label: String,
+    path: String,
+    kind: String,
+    field: String,
+    message: String,
+    match_strategy: Option<String>,
+    effective_match_strategy: Option<String>,
+    match_count: Option<usize>,
+}
+
+impl FileOpsDiagnostic {
+    fn new(
+        operation_index: usize,
+        operation_label: String,
+        path: &str,
+        kind: &str,
+        field: &str,
+        message: String,
+    ) -> Self {
+        Self {
+            operation_index,
+            operation_label,
+            path: path.to_string(),
+            kind: kind.to_string(),
+            field: field.to_string(),
+            message,
+            match_strategy: None,
+            effective_match_strategy: None,
+            match_count: None,
+        }
+    }
+
+    fn with_match_strategy(mut self, strategy: &str) -> Self {
+        self.match_strategy = Some(strategy.to_string());
+        self
+    }
+
+    fn with_effective_match_strategy(mut self, strategy: &str) -> Self {
+        self.effective_match_strategy = Some(strategy.to_string());
+        self
+    }
+
+    fn with_match_count(mut self, count: usize) -> Self {
+        self.match_count = Some(count);
+        self
+    }
+
+    fn into_json(self, source: &str) -> Value {
+        json!({
+            "source": source,
+            "severity": "error",
+            "message": self.message,
+            "operation_index": self.operation_index,
+            "operation_label": self.operation_label,
+            "path": self.path,
+            "kind": self.kind,
+            "field": self.field,
+            "match_strategy": self.match_strategy,
+            "effective_match_strategy": self.effective_match_strategy,
+            "match_count": self.match_count
+        })
+    }
 }
 
 fn resolve_file_ops_write_path(
