@@ -2813,20 +2813,27 @@ fn call_repo_search_tool(
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
     let query = required_input_string(name, input, "query")?;
+    let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
+    if !matches!(mode, "fixed" | "regex") {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.mode must be fixed or regex"
+        )));
+    }
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
     let mut command = Command::new("rg");
-    command
-        .args([
-            "--line-number",
-            "--column",
-            "--with-filename",
-            "--no-heading",
-            "--color",
-            "never",
-        ])
-        .arg("--fixed-strings")
-        .arg(query);
+    command.args([
+        "--line-number",
+        "--column",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+    ]);
+    if mode == "fixed" {
+        command.arg("--fixed-strings");
+    }
+    command.arg(query);
     if let Some(glob) = input.get("glob").and_then(Value::as_str) {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
@@ -2867,6 +2874,7 @@ fn call_repo_search_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
+        "mode": mode,
         "matches": matches,
         "bytes": bytes,
         "truncated": truncated,
@@ -2880,6 +2888,7 @@ fn call_repo_search_tool(
                 "provider": "repo_search",
                 "repo": repo.display().to_string(),
                 "query": query,
+                "mode": mode,
                 "paths": paths,
                 "max_matches": max_matches,
                 "bytes": bytes,
@@ -5073,6 +5082,75 @@ mod tests {
             .unwrap()
             .contains("alpha"));
         assert_eq!(tools.tool_capability("repo.search"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_search_supports_explicit_regex_mode() {
+        let dir = temp_dir("air-tools-repo-search-regex");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn alpha() {}\nfn beta_value() {}\nfn gammaValue() {}\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "repo.search",
+                &json!({"query": "fn [a-z]+_value", "mode": "regex", "path": "src"}),
+            )
+            .unwrap();
+
+        assert_eq!(output["mode"], json!("regex"));
+        assert_eq!(output["matches"].as_array().unwrap().len(), 1);
+        assert!(output["matches"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("beta_value"));
+        assert_eq!(output["artifacts"][0]["metadata"]["mode"], json!("regex"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_search_rejects_unknown_mode() {
+        let dir = temp_dir("air-tools-repo-search-mode");
+        fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("repo.search", &json!({"query": "alpha", "mode": "glob"}))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("input.mode must be fixed or regex"));
         let _ = fs::remove_dir_all(dir);
     }
 

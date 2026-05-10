@@ -16,7 +16,7 @@ The review agent uses:
 - `todo.write` for a structured progress artifact before evidence gathering;
 - `web.search` for external documentation or issues;
 - `repo.files` for relevant repository paths;
-- `repo.search` for symbol or text matches;
+- `repo.search` for symbol or text matches, with explicit regex mode available for grep-style discovery;
 - `repo.context` for automatically selected nearby code snippets around repository matches;
 - `file.read` for the target source file, with optional numbered output for diagnostics;
 - `git.diff` for local changes to that file.
