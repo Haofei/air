@@ -20,6 +20,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.ai
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-multifile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refactor.air-profile.yaml
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs
@@ -805,6 +806,11 @@ check_code_agent_route \
   "code.core_refactor@0.1.0" \
   "recipe"
 check_code_agent_route \
+  "open_refactor" \
+  "Refactor the codebase to make a simple implementation cleaner when no target file is supplied." \
+  "code.open_refactor@0.1.0" \
+  "recipe"
+check_code_agent_route \
   "build" \
   "Build an Apple-style landing page as a single HTML file and verify screenshots." \
   "code.build_page@0.1.0" \
@@ -1128,6 +1134,45 @@ assert any(
     and event.get("status") == "ok"
     for event in trace
 ), trace
+PY
+
+echo "[code-agent] open-ended refactor offline run"
+open_refactor_fixture_backup="$(mktemp)"
+cp examples/code-agent/refactor-fixture/math.js "$open_refactor_fixture_backup"
+restore_open_refactor_fixture() {
+  cp "$open_refactor_fixture_backup" examples/code-agent/refactor-fixture/math.js
+  rm -f "$open_refactor_fixture_backup"
+}
+trap restore_open_refactor_fixture EXIT
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/open-refactor.air-profile.yaml \
+  --trace-out target/generated/code_agent_open_refactor.trace.jsonl \
+  > target/generated/code_agent_open_refactor.output.json
+node examples/code-agent/refactor-fixture/test.js > target/generated/code_agent_open_refactor.post_test.log
+restore_open_refactor_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_open_refactor.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+with open("target/generated/code_agent_open_refactor.trace.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+
+candidate = output["refactor_candidate"]
+assert candidate["target_path"] == "examples/code-agent/refactor-fixture/math.js", candidate
+assert candidate["test_command"] == "refactor_fixture_test", candidate
+assert candidate["risk"] == "low", candidate
+repair = output["repair"]
+assert output["refactor"] == repair, output
+assert repair["initial_success"] is True, repair
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+models = [
+    event.get("meta", {}).get("model")
+    for event in trace
+    if event.get("action") == "model_call" and event.get("status") == "ok"
+]
+assert models == ["code_explorer", "code_refactor_candidate_selector", "code_repairer"], models
 PY
 
 echo "[code-agent] user-facing refactor command offline run"

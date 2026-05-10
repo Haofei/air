@@ -128,6 +128,16 @@
       "context_lines": 4,
       "max_bytes": 65536
     },
+    "candidate.validate": {
+      "kind": "candidate_validate",
+      "capability": "code.read",
+      "base_dir": "../..",
+      "allowed_test_commands": [
+        "repair_fixture_test",
+        "repair_multifile_test",
+        "refactor_fixture_test"
+      ]
+    },
     "git.status": {
       "kind": "git_status",
       "capability": "code.read",

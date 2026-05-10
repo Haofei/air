@@ -2426,6 +2426,126 @@ fn repo_files_lists_and_filters_repo_paths() {
 }
 
 #[test]
+fn repo_files_can_include_all_paths_for_open_ended_exploration() {
+    let dir = temp_dir("air-tools-repo-files-include-all");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    fs::write(dir.join("README.md"), "alpha docs\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.files",
+            &json!({"query": "does-not-match", "include_all": true}),
+        )
+        .unwrap();
+
+    let files = output["files"].as_array().unwrap();
+    assert!(files.iter().any(|file| file == "src/lib.rs"));
+    assert!(files.iter().any(|file| file == "README.md"));
+    assert_eq!(output["include_all"], json!(true));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["include_all"],
+        json!(true)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn candidate_validate_rejects_missing_target_file() {
+    let dir = temp_dir("air-tools-candidate-missing");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "candidate.validate": {
+                  "kind": "candidate_validate",
+                  "capability": "code.read",
+                  "base_dir": ".",
+                  "allowed_test_commands": ["unit"]
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool(
+            "candidate.validate",
+            &json!({
+                "candidate": {
+                    "target_path": "missing.js",
+                    "related_files": [],
+                    "test_command": "unit"
+                }
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("candidate.target_path"));
+    assert!(error.to_string().contains("missing.js"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
+    let dir = temp_dir("air-tools-candidate-valid");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.js"), "module.exports = {}\n").unwrap();
+    fs::write(dir.join("src/test.js"), "require('./lib')\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "candidate.validate": {
+                  "kind": "candidate_validate",
+                  "capability": "code.read",
+                  "base_dir": ".",
+                  "allowed_test_commands": ["unit"]
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "candidate.validate",
+            &json!({
+                "candidate": {
+                    "target_path": "src/lib.js",
+                    "related_files": ["src/test.js"],
+                    "test_command": "unit"
+                }
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["valid"], json!(true));
+    assert_eq!(output["target_path"], json!("src/lib.js"));
+    assert_eq!(output["related_files"], json!(["src/test.js"]));
+    assert_eq!(output["test_command"], json!("unit"));
+    assert_eq!(
+        tools.tool_capability("candidate.validate"),
+        Some("code.read")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_search_returns_structured_matches() {
     let dir = temp_dir("air-tools-repo-search");
     fs::create_dir_all(dir.join("src")).unwrap();

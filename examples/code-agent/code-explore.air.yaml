@@ -1,7 +1,7 @@
 agent:
   name: code-explore-agent
   version: 0.1.0
-  description: "Read-only code exploration subagent for open-ended repository questions."
+  description: "Read-only code exploration subagent for open-ended repository questions. target_path may be an empty string when no target is known yet."
 
 inputs:
   task: string
@@ -46,7 +46,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, plan, web_search, list_files, search_repo, read_context, inspect_symbols, read_target, read_todos, analyze, done, failed]
+    enum: [init, plan, web_search, list_files, search_repo, read_context, inspect_symbols, route_target, read_target, read_todos, analyze, done, failed]
   plan_status: object
   todo_snapshot: object
   web_results: object
@@ -115,7 +115,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 13
+  max_steps: 14
   terminal: [done, failed]
   rules:
     - id: init
@@ -187,6 +187,8 @@ workflow:
             object:
               query:
                 ref: query
+              include_all:
+                literal: true
               max_files:
                 literal: 40
           output: repo_files
@@ -252,10 +254,10 @@ workflow:
           timeout_seconds: 10
         - kind: set
           values:
-            phase: read_target
+            phase: route_target
 
     - id: read-target
-      when: phase == "read_target"
+      when: phase == "route_target" && target_path != ""
       actions:
         - kind: tool_call
           tool: file.read
@@ -271,6 +273,23 @@ workflow:
           timeout_seconds: 10
         - kind: set
           values:
+            phase: read_todos
+
+    - id: skip-target-read
+      when: phase == "route_target" && target_path == ""
+      actions:
+        - kind: set
+          values:
+            target_context:
+              object:
+                path:
+                  literal: ""
+                content:
+                  literal: ""
+                artifacts:
+                  array: []
+                truncated:
+                  literal: false
             phase: read_todos
 
     - id: read-todos

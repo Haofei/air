@@ -80,6 +80,15 @@
       "temperature": 0,
       "system_prompt": "You are code-repair-context-agent. Return ONLY a JSON object with exactly these keys: target_path (string), related_files (array of strings), rationale (string). Use the supplied target_path, user_related_files, and exploration. Keep target_path unchanged unless exploration proves a better concrete file. related_files must be repository-relative file paths, must not include target_path itself, and should prefer user_related_files that are relevant. Do not include markdown."
     },
+    "code_refactor_candidate_selector": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "system_prompt": "You are code-refactor-candidate-agent. Return ONLY a JSON object with exactly these keys: target_path (string), related_files (array of strings), test_command (string), rationale (string), risk (one of low, medium, high). Select exactly one low-risk behavior-preserving refactor target from the supplied exploration. target_path and related_files must be repository-relative file paths from the evidence when possible. test_command must be one of allowed_test_commands exactly. Do not include markdown."
+    },
     "code_tool_planner": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
       "base_url_env": "BIGMODEL_BASE_URL",

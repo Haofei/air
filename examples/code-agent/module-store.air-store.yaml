@@ -38,6 +38,14 @@ modules:
     tags: [coding, repair, semantic_adapter, context_selection]
     covers: [code_fix_context_selection, interface_adaptation, bounded_repair_context]
     priority: 70
+  code.refactor_candidate@0.1.0:
+    path: examples/code-agent/code-refactor-candidate.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Semantic adapter that selects one bounded refactor target and allowlisted test from read-only exploration output."
+    tags: [coding, refactor, semantic_adapter, target_selection, test_selection]
+    covers: [code_refactor_target_selection, interface_adaptation, bounded_refactor_context]
+    priority: 72
   code.review@0.1.0:
     path: examples/code-agent/code-review.air.yaml
     kind: composite
@@ -148,7 +156,7 @@ recipes:
     visibility: public
     description: "Core coding-agent refactor loop for known target/test tasks: intentionally patch a passing target and retest to preserve behavior."
     tags: [coding, refactor, behavior_preserving, file_ops, test]
-    covers: [code_refactor, behavior_preserving_change, bounded_file_ops, retest]
+    covers: [known_target_refactor, behavior_preserving_change, bounded_file_ops, retest]
     priority: 145
     plan:
       plan:
@@ -183,6 +191,71 @@ recipes:
         - id: use-core-code-refactor-loop
           rationale: "The target file and test command are already known, so run the opencode-style core edit loop directly with force_patch enabled."
           selected: [code.core_refactor@0.1.0]
+  - id: code.open_refactor@0.1.0
+    visibility: public
+    description: "Open-ended bounded refactor loop: explore first, select one safe target/test pair, then run the direct refactor kernel."
+    tags: [coding, refactor, explore, target_selection, file_ops, test]
+    covers: [open_ended_refactor, code_refactor, code_refactor_target_selection, bounded_file_ops, retest]
+    priority: 155
+    plan:
+      plan:
+        name: code-open-refactor-recipe
+        version: 0.1.0
+      requires:
+        capabilities: [task.progress, network.search, file.read, file.write, code.read, code.test]
+      nodes:
+        - id: explore
+          module: code.explore@0.1.0
+        - id: select_candidate
+          module: code.refactor_candidate@0.1.0
+        - id: refactor
+          module: code.repair@0.1.0
+      entry: explore
+      edges:
+        - from: explore
+          to: select_candidate
+        - from: select_candidate
+          to: refactor
+      connect:
+        - from: $input.task
+          to: explore.task
+        - from: $input.query
+          to: explore.query
+        - to: explore.target_path
+          value:
+            literal: ""
+        - from: $input.task
+          to: select_candidate.task
+        - from: $input.query
+          to: select_candidate.query
+        - from: $input.allowed_test_commands
+          to: select_candidate.allowed_test_commands
+        - from: explore.exploration
+          to: select_candidate.exploration
+        - from: $input.task
+          to: refactor.task
+        - from: $input.query
+          to: refactor.query
+        - from: $input.target_search_pattern
+          to: refactor.target_search_pattern
+        - from: select_candidate.refactor_candidate.target_path
+          to: refactor.target_path
+        - from: select_candidate.refactor_candidate.related_files
+          to: refactor.related_files
+        - from: select_candidate.refactor_candidate.test_command
+          to: refactor.test_command
+        - to: refactor.force_patch
+          value:
+            literal: true
+      outputs:
+        exploration: explore.exploration
+        refactor_candidate: select_candidate.refactor_candidate
+        refactor: refactor.repair
+        repair: refactor.repair
+      decisions:
+        - id: use-open-code-refactor-loop
+          rationale: "No target file was provided, so first explore, select one bounded candidate with an allowlisted test, then run the direct refactor kernel."
+          selected: [code.open_refactor@0.1.0]
   - id: code.review_with_std_context@0.1.0
     visibility: public
     description: "Grounded code review workflow that composes evidence gathering, the AIR standard context compactor, and final analysis."

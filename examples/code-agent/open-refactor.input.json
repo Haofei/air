@@ -1,0 +1,6 @@
+{
+  "task": "refactor the sum implementation while keeping behavior unchanged",
+  "query": "sum refactor fixture",
+  "target_search_pattern": "sum|reduce|values|total",
+  "allowed_test_commands": ["refactor_fixture_test"]
+}

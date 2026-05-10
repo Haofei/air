@@ -1,0 +1,168 @@
+agent:
+  name: code-refactor-candidate-agent
+  version: 0.1.0
+  description: "Semantic adapter that selects one bounded refactor target, related context files, and an allowlisted test command from read-only exploration."
+
+inputs:
+  task: string
+  query: string
+  allowed_test_commands:
+    type: array
+    items: string
+  exploration:
+    type: object
+    required: [summary, relevant_files, findings, source_ids, next_steps]
+    properties:
+      summary: string
+      relevant_files:
+        type: array
+        items:
+          type: object
+          required: [path, reason]
+          properties:
+            path: string
+            reason: string
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, evidence, source_ids]
+          properties:
+            title: string
+            evidence: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      next_steps:
+        type: array
+        items: string
+
+requires:
+  capabilities: [code.read]
+
+outputs:
+  refactor_candidate:
+    type: object
+    additional_properties: false
+    required: [target_path, related_files, test_command, rationale, risk]
+    properties:
+      target_path: string
+      related_files:
+        type: array
+        items: string
+      test_command: string
+      rationale: string
+      risk:
+        type: enum
+        enum: [low, medium, high]
+
+state:
+  phase:
+    type: enum
+    enum: [init, select, done, failed]
+  refactor_candidate:
+    type: object
+    additional_properties: false
+    required: [target_path, related_files, test_command, rationale, risk]
+    properties:
+      target_path: string
+      related_files:
+        type: array
+        items: string
+      test_command: string
+      rationale: string
+      risk:
+        type: enum
+        enum: [low, medium, high]
+  candidate_validation:
+    type: object
+    required: [valid, target_path, related_files, test_command, artifacts]
+    properties:
+      valid: boolean
+      target_path: string
+      related_files:
+        type: array
+        items: string
+      test_command: string
+      artifacts:
+        type: array
+        items: object
+
+tools:
+  - name: candidate.validate
+    capability: code.read
+    timeout_ms: 10000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 6
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: select
+
+    - id: select
+      when: phase == "select"
+      actions:
+        - kind: model_call
+          model: code_refactor_candidate_selector
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              allowed_test_commands:
+                ref: allowed_test_commands
+              exploration:
+                ref: exploration
+              instruction:
+                literal: "Choose exactly one low-risk behavior-preserving refactor target from exploration.relevant_files. Return a repository-relative target_path, a small related_files list excluding target_path, and one test_command from allowed_test_commands. If no safe target exists, choose the most relevant file and set risk to high."
+          output: refactor_candidate
+          timeout_seconds: 60
+          retry:
+            max_attempts: 2
+        - kind: tool_call
+          tool: candidate.validate
+          input:
+            object:
+              candidate:
+                ref: refactor_candidate
+          output: candidate_validation
+          timeout_seconds: 10
+        - kind: set
+          values:
+            refactor_candidate:
+              object:
+                target_path:
+                  ref: candidate_validation.target_path
+                related_files:
+                  ref: candidate_validation.related_files
+                test_command:
+                  ref: candidate_validation.test_command
+                rationale:
+                  ref: refactor_candidate.rationale
+                risk:
+                  ref: refactor_candidate.risk
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: refactor_candidate
+
+policy:
+  timeout_seconds: 90
+  max_model_calls: 2
+
+observability:
+  traces: true

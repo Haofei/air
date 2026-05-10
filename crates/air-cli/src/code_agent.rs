@@ -32,6 +32,8 @@ pub(crate) enum CodeRecipe {
     Repair,
     /// Behavior-preserving refactor loop: explore, patch intentionally, and retest.
     Refactor,
+    /// Open-ended bounded refactor loop: explore, select one target/test, patch, and retest.
+    OpenRefactor,
     /// Build one bounded static page and verify it.
     Build,
 }
@@ -1890,6 +1892,7 @@ fn task_recipe(task: &Value) -> Result<CodeRecipe> {
         "review" => Ok(CodeRecipe::Review),
         "repair" => Ok(CodeRecipe::Repair),
         "refactor" => Ok(CodeRecipe::Refactor),
+        "open-refactor" => Ok(CodeRecipe::OpenRefactor),
         "build" => Ok(CodeRecipe::Build),
         other => bail!("unsupported planned task recipe {other:?}"),
     }
@@ -2986,7 +2989,10 @@ fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
         fields.push(format!("approvals={}", turn.summary.approvals.join(",")));
     }
     if !turn.summary.files.is_empty() {
-        fields.push(format!("files={}", turn.summary.files.join(",")));
+        fields.push(format!(
+            "files={}",
+            code_session_join_limited(&turn.summary.files, 12)
+        ));
     }
     if !turn.summary.artifact_kinds.is_empty() {
         fields.push(format!(
@@ -3004,7 +3010,10 @@ fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
             .collect::<Vec<_>>();
         fields.push(format!("patch_sets={}", turn.patch_sets.len()));
         if !changed_files.is_empty() {
-            fields.push(format!("patch_files={}", changed_files.join(",")));
+            fields.push(format!(
+                "patch_files={}",
+                code_session_join_limited(&changed_files, 12)
+            ));
         }
     }
     if turn.summary.model_call_count > 0
@@ -3021,6 +3030,15 @@ fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
         ));
     }
     fields.join("; ")
+}
+
+fn code_session_join_limited(values: &[String], limit: usize) -> String {
+    if values.len() <= limit {
+        return values.join(",");
+    }
+    let mut items = values.iter().take(limit).cloned().collect::<Vec<_>>();
+    items.push(format!("+{} more", values.len() - limit));
+    items.join(",")
 }
 
 fn code_loop_iteration_input(
@@ -3131,7 +3149,7 @@ fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
             .pointer("/review/search_quality/sufficient")
             .and_then(Value::as_bool)
             .unwrap_or_else(|| outputs.get("review").is_some()),
-        CodeRecipe::Repair | CodeRecipe::Refactor => outputs
+        CodeRecipe::Repair | CodeRecipe::Refactor | CodeRecipe::OpenRefactor => outputs
             .pointer("/repair/final_success")
             .and_then(Value::as_bool)
             .unwrap_or(false),
@@ -3291,6 +3309,30 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
             );
             Ok(input)
         }
+        CodeRecipe::OpenRefactor => {
+            let query = query.unwrap_or_else(|| task.clone());
+            let target_search_pattern = code_search_pattern(&query);
+            let allowed_test_commands = match test {
+                Some(test) => vec![test],
+                None => vec![
+                    "repair_fixture_test".to_string(),
+                    "repair_multifile_test".to_string(),
+                    "refactor_fixture_test".to_string(),
+                ],
+            };
+            let mut input = Map::new();
+            input.insert("task".to_string(), Value::String(task.clone()));
+            input.insert("query".to_string(), Value::String(query));
+            input.insert(
+                "target_search_pattern".to_string(),
+                Value::String(target_search_pattern),
+            );
+            input.insert(
+                "allowed_test_commands".to_string(),
+                string_array(allowed_test_commands),
+            );
+            Ok(input)
+        }
         CodeRecipe::Build => {
             let output = required_path(output, "--output", recipe)?;
             let brand = brand.unwrap_or_else(|| "Product".to_string());
@@ -3341,6 +3383,9 @@ fn default_profile(recipe: CodeRecipe) -> PathBuf {
         CodeRecipe::Review => PathBuf::from("examples/code-agent/profile.air-profile.yaml"),
         CodeRecipe::Repair => PathBuf::from("examples/code-agent/repair-core.air-profile.yaml"),
         CodeRecipe::Refactor => PathBuf::from("examples/code-agent/refactor-core.air-profile.yaml"),
+        CodeRecipe::OpenRefactor => {
+            PathBuf::from("examples/code-agent/open-refactor.air-profile.yaml")
+        }
         CodeRecipe::Build => PathBuf::from("examples/code-agent/apple-build.air-profile.yaml"),
     }
 }
@@ -3353,6 +3398,7 @@ fn recipe_name(recipe: CodeRecipe) -> &'static str {
         CodeRecipe::Review => "review",
         CodeRecipe::Repair => "repair",
         CodeRecipe::Refactor => "refactor",
+        CodeRecipe::OpenRefactor => "open-refactor",
         CodeRecipe::Build => "build",
     }
 }
@@ -3377,12 +3423,16 @@ fn resolve_recipe(
     if output.is_some() || brand.is_some() || product.is_some() || !constraints.is_empty() {
         return CodeRecipe::Build;
     }
-    if test.is_some()
-        && task
-            .split(|character: char| !character.is_ascii_alphanumeric())
-            .any(|token| token.eq_ignore_ascii_case("refactor"))
-    {
-        return CodeRecipe::Refactor;
+    let asks_refactor = task
+        .split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token.eq_ignore_ascii_case("refactor"));
+    if asks_refactor {
+        if test.is_some() && target.is_some() {
+            return CodeRecipe::Refactor;
+        }
+        if test.is_none() && target.is_none() {
+            return CodeRecipe::OpenRefactor;
+        }
     }
     if test.is_some() {
         return CodeRecipe::Repair;
@@ -3595,6 +3645,44 @@ mod tests {
 
         assert_eq!(input["force_patch"], Value::Bool(true));
         assert_eq!(input["test_command"], Value::String("unit".to_string()));
+    }
+
+    #[test]
+    fn auto_recipe_selects_open_refactor_when_refactor_has_no_target_or_test() {
+        let input = build_input(CodeInputOptions {
+            task: "refactor the implementation to make it cleaner".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: None,
+            test: None,
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["query"],
+            Value::String("refactor the implementation to make it cleaner".to_string())
+        );
+        assert_eq!(
+            input["target_search_pattern"],
+            Value::String("refactor|the|implementation|make|cleaner".to_string())
+        );
+        assert_eq!(
+            input["allowed_test_commands"],
+            Value::Array(vec![
+                Value::String("repair_fixture_test".to_string()),
+                Value::String("repair_multifile_test".to_string()),
+                Value::String("refactor_fixture_test".to_string()),
+            ])
+        );
     }
 
     #[test]
