@@ -2091,6 +2091,11 @@ fn call_file_edit_tool(
             "tool {name} input.old_string must not be empty"
         )));
     }
+    if old_string == new_string {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.new_string must be different from input.old_string"
+        )));
+    }
     let replace_all = optional_bool_input(name, input, "replace_all")?.unwrap_or(false);
     if replace_all && !allow_replace_all {
         return Err(RuntimeError::Provider(format!(
@@ -4005,6 +4010,47 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("input.match_strategy"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_rejects_noop_replacement() {
+        let dir = temp_dir("air-tools-file-edit-noop");
+        fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.edit",
+                &json!({"path": "note.txt", "old_string": "AIR", "new_string": "AIR"}),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("must be different"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "hello AIR\n"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
