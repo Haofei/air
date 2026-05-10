@@ -25,8 +25,8 @@ use crate::planner::{
 };
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::run_plan::{
-    observe_event, replay, resume_plan, run_plan, write_partial_trace, write_trace, ReplayOptions,
-    ResumePlanOptions, RunPlanOptions,
+    observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
+    ReplayOptions, ResumePlanOptions, RunPlanOptions,
 };
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
@@ -899,7 +899,13 @@ fn run(
         let mut vm = Vm { tools, models };
         if observe {
             let result = vm.run_with_observer(&module, inputs, |event| {
-                observe_event(event, log, &mut observed_trace)
+                observe_event_with_trace_file(
+                    event,
+                    log,
+                    &mut observed_trace,
+                    trace_out.as_ref(),
+                    trace_redact,
+                )
             });
             if result.is_err() {
                 write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
@@ -915,7 +921,13 @@ fn run(
         };
         if observe {
             let result = vm.run_with_observer(&module, inputs, |event| {
-                observe_event(event, log, &mut observed_trace)
+                observe_event_with_trace_file(
+                    event,
+                    log,
+                    &mut observed_trace,
+                    trace_out.as_ref(),
+                    trace_redact,
+                )
             });
             if result.is_err() {
                 write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
@@ -972,7 +984,15 @@ fn run_system(
                 inputs,
                 tools,
                 models,
-                |event| observe_event(event, log, &mut observed_trace),
+                |event| {
+                    observe_event_with_trace_file(
+                        event,
+                        log,
+                        &mut observed_trace,
+                        trace_out.as_ref(),
+                        trace_redact,
+                    )
+                },
             );
             if result.is_err() {
                 write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;
@@ -988,7 +1008,15 @@ fn run_system(
             inputs,
             tools,
             ModelProviderChoice::echo(),
-            |event| observe_event(event, log, &mut observed_trace),
+            |event| {
+                observe_event_with_trace_file(
+                    event,
+                    log,
+                    &mut observed_trace,
+                    trace_out.as_ref(),
+                    trace_redact,
+                )
+            },
         );
         if result.is_err() {
             write_partial_trace(trace_out.as_ref(), &observed_trace, trace_redact)?;

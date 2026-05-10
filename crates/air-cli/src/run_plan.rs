@@ -336,7 +336,15 @@ pub(crate) fn run_plan_with_inputs_capture(
                 inputs,
                 tools,
                 models,
-                |event| observe_event(event, log, &mut observed_trace),
+                |event| {
+                    observe_event_with_trace_file(
+                        event,
+                        log,
+                        &mut observed_trace,
+                        trace_out.as_ref(),
+                        trace_redact,
+                    )
+                },
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
             if result.is_err() {
@@ -363,7 +371,15 @@ pub(crate) fn run_plan_with_inputs_capture(
             inputs,
             tools,
             ModelProviderChoice::echo(),
-            |event| observe_event(event, log, &mut observed_trace),
+            |event| {
+                observe_event_with_trace_file(
+                    event,
+                    log,
+                    &mut observed_trace,
+                    trace_out.as_ref(),
+                    trace_redact,
+                )
+            },
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         );
         if result.is_err() {
@@ -567,7 +583,9 @@ fn run_plan_parallel(
             inputs,
             || tools.clone(),
             || models.clone(),
-            |event| observe_event(event, log, observed_trace),
+            |event| {
+                observe_event_with_trace_file(event, log, observed_trace, trace_out, trace_redact)
+            },
             |checkpoint| write_checkpoint_state(checkpoint_out, checkpoint),
         );
         if result.is_err() {
@@ -744,7 +762,15 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
                 resume,
                 tools,
                 models,
-                |event| observe_event(event, log, &mut observed_trace),
+                |event| {
+                    observe_event_with_trace_file(
+                        event,
+                        log,
+                        &mut observed_trace,
+                        trace_out.as_ref(),
+                        trace_redact,
+                    )
+                },
                 |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
             );
             if result.is_err() {
@@ -773,7 +799,15 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
             resume,
             tools,
             ModelProviderChoice::echo(),
-            |event| observe_event(event, log, &mut observed_trace),
+            |event| {
+                observe_event_with_trace_file(
+                    event,
+                    log,
+                    &mut observed_trace,
+                    trace_out.as_ref(),
+                    trace_redact,
+                )
+            },
             |checkpoint| write_checkpoint_state(checkpoint_out.as_ref(), checkpoint),
         );
         if result.is_err() {
@@ -862,6 +896,22 @@ pub(crate) fn observe_event(event: &TraceEvent, log: bool, trace: &mut Vec<Trace
         log_event(event);
     }
     trace.push(event.clone());
+}
+
+pub(crate) fn observe_event_with_trace_file(
+    event: &TraceEvent,
+    log: bool,
+    trace: &mut Vec<TraceEvent>,
+    trace_out: Option<&PathBuf>,
+    trace_redact: bool,
+) {
+    observe_event(event, log, trace);
+    if let Err(error) = write_partial_trace(trace_out, trace, trace_redact) {
+        eprintln!(
+            "[air] failed to write incremental trace after {}:{}: {error}",
+            event.rule, event.action
+        );
+    }
 }
 
 pub(crate) fn write_partial_trace(
@@ -991,4 +1041,46 @@ pub(crate) fn replay(options: ReplayOptions) -> Result<()> {
         println!("{}", serde_json::to_string_pretty(&output)?);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use air_runtime::TraceStatus;
+
+    #[test]
+    fn observer_writes_incremental_trace_file() {
+        let path = std::env::temp_dir().join(format!(
+            "air-incremental-trace-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let event = TraceEvent {
+            agent: "agent".to_string(),
+            step: 0,
+            rule: "choose".to_string(),
+            action: "model_call_start".to_string(),
+            input: Some(json!({"secret": "sk-test-123", "visible": "ok"})),
+            output: None,
+            meta: Some(json!({"model": "code_edit_decider"})),
+            status: TraceStatus::Ok,
+            error: None,
+        };
+        let mut trace = Vec::new();
+
+        observe_event_with_trace_file(&event, false, &mut trace, Some(&path), true);
+
+        let content = fs::read_to_string(&path).unwrap();
+        let events = read_trace_jsonl(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(trace.len(), 1);
+        assert_eq!(events.len(), 1);
+        assert!(content.contains("model_call_start"));
+        assert!(content.contains("[AIR_REDACTED]"));
+        assert!(!content.contains("sk-test-123"));
+    }
 }
