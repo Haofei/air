@@ -48,6 +48,7 @@ cargo test -q -p air-tools extract_command_diagnostics_parses_rustc_location_blo
 cargo test -q -p air-tools extract_command_diagnostics_parses_python_tracebacks
 cargo test -q -p air-tools extract_command_diagnostics_parses_line_only_colon_diagnostics
 cargo test -q -p air-tools extract_command_diagnostics_parses_file_context_lint_blocks
+cargo test -q -p air-cli model_config_prompt_matches_code_repair_schema
 
 echo "[code-agent] composed review offline run"
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-review-composed.air-plan.yaml \

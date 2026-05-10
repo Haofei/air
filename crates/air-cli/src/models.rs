@@ -217,6 +217,8 @@ pub(crate) fn call_openai_model(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use air_core::{StateAction, TypeSpec, Workflow};
+    use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
     fn temp_file(name: &str) -> PathBuf {
@@ -315,5 +317,71 @@ mod tests {
         assert_eq!(first["step"], json!(1));
         assert_eq!(second["step"], json!(2));
         assert_eq!(third["step"], json!(2));
+    }
+
+    #[test]
+    fn model_config_prompt_matches_code_repair_schema() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .unwrap();
+        let module =
+            air_parser::parse_air_file(root.join("examples/code-agent/code-repair.air.yaml"))
+                .unwrap();
+        let required = model_output_required_keys(&module, "code_repairer");
+        assert_eq!(
+            required,
+            BTreeSet::from(["operations".to_string(), "rationale".to_string()])
+        );
+
+        let config = air_backend_openai::parse_config_file(
+            root.join("examples/bigmodel-openai-compatible.json"),
+        )
+        .unwrap();
+        let prompt = config
+            .models
+            .get("code_repairer")
+            .and_then(|model| model.system_prompt.as_deref())
+            .unwrap_or_default()
+            .to_lowercase();
+
+        for key in &required {
+            assert!(
+                prompt.contains(key),
+                "code_repairer prompt must mention required output key {key}"
+            );
+        }
+        assert!(
+            !prompt.contains("exactly these keys: patch"),
+            "code_repairer prompt must not require the old patch-only schema"
+        );
+        assert!(
+            !prompt.contains("patch must be"),
+            "code_repairer prompt must not describe the old patch-only schema"
+        );
+    }
+
+    fn model_output_required_keys(
+        module: &air_core::AirModule,
+        model_alias: &str,
+    ) -> BTreeSet<String> {
+        let mut required = BTreeSet::new();
+        let Workflow::StateMachine(workflow) = &module.workflow else {
+            return required;
+        };
+        for rule in &workflow.rules {
+            for action in &rule.actions {
+                let StateAction::ModelCall { model, output, .. } = action else {
+                    continue;
+                };
+                if model != model_alias {
+                    continue;
+                }
+                if let Some(TypeSpec::Detailed(schema)) = module.state.get(output) {
+                    required.extend(schema.required.iter().cloned());
+                }
+            }
+        }
+        required
     }
 }
