@@ -1,0 +1,7 @@
+{
+  "task": "fix the failing add and multiply behavior using repository exploration, a bounded multi-file patch, and retest",
+  "query": "repair multifile add multiply normalize test",
+  "target_path": "examples/code-agent/repair-multifile/math.js",
+  "related_files": [],
+  "test_command": "repair_multifile_test"
+}

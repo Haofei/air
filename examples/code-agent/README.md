@@ -174,6 +174,18 @@ cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-core.air-p
 This profile also modifies `examples/code-agent/repair-fixture/math.js`; reset or restore the
 fixture after manual runs.
 
+Run the bounded multi-file repair fixture:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/repair-multifile.air-profile.yaml
+
+cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-multifile.air-profile.yaml --log
+```
+
+This uses the same core repair recipe, but `tools.core.json` allows a patch touching at most two
+existing files. The fixture starts with failures split across `math.js` and `normalize.js`; the
+verification gate asserts that the patch event reports `file_count == 2` and that the retest passes.
+
 Deterministic verification for these examples:
 
 ```bash

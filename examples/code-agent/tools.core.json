@@ -81,7 +81,7 @@
       "require_read": true,
       "allow_new_files": false,
       "allow_delete_files": false,
-      "max_files": 1,
+      "max_files": 2,
       "max_bytes": 65536
     },
     "diagnostic.context": {
@@ -106,6 +106,10 @@
         "repair_fixture_test": [
           "node",
           "examples/code-agent/repair-fixture/test.js"
+        ],
+        "repair_multifile_test": [
+          "node",
+          "examples/code-agent/repair-multifile/test.js"
         ]
       },
       "timeout_seconds": 30,

@@ -16,6 +16,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.a
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-multifile.air-profile.yaml
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs
@@ -135,6 +136,15 @@ fi
 grep -q "examples/code-agent/repair-fixture/math.js:2:10: error:" \
   target/generated/code_agent_repair_fixture.log
 
+echo "[code-agent] multifile repair fixture starts failing with structured diagnostics"
+if node examples/code-agent/repair-multifile/test.js > target/generated/code_agent_repair_multifile_fixture.log 2>&1; then
+  echo "multifile repair fixture unexpectedly passed; it should start from a failing implementation" >&2
+  cat target/generated/code_agent_repair_multifile_fixture.log >&2
+  exit 1
+fi
+grep -q "examples/code-agent/repair-multifile/math.js:4:10: error:" \
+  target/generated/code_agent_repair_multifile_fixture.log
+
 echo "[code-agent] core explore-repair offline run"
 repair_fixture_backup="$(mktemp)"
 cp examples/code-agent/repair-fixture/math.js "$repair_fixture_backup"
@@ -179,6 +189,48 @@ assert any(
     event.get("action") == "tool_call"
     and event.get("meta", {}).get("tool") == "file.patch"
     and event.get("status") == "ok"
+    for event in trace
+), trace
+PY
+
+echo "[code-agent] core multifile repair offline run"
+multifile_math_backup="$(mktemp)"
+multifile_normalize_backup="$(mktemp)"
+cp examples/code-agent/repair-multifile/math.js "$multifile_math_backup"
+cp examples/code-agent/repair-multifile/normalize.js "$multifile_normalize_backup"
+restore_multifile_repair_fixture() {
+  cp "$multifile_math_backup" examples/code-agent/repair-multifile/math.js
+  cp "$multifile_normalize_backup" examples/code-agent/repair-multifile/normalize.js
+  rm -f "$multifile_math_backup" "$multifile_normalize_backup"
+}
+trap restore_multifile_repair_fixture EXIT
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/repair-multifile.air-profile.yaml \
+  --trace-out target/generated/code_agent_repair_multifile.trace.jsonl \
+  > target/generated/code_agent_repair_multifile.output.json
+node examples/code-agent/repair-multifile/test.js > target/generated/code_agent_repair_multifile.post_test.log
+restore_multifile_repair_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_repair_multifile.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+with open("target/generated/code_agent_repair_multifile.trace.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+
+repair = output["repair"]
+changed = {entry["path"] for entry in repair["changed_files"]}
+assert output["repair_context"]["related_files"], output
+assert repair["initial_success"] is False, repair
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert "examples/code-agent/repair-multifile/math.js" in changed, repair
+assert "examples/code-agent/repair-multifile/normalize.js" in changed, repair
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "file.patch"
+    and event.get("status") == "ok"
+    and event.get("output", {}).get("file_count") == 2
     for event in trace
 ), trace
 PY
