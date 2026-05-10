@@ -204,7 +204,7 @@ workflow:
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
-          timeout_seconds: 45
+          timeout_seconds: 90
           retry:
             max_attempts: 2
         - kind: set
@@ -256,7 +256,7 @@ workflow:
               final_decision:
                 ref: decision
           output: edit
-          timeout_seconds: 45
+          timeout_seconds: 90
           retry:
             max_attempts: 2
         - kind: set

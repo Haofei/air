@@ -1083,6 +1083,76 @@ fn file_read_can_return_numbered_content() {
 }
 
 #[test]
+fn file_read_range_defaults_to_numbered_content() {
+    let dir = temp_dir("air-tools-file-read-range-numbered-default");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("file.read", &json!({"path": "note.txt", "start_line": 2}))
+        .unwrap();
+
+    assert_eq!(output["content"], json!("two\nthree"));
+    assert_eq!(output["line_numbers"], json!(true));
+    assert_eq!(output["line_numbers_defaulted"], json!(true));
+    assert_eq!(
+        output["numbered_content"],
+        json!("00002| two\n00003| three")
+    );
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["line_numbers_defaulted"],
+        json!(true)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_accepts_lines_range_alias() {
+    let dir = temp_dir("air-tools-file-read-lines-range");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("file.read", &json!({"path": "note.txt", "lines": "2-3"}))
+        .unwrap();
+
+    assert_eq!(output["content"], json!("two\nthree"));
+    assert_eq!(output["start_line"], json!(2));
+    assert_eq!(output["end_line"], json!(3));
+    assert_eq!(output["line_numbers"], json!(true));
+    assert_eq!(output["line_numbers_defaulted"], json!(true));
+    assert_eq!(
+        output["numbered_content"],
+        json!("00002| two\n00003| three")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_write_writes_inside_configured_base_dir() {
     let dir = temp_dir("air-tools-file-write");
     let config_path = write_config(
@@ -1825,6 +1895,57 @@ fn file_ops_applies_top_level_path_to_ops_alias_items() {
 }
 
 #[test]
+fn file_ops_applies_top_level_kind_and_path_to_edits_alias_items() {
+    let dir = temp_dir("air-tools-file-ops-edits-alias");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 2,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "kind": "replace_lines",
+                "path": "note.txt",
+                "edits": [{
+                    "start_line": 2,
+                    "end_line": 2,
+                    "new_lines": ["TWO"]
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\nTWO\nthree\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_ops_accepts_replace_lines_new_lines_alias() {
     let dir = temp_dir("air-tools-file-ops-new-lines-alias");
     fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
@@ -1862,6 +1983,57 @@ fn file_ops_accepts_replace_lines_new_lines_alias() {
                     "start_line": 2,
                     "end_line": 2,
                     "new_lines": ["TWO"]
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\nTWO\nthree\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_accepts_replace_lines_lines_alias() {
+    let dir = temp_dir("air-tools-file-ops-lines-alias");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 2,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "ops": [{
+                    "kind": "replace_lines",
+                    "path": "note.txt",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "lines": ["TWO"]
                 }]
             }),
         )

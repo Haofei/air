@@ -81,7 +81,7 @@ pub(crate) fn build_input_with_pack(
             input.insert("query".to_string(), Value::String(query.unwrap_or(task)));
             input.insert(
                 "target_path".to_string(),
-                Value::String(target.map(path_to_input_string).unwrap_or_default()),
+                Value::String(optional_path_to_input_string(target)),
             );
             Ok(input)
         }
@@ -119,7 +119,7 @@ pub(crate) fn build_input_with_pack(
             );
             input.insert(
                 "target_path".to_string(),
-                Value::String(target.map(path_to_input_string).unwrap_or_default()),
+                Value::String(optional_path_to_input_string(target)),
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("test_command".to_string(), Value::String(test));
@@ -252,6 +252,10 @@ fn string_array(values: Vec<String>) -> Value {
 
 pub(crate) fn path_to_input_string(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
+}
+
+pub(crate) fn optional_path_to_input_string(target: Option<PathBuf>) -> String {
+    target.map(path_to_input_string).unwrap_or_default()
 }
 
 pub(crate) fn path_ref_to_input_string(path: &Path) -> String {

@@ -35,12 +35,27 @@ pub(super) fn call_file_read_tool(
         })?
         .to_string();
     let total_lines = full_content.lines().count();
-    let start_line = optional_positive_usize_input(name, input, "start_line")?;
-    let end_line = optional_positive_usize_input(name, input, "end_line")?;
+    let lines_range = optional_line_range_input(name, input, "lines")?;
+    if lines_range.is_some()
+        && (input.get("start_line").is_some() || input.get("end_line").is_some())
+    {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.lines cannot be combined with input.start_line or input.end_line"
+        )));
+    }
+    let explicit_start_line = optional_positive_usize_input(name, input, "start_line")?;
+    let explicit_end_line = optional_positive_usize_input(name, input, "end_line")?;
+    let (start_line, end_line) = if let Some((start, end)) = lines_range {
+        (Some(start), Some(end))
+    } else {
+        (explicit_start_line, explicit_end_line)
+    };
     let contains = optional_string_input(name, input, "contains")?;
     let context_lines = optional_positive_usize_input(name, input, "context_lines")?.unwrap_or(0);
     let occurrence = optional_positive_usize_input(name, input, "occurrence")?.unwrap_or(1);
-    let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(false);
+    let explicit_line_numbers = input.get("line_numbers").is_some();
+    let line_numbers = optional_bool_input(name, input, "line_numbers")?
+        .unwrap_or_else(|| start_line.is_some() || end_line.is_some());
     let effective_max_bytes =
         optional_bounded_usize_input(name, input, "max_bytes", max_bytes)?.unwrap_or(max_bytes);
     if let (Some(start), Some(end)) = (start_line, end_line) {
@@ -115,6 +130,7 @@ pub(super) fn call_file_read_tool(
         "max_bytes": effective_max_bytes,
         "truncated": truncated,
         "line_numbers": line_numbers,
+        "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
         "artifacts": [{
             "id": format!("file:{}", path.display()),
             "kind": "file_span",
@@ -137,7 +153,8 @@ pub(super) fn call_file_read_tool(
                 "occurrence": occurrence,
                 "total_lines": total_lines,
                 "truncated": truncated,
-                "line_numbers": line_numbers
+                "line_numbers": line_numbers,
+                "line_numbers_defaulted": !explicit_line_numbers && line_numbers
             }
         }],
     }))
@@ -598,6 +615,99 @@ fn optional_bounded_zero_or_positive_usize_input(
     usize::try_from(number)
         .map(|value| Some(value.min(configured_max)))
         .map_err(|_| RuntimeError::Provider(format!("tool {tool_name} input.{field} is too large")))
+}
+
+fn optional_line_range_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+) -> Result<Option<(usize, usize)>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    match value {
+        Value::String(text) => parse_line_range_text(tool_name, field, text).map(Some),
+        Value::Array(items) if items.len() == 2 => {
+            let start = positive_usize_from_value(tool_name, field, &items[0])?;
+            let end = positive_usize_from_value(tool_name, field, &items[1])?;
+            validate_line_range(tool_name, field, start, end).map(Some)
+        }
+        Value::Number(_) => {
+            let line = positive_usize_from_value(tool_name, field, value)?;
+            Ok(Some((line, line)))
+        }
+        _ => Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must be a line number, \"start-end\", or [start, end]"
+        ))),
+    }
+}
+
+fn parse_line_range_text(
+    tool_name: &str,
+    field: &str,
+    text: &str,
+) -> Result<(usize, usize), RuntimeError> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must not be empty"
+        )));
+    }
+    if let Some((start, end)) = text.split_once('-').or_else(|| text.split_once(':')) {
+        let start = positive_usize_from_str(tool_name, field, start.trim())?;
+        let end = positive_usize_from_str(tool_name, field, end.trim())?;
+        return validate_line_range(tool_name, field, start, end);
+    }
+    let line = positive_usize_from_str(tool_name, field, text)?;
+    Ok((line, line))
+}
+
+fn positive_usize_from_value(
+    tool_name: &str,
+    field: &str,
+    value: &Value,
+) -> Result<usize, RuntimeError> {
+    let Some(number) = value.as_u64() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must contain positive integers"
+        )));
+    };
+    usize::try_from(number)
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{field} is too large"))
+        })
+}
+
+fn positive_usize_from_str(
+    tool_name: &str,
+    field: &str,
+    value: &str,
+) -> Result<usize, RuntimeError> {
+    value
+        .parse::<usize>()
+        .ok()
+        .filter(|number| *number > 0)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "tool {tool_name} input.{field} must contain positive integers"
+            ))
+        })
+}
+
+fn validate_line_range(
+    tool_name: &str,
+    field: &str,
+    start: usize,
+    end: usize,
+) -> Result<(usize, usize), RuntimeError> {
+    if start > end {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} start must be less than or equal to end"
+        )));
+    }
+    Ok((start, end))
 }
 
 fn numbered_content(content: &str, first_line: usize) -> String {
@@ -1065,6 +1175,22 @@ fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
             normalize_file_ops_operations_with_default_path(
                 ops,
                 input.get("path").and_then(Value::as_str),
+                input.get("kind").and_then(Value::as_str),
+            )?,
+        );
+        if let Some(dry_run) = input.get("dry_run") {
+            normalized.insert("dry_run".to_string(), dry_run.clone());
+        }
+        return Ok(Value::Object(normalized));
+    }
+    if let Some(edits) = input.get("edits") {
+        let mut normalized = serde_json::Map::new();
+        normalized.insert(
+            "operations".to_string(),
+            normalize_file_ops_operations_with_default_path(
+                edits,
+                input.get("path").and_then(Value::as_str),
+                input.get("kind").and_then(Value::as_str),
             )?,
         );
         if let Some(dry_run) = input.get("dry_run") {
@@ -1120,6 +1246,7 @@ fn normalize_file_ops_array_input(input: &Value, field: &str) -> Result<Value, R
             normalize_file_ops_operations_with_default_path(
                 operations,
                 input.get("path").and_then(Value::as_str),
+                input.get("kind").and_then(Value::as_str),
             )?,
         );
     }
@@ -1129,6 +1256,7 @@ fn normalize_file_ops_array_input(input: &Value, field: &str) -> Result<Value, R
 fn normalize_file_ops_operations_with_default_path(
     operations: &Value,
     default_path: Option<&str>,
+    default_kind: Option<&str>,
 ) -> Result<Value, RuntimeError> {
     let Some(items) = operations.as_array() else {
         return Ok(operations.clone());
@@ -1152,6 +1280,11 @@ fn normalize_file_ops_operations_with_default_path(
                 .entry("path".to_string())
                 .or_insert_with(|| Value::String(path.to_string()));
         }
+        if let Some(kind) = default_kind {
+            operation
+                .entry("kind".to_string())
+                .or_insert_with(|| Value::String(kind.to_string()));
+        }
         normalize_file_ops_operation_aliases(&mut operation);
         normalized_items.push(Value::Object(operation));
     }
@@ -1170,11 +1303,28 @@ fn merge_file_ops_args(
 }
 
 fn normalize_file_ops_operation_aliases(operation: &mut serde_json::Map<String, Value>) {
+    if operation.get("kind").is_none()
+        && operation.get("start_line").is_some()
+        && operation.get("end_line").is_some()
+        && (operation.get("content").is_some()
+            || operation.get("new_lines").is_some()
+            || operation.get("lines").is_some()
+            || operation.get("replacement").is_some())
+    {
+        operation.insert(
+            "kind".to_string(),
+            Value::String("replace_lines".to_string()),
+        );
+    }
     let kind = operation.get("kind").and_then(Value::as_str);
     if kind != Some("replace_lines") || operation.contains_key("new_string") {
         return;
     }
-    let value = if let Some(lines) = operation.get("new_lines").and_then(Value::as_array) {
+    let value = if let Some(lines) = operation
+        .get("new_lines")
+        .or_else(|| operation.get("lines"))
+        .and_then(Value::as_array)
+    {
         let mut text = String::new();
         for line in lines {
             let Some(line) = line.as_str() else {
