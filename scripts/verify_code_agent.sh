@@ -23,6 +23,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refactor.air-profile.yaml
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
 cargo test -q -p air-cli pack_validation_rejects
+cargo test -q -p air-cli pack_input_contract
 rm -rf target/generated/examples/code-agent target/generated/modules
 mkdir -p target/generated/examples
 cp -R examples/code-agent target/generated/examples/code-agent
@@ -49,6 +50,17 @@ assert output["pack"]["completion"]["any"][1]["all"][1]["non_empty_array"] == "/
 assert output["pack"]["routing"]["auto"][0]["recipe"] == "build", output
 assert output["pack"]["routing_decision"] is None, output
 PY
+if cargo run -q -p air-cli -- code "repair missing target" \
+  --recipe repair \
+  --test repair_fixture_test \
+  --explain \
+  > target/generated/code_agent_missing_input.output.json \
+  2> target/generated/code_agent_missing_input.err
+then
+  echo "expected code-agent input contract to reject missing --target" >&2
+  exit 1
+fi
+grep -q "missing required input field(s): target" target/generated/code_agent_missing_input.err
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs

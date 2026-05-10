@@ -1,6 +1,6 @@
 use crate::code_pack::{
-    load_code_agent_pack, CodeAgentCompletion, CodeAgentPackContext, CodeAgentRouteDecision,
-    CodeAgentRouteFacts,
+    load_code_agent_pack, CodeAgentCompletion, CodeAgentInputFacts, CodeAgentPackContext,
+    CodeAgentRouteDecision, CodeAgentRouteFacts,
 };
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
@@ -151,6 +151,30 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         &constraints,
     )?;
     let recipe = recipe_resolution.recipe;
+    pack.validate_recipe_input_facts(
+        recipe_name(recipe),
+        &CodeAgentInputFacts {
+            task: !task.trim().is_empty(),
+            target: target.is_some(),
+            test: test.as_ref().is_some_and(|value| !value.trim().is_empty()),
+            query: query.as_ref().is_some_and(|value| !value.trim().is_empty()),
+            related: !related.is_empty(),
+            search_query: search_query
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            repo_query: repo_query
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            required_terms: !required_terms.is_empty(),
+            output: output.is_some(),
+            brand: brand.as_ref().is_some_and(|value| !value.trim().is_empty()),
+            product: product
+                .as_ref()
+                .is_some_and(|value| !value.trim().is_empty()),
+            constraints: !constraints.is_empty(),
+            force_patch,
+        },
+    )?;
     let profile = match profile {
         Some(profile) => profile,
         None => default_profile(&pack, recipe)?,

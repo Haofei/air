@@ -65,6 +65,23 @@ pub(crate) struct CodeAgentRouteDecision {
     pub(crate) when: CodeAgentRouteWhen,
 }
 
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CodeAgentInputFacts {
+    pub(crate) task: bool,
+    pub(crate) target: bool,
+    pub(crate) test: bool,
+    pub(crate) query: bool,
+    pub(crate) related: bool,
+    pub(crate) search_query: bool,
+    pub(crate) repo_query: bool,
+    pub(crate) required_terms: bool,
+    pub(crate) output: bool,
+    pub(crate) brand: bool,
+    pub(crate) product: bool,
+    pub(crate) constraints: bool,
+    pub(crate) force_patch: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -283,6 +300,44 @@ all:
             error.to_string().contains("both required and optional"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn pack_input_contract_accepts_required_fields() {
+        let pack = load_code_agent_pack(None).unwrap();
+
+        pack.validate_recipe_input_facts(
+            "repair",
+            &CodeAgentInputFacts {
+                task: true,
+                target: true,
+                test: true,
+                ..CodeAgentInputFacts::default()
+            },
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn pack_input_contract_rejects_missing_required_fields() {
+        let pack = load_code_agent_pack(None).unwrap();
+
+        let error = pack
+            .validate_recipe_input_facts(
+                "repair",
+                &CodeAgentInputFacts {
+                    task: true,
+                    test: true,
+                    ..CodeAgentInputFacts::default()
+                },
+            )
+            .expect_err("missing target should be rejected by pack input contract");
+
+        assert!(
+            error.to_string().contains("missing required input"),
+            "{error}"
+        );
+        assert!(error.to_string().contains("target"), "{error}");
     }
 
     #[test]
@@ -674,6 +729,29 @@ impl CodeAgentPackContext {
         Ok(completion.is_complete(outputs))
     }
 
+    pub(crate) fn validate_recipe_input_facts(
+        &self,
+        recipe: &str,
+        facts: &CodeAgentInputFacts,
+    ) -> Result<()> {
+        let pack_recipe = self.recipe_for_id(recipe)?;
+        let missing = pack_recipe
+            .input
+            .required
+            .iter()
+            .filter(|field| !facts.field_present(field))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            bail!(
+                "code-agent pack {} recipe {recipe} missing required input field(s): {}",
+                self.path.display(),
+                missing.join(", ")
+            );
+        }
+        Ok(())
+    }
+
     pub(crate) fn resolve_auto_recipe_decision(
         &self,
         facts: &CodeAgentRouteFacts,
@@ -789,6 +867,27 @@ impl CodeAgentRouteFacts {
             "brand" => self.brand,
             "product" => self.product,
             "constraints" => self.constraints,
+            _ => false,
+        }
+    }
+}
+
+impl CodeAgentInputFacts {
+    fn field_present(&self, field: &str) -> bool {
+        match field {
+            "task" => self.task,
+            "target" => self.target,
+            "test" => self.test,
+            "query" => self.query,
+            "related" => self.related,
+            "search_query" => self.search_query,
+            "repo_query" => self.repo_query,
+            "required_terms" => self.required_terms,
+            "output" => self.output,
+            "brand" => self.brand,
+            "product" => self.product,
+            "constraints" => self.constraints,
+            "force_patch" => self.force_patch,
             _ => false,
         }
     }
