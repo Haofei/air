@@ -587,6 +587,52 @@ fn file_search_rejects_invalid_regex() {
 }
 
 #[test]
+fn file_search_truncates_long_structured_lines() {
+    let dir = temp_dir("air-tools-file-search-long-lines");
+    fs::write(
+        dir.join("note.txt"),
+        "before needle abcdefghijklmnopqrstuvwxyz after\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 4096,
+                  "max_matches": 8,
+                  "max_context_lines": 4,
+                  "max_line_chars": 12
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.search",
+            &json!({"path": "note.txt", "pattern": "needle"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["match_count"], json!(1));
+    assert_eq!(output["max_line_chars"], json!(12));
+    assert_eq!(output["line_truncated"], json!(true));
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["matches"][0]["line"], json!("before needl"));
+    assert_eq!(output["matches"][0]["line_truncated"], json!(true));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["line_truncated"],
+        json!(true)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_satisfies_read_before_file_ops_edit() {
     let dir = temp_dir("air-tools-file-search-read-before-edit");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();

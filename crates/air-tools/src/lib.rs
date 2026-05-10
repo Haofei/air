@@ -220,6 +220,9 @@ enum ToolConfig {
 
         #[serde(default)]
         max_context_lines: Option<usize>,
+
+        #[serde(default)]
+        max_line_chars: Option<usize>,
     },
     FileWrite {
         #[serde(default)]
@@ -981,6 +984,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 max_matches,
                 max_context_lines,
+                max_line_chars,
                 ..
             } => {
                 if base_dir.as_os_str().is_empty() {
@@ -995,6 +999,11 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     path,
                     &format!("tools.{name}.max_context_lines"),
                     *max_context_lines,
+                )?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_line_chars"),
+                    *max_line_chars,
                 )?;
             }
             ToolConfig::FileWrite {
@@ -1635,6 +1644,7 @@ impl ToolProvider for ConfigTools {
                 max_bytes,
                 max_matches,
                 max_context_lines,
+                max_line_chars,
             } => {
                 let base_dir = resolve_config_path(&self.config_dir, &base_dir);
                 let output = call_file_search_tool(
@@ -1644,6 +1654,7 @@ impl ToolProvider for ConfigTools {
                     max_bytes.unwrap_or(64 * 1024),
                     max_matches.unwrap_or(100),
                     max_context_lines.unwrap_or(8),
+                    max_line_chars.unwrap_or(2000),
                 )?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
                     self.remember_read_snapshot(Path::new(path))?;

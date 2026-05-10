@@ -231,6 +231,7 @@ pub(super) fn call_file_search_tool(
     max_bytes: usize,
     max_matches: usize,
     max_context_lines: usize,
+    max_line_chars: usize,
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
     let pattern = required_input_string(name, input, "pattern")?;
@@ -275,6 +276,7 @@ pub(super) fn call_file_search_tool(
     let lines = content.lines().collect::<Vec<_>>();
     let total_lines = lines.len();
     let mut total_match_count = 0usize;
+    let mut any_line_truncated = false;
     let mut matches = Vec::new();
     for (index, line) in lines.iter().enumerate() {
         if !regex.is_match(line) {
@@ -287,15 +289,30 @@ pub(super) fn call_file_search_tool(
         let line_number = index + 1;
         let before_start = line_number.saturating_sub(context_lines).max(1);
         let before = (before_start..line_number)
-            .filter_map(|number| line_json(&lines, number))
+            .filter_map(|number| line_json(&lines, number, max_line_chars))
+            .inspect(|line| {
+                any_line_truncated |= line
+                    .get("line_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            })
             .collect::<Vec<_>>();
         let after_end = (line_number + context_lines).min(total_lines);
         let after = ((line_number + 1)..=after_end)
-            .filter_map(|number| line_json(&lines, number))
+            .filter_map(|number| line_json(&lines, number, max_line_chars))
+            .inspect(|line| {
+                any_line_truncated |= line
+                    .get("line_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            })
             .collect::<Vec<_>>();
+        let (line, line_truncated) = truncate_line_text(line, max_line_chars);
+        any_line_truncated |= line_truncated;
         matches.push(json!({
             "line_number": line_number,
             "line": line,
+            "line_truncated": line_truncated,
             "before": before,
             "after": after,
         }));
@@ -324,6 +341,7 @@ pub(super) fn call_file_search_tool(
     let (artifact_content, content_truncated, bytes) =
         bytes_to_limited_text(rendered.as_bytes(), max_bytes);
     let match_truncated = total_match_count > matches.len();
+    let truncated = match_truncated || content_truncated || any_line_truncated;
     Ok(json!({
         "path": path.display().to_string(),
         "pattern": pattern,
@@ -332,7 +350,9 @@ pub(super) fn call_file_search_tool(
         "returned_match_count": matches.len(),
         "total_lines": total_lines,
         "context_lines": context_lines,
-        "truncated": match_truncated || content_truncated,
+        "max_line_chars": max_line_chars,
+        "line_truncated": any_line_truncated,
+        "truncated": truncated,
         "bytes": bytes,
         "artifacts": [{
             "id": format!("file-search:{}:{}", path.display(), stable_pattern_id(pattern)),
@@ -349,19 +369,30 @@ pub(super) fn call_file_search_tool(
                 "total_lines": total_lines,
                 "context_lines": context_lines,
                 "max_matches": max_matches,
-                "truncated": match_truncated || content_truncated
+                "max_line_chars": max_line_chars,
+                "line_truncated": any_line_truncated,
+                "truncated": truncated
             }
         }]
     }))
 }
 
-fn line_json(lines: &[&str], line_number: usize) -> Option<Value> {
+fn line_json(lines: &[&str], line_number: usize, max_line_chars: usize) -> Option<Value> {
     lines.get(line_number.checked_sub(1)?).map(|line| {
+        let (line, line_truncated) = truncate_line_text(line, max_line_chars);
         json!({
             "line_number": line_number,
             "line": line,
+            "line_truncated": line_truncated,
         })
     })
+}
+
+fn truncate_line_text(line: &str, max_line_chars: usize) -> (String, bool) {
+    if line.chars().count() <= max_line_chars {
+        return (line.to_string(), false);
+    }
+    (line.chars().take(max_line_chars).collect(), true)
 }
 
 fn render_search_line(value: &Value) -> String {
