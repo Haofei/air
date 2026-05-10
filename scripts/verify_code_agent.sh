@@ -204,6 +204,60 @@ file_search = next(
 assert file_search["output"]["directory"] is True, file_search
 PY
 
+echo "[code-agent] edit loop blocks premature completion"
+edit_premature_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_premature_backup"
+restore_edit_premature_fixture() {
+  cp "$edit_premature_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_premature_backup"
+}
+trap restore_edit_premature_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.premature-complete.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_premature.trace.jsonl \
+  > target/generated/code_agent_edit_premature.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_premature.post_test.log
+restore_edit_premature_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_premature.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_premature.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+assert any(
+    event.get("rule") == "block-complete-without-passed-verification"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "completion_blocked"
+    for event in events
+), events
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+summarizer = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_summarizer"
+)
+assert any(
+    observation.get("action") == "completion_blocked"
+    for observation in summarizer["input"]["observations"]
+), summarizer
+PY
+
 echo "[code-agent] user-facing edit command explain"
 cargo run -q -p air-cli -- code "edit the failing add function and retest" \
   --recipe edit \

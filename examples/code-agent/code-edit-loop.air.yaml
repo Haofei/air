@@ -51,6 +51,9 @@ state:
   observations:
     type: array
     items: object
+  verification_status:
+    type: enum
+    enum: [unknown, passed, failed]
   decision:
     type: object
     required: [complete, tool_calls, rationale]
@@ -163,6 +166,7 @@ workflow:
         - kind: set
           values:
             observations: []
+            verification_status: unknown
             phase: choose
 
     - id: choose
@@ -190,6 +194,8 @@ workflow:
                 ref: force_patch
               observations:
                 ref: observations
+              verification_status:
+                ref: verification_status
               allowed_tools:
                 array:
                   - literal: todo.write
@@ -418,6 +424,7 @@ workflow:
                 ref: auto_verify_result
         - kind: set
           values:
+            verification_status: failed
             phase: choose
 
     - id: record-auto-verify-failed-tool
@@ -444,6 +451,7 @@ workflow:
                 ref: auto_verify_result
         - kind: set
           values:
+            verification_status: failed
             phase: choose
 
     - id: record-auto-verify-passed
@@ -470,6 +478,31 @@ workflow:
                 ref: auto_verify_result
         - kind: set
           values:
+            verification_status: passed
+            phase: choose
+
+    - id: record-manual-test-failed-output
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: record-manual-test-passed
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == true
+      actions:
+        - kind: set
+          values:
+            verification_status: passed
+            phase: choose
+
+    - id: record-manual-test-tool-failed
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "error"
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
             phase: choose
 
     - id: continue-after-act
@@ -479,8 +512,29 @@ workflow:
           values:
             phase: choose
 
+    - id: block-complete-without-passed-verification
+      when: phase == "act" && decision.complete == true && verification_status != "passed"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: completion_blocked
+              rationale:
+                literal: Completion was blocked because verification_status is not passed. Run the allowlisted test or fix failing diagnostics before finishing.
+              requested:
+                array: []
+              result:
+                object:
+                  verification_status:
+                    ref: verification_status
+        - kind: set
+          values:
+            phase: choose
+
     - id: summarize
-      when: phase == "act" && decision.complete == true
+      when: phase == "act" && decision.complete == true && verification_status == "passed"
       actions:
         - kind: model_call
           model: code_edit_summarizer
