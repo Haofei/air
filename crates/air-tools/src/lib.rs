@@ -1687,7 +1687,18 @@ fn call_file_read_tool(
     }
     let body = fs::read(&path)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-    let full_content = String::from_utf8_lossy(&body).to_string();
+    if is_likely_binary(&body) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.path appears to be binary; file.read only supports UTF-8 text"
+        )));
+    }
+    let full_content = std::str::from_utf8(&body)
+        .map_err(|_| {
+            RuntimeError::Provider(format!(
+                "tool {name} input.path is not valid UTF-8; file.read only supports UTF-8 text"
+            ))
+        })?
+        .to_string();
     let total_lines = full_content.lines().count();
     let start_line = optional_positive_usize_input(name, input, "start_line")?;
     let end_line = optional_positive_usize_input(name, input, "end_line")?;
@@ -1730,6 +1741,21 @@ fn call_file_read_tool(
             }
         }],
     }))
+}
+
+fn is_likely_binary(bytes: &[u8]) -> bool {
+    if bytes.is_empty() {
+        return false;
+    }
+    let sample = &bytes[..bytes.len().min(4096)];
+    if sample.contains(&0) {
+        return true;
+    }
+    let non_printable = sample
+        .iter()
+        .filter(|byte| **byte < 9 || (**byte > 13 && **byte < 32))
+        .count();
+    non_printable * 10 > sample.len() * 3
 }
 
 fn file_modified_time(name: &str, label: &str, path: &Path) -> Result<SystemTime, RuntimeError> {
@@ -3644,6 +3670,58 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("outside configured base_dir"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_rejects_binary_content() {
+        let dir = temp_dir("air-tools-file-read-binary");
+        fs::write(dir.join("blob.bin"), [0, 159, 146, 150, 0, 1]).unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("file.read", &json!({"path": "blob.bin"}))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("appears to be binary"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_rejects_non_utf8_text() {
+        let dir = temp_dir("air-tools-file-read-non-utf8");
+        fs::write(dir.join("latin1.txt"), [b'h', b'i', 0xff]).unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("file.read", &json!({"path": "latin1.txt"}))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not valid UTF-8"));
         let _ = fs::remove_dir_all(dir);
     }
 
