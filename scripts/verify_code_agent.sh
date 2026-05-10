@@ -251,6 +251,9 @@ assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
 assert repair["changed_files"], repair
 assert repair["workspace_changed_files"], repair
+assert repair["workspace_clean_before"] is False, repair
+preexisting = {entry["path"] for entry in repair["preexisting_changed_files"]}
+assert "examples/code-agent/repair-fixture/test.js" in preexisting, repair
 assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
 assert "examples/code-agent/repair-fixture/test.js" not in repair["workspace_diff"]["diff"], repair
 assert any(

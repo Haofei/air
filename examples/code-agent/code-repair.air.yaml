@@ -14,7 +14,7 @@ inputs:
 outputs:
   repair:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files, workspace_diff]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean_before, workspace_clean, preexisting_changed_files, changed_files, workspace_changed_files, workspace_diff]
     properties:
       target_path: string
       initial_success: boolean
@@ -24,7 +24,11 @@ outputs:
       diagnostics:
         type: array
         items: object
+      workspace_clean_before: boolean
       workspace_clean: boolean
+      preexisting_changed_files:
+        type: array
+        items: object
       changed_files:
         type: array
         items: object
@@ -255,6 +259,20 @@ state:
       artifacts:
         type: array
         items: object
+  workspace_status_before:
+    type: object
+    required: [repo, clean, entries, file_count, artifacts]
+    properties:
+      repo: string
+      clean: boolean
+      entries:
+        type: array
+        items: object
+      file_count: integer
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
   workspace_diff:
     type: object
     required: [repo, diff, bytes, truncated, artifacts]
@@ -283,7 +301,7 @@ state:
         items: object
   repair:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files, workspace_diff]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean_before, workspace_clean, preexisting_changed_files, changed_files, workspace_changed_files, workspace_diff]
     properties:
       target_path: string
       initial_success: boolean
@@ -293,7 +311,11 @@ state:
       diagnostics:
         type: array
         items: object
+      workspace_clean_before: boolean
       workspace_clean: boolean
+      preexisting_changed_files:
+        type: array
+        items: object
       changed_files:
         type: array
         items: object
@@ -344,6 +366,14 @@ workflow:
     - id: init
       when: phase == "init"
       actions:
+        - kind: tool_call
+          tool: git.status
+          input:
+            literal: {}
+          output: workspace_status_before
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: set
           values:
             phase: read
@@ -771,8 +801,12 @@ workflow:
                   ref: repair_draft.rationale
                 diagnostics:
                   ref: repair_draft.diagnostics
+                workspace_clean_before:
+                  ref: workspace_status_before.clean
                 workspace_clean:
                   ref: workspace_status.clean
+                preexisting_changed_files:
+                  ref: workspace_status_before.entries
                 changed_files:
                   ref: repair_draft.changed_files
                 workspace_changed_files:
@@ -788,7 +822,7 @@ workflow:
           output: repair
 
 policy:
-  max_tool_calls: 14
+  max_tool_calls: 15
   max_model_calls: 2
   timeout_seconds: 360
 
