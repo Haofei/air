@@ -3137,51 +3137,56 @@ fn call_repo_search_tool(
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
     let (query, query_source) = repo_search_query_input(name, input)?;
-    let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
-    if !matches!(mode, "fixed" | "regex" | "smart") {
+    let requested_mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
+    if !matches!(requested_mode, "fixed" | "regex" | "smart") {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.mode must be fixed, regex, or smart"
         )));
     }
-    let effective_query = repo_effective_search_query(mode, query);
+    let mut mode = requested_mode.to_string();
+    let mut effective_query = repo_effective_search_query(&mode, query);
     let effective_max_matches =
         optional_bounded_usize_input(name, input, "max_matches", max_matches)?
             .unwrap_or(max_matches);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
-    let mut command = Command::new("rg");
-    command.args([
-        "--line-number",
-        "--column",
-        "--with-filename",
-        "--no-heading",
-        "--color",
-        "never",
-    ]);
-    if mode == "fixed" {
-        command.arg("--fixed-strings");
-    }
-    if mode == "smart" {
-        command.arg("--ignore-case");
-    }
-    command.arg(&effective_query);
     let glob = repo_glob_input(name, input)?;
     if let Some(glob) = glob {
         validate_git_pathspec(name, glob)?;
-        command.arg("-g").arg(glob);
     }
-    if !paths.is_empty() {
-        command.args(&paths);
-    }
-    let output = command
-        .current_dir(&repo)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo search: {error}")))?;
+    let mut output = run_repo_rg(
+        name,
+        &repo,
+        &paths,
+        glob,
+        &mode,
+        &effective_query,
+        "repo search",
+    )?;
     if !output.status.success() && output.status.code() != Some(1) {
         return Err(RuntimeError::Provider(format!(
             "tool {name} repo search failed: {}",
             provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
         )));
+    }
+    if output.status.code() == Some(1) && should_smart_fallback(requested_mode, query) {
+        mode = "smart".to_string();
+        effective_query = repo_effective_search_query(&mode, query);
+        output = run_repo_rg(
+            name,
+            &repo,
+            &paths,
+            glob,
+            &mode,
+            &effective_query,
+            "repo search",
+        )?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} repo search failed: {}",
+                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+            )));
+        }
     }
     let raw = String::from_utf8_lossy(&output.stdout);
     let mut matches = Vec::new();
@@ -3210,6 +3215,7 @@ fn call_repo_search_tool(
         "effective_query": effective_query,
         "glob": glob,
         "mode": mode,
+        "requested_mode": requested_mode,
         "matches": matches,
         "bytes": bytes,
         "truncated": truncated,
@@ -3227,6 +3233,7 @@ fn call_repo_search_tool(
                 "effective_query": effective_query,
                 "glob": glob,
                 "mode": mode,
+                "requested_mode": requested_mode,
                 "paths": paths,
                 "max_matches": effective_max_matches,
                 "bytes": bytes,
@@ -3246,13 +3253,14 @@ fn call_repo_context_tool(
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
     let query = required_input_string(name, input, "query")?;
-    let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
-    if !matches!(mode, "fixed" | "regex" | "smart") {
+    let requested_mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
+    if !matches!(requested_mode, "fixed" | "regex" | "smart") {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.mode must be fixed, regex, or smart"
         )));
     }
-    let effective_query = repo_effective_search_query(mode, query);
+    let mut mode = requested_mode.to_string();
+    let mut effective_query = repo_effective_search_query(&mode, query);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
     let effective_max_matches =
@@ -3264,38 +3272,43 @@ fn call_repo_context_tool(
         optional_bounded_usize_input(name, input, "context_lines", context_lines)?
             .unwrap_or(context_lines);
 
-    let mut command = Command::new("rg");
-    command.args([
-        "--line-number",
-        "--column",
-        "--with-filename",
-        "--no-heading",
-        "--color",
-        "never",
-    ]);
-    if mode == "fixed" {
-        command.arg("--fixed-strings");
-    }
-    if mode == "smart" {
-        command.arg("--ignore-case");
-    }
-    command.arg(&effective_query);
-    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+    let glob = repo_glob_input(name, input)?;
+    if let Some(glob) = glob {
         validate_git_pathspec(name, glob)?;
-        command.arg("-g").arg(glob);
     }
-    if !paths.is_empty() {
-        command.args(&paths);
-    }
-    let output = command
-        .current_dir(&repo)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo context: {error}")))?;
+    let mut output = run_repo_rg(
+        name,
+        &repo,
+        &paths,
+        glob,
+        &mode,
+        &effective_query,
+        "repo context",
+    )?;
     if !output.status.success() && output.status.code() != Some(1) {
         return Err(RuntimeError::Provider(format!(
             "tool {name} repo context failed: {}",
             provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
         )));
+    }
+    if output.status.code() == Some(1) && should_smart_fallback(requested_mode, query) {
+        mode = "smart".to_string();
+        effective_query = repo_effective_search_query(&mode, query);
+        output = run_repo_rg(
+            name,
+            &repo,
+            &paths,
+            glob,
+            &mode,
+            &effective_query,
+            "repo context",
+        )?;
+        if !output.status.success() && output.status.code() != Some(1) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} repo context failed: {}",
+                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+            )));
+        }
     }
 
     let raw = String::from_utf8_lossy(&output.stdout);
@@ -3370,6 +3383,7 @@ fn call_repo_context_tool(
         "query": query,
         "effective_query": effective_query,
         "mode": mode,
+        "requested_mode": requested_mode,
         "matches": matches,
         "snippets": snippets,
         "bytes": bytes,
@@ -3386,6 +3400,7 @@ fn call_repo_context_tool(
                 "query": query,
                 "effective_query": effective_query,
                 "mode": mode,
+                "requested_mode": requested_mode,
                 "paths": paths,
                 "max_matches": effective_max_matches,
                 "max_files": effective_max_files,
@@ -3413,6 +3428,47 @@ fn repo_effective_search_query(mode: &str, query: &str) -> String {
             .collect::<Vec<_>>()
             .join("|")
     )
+}
+
+fn run_repo_rg(
+    name: &str,
+    repo: &Path,
+    paths: &[String],
+    glob: Option<&str>,
+    mode: &str,
+    effective_query: &str,
+    label: &str,
+) -> Result<std::process::Output, RuntimeError> {
+    let mut command = Command::new("rg");
+    command.args([
+        "--line-number",
+        "--column",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+    ]);
+    if mode == "fixed" {
+        command.arg("--fixed-strings");
+    }
+    if mode == "smart" {
+        command.arg("--ignore-case");
+    }
+    command.arg(effective_query);
+    if let Some(glob) = glob {
+        command.arg("-g").arg(glob);
+    }
+    if !paths.is_empty() {
+        command.args(paths);
+    }
+    command
+        .current_dir(repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} {label}: {error}")))
+}
+
+fn should_smart_fallback(mode: &str, query: &str) -> bool {
+    mode == "fixed" && repo_smart_search_terms(query).len() >= 2
 }
 
 fn repo_smart_search_terms(query: &str) -> Vec<String> {

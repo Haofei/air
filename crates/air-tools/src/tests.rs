@@ -4061,6 +4061,44 @@ fn repo_search_supports_smart_natural_language_queries() {
 }
 
 #[test]
+fn repo_search_falls_back_to_smart_for_multi_term_fixed_queries() {
+    let dir = temp_dir("air-tools-repo-search-smart-fallback");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn path_segments() {}\nfn read_path() { path_segments(); }\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.search", &json!({"query": "path_segments read_path"}))
+        .unwrap();
+
+    assert_eq!(output["mode"], json!("smart"));
+    assert_eq!(output["requested_mode"], json!("fixed"));
+    assert!(output["effective_query"]
+        .as_str()
+        .unwrap()
+        .contains("path_segments"));
+    assert_eq!(output["matches"][0]["path"], json!("src/lib.rs"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_search_supports_bounded_per_call_max_matches() {
     let dir = temp_dir("air-tools-repo-search-max-matches");
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -4224,6 +4262,50 @@ fn repo_context_supports_smart_natural_language_queries() {
         .as_str()
         .unwrap()
         .contains("function sum"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_context_falls_back_to_smart_for_multi_term_fixed_queries() {
+    let dir = temp_dir("air-tools-repo-context-smart-fallback");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn path_segments() {}\nfn read_path() { path_segments(); }\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.context": {
+                  "kind": "repo_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5,
+                  "max_files": 1,
+                  "context_lines": 1
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.context", &json!({"query": "path_segments read_path"}))
+        .unwrap();
+
+    assert_eq!(output["mode"], json!("smart"));
+    assert_eq!(output["requested_mode"], json!("fixed"));
+    assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
+    assert!(output["snippets"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("read_path"));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["requested_mode"],
+        json!("fixed")
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
