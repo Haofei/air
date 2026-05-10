@@ -12,6 +12,30 @@ pub(crate) struct CodeAgentPack {
     pub(crate) recipes: Vec<CodeAgentPackRecipe>,
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_relative_profiles_resolve_from_pack_directory_even_when_cwd_has_match() {
+        let pack = CodeAgentPackContext {
+            path: PathBuf::from("target/generated/custom-pack/code-agent.air-pack.yaml"),
+            pack: CodeAgentPack {
+                recipes: vec![CodeAgentPackRecipe {
+                    id: "plan".to_string(),
+                    default_profile: PathBuf::from("project-plan.air-profile.yaml"),
+                    intent: None,
+                }],
+            },
+        };
+
+        assert_eq!(
+            pack.default_profile_for_recipe("plan").unwrap(),
+            PathBuf::from("target/generated/custom-pack/project-plan.air-profile.yaml")
+        );
+    }
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub(crate) struct CodeAgentPackRecipe {
     pub(crate) id: String,
@@ -73,7 +97,7 @@ impl CodeAgentPackContext {
     }
 
     fn resolve_profile_path(&self, profile: &Path) -> PathBuf {
-        if profile.is_absolute() || profile.exists() {
+        if profile.is_absolute() {
             return profile.to_path_buf();
         }
         self.path
