@@ -462,6 +462,8 @@ assert project["executions"][0]["acceptance"][0]["success"] is False, project
 recovery = output["recovery"]
 assert recovery["status"] == "stopped", recovery
 assert recovery["failed_task_id"] == "t1", recovery
+assert recovery["failed_execution"]["acceptance"][0]["id"] == "missing-alias", recovery
+assert recovery["failed_execution"]["output_keys"] == ["exploration"], recovery
 fork = Path(recovery["fork"])
 assert fork.exists(), recovery
 assert recovery["workspace_revert_argv"][:3] == ["air", "code-session", recovery["fork"]], recovery
@@ -476,6 +478,28 @@ with fork.open(encoding="utf-8") as handle:
     fork_session = json.load(handle)
 assert fork_session["turns"][-1]["id"] == turn["id"], fork_session
 assert fork_session["turns"][-1]["recovery"]["failed_task_id"] == "t1", fork_session
+PY
+
+cargo run -q -p air-cli -- code "continue from the failed project execution" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 1 \
+  --query "code agent project failure recovery" \
+  --model-config target/generated/code_project_fail_model_fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --session target/generated/code_project_fail.session.json \
+  --explain \
+  > target/generated/code_project_fail_recovery_explain.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_project_fail_recovery_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+task = output["input"]["task"]
+assert "AIR project recovery context from previous failed execution" in task, task
+assert '"failed_task_id": "t1"' in task, task
+assert "missing-alias" in task, task
+assert "target/generated/code_project_fail.session.forks/turn1.failed.json" in task, task
 PY
 
 echo "[code-agent] user-facing code command explain"

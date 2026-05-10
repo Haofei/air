@@ -142,7 +142,12 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         None => None,
     };
     if let Some(state) = session_state.as_ref() {
-        input = code_session_turn_input(&input, &state.turns);
+        input = if execute_plan && recipe == CodeRecipe::Plan {
+            code_project_recovery_turn_input(&input, state)
+                .unwrap_or_else(|| code_session_turn_input(&input, &state.turns))
+        } else {
+            code_session_turn_input(&input, &state.turns)
+        };
     }
 
     if explain {
@@ -478,6 +483,10 @@ struct CodeSessionRecovery {
     turn_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     failed_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failed_execution: Option<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    remaining_task_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     workspace_revert_argv: Vec<String>,
 }
@@ -744,7 +753,7 @@ fn code_session_recovery_for_outputs(
 
     let fork_path = default_session_recovery_fork_path(session_path, turn_number);
     let fork = path_ref_to_input_string(&fork_path);
-    let failed_task_id = project
+    let failed_execution = project
         .get("executions")
         .and_then(Value::as_array)
         .and_then(|executions| executions.last())
@@ -753,15 +762,29 @@ fn code_session_recovery_for_outputs(
                 .get("completed")
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
-        })
+        });
+    let failed_task_id = failed_execution
         .and_then(|execution| execution.get("task_id").and_then(Value::as_str))
         .map(str::to_string);
+    let failed_execution = failed_execution.map(code_project_failed_execution_summary);
+    let remaining_task_ids = project
+        .get("remaining_task_ids")
+        .and_then(Value::as_array)
+        .map(|ids| {
+            ids.iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
     let recovery = CodeSessionRecovery {
         reason: "project execution stopped before completion".to_string(),
         status: status.to_string(),
         fork: fork.clone(),
         turn_id: turn_id.to_string(),
         failed_task_id,
+        failed_execution,
+        remaining_task_ids,
         workspace_revert_argv: vec![
             "air".to_string(),
             "code-session".to_string(),
@@ -772,6 +795,41 @@ fn code_session_recovery_for_outputs(
         ],
     };
     Some((recovery, fork_path))
+}
+
+fn code_project_failed_execution_summary(execution: &Value) -> Value {
+    let mut summary = Map::new();
+    for key in [
+        "task_id",
+        "title",
+        "recipe",
+        "depends_on",
+        "completed",
+        "error",
+    ] {
+        if let Some(value) = execution.get(key) {
+            summary.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(acceptance) = execution.get("acceptance") {
+        summary.insert("acceptance".to_string(), acceptance.clone());
+    }
+    summary.insert(
+        "output_keys".to_string(),
+        Value::Array(
+            execution
+                .get("outputs")
+                .and_then(Value::as_object)
+                .map(|outputs| {
+                    outputs
+                        .keys()
+                        .map(|key| Value::String(key.clone()))
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default(),
+        ),
+    );
+    Value::Object(summary)
 }
 
 fn code_session_insert_recovery(outputs: &mut Value, recovery: &CodeSessionRecovery) -> Result<()> {
@@ -816,6 +874,54 @@ fn code_session_project_resume(state: &CodeSessionState) -> Option<CodeProjectRe
         project_plan,
         executions,
     })
+}
+
+fn code_project_recovery_turn_input(
+    base_input: &Map<String, Value>,
+    state: &CodeSessionState,
+) -> Option<Map<String, Value>> {
+    let turn = state.turns.iter().rev().find(|turn| {
+        turn.recipe == "plan"
+            && turn
+                .outputs
+                .pointer("/project/status")
+                .and_then(Value::as_str)
+                == Some("stopped")
+    })?;
+    let task = base_input.get("task").and_then(Value::as_str)?;
+    let mut input = code_session_turn_input(base_input, &state.turns);
+    let recovery = turn.outputs.get("recovery").or_else(|| {
+        turn.recovery
+            .as_ref()
+            .and_then(|_| turn.outputs.get("recovery"))
+    });
+    let failed_execution = recovery
+        .and_then(|recovery| recovery.get("failed_execution"))
+        .or_else(|| {
+            turn.outputs
+                .pointer("/project/executions")
+                .and_then(Value::as_array)
+                .and_then(|executions| executions.last())
+        });
+    let project = turn.outputs.get("project").cloned().unwrap_or(Value::Null);
+    let recovery_context = json!({
+        "failed_turn_id": turn.id,
+        "project_status": turn.outputs.pointer("/project/status").and_then(Value::as_str),
+        "failed_task_id": recovery.and_then(|recovery| recovery.get("failed_task_id")).cloned(),
+        "failed_execution": failed_execution.cloned(),
+        "remaining_task_ids": turn.outputs.pointer("/project/remaining_task_ids").cloned(),
+        "recovery_fork": recovery.and_then(|recovery| recovery.get("fork")).cloned(),
+        "workspace_revert_argv": recovery.and_then(|recovery| recovery.get("workspace_revert_argv")).cloned(),
+        "project": project,
+    });
+    input.insert(
+        "task".to_string(),
+        Value::String(format!(
+            "{task}\n\nAIR project recovery context from previous failed execution:\n{}",
+            serde_json::to_string_pretty(&recovery_context).unwrap_or_default()
+        )),
+    );
+    Some(input)
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -2677,8 +2783,16 @@ mod tests {
         let stopped = json!({
             "project": {
                 "status": "stopped",
+                "remaining_task_ids": ["t2"],
                 "executions": [
-                    {"task_id": "t1", "completed": false}
+                    {
+                        "task_id": "t1",
+                        "title": "Failing task",
+                        "recipe": "explore",
+                        "completed": false,
+                        "acceptance": [{"id": "unit", "success": false}],
+                        "outputs": {"exploration": {"summary": "partial"}}
+                    }
                 ]
             }
         });
@@ -2694,6 +2808,15 @@ mod tests {
 
         assert_eq!(recovery.0.status, "stopped");
         assert_eq!(recovery.0.failed_task_id, Some("t1".to_string()));
+        assert_eq!(recovery.0.remaining_task_ids, vec!["t2"]);
+        assert_eq!(
+            recovery.0.failed_execution.as_ref().unwrap()["acceptance"][0]["id"],
+            Value::String("unit".to_string())
+        );
+        assert_eq!(
+            recovery.0.failed_execution.as_ref().unwrap()["output_keys"][0],
+            Value::String("exploration".to_string())
+        );
         assert_eq!(
             recovery.1,
             PathBuf::from("target/generated/code_session.forks/turn1.failed.json")
@@ -2763,6 +2886,62 @@ mod tests {
             resume.executions[0]["task_id"],
             Value::String("t1".to_string())
         );
+    }
+
+    #[test]
+    fn project_recovery_turn_input_adds_failed_execution_context() {
+        let mut input = Map::new();
+        input.insert(
+            "task".to_string(),
+            Value::String("continue project".to_string()),
+        );
+        input.insert(
+            "query".to_string(),
+            Value::String("project recovery".to_string()),
+        );
+        let mut state = CodeSessionState::default();
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000001".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "run project".to_string(),
+            recipe: "plan".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: false,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            patch_sets: Vec::new(),
+            recovery: None,
+            outputs: json!({
+                "project": {
+                    "status": "stopped",
+                    "remaining_task_ids": ["t2"],
+                    "executions": [
+                        {
+                            "task_id": "t1",
+                            "completed": false,
+                            "error": "acceptance failed",
+                            "acceptance": [{"id": "unit", "success": false}]
+                        }
+                    ]
+                },
+                "recovery": {
+                    "failed_task_id": "t1",
+                    "fork": "target/generated/session.forks/turn1.failed.json",
+                    "workspace_revert_argv": ["air", "code-session"]
+                }
+            }),
+        });
+
+        let next = code_project_recovery_turn_input(&input, &state).unwrap();
+
+        let task = next["task"].as_str().unwrap();
+        assert!(task.starts_with("continue project"));
+        assert!(task.contains("AIR project recovery context from previous failed execution"));
+        assert!(task.contains("\"failed_task_id\": \"t1\""));
+        assert!(task.contains("\"remaining_task_ids\""));
+        assert!(task.contains("acceptance failed"));
     }
 
     #[test]
