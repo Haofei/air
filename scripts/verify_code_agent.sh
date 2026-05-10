@@ -1138,6 +1138,8 @@ with open("target/generated/code_agent_session.json", encoding="utf-8") as handl
 assert session["version"] == 1, session
 assert len(session["turns"]) == 2, session
 assert session["turns"][0]["recipe"] == "explore", session
+assert session["turns"][0]["requested_recipe"] == "auto", session
+assert session["turns"][1]["requested_recipe"] == "auto", session
 assert session["turns"][1]["completed"] is True, session
 for index, turn in enumerate(session["turns"], start=1):
     assert turn["id"] == f"turn-{index:06}", turn

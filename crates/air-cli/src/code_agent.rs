@@ -329,6 +329,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .and_then(Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
+            requested_recipe: Some(recipe_name(requested_recipe).to_string()),
             recipe: recipe_name(recipe).to_string(),
             profile: path_ref_to_input_string(&profile),
             pack: code_session_turn_pack(&pack, recipe, &profile),
@@ -443,6 +444,8 @@ struct CodeSessionTurn {
     #[serde(default)]
     time: CodeSessionTurnTime,
     task: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    requested_recipe: Option<String>,
     recipe: String,
     profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -3135,6 +3138,11 @@ fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
         format!("recipe={}", turn.recipe),
         format!("completed={}", turn.completed),
     ];
+    if let Some(requested_recipe) = turn.requested_recipe.as_ref() {
+        if requested_recipe != &turn.recipe {
+            fields.push(format!("requested_recipe={requested_recipe}"));
+        }
+    }
     if !turn.summary.models.is_empty() {
         fields.push(format!("models={}", turn.summary.models.join(",")));
     }
@@ -4196,6 +4204,7 @@ mod tests {
             id: "turn-000001".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "run two tasks".to_string(),
+            requested_recipe: None,
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
             pack: None,
@@ -4244,6 +4253,7 @@ mod tests {
             id: "turn-000001".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "run two tasks".to_string(),
+            requested_recipe: None,
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
             pack: None,
@@ -4266,6 +4276,7 @@ mod tests {
             id: "turn-000002".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "failed recovery".to_string(),
+            requested_recipe: None,
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
             pack: None,
@@ -4304,6 +4315,7 @@ mod tests {
             id: "turn-000001".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "run project".to_string(),
+            requested_recipe: None,
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
             pack: None,
@@ -4909,6 +4921,7 @@ mod tests {
                 updated: 1,
             },
             task: "inspect repo".to_string(),
+            requested_recipe: Some("auto".to_string()),
             recipe: "explore".to_string(),
             profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
             pack: None,
@@ -4940,6 +4953,7 @@ mod tests {
         let task = next["task"].as_str().unwrap();
         assert!(task.starts_with("continue investigation"));
         assert!(task.contains("AIR session context from previous turns"));
+        assert!(task.contains("requested_recipe=auto"));
         assert!(task.contains("models=code_explorer"));
         assert!(task.contains("tools=repo.search"));
         assert!(task.contains("files=src/lib.rs"));
@@ -5002,6 +5016,7 @@ mod tests {
                     updated: 1,
                 },
                 task: "old".to_string(),
+                requested_recipe: None,
                 recipe: "explore".to_string(),
                 profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
                 pack: None,
@@ -5021,6 +5036,7 @@ mod tests {
                     updated: 2,
                 },
                 task: "new".to_string(),
+                requested_recipe: None,
                 recipe: "repair".to_string(),
                 profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
                 pack: None,
@@ -5075,6 +5091,7 @@ mod tests {
                 updated: 42,
             },
             task: "fix it".to_string(),
+            requested_recipe: Some("auto".to_string()),
             recipe: "repair".to_string(),
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
             pack: Some(
@@ -5105,6 +5122,10 @@ mod tests {
         assert_eq!(roundtrip.turns[0].time.created, 42);
         assert_eq!(roundtrip.turns[0].time.updated, 42);
         assert_eq!(roundtrip.turns[0].recipe, "repair");
+        assert_eq!(
+            roundtrip.turns[0].requested_recipe,
+            Some("auto".to_string())
+        );
         let pack = roundtrip.turns[0].pack.as_ref().unwrap();
         assert_eq!(pack.path, crate::code_pack::CODE_AGENT_PACK_PATH);
         assert_eq!(pack.recipe, "repair");
@@ -5145,6 +5166,7 @@ mod tests {
             id: "turn-000001".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "one".to_string(),
+            requested_recipe: None,
             recipe: "explore".to_string(),
             profile: "profile".to_string(),
             pack: None,
@@ -5161,6 +5183,7 @@ mod tests {
             id: "turn-000002".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "two".to_string(),
+            requested_recipe: None,
             recipe: "review".to_string(),
             profile: "profile".to_string(),
             pack: None,
@@ -5186,6 +5209,7 @@ mod tests {
             id: "turn-000001".to_string(),
             time: CodeSessionTurnTime::default(),
             task: "inspect".to_string(),
+            requested_recipe: None,
             recipe: "explore".to_string(),
             profile: "profile".to_string(),
             pack: None,
