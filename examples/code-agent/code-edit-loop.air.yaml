@@ -32,6 +32,9 @@ outputs:
         type: array
         items:
           type: object
+          required: [path]
+          properties:
+            path: string
       workspace_diff: object
       rationale: string
 
@@ -83,6 +86,9 @@ state:
         type: array
         items:
           type: object
+          required: [path]
+          properties:
+            path: string
       workspace_diff: object
       rationale: string
 
@@ -134,7 +140,7 @@ tools:
     timeout_ms: 10000
   - name: test.run
     capability: code.test
-    timeout_ms: 30000
+    timeout_ms: 120000
 
 workflow:
   kind: state_machine
@@ -219,7 +225,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 4
-          timeout_seconds: 30
+          timeout_seconds: 120
           on_error: observe
         - kind: append
           target: observations

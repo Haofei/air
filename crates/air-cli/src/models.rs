@@ -385,6 +385,19 @@ mod tests {
             edit_prompt.contains("file.patch"),
             "code_edit_decider prompt must describe the unified diff patch tool"
         );
+        let summarize_prompt = config
+            .models
+            .get("code_edit_summarizer")
+            .and_then(|model| model.system_prompt.as_deref())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            summarize_prompt.contains("preexisting_changed_files")
+                && summarize_prompt.contains("array of objects")
+                && summarize_prompt.contains("\"path\": string")
+                && summarize_prompt.contains("must not be an array of strings"),
+            "code_edit_summarizer prompt must match preexisting_changed_files object schema"
+        );
     }
 
     fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {

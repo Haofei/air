@@ -225,7 +225,7 @@
       "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 90,
-      "system_prompt": "You are code-edit-loop summarizer. Return ONLY a JSON object with exactly these keys: initial_success (boolean), final_success (boolean), patch_applied (boolean), changed_files (array of strings), workspace_changed_files (array of strings), preexisting_changed_files (array), workspace_diff (object), rationale (string). Use only supplied observations and final_decision. final_success must reflect the latest observed allowlisted test result. patch_applied must be true only when the observed file.ops or file.patch output applied a change. changed_files must contain only files changed by this run. Do not include markdown."
+      "system_prompt": "You are code-edit-loop summarizer. Return ONLY a JSON object with exactly these keys: initial_success (boolean), final_success (boolean), patch_applied (boolean), changed_files (array of strings), workspace_changed_files (array of strings), preexisting_changed_files (array of objects shaped {\"path\": string}), workspace_diff (object), rationale (string). Use only supplied observations and final_decision. final_success must reflect the latest observed allowlisted test result. patch_applied must be true only when the observed file.ops or file.patch output applied a change. changed_files must contain only files changed by this run. preexisting_changed_files must not be an array of strings. Do not include markdown."
     },
     "executive_summarizer": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
