@@ -555,6 +555,8 @@ restore_code_loop_feedback_fixture() {
   rm -f "$code_loop_feedback_backup"
 }
 trap restore_code_loop_feedback_fixture EXIT
+rm -f target/generated/code_agent_code_loop_feedback.session.json
+rm -rf target/generated/code_agent_code_loop_feedback.session.traces
 cargo run -q -p air-cli -- code "fix the failing add function until tests pass" \
   --target examples/code-agent/repair-fixture/math.js \
   --test repair_fixture_test \
@@ -563,7 +565,7 @@ cargo run -q -p air-cli -- code "fix the failing add function until tests pass" 
   --max-iterations 2 \
   --model-config examples/code-agent/model-fixtures.loop-fail.json \
   --tool-config examples/code-agent/tools.core.json \
-  --trace-out target/generated/code_agent_code_loop_feedback.trace.jsonl \
+  --session target/generated/code_agent_code_loop_feedback.session.json \
   > target/generated/code_agent_code_loop_feedback.output.json
 restore_code_loop_feedback_fixture
 trap - EXIT
@@ -573,14 +575,26 @@ from pathlib import Path
 
 with open("target/generated/code_agent_code_loop_feedback.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
+with open("target/generated/code_agent_code_loop_feedback.session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
 
 assert output["status"] == "max_iterations_exhausted", output
 assert output["completed"] is False, output
 assert len(output["iterations"]) == 2, output
 assert output["iterations"][0]["outputs"]["repair"]["final_success"] is False, output
-assert Path("target/generated/code_agent_code_loop_feedback.trace.iter2.jsonl").exists()
+assert len(session["turns"]) == 1, session
+turn = session["turns"][0]
+assert turn["id"] == "turn-000001", turn
+assert turn["completed"] is False, turn
+assert len(turn["trace_files"]) == 2, turn
+assert all(Path(path).exists() for path in turn["trace_files"]), turn
+assert turn["trace_files"][0].endswith("turn1.trace.iter1.jsonl"), turn
+assert turn["trace_files"][1].endswith("turn1.trace.iter2.jsonl"), turn
+assert turn["summary"]["model_call_count"] >= 2, turn
+assert turn["summary"]["tool_call_count"] >= 2, turn
+assert "file.patch" in turn["summary"]["tools"], turn
 
-with open("target/generated/code_agent_code_loop_feedback.trace.iter2.jsonl", encoding="utf-8") as handle:
+with open(turn["trace_files"][1], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 
 repair_calls = [
