@@ -100,6 +100,11 @@ assert output["will_run"] is False, output
 assert output["requested_recipe"] == "auto", output
 assert output["resolved_recipe"] == "repair", output
 assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
+assert output["plan"].endswith("examples/code-agent/code-repair-with-explore.air-plan.yaml"), output
+assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml"), output
+assert "file.write" in output["capabilities"], output
+assert output["read_only"] is False, output
+assert output["writes_workspace"] is True, output
 assert output["input"]["test_command"] == "repair_fixture_test", output
 PY
 

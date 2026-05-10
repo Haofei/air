@@ -1,3 +1,4 @@
+use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::run_plan::{run_plan, RunPlanOptions};
 use anyhow::{bail, Result};
 use clap::ValueEnum;
@@ -136,17 +137,56 @@ fn print_explain(
     profile: &Path,
     input: &Map<String, Value>,
 ) -> Result<()> {
+    let metadata = explain_metadata_for_profile(profile)?;
     let explanation = json!({
         "command": "code",
         "will_run": false,
         "requested_recipe": recipe_name(requested_recipe),
         "resolved_recipe": recipe_name(resolved_recipe),
         "profile": path_ref_to_input_string(profile),
+        "plan": path_ref_to_input_string(&metadata.plan),
+        "store": path_ref_to_input_string(&metadata.store),
+        "capabilities": metadata.capabilities,
+        "read_only": metadata.read_only,
+        "writes_workspace": metadata.writes_workspace,
         "input": Value::Object(input.clone()),
     });
     serde_json::to_writer_pretty(std::io::stdout(), &explanation)?;
     println!();
     Ok(())
+}
+
+struct CodeExplainMetadata {
+    plan: PathBuf,
+    store: PathBuf,
+    capabilities: Vec<String>,
+    read_only: bool,
+    writes_workspace: bool,
+}
+
+fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
+    let profile_path = profile.to_path_buf();
+    let profile = read_run_plan_profile(&profile_path)?;
+    let plan_path = resolve_profile_path(&profile_path, &profile.plan);
+    let store_path = resolve_profile_path(&profile_path, &profile.store);
+    let plan = air_linker::parse_run_plan_file(&plan_path)?;
+    let mut capabilities = plan.requires.capabilities;
+    capabilities.sort();
+    capabilities.dedup();
+    let writes_workspace = capabilities
+        .iter()
+        .any(|capability| is_workspace_write_capability(capability));
+    Ok(CodeExplainMetadata {
+        plan: plan_path,
+        store: store_path,
+        capabilities,
+        read_only: !writes_workspace,
+        writes_workspace,
+    })
+}
+
+fn is_workspace_write_capability(capability: &str) -> bool {
+    matches!(capability, "file.write")
 }
 
 struct CodeInputOptions {
@@ -543,6 +583,24 @@ mod tests {
             explanation["input"]["test_command"],
             Value::String("unit".to_string())
         );
+    }
+
+    #[test]
+    fn explain_metadata_reports_profile_capabilities() {
+        let profile = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/repair-core.air-profile.yaml");
+        let metadata = explain_metadata_for_profile(&profile).unwrap();
+
+        assert!(metadata
+            .capabilities
+            .iter()
+            .any(|capability| capability == "file.write"));
+        assert!(metadata.writes_workspace);
+        assert!(!metadata.read_only);
+        assert!(metadata
+            .plan
+            .ends_with("code-repair-with-explore.air-plan.yaml"));
     }
 
     #[test]

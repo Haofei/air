@@ -171,6 +171,9 @@ cargo run -p air-cli -- code "fix the failing add function and retest" \
   --explain
 ```
 
+The preflight JSON includes the resolved AIR profile, RunPlan, declared capabilities, and whether
+the recipe can write to the workspace.
+
 Then run it:
 
 ```bash

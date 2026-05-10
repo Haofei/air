@@ -6,6 +6,11 @@ AIR is a compiler-first module system for production agent workflows. Agents are
 
 ## Why AIR
 
+AIR's core value is not merely "agents can run". It is "after an AI acted, you can inspect what
+actually happened". The native VM, traces, typed tool contracts, budgets, and RunPlan validation are
+designed around that audit surface. opencode optimizes for developer freedom; AIR optimizes for
+bounded freedom with guarantees.
+
 | Problem | AIR |
 | --- | --- |
 | Agent code is locked to one SDK | One checked IR can run on the AIR VM or lower to LangGraph / OpenAI JS strict runtimes |
@@ -13,6 +18,17 @@ AIR is a compiler-first module system for production agent workflows. Agents are
 | Dynamic agent graphs are hard to audit | Dynamic fan-out/fan-in is bounded, typed, traced, and can be specialized |
 | Tool permissions are implicit | Capabilities, provider tool contracts, budgets, and approval gates are verified |
 | Long runs are opaque | Human logs, JSONL traces, checkpoints, resume, and replay are built in |
+
+For coding agents, that means the important questions have first-class places to live:
+
+| Question | AIR audit surface |
+| --- | --- |
+| Which files changed? | `file.edit`, `file.patch`, and `file.write` return bounded diff artifacts in the trace |
+| Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
+| What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
+| Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
+| Did it exceed the budget? | `max_tool_calls`, `max_model_calls`, timeouts, and capability gates are checked by the runtime |
+| What will this recipe be allowed to do? | `air code --explain` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
 
 ## Status
 
@@ -59,6 +75,7 @@ The repository intentionally keeps examples focused:
 | --- | --- |
 | `examples/simple-helpdesk/` | One-agent RAG workflow with local document search, model call, typed output, and provider capability check |
 | `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, parallel execution, and backend lowering |
+| `examples/code-agent/` | Bounded coding workflow with exploration, review, repair, page build, context compaction, constrained tools, and patch audit traces |
 
 The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json`.
 
@@ -201,6 +218,7 @@ Primary user-facing commands:
 | `run-plan` | Execute a RunPlan or packaged profile on the native VM |
 | `resume-plan` | Resume a halted/checkpointed plan with typed overrides |
 | `lower-plan` | Compile a checked RunPlan to another backend |
+| `code` | User-facing coding-agent wrapper with deterministic recipe routing and `--explain` permission preflight |
 
 Lower-level module, system, and trace commands exist for development and tests, but are hidden from default help output.
 
