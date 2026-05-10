@@ -79,9 +79,11 @@ with open("target/generated/code-agent-bench/edit.trace.jsonl", encoding="utf-8"
 tools = [
     event.get("meta", {}).get("tool")
     for event in events
-    if event.get("action") == "tool_dispatch"
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
 ]
 assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
 PY
 
 echo "[code-agent-bench] ok"

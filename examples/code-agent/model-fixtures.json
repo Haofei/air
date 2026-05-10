@@ -288,65 +288,75 @@
       "$sequence": [
         {
           "complete": false,
-          "tool_call": {
-            "tool": "test.run",
-            "input": {
-              "command": "edit_fixture_test"
+          "tool_calls": [
+            {
+              "tool": "test.run",
+              "input": {
+                "command": "edit_fixture_test"
+              }
             }
-          },
+          ],
           "rationale": "Run the allowlisted validation first to capture the current failure."
         },
         {
           "complete": false,
-          "tool_call": {
-            "tool": "file.read",
-            "input": {
-              "path": "examples/code-agent/edit-fixture/math.js",
-              "line_numbers": true,
-              "max_bytes": 20000
+          "tool_calls": [
+            {
+              "tool": "file.read",
+              "input": {
+                "path": "examples/code-agent/edit-fixture/math.js",
+                "line_numbers": true,
+                "max_bytes": 20000
+              }
             }
-          },
+          ],
           "rationale": "Read the small target before selecting a file operation."
         },
         {
           "complete": false,
-          "tool_call": {
-            "tool": "file.ops",
-            "input": {
-              "operations": [
-                {
-                  "kind": "replace_lines",
-                  "path": "examples/code-agent/edit-fixture/math.js",
-                  "start_line": 2,
-                  "end_line": 2,
-                  "new_string": "  return a + b;"
-                }
-              ]
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "operations": [
+                  {
+                    "kind": "replace_lines",
+                    "path": "examples/code-agent/edit-fixture/math.js",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "new_string": "  return a + b;"
+                  }
+                ]
+              }
             }
-          },
+          ],
           "rationale": "The failing implementation subtracts on line 2; replace only that line."
         },
         {
           "complete": false,
-          "tool_call": {
-            "tool": "test.run",
-            "input": {
-              "command": "edit_fixture_test"
+          "tool_calls": [
+            {
+              "tool": "test.run",
+              "input": {
+                "command": "edit_fixture_test"
+              }
             }
-          },
+          ],
           "rationale": "Verify the edited implementation with the allowlisted test."
         },
         {
           "complete": false,
-          "tool_call": {
-            "tool": "git.diff",
-            "input": {}
-          },
+          "tool_calls": [
+            {
+              "tool": "git.diff",
+              "input": {}
+            }
+          ],
           "rationale": "Inspect the workspace diff before finishing."
         },
         {
           "complete": true,
-          "tool_call": {},
+          "tool_calls": [],
           "rationale": "The edit was applied, validation passed, and the diff was inspected."
         }
       ]

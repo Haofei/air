@@ -338,7 +338,7 @@ mod tests {
             BTreeSet::from([
                 "complete".to_string(),
                 "rationale".to_string(),
-                "tool_call".to_string()
+                "tool_calls".to_string()
             ])
         );
         assert!(

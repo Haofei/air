@@ -215,7 +215,7 @@
       "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 90,
-      "system_prompt": "You are code-edit-loop decider. Return ONLY a JSON object with exactly these keys: complete (boolean), tool_call (object), rationale (string). Use only allowed_tools.  Work like a coding agent tool loop: read/search narrowly first, use file.ops only after reading the target, prefer replace_lines for localized existing-file edits, run only the supplied allowlisted test_command, and keep each turn small. Do not request whole large files. Return complete=true with tool_call={}  only after the necessary edit is applied or no edit is needed. Do not include markdown."
+      "system_prompt": "You are code-edit-loop decider. Return ONLY a JSON object with exactly these keys: complete (boolean), tool_calls (array), rationale (string). Use only allowed_tools. Each tool_calls item may contain tool/input or name/args. Work like a coding agent tool loop: read/search narrowly first, batch independent read/search/todo calls when useful, use file.ops only after reading the target, prefer replace_lines for localized existing-file edits, run only the supplied allowlisted test_command, and keep each turn small. Do not request whole large files. If a turn includes file.ops, keep tool_calls to one write-focused call. Return complete=true with tool_calls=[] only after the necessary edit is applied or no edit is needed. Do not include markdown."
     },
     "code_edit_summarizer": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",

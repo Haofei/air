@@ -47,19 +47,25 @@ state:
     items: object
   decision:
     type: object
-    required: [complete, tool_call, rationale]
+    required: [complete, tool_calls, rationale]
     properties:
       complete: boolean
-      tool_call:
-        type: object
-        properties:
-          tool: string
-          input: object
-          name: string
-          args: object
+      tool_calls:
+        type: array
+        max_items: 4
+        items:
+          type: object
+          properties:
+            tool: string
+            input: object
+            name: string
+            args: object
+            arguments: object
       rationale: string
   observation:
-    type: object
+    type: array
+    items:
+      type: object
   edit:
     type: object
     required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
@@ -188,11 +194,11 @@ workflow:
                   plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
                   discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
-                  small_steps: "Choose exactly one tool per turn. Do not request whole large files."
-                  edits: "Use file.ops with kind=edit or kind=replace_lines for existing files. Use write only for new files."
+                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files."
+                  edits: "Use file.ops with kind=edit or kind=replace_lines for existing files. Use write only for new files. If a turn includes file.ops, keep that batch to one write-focused call."
                   tests: "Use test.run with the supplied allowlisted test_command only."
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
-                  finish: "Return complete=true with tool_call={} only after the edit/no-op decision is verified."
+                  finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
           timeout_seconds: 45
           retry:
@@ -204,21 +210,22 @@ workflow:
     - id: act
       when: phase == "act" && decision.complete == false
       actions:
-        - kind: tool_dispatch
+        - kind: tool_batch_dispatch
           input:
-            path: decision.tool_call
+            path: decision.tool_calls
           output: observation
+          max_calls: 4
           timeout_seconds: 30
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: tool_dispatch
+                literal: tool_batch_dispatch
               rationale:
                 path: decision.rationale
               requested:
-                path: decision.tool_call
+                path: decision.tool_calls
               result:
                 ref: observation
         - kind: set

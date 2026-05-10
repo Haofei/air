@@ -67,9 +67,11 @@ with open("target/generated/code_agent_edit.trace.jsonl", encoding="utf-8") as h
 tools = [
     event.get("meta", {}).get("tool")
     for event in events
-    if event.get("action") == "tool_dispatch"
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
 ]
 assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
 models = [
     event.get("meta", {}).get("model")
     for event in events
