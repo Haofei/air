@@ -1374,6 +1374,17 @@ fn enforce_allowed_path(
     )))
 }
 
+fn repair_single_allowed_path(
+    path: &str,
+    allowed_paths: &Option<BTreeSet<String>>,
+) -> Option<String> {
+    let allowed_paths = allowed_paths.as_ref()?;
+    if allowed_paths.contains(path) || allowed_paths.len() != 1 {
+        return None;
+    }
+    allowed_paths.iter().next().cloned()
+}
+
 fn effective_max_changed_lines(
     tool_name: &str,
     input: &Value,
@@ -1517,6 +1528,7 @@ pub(super) fn call_file_ops_tool(
     let mut pending = BTreeMap::<PathBuf, FileOpsPendingFile>::new();
     let mut diff = String::new();
     let mut match_strategies = Vec::new();
+    let mut path_repairs = Vec::new();
 
     for (index, operation) in operations.iter().enumerate() {
         let label = format!("input.operations[{index}]");
@@ -1526,10 +1538,21 @@ pub(super) fn call_file_ops_tool(
             )));
         };
         let kind = required_labeled_string_input(name, operation, &label, "kind")?;
-        let input_path = required_labeled_string_input(name, operation, &label, "path")?;
-        validate_git_pathspec(name, input_path)?;
-        enforce_allowed_path(name, &format!("{label}.path"), input_path, &allowed_paths)?;
-        let candidate = base.join(input_path);
+        let raw_input_path = required_labeled_string_input(name, operation, &label, "path")?;
+        validate_git_pathspec(name, raw_input_path)?;
+        let mut input_path = raw_input_path.to_string();
+        if let Some(repaired_path) = repair_single_allowed_path(&input_path, &allowed_paths) {
+            path_repairs.push(json!({
+                "operation": index,
+                "from": input_path.clone(),
+                "to": repaired_path,
+                "reason": "single_allowed_path"
+            }));
+            input_path = repaired_path;
+        } else {
+            enforce_allowed_path(name, &format!("{label}.path"), &input_path, &allowed_paths)?;
+        }
+        let candidate = base.join(&input_path);
 
         match kind {
             "edit" => {
@@ -1589,7 +1612,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "edit",
                             "old_string",
                             format!(
@@ -1611,7 +1634,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "edit",
                             "old_string",
                             format!(
@@ -1628,7 +1651,10 @@ pub(super) fn call_file_ops_tool(
                 let selected = selected_edit_matches(&matches, replace_all);
                 match_strategies.push(effective_match_strategy.as_str());
                 diff.push_str(&edit_unified_diff(
-                    input_path, &current, &selected, new_string,
+                    &input_path,
+                    &current,
+                    &selected,
+                    new_string,
                 ));
                 let updated = apply_selected_edit_matches(&current, &selected, new_string);
                 if updated.len() > options.max_bytes {
@@ -1641,7 +1667,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "edit",
                             "new_string",
                             format!(
@@ -1703,7 +1729,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "replace_lines",
                             "start_line",
                             format!(
@@ -1715,7 +1741,7 @@ pub(super) fn call_file_ops_tool(
                 let old_string = &current[line_match.start..line_match.end];
                 validate_file_edit_operation(name, &label, old_string, new_string)?;
                 diff.push_str(&edit_unified_diff(
-                    input_path,
+                    &input_path,
                     &current,
                     &[line_match],
                     new_string,
@@ -1731,7 +1757,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "replace_lines",
                             "new_string",
                             format!(
@@ -1763,7 +1789,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "write",
                             "content",
                             format!("{label}.content exceeds max_bytes={}", options.max_bytes),
@@ -1771,7 +1797,7 @@ pub(super) fn call_file_ops_tool(
                     ));
                 }
                 let (path, existed, old_content) =
-                    resolve_file_ops_write_path(name, &label, &base, input_path)?;
+                    resolve_file_ops_write_path(name, &label, &base, &input_path)?;
                 if existed {
                     if !options.allow_overwrite {
                         return Ok(file_ops_failure_output(
@@ -1783,7 +1809,7 @@ pub(super) fn call_file_ops_tool(
                             FileOpsDiagnostic::new(
                                 index,
                                 label.clone(),
-                                input_path,
+                                &input_path,
                                 "write",
                                 "path",
                                 format!(
@@ -1811,7 +1837,7 @@ pub(super) fn call_file_ops_tool(
                         FileOpsDiagnostic::new(
                             index,
                             label.clone(),
-                            input_path,
+                            &input_path,
                             "write",
                             "path",
                             format!("{label}.path does not exist and allow_new_files is false"),
@@ -1819,7 +1845,7 @@ pub(super) fn call_file_ops_tool(
                     ));
                 }
                 diff.push_str(&write_unified_diff(
-                    input_path,
+                    &input_path,
                     old_content.as_deref(),
                     content,
                 ));
@@ -1886,6 +1912,7 @@ pub(super) fn call_file_ops_tool(
         "file_count": pending.len(),
         "diagnostics": [],
         "match_strategies": match_strategies,
+        "path_repairs": path_repairs,
         "bytes": diff_bytes,
         "diff": diff_content,
         "diff_truncated": diff_truncated,

@@ -20,27 +20,7 @@
               }
             }
           ],
-          "rationale": "Intentionally use a truncated write path so AIR records a write_path_error_hint."
-        },
-        {
-          "complete": false,
-          "tool_calls": [
-            {
-              "tool": "file.ops",
-              "input": {
-                "operations": [
-                  {
-                    "kind": "replace_lines",
-                    "path": "examples/code-agent/edit-fixture/math.js",
-                    "start_line": 2,
-                    "end_line": 2,
-                    "new_string": "  return a + b;"
-                  }
-                ]
-              }
-            }
-          ],
-          "rationale": "Retry with the exact write_paths entry after receiving the write path hint."
+          "rationale": "Intentionally use a truncated write path so AIR repairs it to the single allowed write path."
         },
         {
           "complete": false,
@@ -73,7 +53,7 @@
       "workspace_diff": {
         "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
       },
-      "rationale": "AIR recorded a write_path_error_hint after the truncated write path failed, then the loop used the exact write path, revalidated, and inspected the diff.",
+      "rationale": "AIR repaired a truncated write path to the single allowed write path, revalidated, and inspected the diff.",
       "observations": []
     }
   }

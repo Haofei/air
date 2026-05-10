@@ -265,7 +265,7 @@ assert any(
 ), summarizer
 PY
 
-echo "[code-agent] edit loop records write path error hints"
+echo "[code-agent] edit loop repairs single allowed write path"
 edit_write_path_error_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_write_path_error_backup"
 restore_edit_write_path_error_fixture() {
@@ -278,45 +278,47 @@ cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml 
   --input examples/code-agent/edit.input.json \
   --model-config examples/code-agent/model-fixtures.write-path-error.json \
   --tool-config examples/code-agent/tools.core.json \
-  --trace-out target/generated/code_agent_edit_write_path_error.trace.jsonl \
-  > target/generated/code_agent_edit_write_path_error.output.json
-node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_write_path_error.post_test.log
+  --trace-out target/generated/code_agent_edit_write_path_repair.trace.jsonl \
+  > target/generated/code_agent_edit_write_path_repair.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_write_path_repair.post_test.log
 restore_edit_write_path_error_fixture
 trap - EXIT
 
 "${PYTHON:-python3}" - <<'PY'
 import json
 
-with open("target/generated/code_agent_edit_write_path_error.output.json", encoding="utf-8") as handle:
+with open("target/generated/code_agent_edit_write_path_repair.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
 edit = output["edit"]
 assert edit["final_success"] is True, edit
 assert edit["patch_applied"] is True, edit
 
-with open("target/generated/code_agent_edit_write_path_error.trace.jsonl", encoding="utf-8") as handle:
+with open("target/generated/code_agent_edit_write_path_repair.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
-assert any(
-    event.get("rule") == "record-file-ops-write-path-error-hint"
-    and event.get("action") == "append"
-    and event.get("output", [{}])[-1].get("action") == "write_path_error_hint"
-    and event.get("output", [{}])[-1].get("result", {}).get("write_paths") == ["examples/code-agent/edit-fixture/math.js"]
-    for event in events
-), events
-failed_write = next(
+file_ops = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("meta", {}).get("tool") == "file.ops"
-    and event.get("status") == "error"
+    and event.get("status") == "ok"
 )
-assert "allowed_paths=['examples/code-agent/edit-fixture/math.js']" in failed_write["error"], failed_write
+assert file_ops["output"]["path_repairs"][0]["from"] == "examples/code-agent/edit-fixture/math.", file_ops
+assert file_ops["output"]["path_repairs"][0]["to"] == "examples/code-agent/edit-fixture/math.js", file_ops
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == ["file.read", "file.ops", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
     and event.get("meta", {}).get("model") == "code_edit_summarizer"
 )
 assert any(
-    observation.get("action") == "write_path_error_hint"
+    result.get("output", {}).get("path_repairs")
     for observation in summarizer["input"]["observations"]
+    for result in observation.get("result", [])
 ), summarizer
 PY
 

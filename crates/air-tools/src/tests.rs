@@ -1753,7 +1753,7 @@ fn file_ops_rejects_paths_outside_allowed_paths() {
         .call_tool(
             "file.ops",
             &json!({
-                "allowed_paths": ["allowed.txt"],
+                "allowed_paths": ["allowed.txt", "another.txt"],
                 "operations": [{
                     "kind": "edit",
                     "path": "other.txt",
@@ -1766,11 +1766,62 @@ fn file_ops_rejects_paths_outside_allowed_paths() {
 
     let error = error.to_string();
     assert!(error.contains("outside allowed_paths"));
-    assert!(error.contains("allowed_paths=['allowed.txt']"));
+    assert!(error.contains("allowed_paths=['allowed.txt', 'another.txt']"));
     assert_eq!(
         fs::read_to_string(dir.join("other.txt")).unwrap(),
         "other\n"
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_repairs_single_allowed_path() {
+    let dir = temp_dir("air-tools-file-ops-repairs-single-allowed-path");
+    fs::write(dir.join("allowed.txt"), "allowed\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "allowed.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "allowed_paths": ["allowed.txt"],
+                "operations": [{
+                    "kind": "edit",
+                    "path": "allowed.",
+                    "old_string": "allowed",
+                    "new_string": "changed"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.join("allowed.txt")).unwrap(),
+        "changed\n"
+    );
+    assert_eq!(output["path_repairs"][0]["from"], json!("allowed."));
+    assert_eq!(output["path_repairs"][0]["to"], json!("allowed.txt"));
     let _ = fs::remove_dir_all(dir);
 }
 
