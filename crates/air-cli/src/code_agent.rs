@@ -1,4 +1,4 @@
-use crate::code_pack::default_profile_for_recipe;
+use crate::code_pack::{default_profile_for_recipe, default_recipe_for_id, CODE_AGENT_PACK_PATH};
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -1351,6 +1351,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         budget_limits,
     } = options;
     let metadata = explain_metadata_for_profile(profile)?;
+    let pack_recipe = default_recipe_for_id(recipe_name(resolved_recipe))?;
     let budget_iterations = if loop_enabled { max_iterations } else { 1 };
     let total_model_calls = metadata
         .max_estimated_model_calls
@@ -1364,6 +1365,12 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         "will_run": false,
         "requested_recipe": recipe_name(requested_recipe),
         "resolved_recipe": recipe_name(resolved_recipe),
+        "pack": {
+            "path": CODE_AGENT_PACK_PATH,
+            "recipe": pack_recipe.id,
+            "default_profile": path_ref_to_input_string(&pack_recipe.default_profile),
+            "intent": pack_recipe.intent,
+        },
         "profile": path_ref_to_input_string(profile),
         "plan": path_ref_to_input_string(&metadata.plan),
         "store": path_ref_to_input_string(&metadata.store),
@@ -3915,6 +3922,12 @@ mod tests {
             "will_run": false,
             "requested_recipe": recipe_name(CodeRecipe::Auto),
             "resolved_recipe": recipe_name(CodeRecipe::Repair),
+            "pack": {
+                "path": CODE_AGENT_PACK_PATH,
+                "recipe": "repair",
+                "default_profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
+                "intent": default_recipe_for_id("repair").unwrap().intent,
+            },
             "profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
             "input": Value::Object(input),
         });
@@ -3929,6 +3942,18 @@ mod tests {
         );
         assert_eq!(
             explanation["profile"],
+            Value::String("examples/code-agent/repair-core.air-profile.yaml".to_string())
+        );
+        assert_eq!(
+            explanation["pack"]["path"],
+            Value::String("examples/code-agent/code-agent.air-pack.yaml".to_string())
+        );
+        assert_eq!(
+            explanation["pack"]["recipe"],
+            Value::String("repair".to_string())
+        );
+        assert_eq!(
+            explanation["pack"]["default_profile"],
             Value::String("examples/code-agent/repair-core.air-profile.yaml".to_string())
         );
         assert_eq!(
