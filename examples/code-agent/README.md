@@ -17,7 +17,7 @@ The review agent uses:
 - `web.search` for external documentation or issues;
 - `repo.files` for relevant repository paths;
 - `repo.search` for symbol or text matches, with explicit regex mode available for grep-style discovery;
-- `repo.context` for automatically selected nearby code snippets around repository matches;
+- `repo.context` for automatically selected nearby code snippets around repository matches, also with explicit regex mode;
 - `file.read` for the target source file, with optional numbered output for diagnostics;
 - `git.diff` for local changes to that file.
 - `git.status` for structured workspace change awareness.

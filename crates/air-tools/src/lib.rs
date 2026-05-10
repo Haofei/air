@@ -2911,6 +2911,12 @@ fn call_repo_context_tool(
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
     let query = required_input_string(name, input, "query")?;
+    let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
+    if !matches!(mode, "fixed" | "regex") {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.mode must be fixed or regex"
+        )));
+    }
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
     let effective_max_matches =
@@ -2923,17 +2929,18 @@ fn call_repo_context_tool(
             .unwrap_or(context_lines);
 
     let mut command = Command::new("rg");
-    command
-        .args([
-            "--line-number",
-            "--column",
-            "--with-filename",
-            "--no-heading",
-            "--color",
-            "never",
-        ])
-        .arg("--fixed-strings")
-        .arg(query);
+    command.args([
+        "--line-number",
+        "--column",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+    ]);
+    if mode == "fixed" {
+        command.arg("--fixed-strings");
+    }
+    command.arg(query);
     if let Some(glob) = input.get("glob").and_then(Value::as_str) {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
@@ -3022,6 +3029,7 @@ fn call_repo_context_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
+        "mode": mode,
         "matches": matches,
         "snippets": snippets,
         "bytes": bytes,
@@ -3036,6 +3044,7 @@ fn call_repo_context_tool(
                 "provider": "repo_context",
                 "repo": repo.display().to_string(),
                 "query": query,
+                "mode": mode,
                 "paths": paths,
                 "max_matches": effective_max_matches,
                 "max_files": effective_max_files,
@@ -5252,6 +5261,79 @@ mod tests {
             .contains("3: fn alpha() {}"));
         assert_eq!(output["artifacts"][0]["kind"], json!("code_context"));
         assert_eq!(tools.tool_capability("repo.context"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_context_supports_explicit_regex_mode() {
+        let dir = temp_dir("air-tools-repo-context-regex");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "line 1\nfn alpha_value() {}\nline 3\nfn betaValue() {}\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.context": {
+                  "kind": "repo_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 10,
+                  "max_files": 2,
+                  "context_lines": 1,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "repo.context",
+                &json!({"query": "fn [a-z]+_value", "mode": "regex", "path": "src/lib.rs"}),
+            )
+            .unwrap();
+
+        assert_eq!(output["mode"], json!("regex"));
+        assert_eq!(output["matches"].as_array().unwrap().len(), 1);
+        assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
+        assert!(output["snippets"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("alpha_value"));
+        assert_eq!(output["artifacts"][0]["metadata"]["mode"], json!("regex"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_context_rejects_unknown_mode() {
+        let dir = temp_dir("air-tools-repo-context-mode");
+        fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.context": {
+                  "kind": "repo_context",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("repo.context", &json!({"query": "alpha", "mode": "glob"}))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("input.mode must be fixed or regex"));
         let _ = fs::remove_dir_all(dir);
     }
 
