@@ -765,10 +765,9 @@ fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
     let mut omitted = 0usize;
     for (index, turn) in previous_turns.iter().enumerate().rev() {
         let turn_number = index + 1;
+        let summary = code_session_feedback_summary(turn);
         let prefix = format!(
-            "- turn {turn_number}: recipe={}; completed={}; outputs={output_summary}",
-            turn.recipe,
-            turn.completed,
+            "- turn {turn_number}: {summary}; outputs={output_summary}",
             output_summary = ""
         );
         let available = budget.saturating_sub(used + prefix.chars().count());
@@ -780,10 +779,7 @@ fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
             &serde_json::to_string(&turn.outputs).unwrap_or_default(),
             available,
         );
-        let line = format!(
-            "- turn {turn_number}: recipe={}; completed={}; outputs={output_summary}",
-            turn.recipe, turn.completed
-        );
+        let line = format!("- turn {turn_number}: {summary}; outputs={output_summary}");
         used += line.chars().count() + 1;
         lines.push(line);
         if used >= budget {
@@ -799,6 +795,45 @@ fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
         );
     }
     truncate_for_context(&lines.join("\n"), budget)
+}
+
+fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
+    let mut fields = vec![
+        format!("recipe={}", turn.recipe),
+        format!("completed={}", turn.completed),
+    ];
+    if !turn.summary.models.is_empty() {
+        fields.push(format!("models={}", turn.summary.models.join(",")));
+    }
+    if !turn.summary.tools.is_empty() {
+        fields.push(format!("tools={}", turn.summary.tools.join(",")));
+    }
+    if !turn.summary.approvals.is_empty() {
+        fields.push(format!("approvals={}", turn.summary.approvals.join(",")));
+    }
+    if !turn.summary.files.is_empty() {
+        fields.push(format!("files={}", turn.summary.files.join(",")));
+    }
+    if !turn.summary.artifact_kinds.is_empty() {
+        fields.push(format!(
+            "artifact_kinds={}",
+            turn.summary.artifact_kinds.join(",")
+        ));
+    }
+    if turn.summary.model_call_count > 0
+        || turn.summary.tool_call_count > 0
+        || turn.summary.approval_count > 0
+        || turn.summary.error_count > 0
+    {
+        fields.push(format!(
+            "counts=model:{},tool:{},approval:{},error:{}",
+            turn.summary.model_call_count,
+            turn.summary.tool_call_count,
+            turn.summary.approval_count,
+            turn.summary.error_count
+        ));
+    }
+    fields.join("; ")
 }
 
 fn code_loop_iteration_input(
@@ -1532,7 +1567,14 @@ mod tests {
             input: json!({"task": "inspect repo"}),
             completed: true,
             trace_files: Vec::new(),
-            summary: CodeSessionTurnSummary::default(),
+            summary: CodeSessionTurnSummary {
+                models: vec!["code_explorer".to_string()],
+                tools: vec!["repo.search".to_string()],
+                files: vec!["src/lib.rs".to_string()],
+                model_call_count: 1,
+                tool_call_count: 1,
+                ..CodeSessionTurnSummary::default()
+            },
             parts: Vec::new(),
             outputs: json!({
                 "exploration": {
@@ -1548,6 +1590,9 @@ mod tests {
         let task = next["task"].as_str().unwrap();
         assert!(task.starts_with("continue investigation"));
         assert!(task.contains("AIR session context from previous turns"));
+        assert!(task.contains("models=code_explorer"));
+        assert!(task.contains("tools=repo.search"));
+        assert!(task.contains("files=src/lib.rs"));
         assert!(task.contains("Found the dispatch implementation"));
     }
 

@@ -317,6 +317,8 @@ assert model_calls, trace
 task = model_calls[0]["input"]["task"]
 assert "AIR session context from previous turns" in task, task
 assert "Fixture exploration completed" in task, task
+assert "models=code_explorer" in task, task
+assert "tools=" in task, task
 assert any(
     part["kind"] == "model_call" and part.get("model") == "code_explorer"
     for part in session["turns"][1]["parts"]
