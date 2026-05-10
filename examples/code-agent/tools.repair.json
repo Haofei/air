@@ -66,5 +66,12 @@
       "timeout_seconds": 30,
       "max_bytes": 65536
     }
+  },
+  "approvals": {
+    "file.write": {
+      "approved": true,
+      "approver": "code-agent-fixture",
+      "reason": "bounded repair patch is allowed after read, diagnostics, and dry-run validation"
+    }
   }
 }

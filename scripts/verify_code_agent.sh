@@ -344,6 +344,12 @@ assert any(
     for event in trace
 ), trace
 assert any(
+    event.get("action") == "approval"
+    and event.get("status") == "ok"
+    and "file.write" in event.get("meta", {}).get("approval_for", [])
+    for event in trace
+), trace
+assert any(
     event.get("action") == "tool_call"
     and event.get("meta", {}).get("tool") == "file.patch"
     and event.get("status") == "ok"
@@ -412,6 +418,12 @@ assert any(
     event.get("action") == "model_call"
     and event.get("meta", {}).get("model") == "code_repair_context_selector"
     and event.get("status") == "ok"
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "approval"
+    and event.get("status") == "ok"
+    and "file.write" in event.get("meta", {}).get("approval_for", [])
     for event in trace
 ), trace
 assert any(
@@ -546,6 +558,12 @@ assert "examples/code-agent/repair-multifile/normalize.js" in changed, repair
 assert changed <= workspace_changed, repair
 assert "examples/code-agent/repair-multifile/math.js" in repair["workspace_diff"]["diff"], repair
 assert "examples/code-agent/repair-multifile/normalize.js" in repair["workspace_diff"]["diff"], repair
+assert any(
+    event.get("action") == "approval"
+    and event.get("status") == "ok"
+    and "file.write" in event.get("meta", {}).get("approval_for", [])
+    for event in trace
+), trace
 assert any(
     event.get("action") == "tool_call"
     and event.get("meta", {}).get("tool") == "file.patch"

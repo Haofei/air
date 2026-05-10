@@ -46,9 +46,10 @@ The explore/review/repair agents use:
 - `test.run` for an allowlisted verification command.
 
 The repair module writes a todo artifact before reading files, updates it before invoking the
-repair model, re-reads it into the model input, and records those progress events in the trace. That
-mirrors opencode's explicit task tracking while keeping progress state inside AIR's typed tool and
-capability boundary.
+repair model, re-reads it into the model input, and records those progress events in the trace. It
+also requires `file.write` approval before `file.patch` can run. That mirrors opencode's explicit
+task tracking while keeping progress and write permission state inside AIR's typed tool, approval,
+and capability boundary.
 
 Before final analysis, the preferred composed review plan sends the evidence bundle through the
 shared `modules/std/context/compact.air.yaml` module. That module first runs deterministic

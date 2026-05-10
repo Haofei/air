@@ -617,6 +617,8 @@ workflow:
     - id: patch-check
       when: phase == "patch_check"
       actions:
+        - kind: approval
+          approval_for: [file.write]
         - kind: tool_call
           tool: file.patch
           input:
@@ -1004,6 +1006,7 @@ workflow:
 policy:
   max_tool_calls: 21
   max_model_calls: 2
+  require_approval: [file.write]
   timeout_seconds: 360
 
 observability:
