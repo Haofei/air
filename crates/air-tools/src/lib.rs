@@ -450,6 +450,16 @@ enum ToolConfig {
         #[serde(default)]
         threshold_percent: Option<u64>,
     },
+    ArtifactValidate {
+        #[serde(default)]
+        capability: Option<String>,
+
+        #[serde(default)]
+        fail_on_missing: Option<bool>,
+
+        #[serde(default)]
+        max_ids: Option<usize>,
+    },
     CommandRun {
         #[serde(default)]
         capability: Option<String>,
@@ -515,6 +525,7 @@ impl ToolConfig {
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::TodoRead { capability }
             | ToolConfig::ContextMeasure { capability, .. }
+            | ToolConfig::ArtifactValidate { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -1167,6 +1178,9 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     *threshold_percent,
                 )?;
             }
+            ToolConfig::ArtifactValidate { max_ids, .. } => {
+                validate_positive_usize(path, &format!("tools.{name}.max_ids"), *max_ids)?;
+            }
             ToolConfig::CommandRun {
                 cwd,
                 commands,
@@ -1766,6 +1780,16 @@ impl ToolProvider for ConfigTools {
                 max_context_chars.unwrap_or(64 * 1024),
                 threshold_percent.unwrap_or(80),
             ),
+            ToolConfig::ArtifactValidate {
+                capability: _,
+                fail_on_missing,
+                max_ids,
+            } => call_artifact_validate_tool(
+                name,
+                input,
+                fail_on_missing.unwrap_or(false),
+                max_ids.unwrap_or(512),
+            ),
             ToolConfig::CommandRun {
                 capability: _,
                 cwd,
@@ -1809,6 +1833,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::TodoRead { capability }
             | ToolConfig::ContextMeasure { capability, .. }
+            | ToolConfig::ArtifactValidate { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -5668,6 +5693,237 @@ fn call_context_measure_tool(
     }))
 }
 
+fn call_artifact_validate_tool(
+    name: &str,
+    input: &Value,
+    fail_on_missing: bool,
+    max_ids: usize,
+) -> Result<Value, RuntimeError> {
+    let mut registered_ids = BTreeSet::new();
+    let mut registered_artifacts = Vec::new();
+    if let Some(ids) = input.get("registered_ids") {
+        collect_string_values(name, "registered_ids", ids, &mut registered_ids, max_ids)?;
+    }
+    if let Some(evidence) = input.get("evidence") {
+        collect_artifact_ids(
+            name,
+            evidence,
+            &mut registered_ids,
+            &mut registered_artifacts,
+            max_ids,
+        )?;
+    }
+
+    let mut cited_ids = BTreeSet::new();
+    if let Some(citations) = input.get("citations") {
+        collect_citation_ids(name, citations, &mut cited_ids, max_ids)?;
+    }
+    if let Some(ids) = input.get("source_ids") {
+        collect_string_values(name, "source_ids", ids, &mut cited_ids, max_ids)?;
+    }
+    if let Some(ids) = input.get("artifact_ids") {
+        collect_string_values(name, "artifact_ids", ids, &mut cited_ids, max_ids)?;
+    }
+
+    let missing_ids = cited_ids
+        .difference(&registered_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    if fail_on_missing && !missing_ids.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} citations reference unregistered artifact ids: {}",
+            missing_ids.join(", ")
+        )));
+    }
+
+    let unused_registered_ids = registered_ids
+        .difference(&cited_ids)
+        .cloned()
+        .collect::<Vec<_>>();
+    let registered_ids = registered_ids.into_iter().collect::<Vec<_>>();
+    let cited_ids = cited_ids.into_iter().collect::<Vec<_>>();
+    let valid = missing_ids.is_empty();
+    let content = format!(
+        "valid: {valid}\nregistered_ids: {}\ncited_ids: {}\nmissing_ids: {}",
+        registered_ids.len(),
+        cited_ids.len(),
+        missing_ids.len()
+    );
+
+    Ok(json!({
+        "valid": valid,
+        "registered_ids": registered_ids,
+        "cited_ids": cited_ids,
+        "missing_ids": missing_ids,
+        "unused_registered_ids": unused_registered_ids,
+        "registered_artifacts": registered_artifacts,
+        "artifacts": [{
+            "id": "artifact-validation:citations",
+            "kind": "artifact_validation",
+            "title": "citation artifact validation",
+            "uri": "air://artifacts/validation/citations",
+            "content": content,
+            "metadata": {
+                "provider": "artifact_validate",
+                "valid": valid
+            }
+        }]
+    }))
+}
+
+fn collect_artifact_ids(
+    tool_name: &str,
+    value: &Value,
+    ids: &mut BTreeSet<String>,
+    artifacts: &mut Vec<Value>,
+    max_ids: usize,
+) -> Result<(), RuntimeError> {
+    match value {
+        Value::Object(object) => {
+            if let Some(raw_artifacts) = object.get("artifacts") {
+                let raw_artifacts = raw_artifacts.as_array().ok_or_else(|| {
+                    RuntimeError::Provider(format!(
+                        "tool {tool_name} evidence.artifacts must be an array"
+                    ))
+                })?;
+                for artifact in raw_artifacts {
+                    let Some(object) = artifact.as_object() else {
+                        continue;
+                    };
+                    let Some(id) = object.get("id").and_then(Value::as_str) else {
+                        continue;
+                    };
+                    insert_non_empty_id(tool_name, "evidence.artifacts.id", id, ids, max_ids)?;
+                    artifacts.push(json!({
+                        "id": id,
+                        "kind": object.get("kind").cloned().unwrap_or(Value::Null),
+                        "title": object.get("title").cloned().unwrap_or(Value::Null),
+                        "uri": object.get("uri").cloned().unwrap_or(Value::Null)
+                    }));
+                }
+            }
+            for child in object.values() {
+                collect_artifact_ids(tool_name, child, ids, artifacts, max_ids)?;
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_artifact_ids(tool_name, child, ids, artifacts, max_ids)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn collect_citation_ids(
+    tool_name: &str,
+    value: &Value,
+    ids: &mut BTreeSet<String>,
+    max_ids: usize,
+) -> Result<(), RuntimeError> {
+    collect_citation_ids_inner(tool_name, value, ids, max_ids, false)
+}
+
+fn collect_citation_ids_inner(
+    tool_name: &str,
+    value: &Value,
+    ids: &mut BTreeSet<String>,
+    max_ids: usize,
+    collect_strings: bool,
+) -> Result<(), RuntimeError> {
+    match value {
+        Value::String(id) => {
+            if collect_strings {
+                insert_non_empty_id(tool_name, "citations", id, ids, max_ids)
+            } else {
+                Ok(())
+            }
+        }
+        Value::Array(values) => {
+            for child in values {
+                collect_citation_ids_inner(tool_name, child, ids, max_ids, collect_strings)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            for (key, child) in object {
+                if is_citation_key(key) {
+                    collect_string_values(tool_name, key, child, ids, max_ids)?;
+                } else {
+                    collect_citation_ids_inner(tool_name, child, ids, max_ids, false)?;
+                }
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn is_citation_key(key: &str) -> bool {
+    matches!(
+        key,
+        "source_id"
+            | "source_ids"
+            | "artifact_id"
+            | "artifact_ids"
+            | "citation"
+            | "citations"
+            | "source"
+            | "sources"
+    )
+}
+
+fn collect_string_values(
+    tool_name: &str,
+    field: &str,
+    value: &Value,
+    ids: &mut BTreeSet<String>,
+    max_ids: usize,
+) -> Result<(), RuntimeError> {
+    match value {
+        Value::String(id) => insert_non_empty_id(tool_name, field, id, ids, max_ids),
+        Value::Array(values) => {
+            for child in values {
+                collect_string_values(tool_name, field, child, ids, max_ids)?;
+            }
+            Ok(())
+        }
+        Value::Object(object) => {
+            for child in object.values() {
+                collect_string_values(tool_name, field, child, ids, max_ids)?;
+            }
+            Ok(())
+        }
+        Value::Null => Ok(()),
+        _ => Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must contain strings, arrays, or objects"
+        ))),
+    }
+}
+
+fn insert_non_empty_id(
+    tool_name: &str,
+    field: &str,
+    id: &str,
+    ids: &mut BTreeSet<String>,
+    max_ids: usize,
+) -> Result<(), RuntimeError> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} entries must not be empty"
+        )));
+    }
+    ids.insert(id.to_string());
+    if ids.len() > max_ids {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must reference at most {max_ids} ids"
+        )));
+    }
+    Ok(())
+}
+
 fn json_char_count(value: &Value) -> usize {
     serde_json::to_string(value)
         .unwrap_or_default()
@@ -5977,6 +6233,109 @@ mod tests {
 
         assert_eq!(output["should_compact"], json!(true));
         assert_eq!(output["threshold_percent"], json!(1));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn artifact_validate_rejects_unregistered_citations_when_configured() {
+        let dir = temp_dir("air-tools-artifact-validate");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "artifact.validate": {
+                  "kind": "artifact_validate",
+                  "capability": "provenance.validate",
+                  "fail_on_missing": true
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "artifact.validate",
+                &json!({
+                    "evidence": {
+                        "search": {
+                            "artifacts": [
+                                {
+                                    "id": "docs-command-run-safety",
+                                    "kind": "doc_chunk",
+                                    "title": "Command runner safety"
+                                }
+                            ]
+                        }
+                    },
+                    "citations": {
+                        "findings": [
+                            {
+                                "source_ids": [
+                                    "docs-command-run-safety",
+                                    "missing-source"
+                                ]
+                            }
+                        ]
+                    }
+                }),
+            )
+            .unwrap_err();
+
+        assert!(format!("{error}").contains("missing-source"));
+        assert_eq!(
+            tools.tool_capability("artifact.validate"),
+            Some("provenance.validate")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn artifact_validate_accepts_registered_artifact_ids() {
+        let dir = temp_dir("air-tools-artifact-validate-ok");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "artifact.validate": {
+                  "kind": "artifact_validate",
+                  "capability": "provenance.validate",
+                  "fail_on_missing": true
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "artifact.validate",
+                &json!({
+                    "registered_ids": ["manual-source"],
+                    "evidence": {
+                        "artifacts": [
+                            {
+                                "id": "docs-command-run-safety",
+                                "kind": "doc_chunk",
+                                "title": "Command runner safety"
+                            }
+                        ]
+                    },
+                    "citations": {
+                        "source_ids": [
+                            "docs-command-run-safety",
+                            "manual-source"
+                        ],
+                        "summary": "This string is not treated as a citation."
+                    }
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["valid"], json!(true));
+        assert_eq!(output["missing_ids"], json!([]));
+        assert_eq!(output["cited_ids"].as_array().unwrap().len(), 2);
+        assert_eq!(output["artifacts"][0]["kind"], json!("artifact_validation"));
         let _ = fs::remove_dir_all(dir);
     }
 

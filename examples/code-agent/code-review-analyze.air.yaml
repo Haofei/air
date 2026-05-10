@@ -45,12 +45,12 @@ outputs:
         items: string
 
 requires:
-  capabilities: []
+  capabilities: [provenance.validate]
 
 state:
   phase:
     type: enum
-    enum: [init, analyze, done, failed]
+    enum: [init, analyze, validate_citations, done, failed]
   review:
     type: object
     required: [summary, findings, source_ids, search_quality, next_steps]
@@ -85,11 +85,33 @@ state:
       next_steps:
         type: array
         items: string
+  citation_check:
+    type: object
+    required: [valid, registered_ids, cited_ids, missing_ids, artifacts]
+    properties:
+      valid: boolean
+      registered_ids:
+        type: array
+        items: string
+      cited_ids:
+        type: array
+        items: string
+      missing_ids:
+        type: array
+        items: string
+      artifacts:
+        type: array
+        items:
+          type: object
+
+tools:
+  - name: artifact.validate
+    capability: provenance.validate
 
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 4
+  max_steps: 5
   terminal: [done, failed]
   rules:
     - id: init
@@ -118,6 +140,27 @@ workflow:
             max_attempts: 2
         - kind: set
           values:
+            phase: validate_citations
+
+    - id: validate-citations
+      when: phase == "validate_citations"
+      actions:
+        - kind: tool_call
+          tool: artifact.validate
+          input:
+            object:
+              evidence:
+                ref: context
+              registered_ids:
+                path: context.source_ids
+              citations:
+                ref: review
+          output: citation_check
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
             phase: done
 
     - id: done
@@ -127,6 +170,7 @@ workflow:
           output: review
 
 policy:
+  max_tool_calls: 1
   timeout_seconds: 180
 
 observability:

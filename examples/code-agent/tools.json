@@ -121,6 +121,12 @@
       "max_context_chars": 45000,
       "threshold_percent": 80
     },
+    "artifact.validate": {
+      "kind": "artifact_validate",
+      "capability": "provenance.validate",
+      "fail_on_missing": true,
+      "max_ids": 512
+    },
     "test.run": {
       "kind": "command_run",
       "capability": "code.test",

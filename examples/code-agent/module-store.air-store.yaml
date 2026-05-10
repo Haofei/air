@@ -134,7 +134,7 @@ recipes:
         name: code-review-with-std-context-recipe
         version: 0.1.0
       requires:
-        capabilities: [task.progress, context.manage, network.search, file.read, code.read, code.test]
+        capabilities: [task.progress, context.manage, provenance.validate, network.search, file.read, code.read, code.test]
       nodes:
         - id: gather
           module: code.review_gather@0.1.0

@@ -1,5 +1,5 @@
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
-use crate::run_plan::{run_plan, RunPlanOptions};
+use crate::run_plan::{run_plan, run_plan_capture, RunPlanOptions};
 use anyhow::{bail, Result};
 use clap::ValueEnum;
 use serde_json::{json, Map, Value};
@@ -44,6 +44,8 @@ pub(crate) struct CodeOptions {
     pub(crate) parallel: bool,
     pub(crate) log: bool,
     pub(crate) explain: bool,
+    pub(crate) loop_enabled: bool,
+    pub(crate) max_iterations: usize,
     pub(crate) tool_config: Option<PathBuf>,
 }
 
@@ -73,6 +75,8 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         parallel,
         log,
         explain,
+        loop_enabled,
+        max_iterations,
         tool_config,
     } = options;
 
@@ -107,8 +111,34 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     })?;
 
     if explain {
-        print_explain(requested_recipe, recipe, &profile, &input)?;
+        print_explain(
+            requested_recipe,
+            recipe,
+            &profile,
+            &input,
+            loop_enabled,
+            max_iterations,
+        )?;
         return Ok(());
+    }
+
+    if loop_enabled {
+        return run_code_loop(CodeLoopOptions {
+            recipe,
+            profile,
+            input,
+            model_config,
+            trace_out,
+            trace_redact,
+            trace_raw,
+            state_out,
+            checkpoint_out,
+            jit_cache,
+            parallel,
+            log,
+            tool_config,
+            max_iterations,
+        });
     }
 
     run_plan(RunPlanOptions {
@@ -136,6 +166,8 @@ fn print_explain(
     resolved_recipe: CodeRecipe,
     profile: &Path,
     input: &Map<String, Value>,
+    loop_enabled: bool,
+    max_iterations: usize,
 ) -> Result<()> {
     let metadata = explain_metadata_for_profile(profile)?;
     let explanation = json!({
@@ -149,6 +181,10 @@ fn print_explain(
         "capabilities": metadata.capabilities,
         "read_only": metadata.read_only,
         "writes_workspace": metadata.writes_workspace,
+        "loop": {
+            "enabled": loop_enabled,
+            "max_iterations": max_iterations
+        },
         "input": Value::Object(input.clone()),
     });
     serde_json::to_writer_pretty(std::io::stdout(), &explanation)?;
@@ -187,6 +223,136 @@ fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
 
 fn is_workspace_write_capability(capability: &str) -> bool {
     matches!(capability, "file.write")
+}
+
+struct CodeLoopOptions {
+    recipe: CodeRecipe,
+    profile: PathBuf,
+    input: Map<String, Value>,
+    model_config: Option<PathBuf>,
+    trace_out: Option<PathBuf>,
+    trace_redact: bool,
+    trace_raw: bool,
+    state_out: Option<PathBuf>,
+    checkpoint_out: Option<PathBuf>,
+    jit_cache: Option<PathBuf>,
+    parallel: bool,
+    log: bool,
+    tool_config: Option<PathBuf>,
+    max_iterations: usize,
+}
+
+fn run_code_loop(options: CodeLoopOptions) -> Result<()> {
+    if options.max_iterations == 0 {
+        bail!("air code --loop requires --max-iterations to be greater than 0");
+    }
+
+    let mut iterations = Vec::new();
+    let mut final_outputs = Value::Object(Map::new());
+    let mut completed = false;
+
+    for iteration in 1..=options.max_iterations {
+        if options.log {
+            eprintln!(
+                "[air-code-loop] iteration={} recipe={}",
+                iteration,
+                recipe_name(options.recipe)
+            );
+        }
+        let outputs = run_plan_capture(RunPlanOptions {
+            plan: None,
+            profile: Some(options.profile.clone()),
+            store: None,
+            input: None,
+            input_values: Some(options.input.clone()),
+            model_config: options.model_config.clone(),
+            trace_out: options
+                .trace_out
+                .as_ref()
+                .map(|path| iteration_path(path, iteration)),
+            trace_redact: options.trace_redact,
+            trace_raw: options.trace_raw,
+            state_out: options
+                .state_out
+                .as_ref()
+                .map(|path| iteration_path(path, iteration)),
+            checkpoint_out: options
+                .checkpoint_out
+                .as_ref()
+                .map(|path| iteration_path(path, iteration)),
+            jit_cache: options.jit_cache.clone(),
+            parallel: options.parallel,
+            log: options.log,
+            example_tools: false,
+            tool_config: options.tool_config.clone(),
+        })?;
+        completed = code_outputs_complete(options.recipe, &outputs);
+        final_outputs = outputs.clone();
+        iterations.push(json!({
+            "iteration": iteration,
+            "completed": completed,
+            "outputs": outputs,
+        }));
+        if completed {
+            break;
+        }
+    }
+
+    let status = if completed {
+        "completed"
+    } else {
+        "max_iterations_exhausted"
+    };
+    let summary = json!({
+        "status": status,
+        "recipe": recipe_name(options.recipe),
+        "completed": completed,
+        "iterations": iterations,
+        "final_outputs": final_outputs,
+    });
+    serde_json::to_writer_pretty(std::io::stdout(), &summary)?;
+    println!();
+    Ok(())
+}
+
+fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
+    match recipe {
+        CodeRecipe::Auto => false,
+        CodeRecipe::Explore => outputs.get("exploration").is_some(),
+        CodeRecipe::Review => outputs
+            .pointer("/review/search_quality/sufficient")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| outputs.get("review").is_some()),
+        CodeRecipe::Repair => outputs
+            .pointer("/repair/final_success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        CodeRecipe::Build => {
+            outputs
+                .pointer("/build/test_success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+                && outputs
+                    .pointer("/build/audit_success")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+        }
+    }
+}
+
+fn iteration_path(path: &Path, iteration: usize) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("air-code-loop");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let file_name = if let Some(extension) = extension {
+        format!("{stem}.iter{iteration}.{extension}")
+    } else {
+        format!("{stem}.iter{iteration}")
+    };
+    parent.join(file_name)
 }
 
 struct CodeInputOptions {
@@ -601,6 +767,34 @@ mod tests {
         assert!(metadata
             .plan
             .ends_with("code-repair-with-explore.air-plan.yaml"));
+    }
+
+    #[test]
+    fn completion_detection_matches_recipe_outputs() {
+        assert!(code_outputs_complete(
+            CodeRecipe::Repair,
+            &json!({"repair": {"final_success": true}})
+        ));
+        assert!(!code_outputs_complete(
+            CodeRecipe::Repair,
+            &json!({"repair": {"final_success": false}})
+        ));
+        assert!(code_outputs_complete(
+            CodeRecipe::Build,
+            &json!({"build": {"test_success": true, "audit_success": true}})
+        ));
+        assert!(!code_outputs_complete(
+            CodeRecipe::Build,
+            &json!({"build": {"test_success": true, "audit_success": false}})
+        ));
+    }
+
+    #[test]
+    fn iteration_path_preserves_extension() {
+        assert_eq!(
+            iteration_path(Path::new("target/generated/code.trace.jsonl"), 2),
+            PathBuf::from("target/generated/code.trace.iter2.jsonl")
+        );
     }
 
     #[test]

@@ -52,6 +52,7 @@ cargo run -q -p air-cli -- run-plan examples/code-agent/code-review-composed.air
   --input examples/code-agent/input.json \
   --model-config examples/code-agent/model-fixtures.json \
   --tool-config examples/code-agent/tools.json \
+  --trace-out target/generated/code_review_composed_fixture.trace.jsonl \
   > target/generated/code_review_composed_fixture.output.json
 "${PYTHON:-python3}" - <<'PY'
 import json
@@ -62,6 +63,15 @@ review = output["review"]
 assert review["summary"].startswith("Fixture review completed")
 assert review["findings"][0]["severity"] == "info"
 assert review["search_quality"]["sufficient"] is True
+with open("target/generated/code_review_composed_fixture.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+checks = [
+    event for event in events
+    if event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "artifact.validate"
+]
+assert checks, "expected artifact.validate trace event"
+assert checks[-1]["output"]["valid"] is True, checks[-1]
 PY
 
 echo "[code-agent] user-facing review command offline run"
@@ -105,6 +115,8 @@ assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml
 assert "file.write" in output["capabilities"], output
 assert output["read_only"] is False, output
 assert output["writes_workspace"] is True, output
+assert output["loop"]["enabled"] is False, output
+assert output["loop"]["max_iterations"] == 3, output
 assert output["input"]["test_command"] == "repair_fixture_test", output
 PY
 
@@ -300,6 +312,44 @@ assert any(
     and event.get("status") == "ok"
     for event in trace
 ), trace
+PY
+
+echo "[code-agent] bounded loop repair command offline run"
+code_loop_fixture_backup="$(mktemp)"
+cp examples/code-agent/repair-fixture/math.js "$code_loop_fixture_backup"
+restore_code_loop_fixture() {
+  cp "$code_loop_fixture_backup" examples/code-agent/repair-fixture/math.js
+  rm -f "$code_loop_fixture_backup"
+}
+trap restore_code_loop_fixture EXIT
+cargo run -q -p air-cli -- code "fix the failing add function until tests pass" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --related examples/code-agent/repair-fixture/test.js \
+  --loop \
+  --max-iterations 2 \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_code_loop.trace.jsonl \
+  > target/generated/code_agent_code_loop.output.json
+node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_code_loop.post_test.log
+restore_code_loop_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_agent_code_loop.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+
+assert output["status"] == "completed", output
+assert output["completed"] is True, output
+assert output["recipe"] == "repair", output
+assert len(output["iterations"]) == 1, output
+repair = output["final_outputs"]["repair"]
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert Path("target/generated/code_agent_code_loop.trace.iter1.jsonl").exists()
 PY
 
 echo "[code-agent] core multifile repair offline run"

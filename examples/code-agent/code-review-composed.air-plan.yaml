@@ -4,7 +4,7 @@ plan:
   description: "Grounded code review composed from evidence gathering, the AIR standard context compactor, and final analysis."
 
 requires:
-  capabilities: [task.progress, context.manage, network.search, file.read, code.read, code.test]
+  capabilities: [task.progress, context.manage, provenance.validate, network.search, file.read, code.read, code.test]
 
 nodes:
   - id: gather

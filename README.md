@@ -218,7 +218,7 @@ Primary user-facing commands:
 | `run-plan` | Execute a RunPlan or packaged profile on the native VM |
 | `resume-plan` | Resume a halted/checkpointed plan with typed overrides |
 | `lower-plan` | Compile a checked RunPlan to another backend |
-| `code` | User-facing coding-agent wrapper with deterministic recipe routing and `--explain` permission preflight |
+| `code` | User-facing coding-agent wrapper with deterministic recipe routing, `--explain` permission preflight, and bounded `--loop` iteration |
 
 Lower-level module, system, and trace commands exist for development and tests, but are hidden from default help output.
 

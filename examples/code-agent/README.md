@@ -28,6 +28,7 @@ The explore/review agents use:
 
 - `todo.write` for a structured progress artifact before evidence gathering;
 - `todo.read` for re-reading the current task-progress artifact before analysis;
+- `artifact.validate` for fail-closed source-id validation against registered evidence artifacts;
 - `web.search` for external documentation or issues;
 - `repo.files` for relevant repository paths;
 - `repo.search` for symbol or text matches, with explicit regex mode available for grep-style discovery;
@@ -183,6 +184,24 @@ cargo run -p air-cli -- code "fix the failing add function and retest" \
   --related examples/code-agent/repair-fixture/test.js \
   --log
 ```
+
+For coding tasks that need opencode-style iteration, keep the loop outside the AIR module and bound
+it explicitly:
+
+```bash
+cargo run -p air-cli -- code "fix the failing add function until tests pass" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --related examples/code-agent/repair-fixture/test.js \
+  --loop \
+  --max-iterations 2 \
+  --trace-out target/generated/code_loop.trace.jsonl
+```
+
+Each iteration runs the same checked AIR recipe with the same capability contract. The wrapper stops
+when the recipe's completion signal passes, such as `repair.final_success == true` or both
+`build.test_success` and `build.audit_success` are true. Iteration trace paths are suffixed with
+`.iterN` so each pass remains auditable.
 
 The same command can select the other public coding-agent recipes:
 

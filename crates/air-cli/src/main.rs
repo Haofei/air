@@ -35,6 +35,7 @@ struct Cli {
 }
 
 #[derive(Debug, Subcommand)]
+#[allow(clippy::large_enum_variant)]
 enum Command {
     /// Run an AIR coding-agent recipe from a task and typed context.
     Code {
@@ -132,6 +133,14 @@ enum Command {
         /// Print the resolved recipe, profile, and typed input without running.
         #[arg(long)]
         explain: bool,
+
+        /// Re-run the selected coding recipe until its completion signal passes or the loop budget is exhausted.
+        #[arg(long = "loop")]
+        loop_enabled: bool,
+
+        /// Maximum iterations for --loop.
+        #[arg(long, default_value_t = 3)]
+        max_iterations: usize,
 
         /// Optional tool provider config JSON.
         #[arg(long)]
@@ -494,6 +503,8 @@ fn main() -> Result<()> {
             parallel,
             log,
             explain,
+            loop_enabled,
+            max_iterations,
             tool_config,
         } => code(CodeOptions {
             task,
@@ -520,6 +531,8 @@ fn main() -> Result<()> {
             parallel,
             log,
             explain,
+            loop_enabled,
+            max_iterations,
             tool_config,
         }),
         Command::Validate { file } => validate(file),
@@ -1707,6 +1720,35 @@ mod tests {
 
         assert_eq!(recipe, CodeRecipe::Auto);
         assert!(explain);
+    }
+
+    #[test]
+    fn code_command_accepts_bounded_loop_flags() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "fix the failing add function until tests pass",
+            "--target",
+            "examples/code-agent/repair-fixture/math.js",
+            "--test",
+            "repair_fixture_test",
+            "--loop",
+            "--max-iterations",
+            "2",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            loop_enabled,
+            max_iterations,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert!(loop_enabled);
+        assert_eq!(max_iterations, 2);
     }
 
     #[test]

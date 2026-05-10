@@ -322,6 +322,7 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `todo_write` | `todo.write` | `{ "todos": [{ "id": "inspect", "content": "...", "status": "in_progress", "priority": "high" }] }` | `{ todos[], total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts[] }` | Writes a structured task-progress artifact for complex agents. Status must be `pending`, `in_progress`, `completed`, or `cancelled`; priority must be `high`, `medium`, or `low`; at most one item may be `in_progress`. |
 | `todo_read` | `todo.read` | `{}` | `{ todos[], total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts[] }` | Reads the current in-memory todo list from the configured tool provider. This mirrors opencode-style task tracking without adding task state to the AIR IR. |
 | `context_measure` | `context.measure` | `{ "payload": {...}, "max_context_chars": 128000, "threshold_percent": 80 }` | `{ chars, max_context_chars, threshold_percent, threshold_chars, usage_ratio, should_compact, fields[], artifacts[] }` | Deterministically estimates serialized context size and returns whether a module should route through a semantic compaction step. This is generic and can be used by coding, research, planning, or support agents. |
+| `artifact_validate` | `artifact.validate` | `{ "evidence": {...}, "registered_ids": ["doc-1"], "citations": {...} }` | `{ valid, registered_ids[], cited_ids[], missing_ids[], unused_registered_ids[], registered_artifacts[], artifacts[] }` | Validates that model-produced `source_ids`, `citations`, or `artifact_ids` refer only to registered artifact ids. Set `fail_on_missing: true` in tool config for fail-closed provenance checks after semantic adapters or compaction. |
 | `command_run` | `test.run` | `{ "command": "alias" }` or `{ "command": "alias_with_filter", "test_filter": "module::case" }` | `{ command, argv, success, status, log, diagnostics[], artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Configured argv parts may use constrained `{{parameter}}` placeholders for bounded test names or paths. Extracts common Rust/TypeScript/file-line diagnostics for repair loops. |
 
 The reusable `modules/std/context/compact.air.yaml` module wraps `context.measure` with conditional
@@ -353,7 +354,9 @@ The native AIR VM records artifact ids from `artifacts[]` and from compatible `d
 results. If the registry is non-empty, model outputs and return outputs that contain
 `sources`, `citations`, or `source_ids` arrays must cite those ids. This gives deep research a
 checked source list and gives coding agents checked references to file reads, diffs, fetches, or
-test logs. Existing modules without artifact-producing tools continue to run without citation
+test logs. `artifact.validate` provides the same check as an explicit AIR tool when a module has
+passed through semantic compaction or adapter layers and wants to validate against carried-forward
+`source_ids`. Existing modules without artifact-producing tools continue to run without citation
 enforcement.
 
 The `examples/code-agent` workflows show three coding-agent patterns: review agents search for

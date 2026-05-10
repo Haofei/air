@@ -99,6 +99,12 @@ fn effective_trace_redact(
 }
 
 pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
+    let outputs = run_plan_capture(options)?;
+    println!("{}", serde_json::to_string_pretty(&outputs)?);
+    Ok(())
+}
+
+pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
     let RunPlanOptions {
         plan,
         profile,
@@ -217,7 +223,7 @@ pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
             .and_then(|(_, profile)| profile.example_tools)
             .unwrap_or(false);
 
-    run_plan_with_inputs(
+    run_plan_with_inputs_capture(
         plan,
         store,
         inputs,
@@ -236,12 +242,24 @@ pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn run_plan_with_inputs(
     plan: PathBuf,
     store: PathBuf,
     inputs: serde_json::Map<String, Value>,
     options: RunPlanExecutionOptions,
 ) -> Result<()> {
+    let outputs = run_plan_with_inputs_capture(plan, store, inputs, options)?;
+    println!("{}", serde_json::to_string_pretty(&outputs)?);
+    Ok(())
+}
+
+pub(crate) fn run_plan_with_inputs_capture(
+    plan: PathBuf,
+    store: PathBuf,
+    inputs: serde_json::Map<String, Value>,
+    options: RunPlanExecutionOptions,
+) -> Result<Value> {
     let RunPlanExecutionOptions {
         model_config,
         trace_out,
@@ -377,9 +395,7 @@ pub(crate) fn run_plan_with_inputs(
             write_jit_cache(jit_context, &result.trace, &store, &base_dir, log)?;
         }
     }
-    println!("{}", serde_json::to_string_pretty(&result.outputs)?);
-
-    Ok(())
+    Ok(Value::Object(result.outputs))
 }
 
 #[derive(Debug, Clone)]
