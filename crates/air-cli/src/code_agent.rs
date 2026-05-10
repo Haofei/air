@@ -1,3 +1,4 @@
+use crate::code_context::{default_context_budget_chars, truncate_for_context};
 #[cfg(test)]
 use crate::code_input::build_input;
 pub(crate) use crate::code_input::CodeRecipe;
@@ -11,9 +12,10 @@ use crate::code_pack::{
     load_code_agent_pack, CodeAgentInputFacts, CodeAgentPackContext, CodeAgentRouteDecision,
 };
 use crate::code_session::{
-    code_session_turn_id, code_session_turn_index, code_session_workspace_revert, CodeSessionPart,
-    CodeSessionPatchSet, CodeSessionRecovery, CodeSessionState, CodeSessionTurn,
-    CodeSessionTurnPack, CodeSessionTurnSummary, CodeSessionTurnTime,
+    code_session_feedback, code_session_turn_id, code_session_turn_index,
+    code_session_workspace_revert, CodeSessionPart, CodeSessionPatchSet, CodeSessionRecovery,
+    CodeSessionState, CodeSessionTurn, CodeSessionTurnPack, CodeSessionTurnSummary,
+    CodeSessionTurnTime,
 };
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
@@ -26,9 +28,6 @@ use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
-
-const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
-const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
 
 pub(crate) struct CodeOptions {
     pub(crate) task: String,
@@ -2779,117 +2778,6 @@ fn code_session_turn_input(
     input
 }
 
-fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
-    let budget = default_context_budget_chars();
-    let mut lines = Vec::new();
-    let mut used = 0usize;
-    let mut omitted = 0usize;
-    for (index, turn) in previous_turns.iter().enumerate().rev() {
-        let turn_number = index + 1;
-        let summary = code_session_feedback_summary(turn);
-        let prefix = format!(
-            "- turn {turn_number}: {summary}; outputs={output_summary}",
-            output_summary = ""
-        );
-        let available = budget.saturating_sub(used + prefix.chars().count());
-        if available == 0 {
-            omitted += 1;
-            continue;
-        }
-        let output_summary = truncate_for_context(
-            &serde_json::to_string(&turn.outputs).unwrap_or_default(),
-            available,
-        );
-        let line = format!("- turn {turn_number}: {summary}; outputs={output_summary}");
-        used += line.chars().count() + 1;
-        lines.push(line);
-        if used >= budget {
-            omitted += index;
-            break;
-        }
-    }
-    if omitted > 0 {
-        lines.push(
-            format!(
-                "- {omitted} older turn(s) omitted because AIR session context is capped at {budget} chars"
-            ),
-        );
-    }
-    truncate_for_context(&lines.join("\n"), budget)
-}
-
-fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
-    let mut fields = vec![
-        format!("recipe={}", turn.recipe),
-        format!("completed={}", turn.completed),
-    ];
-    if let Some(requested_recipe) = turn.requested_recipe.as_ref() {
-        if requested_recipe != &turn.recipe {
-            fields.push(format!("requested_recipe={requested_recipe}"));
-        }
-    }
-    if !turn.summary.models.is_empty() {
-        fields.push(format!("models={}", turn.summary.models.join(",")));
-    }
-    if !turn.summary.tools.is_empty() {
-        fields.push(format!("tools={}", turn.summary.tools.join(",")));
-    }
-    if !turn.summary.approvals.is_empty() {
-        fields.push(format!("approvals={}", turn.summary.approvals.join(",")));
-    }
-    if !turn.summary.files.is_empty() {
-        fields.push(format!(
-            "files={}",
-            code_session_join_limited(&turn.summary.files, 12)
-        ));
-    }
-    if !turn.summary.artifact_kinds.is_empty() {
-        fields.push(format!(
-            "artifact_kinds={}",
-            turn.summary.artifact_kinds.join(",")
-        ));
-    }
-    if !turn.patch_sets.is_empty() {
-        let changed_files = turn
-            .patch_sets
-            .iter()
-            .flat_map(|patch_set| patch_set.changed_files.iter())
-            .filter_map(|file| file.get("path").and_then(Value::as_str))
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        fields.push(format!("patch_sets={}", turn.patch_sets.len()));
-        if !changed_files.is_empty() {
-            fields.push(format!(
-                "patch_files={}",
-                code_session_join_limited(&changed_files, 12)
-            ));
-        }
-    }
-    if turn.summary.model_call_count > 0
-        || turn.summary.tool_call_count > 0
-        || turn.summary.approval_count > 0
-        || turn.summary.error_count > 0
-    {
-        fields.push(format!(
-            "counts=model:{},tool:{},approval:{},error:{}",
-            turn.summary.model_call_count,
-            turn.summary.tool_call_count,
-            turn.summary.approval_count,
-            turn.summary.error_count
-        ));
-    }
-    fields.join("; ")
-}
-
-fn code_session_join_limited(values: &[String], limit: usize) -> String {
-    if values.len() <= limit {
-        return values.join(",");
-    }
-    let mut items = values.iter().take(limit).cloned().collect::<Vec<_>>();
-    items.push(format!("+{} more", values.len() - limit));
-    items.join(",")
-}
-
 fn code_loop_iteration_input(
     base_input: &Map<String, Value>,
     previous_iterations: &[Value],
@@ -2958,27 +2846,6 @@ fn code_loop_feedback(previous_iterations: &[Value]) -> String {
         );
     }
     truncate_for_context(&lines.join("\n"), budget)
-}
-
-fn default_context_budget_chars() -> usize {
-    DEFAULT_CONTEXT_MAX_CHARS.saturating_mul(DEFAULT_CONTEXT_THRESHOLD_PERCENT) / 100
-}
-
-fn truncate_for_context(value: &str, max_chars: usize) -> String {
-    if value.chars().count() <= max_chars {
-        return value.to_string();
-    }
-    if max_chars == 0 {
-        return "[AIR_TRUNCATED]".to_string();
-    }
-    const MARKER: &str = " [AIR_TRUNCATED]";
-    if max_chars <= MARKER.chars().count() {
-        return MARKER.chars().take(max_chars).collect();
-    }
-    let keep = max_chars - MARKER.chars().count();
-    let mut truncated = value.chars().take(keep).collect::<String>();
-    truncated.push_str(MARKER);
-    truncated
 }
 
 fn code_outputs_complete(

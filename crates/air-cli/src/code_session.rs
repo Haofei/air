@@ -1,3 +1,4 @@
+use crate::code_context::{default_context_budget_chars, truncate_for_context};
 use crate::code_pack::{CodeAgentCompletion, CodeAgentRouteDecision};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -200,6 +201,45 @@ pub(crate) fn code_session_turn_index(state: &CodeSessionState, target: &str) ->
     bail!("AIR code session does not contain turn {target:?}");
 }
 
+pub(crate) fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
+    let budget = default_context_budget_chars();
+    let mut lines = Vec::new();
+    let mut used = 0usize;
+    let mut omitted = 0usize;
+    for (index, turn) in previous_turns.iter().enumerate().rev() {
+        let turn_number = index + 1;
+        let summary = code_session_feedback_summary(turn);
+        let prefix = format!(
+            "- turn {turn_number}: {summary}; outputs={output_summary}",
+            output_summary = ""
+        );
+        let available = budget.saturating_sub(used + prefix.chars().count());
+        if available == 0 {
+            omitted += 1;
+            continue;
+        }
+        let output_summary = truncate_for_context(
+            &serde_json::to_string(&turn.outputs).unwrap_or_default(),
+            available,
+        );
+        let line = format!("- turn {turn_number}: {summary}; outputs={output_summary}");
+        used += line.chars().count() + 1;
+        lines.push(line);
+        if used >= budget {
+            omitted += index;
+            break;
+        }
+    }
+    if omitted > 0 {
+        lines.push(
+            format!(
+                "- {omitted} older turn(s) omitted because AIR session context is capped at {budget} chars"
+            ),
+        );
+    }
+    truncate_for_context(&lines.join("\n"), budget)
+}
+
 pub(crate) fn code_session_workspace_revert(
     state: &CodeSessionState,
     target: &str,
@@ -249,6 +289,78 @@ pub(crate) fn code_session_workspace_revert(
         patch_set_count: patch_sets.len(),
         results,
     })
+}
+
+fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
+    let mut fields = vec![
+        format!("recipe={}", turn.recipe),
+        format!("completed={}", turn.completed),
+    ];
+    if let Some(requested_recipe) = turn.requested_recipe.as_ref() {
+        if requested_recipe != &turn.recipe {
+            fields.push(format!("requested_recipe={requested_recipe}"));
+        }
+    }
+    if !turn.summary.models.is_empty() {
+        fields.push(format!("models={}", turn.summary.models.join(",")));
+    }
+    if !turn.summary.tools.is_empty() {
+        fields.push(format!("tools={}", turn.summary.tools.join(",")));
+    }
+    if !turn.summary.approvals.is_empty() {
+        fields.push(format!("approvals={}", turn.summary.approvals.join(",")));
+    }
+    if !turn.summary.files.is_empty() {
+        fields.push(format!(
+            "files={}",
+            code_session_join_limited(&turn.summary.files, 12)
+        ));
+    }
+    if !turn.summary.artifact_kinds.is_empty() {
+        fields.push(format!(
+            "artifact_kinds={}",
+            turn.summary.artifact_kinds.join(",")
+        ));
+    }
+    if !turn.patch_sets.is_empty() {
+        let changed_files = turn
+            .patch_sets
+            .iter()
+            .flat_map(|patch_set| patch_set.changed_files.iter())
+            .filter_map(|file| file.get("path").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        fields.push(format!("patch_sets={}", turn.patch_sets.len()));
+        if !changed_files.is_empty() {
+            fields.push(format!(
+                "patch_files={}",
+                code_session_join_limited(&changed_files, 12)
+            ));
+        }
+    }
+    if turn.summary.model_call_count > 0
+        || turn.summary.tool_call_count > 0
+        || turn.summary.approval_count > 0
+        || turn.summary.error_count > 0
+    {
+        fields.push(format!(
+            "counts=model:{},tool:{},approval:{},error:{}",
+            turn.summary.model_call_count,
+            turn.summary.tool_call_count,
+            turn.summary.approval_count,
+            turn.summary.error_count
+        ));
+    }
+    fields.join("; ")
+}
+
+fn code_session_join_limited(values: &[String], limit: usize) -> String {
+    if values.len() <= limit {
+        return values.join(",");
+    }
+    let mut items = values.iter().take(limit).cloned().collect::<Vec<_>>();
+    items.push(format!("+{} more", values.len() - limit));
+    items.join(",")
 }
 
 impl CodeSessionState {
