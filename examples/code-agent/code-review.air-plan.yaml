@@ -4,7 +4,7 @@ plan:
   description: "Single bounded coding agent that combines search, file context, and git diff."
 
 requires:
-  capabilities: [network.search, file.read, code.read, code.test]
+  capabilities: [task.progress, network.search, file.read, code.read, code.test]
 
 nodes:
   - id: review

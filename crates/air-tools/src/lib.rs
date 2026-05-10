@@ -328,6 +328,16 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    TodoWrite {
+        #[serde(default)]
+        capability: Option<String>,
+
+        #[serde(default)]
+        max_items: Option<usize>,
+
+        #[serde(default)]
+        max_content_chars: Option<usize>,
+    },
     CommandRun {
         #[serde(default)]
         capability: Option<String>,
@@ -361,6 +371,7 @@ impl ToolConfig {
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -807,6 +818,18 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
+            ToolConfig::TodoWrite {
+                max_items,
+                max_content_chars,
+                ..
+            } => {
+                validate_positive_usize(path, &format!("tools.{name}.max_items"), *max_items)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_content_chars"),
+                    *max_content_chars,
+                )?;
+            }
             ToolConfig::CommandRun {
                 cwd,
                 commands,
@@ -1218,6 +1241,16 @@ impl ToolProvider for ConfigTools {
                 context_lines.unwrap_or(6),
                 max_bytes.unwrap_or(256 * 1024),
             ),
+            ToolConfig::TodoWrite {
+                capability: _,
+                max_items,
+                max_content_chars,
+            } => call_todo_write_tool(
+                name,
+                input,
+                max_items.unwrap_or(20),
+                max_content_chars.unwrap_or(200),
+            ),
             ToolConfig::CommandRun {
                 capability: _,
                 cwd,
@@ -1251,6 +1284,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -3578,6 +3612,136 @@ fn doc_dedupe_key(doc: &LocalDoc) -> String {
     format!("id:{}", doc.id.trim().to_lowercase())
 }
 
+fn call_todo_write_tool(
+    name: &str,
+    input: &Value,
+    max_items: usize,
+    max_content_chars: usize,
+) -> Result<Value, RuntimeError> {
+    let todos = input
+        .get("todos")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.todos must be an array"))
+        })?;
+    if todos.len() > max_items {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos must contain at most {max_items} items"
+        )));
+    }
+
+    let mut seen_ids = BTreeSet::new();
+    let mut normalized = Vec::new();
+    let mut pending_count = 0usize;
+    let mut in_progress_count = 0usize;
+    let mut completed_count = 0usize;
+    let mut cancelled_count = 0usize;
+
+    for (index, todo) in todos.iter().enumerate() {
+        let object = todo.as_object().ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}] must be an object"
+            ))
+        })?;
+        let id = required_object_string(name, object, &format!("todos[{index}].id"))?;
+        let content = required_object_string(name, object, &format!("todos[{index}].content"))?;
+        let status = required_object_string(name, object, &format!("todos[{index}].status"))?;
+        let priority = required_object_string(name, object, &format!("todos[{index}].priority"))?;
+        if id.trim().is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].id must not be empty"
+            )));
+        }
+        if !seen_ids.insert(id.to_string()) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].id must be unique"
+            )));
+        }
+        if content.trim().is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].content must not be empty"
+            )));
+        }
+        if content.chars().count() > max_content_chars {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].content must contain at most {max_content_chars} characters"
+            )));
+        }
+        match status {
+            "pending" => pending_count += 1,
+            "in_progress" => in_progress_count += 1,
+            "completed" => completed_count += 1,
+            "cancelled" => cancelled_count += 1,
+            _ => {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.todos[{index}].status must be pending, in_progress, completed, or cancelled"
+                )));
+            }
+        }
+        if !matches!(priority, "high" | "medium" | "low") {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].priority must be high, medium, or low"
+            )));
+        }
+
+        normalized.push(json!({
+            "id": id,
+            "content": content,
+            "status": status,
+            "priority": priority,
+        }));
+    }
+
+    if in_progress_count > 1 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos must contain at most one in_progress item"
+        )));
+    }
+
+    let open_count = pending_count + in_progress_count;
+    let content = serde_json::to_string_pretty(&normalized).map_err(|error| {
+        RuntimeError::Provider(format!("tool {name} serialize todo list: {error}"))
+    })?;
+    Ok(json!({
+        "todos": normalized,
+        "total": todos.len(),
+        "open_count": open_count,
+        "pending_count": pending_count,
+        "in_progress_count": in_progress_count,
+        "completed_count": completed_count,
+        "cancelled_count": cancelled_count,
+        "artifacts": [{
+            "id": "todo:list",
+            "kind": "todo_list",
+            "title": format!("{open_count} open todos"),
+            "uri": "air://todos/current",
+            "content": content,
+            "metadata": {
+                "provider": "todo_write",
+                "total": todos.len(),
+                "open_count": open_count,
+                "pending_count": pending_count,
+                "in_progress_count": in_progress_count,
+                "completed_count": completed_count,
+                "cancelled_count": cancelled_count
+            }
+        }],
+    }))
+}
+
+fn required_object_string<'a>(
+    tool_name: &str,
+    object: &'a Map<String, Value>,
+    field: &str,
+) -> Result<&'a str, RuntimeError> {
+    object
+        .get(field.rsplit('.').next().unwrap_or(field))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+        })
+}
+
 struct HelpdeskDoc {
     id: &'static str,
     title: &'static str,
@@ -3625,6 +3789,102 @@ mod tests {
         let path = dir.join("tools.json");
         fs::write(&path, content).unwrap();
         path
+    }
+
+    #[test]
+    fn todo_write_returns_a_structured_artifact() {
+        let dir = temp_dir("air-tools-todo-write");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "todo.write": {
+                  "kind": "todo_write",
+                  "capability": "task.progress",
+                  "max_items": 4,
+                  "max_content_chars": 80
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "todo.write",
+                &json!({
+                    "todos": [
+                        {
+                            "id": "inspect",
+                            "content": "Inspect repository context",
+                            "status": "completed",
+                            "priority": "high"
+                        },
+                        {
+                            "id": "fix",
+                            "content": "Apply the bounded fix",
+                            "status": "in_progress",
+                            "priority": "high"
+                        },
+                        {
+                            "id": "verify",
+                            "content": "Run the allowlisted verification",
+                            "status": "pending",
+                            "priority": "medium"
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["total"], json!(3));
+        assert_eq!(output["open_count"], json!(2));
+        assert_eq!(output["in_progress_count"], json!(1));
+        assert_eq!(output["artifacts"][0]["kind"], json!("todo_list"));
+        assert_eq!(tools.tool_capability("todo.write"), Some("task.progress"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn todo_write_rejects_multiple_in_progress_items() {
+        let dir = temp_dir("air-tools-todo-write-invalid");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "todo.write": {
+                  "kind": "todo_write",
+                  "capability": "task.progress"
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "todo.write",
+                &json!({
+                    "todos": [
+                        {
+                            "id": "one",
+                            "content": "First task",
+                            "status": "in_progress",
+                            "priority": "high"
+                        },
+                        {
+                            "id": "two",
+                            "content": "Second task",
+                            "status": "in_progress",
+                            "priority": "medium"
+                        }
+                    ]
+                }),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("at most one in_progress"));
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]

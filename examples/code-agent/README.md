@@ -13,6 +13,7 @@ This example contains two bounded AIR coding agents:
 
 The review agent uses:
 
+- `todo.write` for a structured progress artifact before evidence gathering;
 - `web.search` for external documentation or issues;
 - `repo.files` for relevant repository paths;
 - `repo.search` for symbol or text matches;
@@ -23,6 +24,7 @@ The review agent uses:
 - `test.run` for an allowlisted verification command.
 
 For editing agents, prefer the opencode-style tool split already available in `air-tools`:
+`todo.write` for explicit task tracking on non-trivial work,
 `file.read` for context, `file.edit` for exact-string changes that require a prior read by default
 and explicit whitespace-tolerant strategies for indentation drift, with bounded diff output for
 audit,

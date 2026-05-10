@@ -280,6 +280,7 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `repo_files` | `repo.files` | `{ "query": "...", "path": "optional/dir" }` | `{ repo, query, files[], truncated, artifacts[] }` | Read-only repository file listing through `rg --files`; optional query/path/glob filtering. |
 | `repo_search` | `repo.search` | `{ "query": "...", "path": "optional/dir" }` | `{ repo, query, matches[], truncated, artifacts[] }` | Read-only fixed-string search through `rg`; returns path/line/column/text matches. |
 | `repo_context` | `repo.context` | `{ "query": "...", "context_lines": 8 }` | `{ repo, query, matches[], snippets[], truncated, artifacts[] }` | Read-only code context through `rg`; groups matches by file and returns nearby numbered snippets with a `code_context` artifact. |
+| `todo_write` | `todo.write` | `{ "todos": [{ "id": "inspect", "content": "...", "status": "in_progress", "priority": "high" }] }` | `{ todos[], total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts[] }` | Writes a structured task-progress artifact for complex agents. Status must be `pending`, `in_progress`, `completed`, or `cancelled`; priority must be `high`, `medium`, or `low`; at most one item may be `in_progress`. |
 | `command_run` | `test.run` | `{ "command": "alias" }` | `{ command, success, status, log, diagnostics[], artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Extracts common Rust/TypeScript/file-line diagnostics for repair loops. |
 
 Artifact-producing tools return a common shape:
@@ -289,7 +290,7 @@ Artifact-producing tools return a common shape:
   "artifacts": [
     {
       "id": "doc-1",
-      "kind": "web_page | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | code_context | git_diff | git_status | test_log",
+      "kind": "web_page | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | code_context | todo_list | git_diff | git_status | test_log",
       "title": "Readable title",
       "uri": "file-or-web-location",
       "content": "Evidence text",

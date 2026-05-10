@@ -67,6 +67,12 @@
       "repo_dir": "../..",
       "max_files": 200
     },
+    "todo.write": {
+      "kind": "todo_write",
+      "capability": "task.progress",
+      "max_items": 8,
+      "max_content_chars": 120
+    },
     "test.run": {
       "kind": "command_run",
       "capability": "code.test",

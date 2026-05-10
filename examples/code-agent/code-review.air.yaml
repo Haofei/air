@@ -49,12 +49,28 @@ outputs:
         items: string
 
 requires:
-  capabilities: [network.search, file.read, code.read, code.test]
+  capabilities: [task.progress, network.search, file.read, code.read, code.test]
 
 state:
   phase:
     type: enum
-    enum: [init, search, list_files, search_repo, read_context, read_file, read_diff, read_status, run_tests, analyze, done, failed]
+    enum: [init, plan, search, list_files, search_repo, read_context, read_file, read_diff, read_status, run_tests, analyze, done, failed]
+  plan_status:
+    type: object
+    required: [todos, total, open_count, artifacts]
+    properties:
+      todos:
+        type: array
+        items: object
+      total: integer
+      open_count: integer
+      pending_count: integer
+      in_progress_count: integer
+      completed_count: integer
+      cancelled_count: integer
+      artifacts:
+        type: array
+        items: object
   search_results:
     type: object
     required: [query, documents]
@@ -201,6 +217,9 @@ state:
         items: string
 
 tools:
+  - name: todo.write
+    capability: task.progress
+    timeout_ms: 10000
   - name: web.search
     capability: network.search
     timeout_ms: 120000
@@ -229,12 +248,56 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 11
+  max_steps: 12
   terminal: [done, failed]
   rules:
     - id: init
       when: phase == "init"
       actions:
+        - kind: set
+          values:
+            phase: plan
+
+    - id: plan
+      when: phase == "plan"
+      actions:
+        - kind: tool_call
+          tool: todo.write
+          input:
+            object:
+              todos:
+                array:
+                  - object:
+                      id:
+                        literal: gather-evidence
+                      content:
+                        literal: Gather external references, repository matches, target file context, diff, status, and verification output.
+                      status:
+                        literal: in_progress
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: analyze-risks
+                      content:
+                        literal: Produce grounded findings with cited artifact ids and search quality gaps.
+                      status:
+                        literal: pending
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: recommend-next-steps
+                      content:
+                        literal: Return concise next steps based on evidence and test results.
+                      status:
+                        literal: pending
+                      priority:
+                        literal: medium
+          output: plan_status
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: set
           values:
             phase: search
@@ -421,6 +484,8 @@ workflow:
                 ref: workspace_status
               test_results:
                 ref: test_results
+              plan_status:
+                ref: plan_status
           output: review
           timeout_seconds: 120
           retry:
@@ -436,7 +501,7 @@ workflow:
           output: review
 
 policy:
-  max_tool_calls: 10
+  max_tool_calls: 11
   timeout_seconds: 300
 
 observability:

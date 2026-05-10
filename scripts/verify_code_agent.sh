@@ -17,6 +17,7 @@ cargo test -q -p air-tools file_patch
 cargo test -q -p air-tools file_edit
 cargo test -q -p air-tools stale_read
 cargo test -q -p air-tools git_status
+cargo test -q -p air-tools todo_write
 cargo test -q -p air-tools command_run_extracts_structured_diagnostics
 cargo test -q -p air-tools extract_command_diagnostics_parses_rustc_location_blocks
 
