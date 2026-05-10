@@ -251,6 +251,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             code_session_trace_files(effective_trace_out.as_ref(), loop_enabled, &outputs);
         let parts = code_session_parts(&trace_files)?;
         let summary = code_session_turn_summary(&parts);
+        let patch_sets = code_session_patch_sets(&outputs);
         state.append_turn(CodeSessionTurn {
             id: code_session_turn_id(turn_number),
             time: turn_time,
@@ -269,6 +270,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .collect(),
             summary,
             parts,
+            patch_sets,
             outputs: outputs.clone(),
         });
         state.write(path)?;
@@ -311,6 +313,11 @@ pub(crate) fn code_session(options: CodeSessionOptions) -> Result<()> {
         .iter()
         .map(|turn| turn.trace_files.len())
         .sum::<usize>();
+    let patch_set_count = state
+        .turns
+        .iter()
+        .map(|turn| turn.patch_sets.len())
+        .sum::<usize>();
     let summary = json!({
         "source": path_ref_to_input_string(&session),
         "output": output_path.as_ref().map(|path| path_ref_to_input_string(path)),
@@ -320,6 +327,7 @@ pub(crate) fn code_session(options: CodeSessionOptions) -> Result<()> {
         "latest_turn_id": state.turns.last().map(|turn| turn.id.as_str()),
         "reverted_to": reverted_to,
         "trace_file_count": trace_file_count,
+        "patch_set_count": patch_set_count,
         "workspace_reverted": false,
         "note": "AIR code-session only forks or truncates session history; it does not modify workspace files."
     });
@@ -353,6 +361,8 @@ struct CodeSessionTurn {
     summary: CodeSessionTurnSummary,
     #[serde(default)]
     parts: Vec<CodeSessionPart>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    patch_sets: Vec<CodeSessionPatchSet>,
     outputs: Value,
 }
 
@@ -390,6 +400,29 @@ struct CodeSessionTurnSummary {
     tool_call_count: usize,
     approval_count: usize,
     error_count: usize,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct CodeSessionPatchSet {
+    source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_clean_before: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    workspace_clean_after: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    preexisting_changed_files: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    changed_files: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    workspace_changed_files: Vec<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diff: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diff_bytes: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    diff_truncated: Option<bool>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_ids: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -585,6 +618,71 @@ fn code_session_turn_summary(parts: &[CodeSessionPart]) -> CodeSessionTurnSummar
     sort_dedup(&mut summary.artifact_ids);
     sort_dedup(&mut summary.artifact_kinds);
     summary
+}
+
+fn code_session_patch_sets(outputs: &Value) -> Vec<CodeSessionPatchSet> {
+    let mut patch_sets = Vec::new();
+    collect_code_session_patch_sets(outputs, "$", &mut patch_sets);
+    patch_sets
+}
+
+fn collect_code_session_patch_sets(
+    value: &Value,
+    path: &str,
+    patch_sets: &mut Vec<CodeSessionPatchSet>,
+) {
+    match value {
+        Value::Object(object) => {
+            if let Some(Value::Object(workspace_diff)) = object.get("workspace_diff") {
+                let artifact_ids = workspace_diff
+                    .get("artifacts")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|artifact| artifact.get("id").and_then(Value::as_str))
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                patch_sets.push(CodeSessionPatchSet {
+                    source: path.to_string(),
+                    workspace_clean_before: object
+                        .get("workspace_clean_before")
+                        .and_then(Value::as_bool),
+                    workspace_clean_after: object.get("workspace_clean").and_then(Value::as_bool),
+                    preexisting_changed_files: object
+                        .get("preexisting_changed_files")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                    changed_files: object
+                        .get("changed_files")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                    workspace_changed_files: object
+                        .get("workspace_changed_files")
+                        .and_then(Value::as_array)
+                        .cloned()
+                        .unwrap_or_default(),
+                    diff: workspace_diff
+                        .get("diff")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    diff_bytes: workspace_diff.get("bytes").and_then(Value::as_u64),
+                    diff_truncated: workspace_diff.get("truncated").and_then(Value::as_bool),
+                    artifact_ids,
+                });
+            }
+            for (key, child) in object {
+                collect_code_session_patch_sets(child, &format!("{path}.{key}"), patch_sets);
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                collect_code_session_patch_sets(child, &format!("{path}[{index}]"), patch_sets);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn sort_dedup(values: &mut Vec<String>) {
@@ -1416,6 +1514,19 @@ fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
             turn.summary.artifact_kinds.join(",")
         ));
     }
+    if !turn.patch_sets.is_empty() {
+        let changed_files = turn
+            .patch_sets
+            .iter()
+            .flat_map(|patch_set| patch_set.changed_files.iter())
+            .filter_map(|file| file.get("path").and_then(Value::as_str))
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        fields.push(format!("patch_sets={}", turn.patch_sets.len()));
+        if !changed_files.is_empty() {
+            fields.push(format!("patch_files={}", changed_files.join(",")));
+        }
+    }
     if turn.summary.model_call_count > 0
         || turn.summary.tool_call_count > 0
         || turn.summary.approval_count > 0
@@ -2111,6 +2222,37 @@ mod tests {
     }
 
     #[test]
+    fn session_patch_sets_extract_workspace_diff() {
+        let patch_sets = code_session_patch_sets(&json!({
+            "repair": {
+                "workspace_clean_before": false,
+                "workspace_clean": false,
+                "changed_files": [{"path": "src/lib.rs"}],
+                "workspace_changed_files": [{"path": "src/lib.rs"}, {"path": "README.md"}],
+                "preexisting_changed_files": [{"path": "README.md"}],
+                "workspace_diff": {
+                    "diff": "diff --git a/src/lib.rs b/src/lib.rs",
+                    "bytes": 42,
+                    "truncated": false,
+                    "artifacts": [{"id": "git-diff:src/lib.rs"}]
+                }
+            }
+        }));
+
+        assert_eq!(patch_sets.len(), 1);
+        assert_eq!(patch_sets[0].source, "$.repair");
+        assert_eq!(patch_sets[0].workspace_clean_before, Some(false));
+        assert_eq!(patch_sets[0].workspace_clean_after, Some(false));
+        assert_eq!(
+            patch_sets[0].changed_files[0]["path"],
+            Value::String("src/lib.rs".to_string())
+        );
+        assert_eq!(patch_sets[0].diff_bytes, Some(42));
+        assert_eq!(patch_sets[0].diff_truncated, Some(false));
+        assert_eq!(patch_sets[0].artifact_ids, vec!["git-diff:src/lib.rs"]);
+    }
+
+    #[test]
     fn session_part_indexes_trace_event() {
         let event = TraceEvent {
             agent: "code-agent".to_string(),
@@ -2324,6 +2466,7 @@ mod tests {
                 ..CodeSessionTurnSummary::default()
             },
             parts: Vec::new(),
+            patch_sets: Vec::new(),
             outputs: json!({
                 "exploration": {
                     "summary": "Found the dispatch implementation",
@@ -2362,6 +2505,7 @@ mod tests {
                 trace_files: Vec::new(),
                 summary: CodeSessionTurnSummary::default(),
                 parts: Vec::new(),
+                patch_sets: Vec::new(),
                 outputs: json!({"summary": "older turn"}),
             },
             CodeSessionTurn {
@@ -2378,6 +2522,7 @@ mod tests {
                 trace_files: Vec::new(),
                 summary: CodeSessionTurnSummary::default(),
                 parts: Vec::new(),
+                patch_sets: Vec::new(),
                 outputs: json!({"summary": large_output}),
             },
         ];
@@ -2429,6 +2574,7 @@ mod tests {
             trace_files: Vec::new(),
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
+            patch_sets: Vec::new(),
             outputs: json!({"repair": {"final_success": false}}),
         });
 
@@ -2459,6 +2605,7 @@ mod tests {
             trace_files: Vec::new(),
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
+            patch_sets: Vec::new(),
             outputs: json!({}),
         });
         state.append_turn(CodeSessionTurn {
@@ -2472,6 +2619,7 @@ mod tests {
             trace_files: Vec::new(),
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
+            patch_sets: Vec::new(),
             outputs: json!({}),
         });
 

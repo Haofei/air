@@ -607,6 +607,15 @@ assert "file.patch" in turn["summary"]["tools"], turn["summary"]
 assert "file.write" in turn["summary"]["approvals"], turn["summary"]
 assert "examples/code-agent/repair-fixture/math.js" in turn["summary"]["files"], turn["summary"]
 assert "file_patch" in turn["summary"]["artifact_kinds"], turn["summary"]
+assert turn["patch_sets"], turn
+patch_set = turn["patch_sets"][0]
+assert patch_set["source"].endswith(".repair"), patch_set
+assert patch_set["workspace_clean_before"] is False, patch_set
+assert any(
+    entry["path"] == "examples/code-agent/repair-fixture/math.js"
+    for entry in patch_set["changed_files"]
+), patch_set
+assert "examples/code-agent/repair-fixture/math.js" in patch_set["diff"], patch_set
 with open(turn["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 

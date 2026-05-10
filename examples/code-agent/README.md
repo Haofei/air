@@ -265,8 +265,10 @@ session context uses the same default budget posture as AIR context management: 
 context window, inject at most the 80% working threshold, and prefer recent turns when older history
 must be omitted. If `--session` is set and no `--trace-out` path is supplied, `air code` writes a
 per-turn trace beside the session file under `<session-stem>.traces/` and stores a lightweight
-`parts[]` index for model calls, tool calls, approvals, and returns. The original trace remains the
-source of truth; the session index only makes prior AIR actions easy to inspect.
+`parts[]` index for model calls, tool calls, approvals, and returns. Turns that include a repair
+workspace diff also store `patch_sets[]` with changed files, pre-existing dirty files, diff text,
+and diff artifact ids. The original trace remains the source of truth; the session index only makes
+prior AIR actions easy to inspect.
 
 Session history can be forked or truncated without touching workspace files:
 
