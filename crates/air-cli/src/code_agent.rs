@@ -57,6 +57,7 @@ pub(crate) struct CodeOptions {
     pub(crate) log: bool,
     pub(crate) explain: bool,
     pub(crate) loop_enabled: bool,
+    pub(crate) execute_plan: bool,
     pub(crate) max_iterations: usize,
     pub(crate) tool_config: Option<PathBuf>,
 }
@@ -89,6 +90,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         log,
         explain,
         loop_enabled,
+        execute_plan,
         max_iterations,
         tool_config,
     } = options;
@@ -137,6 +139,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             &profile,
             &input,
             loop_enabled,
+            execute_plan,
             max_iterations,
         )?;
         return Ok(());
@@ -156,7 +159,26 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     }
 
     let session_input = input.clone();
-    let outputs = if loop_enabled {
+    let outputs = if execute_plan {
+        if recipe != CodeRecipe::Plan {
+            bail!("air code --execute-plan requires the resolved recipe to be plan");
+        }
+        run_code_project(CodeProjectOptions {
+            plan_profile: profile.clone(),
+            input,
+            model_config: model_config.clone(),
+            trace_out: effective_trace_out.clone(),
+            trace_redact,
+            trace_raw,
+            state_out: state_out.clone(),
+            checkpoint_out: checkpoint_out.clone(),
+            jit_cache: jit_cache.clone(),
+            parallel,
+            log,
+            tool_config: tool_config.clone(),
+            max_tasks: max_iterations,
+        })?
+    } else if loop_enabled {
         run_code_loop(CodeLoopOptions {
             recipe,
             profile: profile.clone(),
@@ -419,6 +441,13 @@ fn code_session_trace_files(
     loop_enabled: bool,
     outputs: &Value,
 ) -> Vec<PathBuf> {
+    if let Some(files) = outputs.get("trace_files").and_then(Value::as_array) {
+        return files
+            .iter()
+            .filter_map(Value::as_str)
+            .map(PathBuf::from)
+            .collect();
+    }
     let Some(trace_out) = trace_out else {
         return Vec::new();
     };
@@ -608,6 +637,7 @@ fn print_explain(
     profile: &Path,
     input: &Map<String, Value>,
     loop_enabled: bool,
+    execute_plan: bool,
     max_iterations: usize,
 ) -> Result<()> {
     let metadata = explain_metadata_for_profile(profile)?;
@@ -637,6 +667,10 @@ fn print_explain(
         "loop": {
             "enabled": loop_enabled,
             "max_iterations": max_iterations
+        },
+        "project_execution": {
+            "enabled": execute_plan,
+            "max_tasks": if execute_plan { max_iterations } else { 0 }
         },
         "input": Value::Object(input.clone()),
     });
@@ -700,6 +734,259 @@ struct CodeLoopOptions {
     log: bool,
     tool_config: Option<PathBuf>,
     max_iterations: usize,
+}
+
+struct CodeProjectOptions {
+    plan_profile: PathBuf,
+    input: Map<String, Value>,
+    model_config: Option<PathBuf>,
+    trace_out: Option<PathBuf>,
+    trace_redact: bool,
+    trace_raw: bool,
+    state_out: Option<PathBuf>,
+    checkpoint_out: Option<PathBuf>,
+    jit_cache: Option<PathBuf>,
+    parallel: bool,
+    log: bool,
+    tool_config: Option<PathBuf>,
+    max_tasks: usize,
+}
+
+fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
+    if options.max_tasks == 0 {
+        bail!("air code --execute-plan requires --max-iterations to be greater than 0");
+    }
+
+    let mut trace_files = Vec::new();
+    let plan_trace = options
+        .trace_out
+        .as_ref()
+        .map(|path| labeled_trace_path(path, "plan"));
+    if let Some(path) = plan_trace.as_ref() {
+        trace_files.push(path_ref_to_input_string(path));
+    }
+
+    if options.log {
+        eprintln!("[air-code-project] step=plan recipe=plan");
+    }
+    let plan_outputs = run_plan_capture(RunPlanOptions {
+        plan: None,
+        profile: Some(options.plan_profile.clone()),
+        store: None,
+        input: None,
+        input_values: Some(options.input.clone()),
+        model_config: options.model_config.clone(),
+        trace_out: plan_trace,
+        trace_redact: options.trace_redact,
+        trace_raw: options.trace_raw,
+        state_out: options
+            .state_out
+            .as_ref()
+            .map(|path| labeled_trace_path(path, "plan")),
+        checkpoint_out: options
+            .checkpoint_out
+            .as_ref()
+            .map(|path| labeled_trace_path(path, "plan")),
+        jit_cache: options.jit_cache.clone(),
+        parallel: options.parallel,
+        log: options.log,
+        example_tools: false,
+        tool_config: options.tool_config.clone(),
+    })?;
+    let project_plan = plan_outputs
+        .get("project_plan")
+        .cloned()
+        .context("project plan run did not return project_plan")?;
+    let tasks = project_plan
+        .get("tasks")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut executions = Vec::new();
+    let mut prior_executions = Vec::new();
+    let mut completed = true;
+    let mut stopped = false;
+    for (index, task) in tasks.iter().take(options.max_tasks).enumerate() {
+        let task_number = index + 1;
+        let task_id = task
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or("task")
+            .to_string();
+        let title = task
+            .get("title")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        let recipe = match task_recipe(task) {
+            Ok(recipe) => recipe,
+            Err(error) => {
+                completed = false;
+                stopped = true;
+                executions.push(json!({
+                    "task_id": task_id,
+                    "title": title,
+                    "completed": false,
+                    "error": error.to_string(),
+                }));
+                break;
+            }
+        };
+        let Some(input) = task.get("input").and_then(Value::as_object) else {
+            completed = false;
+            stopped = true;
+            executions.push(json!({
+                "task_id": task_id,
+                "title": title,
+                "recipe": recipe_name(recipe),
+                "completed": false,
+                "error": "planned task is missing input object",
+            }));
+            break;
+        };
+        let task_input = code_project_task_input(input, &prior_executions);
+        let trace_path = options
+            .trace_out
+            .as_ref()
+            .map(|path| labeled_trace_path(path, &format!("task{task_number}")));
+        if let Some(path) = trace_path.as_ref() {
+            trace_files.push(path_ref_to_input_string(path));
+        }
+
+        if options.log {
+            eprintln!(
+                "[air-code-project] step=task index={} id={} recipe={}",
+                task_number,
+                task_id,
+                recipe_name(recipe)
+            );
+        }
+        let task_result = run_plan_capture(RunPlanOptions {
+            plan: None,
+            profile: Some(default_profile(recipe)),
+            store: None,
+            input: None,
+            input_values: Some(task_input),
+            model_config: options.model_config.clone(),
+            trace_out: trace_path,
+            trace_redact: options.trace_redact,
+            trace_raw: options.trace_raw,
+            state_out: options
+                .state_out
+                .as_ref()
+                .map(|path| labeled_trace_path(path, &format!("task{task_number}"))),
+            checkpoint_out: options
+                .checkpoint_out
+                .as_ref()
+                .map(|path| labeled_trace_path(path, &format!("task{task_number}"))),
+            jit_cache: options.jit_cache.clone(),
+            parallel: options.parallel,
+            log: options.log,
+            example_tools: false,
+            tool_config: options.tool_config.clone(),
+        });
+        match task_result {
+            Ok(outputs) => {
+                let task_completed = code_outputs_complete(recipe, &outputs);
+                completed &= task_completed;
+                let execution = json!({
+                    "task_id": task_id,
+                    "title": title,
+                    "recipe": recipe_name(recipe),
+                    "completed": task_completed,
+                    "outputs": outputs,
+                });
+                prior_executions.push(execution.clone());
+                executions.push(execution);
+                if !task_completed {
+                    stopped = true;
+                    break;
+                }
+            }
+            Err(error) => {
+                completed = false;
+                stopped = true;
+                let execution = json!({
+                    "task_id": task_id,
+                    "title": title,
+                    "recipe": recipe_name(recipe),
+                    "completed": false,
+                    "error": error.to_string(),
+                });
+                prior_executions.push(execution.clone());
+                executions.push(execution);
+                break;
+            }
+        }
+    }
+
+    let executed = executions.len();
+    let remaining_task_ids = tasks
+        .iter()
+        .skip(executed)
+        .filter_map(|task| task.get("id").and_then(Value::as_str))
+        .map(|id| Value::String(id.to_string()))
+        .collect::<Vec<_>>();
+    let status = if stopped {
+        "stopped"
+    } else if tasks.len() > executed {
+        completed = false;
+        "max_tasks_exhausted"
+    } else if completed {
+        "completed"
+    } else {
+        "stopped"
+    };
+
+    Ok(json!({
+        "project_plan": project_plan,
+        "project": {
+            "status": status,
+            "completed": completed,
+            "max_tasks": options.max_tasks,
+            "executed_tasks": executed,
+            "remaining_task_ids": remaining_task_ids,
+            "executions": executions,
+        },
+        "trace_files": trace_files,
+    }))
+}
+
+fn task_recipe(task: &Value) -> Result<CodeRecipe> {
+    let name = task
+        .get("recipe")
+        .and_then(Value::as_str)
+        .context("planned task is missing recipe")?;
+    match name {
+        "explore" => Ok(CodeRecipe::Explore),
+        "review" => Ok(CodeRecipe::Review),
+        "repair" => Ok(CodeRecipe::Repair),
+        "build" => Ok(CodeRecipe::Build),
+        other => bail!("unsupported planned task recipe {other:?}"),
+    }
+}
+
+fn code_project_task_input(
+    base_input: &Map<String, Value>,
+    prior_executions: &[Value],
+) -> Map<String, Value> {
+    if prior_executions.is_empty() {
+        return base_input.clone();
+    }
+    let mut input = base_input.clone();
+    let task = input
+        .get("task")
+        .and_then(Value::as_str)
+        .unwrap_or("execute planned project task");
+    let feedback = code_loop_feedback(prior_executions);
+    input.insert(
+        "task".to_string(),
+        Value::String(format!(
+            "{task}\n\nAIR project execution context from previous tasks:\n{feedback}"
+        )),
+    );
+    input
 }
 
 fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
@@ -969,9 +1256,14 @@ fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
     match recipe {
         CodeRecipe::Auto => false,
         CodeRecipe::Plan => outputs
-            .pointer("/project_plan/tasks")
-            .and_then(Value::as_array)
-            .is_some_and(|tasks| !tasks.is_empty()),
+            .pointer("/project/completed")
+            .and_then(Value::as_bool)
+            .unwrap_or_else(|| {
+                outputs
+                    .pointer("/project_plan/tasks")
+                    .and_then(Value::as_array)
+                    .is_some_and(|tasks| !tasks.is_empty())
+            }),
         CodeRecipe::Explore => outputs.get("exploration").is_some(),
         CodeRecipe::Review => outputs
             .pointer("/review/search_quality/sufficient")
@@ -1005,6 +1297,21 @@ fn iteration_path(path: &Path, iteration: usize) -> PathBuf {
         format!("{stem}.iter{iteration}.{extension}")
     } else {
         format!("{stem}.iter{iteration}")
+    };
+    parent.join(file_name)
+}
+
+fn labeled_trace_path(path: &Path, label: &str) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("air-code");
+    let extension = path.extension().and_then(|value| value.to_str());
+    let file_name = if let Some(extension) = extension {
+        format!("{stem}.{label}.{extension}")
+    } else {
+        format!("{stem}.{label}")
     };
     parent.join(file_name)
 }
@@ -1511,6 +1818,28 @@ mod tests {
     }
 
     #[test]
+    fn code_session_trace_files_prefers_explicit_project_trace_index() {
+        let files = code_session_trace_files(
+            Some(&PathBuf::from("target/generated/code.trace.jsonl")),
+            false,
+            &json!({
+                "trace_files": [
+                    "target/generated/code.trace.plan.jsonl",
+                    "target/generated/code.trace.task1.jsonl"
+                ]
+            }),
+        );
+
+        assert_eq!(
+            files,
+            vec![
+                PathBuf::from("target/generated/code.trace.plan.jsonl"),
+                PathBuf::from("target/generated/code.trace.task1.jsonl"),
+            ]
+        );
+    }
+
+    #[test]
     fn session_part_indexes_trace_event() {
         let event = TraceEvent {
             agent: "code-agent".to_string(),
@@ -1638,6 +1967,32 @@ mod tests {
         assert!(task.starts_with("fix it"));
         assert!(task.contains("AIR loop context from previous iterations"));
         assert!(task.contains("final_success"));
+    }
+
+    #[test]
+    fn project_task_input_appends_previous_task_outputs() {
+        let mut input = Map::new();
+        input.insert(
+            "task".to_string(),
+            Value::String("inspect the next file".to_string()),
+        );
+        input.insert(
+            "target_path".to_string(),
+            Value::String("src/lib.rs".to_string()),
+        );
+        let previous = vec![json!({
+            "task_id": "t1",
+            "completed": true,
+            "outputs": {"exploration": {"summary": "found routing code"}}
+        })];
+
+        let next = code_project_task_input(&input, &previous);
+
+        assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
+        let task = next["task"].as_str().unwrap();
+        assert!(task.contains("inspect the next file"));
+        assert!(task.contains("AIR project execution context from previous tasks"));
+        assert!(task.contains("found routing code"));
     }
 
     #[test]

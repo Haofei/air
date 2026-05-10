@@ -279,6 +279,12 @@ cargo run -p air-cli -- code "plan the next code-agent project milestone" \
   --recipe plan \
   --query "code agent project plan"
 
+cargo run -p air-cli -- code "plan and start the next code-agent project milestone" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 2 \
+  --query "code agent project plan"
+
 cargo run -p air-cli -- code "review the Playwright search tool" \
   --recipe review \
   --target scripts/playwright_search.cjs \
@@ -294,7 +300,11 @@ cargo run -p air-cli -- code "build a premium product landing page" \
 ```
 
 The wrapper only assembles the same typed input and runs the selected AIR recipe. The AIR module
-still owns permissions, bounded tool calls, trace, retry, and output schema. Repair outputs include
+still owns permissions, bounded tool calls, trace, retry, and output schema. With `--execute-plan`,
+the project planner first returns `project_plan.tasks[]`; each task must declare a bounded AIR
+`recipe` and typed `input`, and the wrapper executes at most `--max-iterations` tasks through those
+existing recipes. Each planned task gets its own trace file, and later tasks receive a bounded
+summary of prior task outputs. Repair outputs include
 both changed-file metadata and a bounded `workspace_diff` artifact filtered to the files patched by
 the agent, so the actual patch is visible without replaying the trace or mixing in unrelated dirty
 workspace changes. They also include `workspace_clean_before` and `preexisting_changed_files`, so a

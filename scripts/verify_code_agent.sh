@@ -153,6 +153,40 @@ assert turn["summary"]["model_call_count"] >= 1, turn
 assert "project_planner" in turn["summary"]["models"], turn["summary"]
 PY
 
+echo "[code-agent] project plan execution offline run"
+cargo run -q -p air-cli -- code "plan and start executing a project-level task graph for the AIR code agent" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 2 \
+  --query "code agent project plan task graph" \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --trace-out target/generated/code_project_execute.trace.jsonl \
+  > target/generated/code_project_execute.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_execute.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+project = output["project"]
+assert project["status"] == "max_tasks_exhausted", project
+assert project["completed"] is False, project
+assert project["executed_tasks"] == 2, project
+assert [item["recipe"] for item in project["executions"]] == ["explore", "explore"], project
+assert all(item["completed"] for item in project["executions"]), project
+trace_files = [Path(path) for path in output["trace_files"]]
+assert len(trace_files) == 3, trace_files
+for path in trace_files:
+    assert path.exists(), path
+with trace_files[0].open(encoding="utf-8") as handle:
+    plan_events = [json.loads(line) for line in handle if line.strip()]
+with trace_files[1].open(encoding="utf-8") as handle:
+    task_events = [json.loads(line) for line in handle if line.strip()]
+assert any(event.get("meta", {}).get("model") == "project_planner" for event in plan_events), plan_events
+assert any(event.get("meta", {}).get("model") == "code_explorer" for event in task_events), task_events
+PY
+
 echo "[code-agent] user-facing code command explain"
 cargo run -q -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \

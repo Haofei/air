@@ -142,7 +142,11 @@ enum Command {
         #[arg(long = "loop")]
         loop_enabled: bool,
 
-        /// Maximum iterations for --loop.
+        /// After a project plan, execute up to --max-iterations planned tasks through their declared AIR recipes.
+        #[arg(long, conflicts_with = "loop_enabled")]
+        execute_plan: bool,
+
+        /// Maximum iterations for --loop, or maximum planned tasks for --execute-plan.
         #[arg(long, default_value_t = 3)]
         max_iterations: usize,
 
@@ -509,6 +513,7 @@ fn main() -> Result<()> {
             log,
             explain,
             loop_enabled,
+            execute_plan,
             max_iterations,
             tool_config,
         } => code(CodeOptions {
@@ -538,6 +543,7 @@ fn main() -> Result<()> {
             log,
             explain,
             loop_enabled,
+            execute_plan,
             max_iterations,
             tool_config,
         }),
@@ -1787,6 +1793,35 @@ mod tests {
         };
 
         assert!(loop_enabled);
+        assert_eq!(max_iterations, 2);
+    }
+
+    #[test]
+    fn code_command_accepts_project_execution_flags() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "plan and execute the next project milestone",
+            "--recipe",
+            "plan",
+            "--execute-plan",
+            "--max-iterations",
+            "2",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            recipe,
+            execute_plan,
+            max_iterations,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert_eq!(recipe, CodeRecipe::Plan);
+        assert!(execute_plan);
         assert_eq!(max_iterations, 2);
     }
 

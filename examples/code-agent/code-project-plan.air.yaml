@@ -41,12 +41,14 @@ outputs:
         min_items: 1
         items:
           type: object
-          required: [id, title, description, kind, depends_on, files, acceptance]
+          required: [id, title, description, kind, recipe, input, depends_on, files, acceptance]
           properties:
             id: string
             title: string
             description: string
             kind: string
+            recipe: string
+            input: object
             depends_on:
               type: array
               items: string
@@ -135,12 +137,14 @@ state:
         min_items: 1
         items:
           type: object
-          required: [id, title, description, kind, depends_on, files, acceptance]
+          required: [id, title, description, kind, recipe, input, depends_on, files, acceptance]
           properties:
             id: string
             title: string
             description: string
             kind: string
+            recipe: string
+            input: object
             depends_on:
               type: array
               items: string

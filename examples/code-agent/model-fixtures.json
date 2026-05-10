@@ -39,6 +39,12 @@
           "title": "Define project-plan AIR schema",
           "description": "Create a read-only AIR module whose output includes scope, milestones, tasks, files, acceptance checks, risks, and source ids.",
           "kind": "ir",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect the project-plan AIR schema and identify implementation context for this task.",
+            "query": "code project plan AIR schema",
+            "target_path": "examples/code-agent/code-project-plan.air.yaml"
+          },
           "depends_on": [],
           "files": [
             "examples/code-agent/code-project-plan.air.yaml",
@@ -54,6 +60,12 @@
           "title": "Ground planning in repository evidence",
           "description": "Use web.search, repo.files, repo.search, repo.context, and todo tools before the model creates the plan.",
           "kind": "tooling",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect the code-agent tool configuration and fixture grounding for project planning.",
+            "query": "code agent tools project planner evidence",
+            "target_path": "examples/code-agent/tools.json"
+          },
           "depends_on": [
             "t1"
           ],
@@ -70,6 +82,12 @@
           "title": "Add air code plan recipe",
           "description": "Route explicit --recipe plan and target-less auto coding requests to the project planner.",
           "kind": "cli",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect CLI routing for the AIR code project-plan recipe.",
+            "query": "CodeRecipe Plan project execution routing",
+            "target_path": "crates/air-cli/src/code_agent.rs"
+          },
           "depends_on": [
             "t1"
           ],
@@ -86,6 +104,12 @@
           "title": "Document and gate the project planner",
           "description": "Add README usage and make the code-agent verification script run the offline project planning profile.",
           "kind": "docs_test",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect documentation and verification coverage for the project planner.",
+            "query": "project-plan verify_code_agent README",
+            "target_path": "examples/code-agent/README.md"
+          },
           "depends_on": [
             "t2",
             "t3"
