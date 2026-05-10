@@ -319,7 +319,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .to_string(),
             recipe: recipe_name(recipe).to_string(),
             profile: path_ref_to_input_string(&profile),
-            pack: code_session_turn_pack(recipe),
+            pack: code_session_turn_pack(recipe, &profile),
             input: Value::Object(session_input),
             completed: code_outputs_complete(recipe, &outputs),
             trace_files: trace_files
@@ -455,6 +455,7 @@ struct CodeSessionTurnPack {
     path: String,
     recipe: String,
     default_profile: String,
+    profile_override: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     intent: Option<String>,
 }
@@ -755,12 +756,18 @@ impl CodeSessionState {
     }
 }
 
-fn code_session_turn_pack(recipe: CodeRecipe) -> Option<CodeSessionTurnPack> {
+fn code_session_turn_pack(
+    recipe: CodeRecipe,
+    active_profile: &Path,
+) -> Option<CodeSessionTurnPack> {
     let recipe = default_recipe_for_id(recipe_name(recipe)).ok()?;
+    let default_profile = path_ref_to_input_string(&recipe.default_profile);
+    let active_profile = path_ref_to_input_string(active_profile);
     Some(CodeSessionTurnPack {
         path: CODE_AGENT_PACK_PATH.to_string(),
         recipe: recipe.id,
-        default_profile: path_ref_to_input_string(&recipe.default_profile),
+        profile_override: active_profile != default_profile,
+        default_profile,
         intent: recipe.intent,
     })
 }
@@ -1374,6 +1381,8 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
     } = options;
     let metadata = explain_metadata_for_profile(profile)?;
     let pack_recipe = default_recipe_for_id(recipe_name(resolved_recipe))?;
+    let pack_default_profile = path_ref_to_input_string(&pack_recipe.default_profile);
+    let active_profile = path_ref_to_input_string(profile);
     let budget_iterations = if loop_enabled { max_iterations } else { 1 };
     let total_model_calls = metadata
         .max_estimated_model_calls
@@ -1390,10 +1399,11 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         "pack": {
             "path": CODE_AGENT_PACK_PATH,
             "recipe": pack_recipe.id,
-            "default_profile": path_ref_to_input_string(&pack_recipe.default_profile),
+            "default_profile": pack_default_profile,
+            "profile_override": active_profile != pack_default_profile,
             "intent": pack_recipe.intent,
         },
-        "profile": path_ref_to_input_string(profile),
+        "profile": active_profile,
         "plan": path_ref_to_input_string(&metadata.plan),
         "store": path_ref_to_input_string(&metadata.store),
         "capabilities": metadata.capabilities,
@@ -3948,6 +3958,7 @@ mod tests {
                 "path": CODE_AGENT_PACK_PATH,
                 "recipe": "repair",
                 "default_profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
+                "profile_override": false,
                 "intent": default_recipe_for_id("repair").unwrap().intent,
             },
             "profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
@@ -3978,6 +3989,7 @@ mod tests {
             explanation["pack"]["default_profile"],
             Value::String("examples/code-agent/repair-core.air-profile.yaml".to_string())
         );
+        assert_eq!(explanation["pack"]["profile_override"], Value::Bool(false));
         assert_eq!(
             explanation["input"]["test_command"],
             Value::String("unit".to_string())
@@ -5004,7 +5016,13 @@ mod tests {
             task: "fix it".to_string(),
             recipe: "repair".to_string(),
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
-            pack: Some(code_session_turn_pack(CodeRecipe::Repair).unwrap()),
+            pack: Some(
+                code_session_turn_pack(
+                    CodeRecipe::Repair,
+                    Path::new("examples/code-agent/repair-core.air-profile.yaml"),
+                )
+                .unwrap(),
+            ),
             input: json!({"task": "fix it"}),
             completed: false,
             trace_files: Vec::new(),
@@ -5032,7 +5050,24 @@ mod tests {
             pack.default_profile,
             "examples/code-agent/repair-core.air-profile.yaml"
         );
+        assert!(!pack.profile_override);
         assert!(!roundtrip.turns[0].completed);
+    }
+
+    #[test]
+    fn session_pack_marks_profile_overrides() {
+        let pack = code_session_turn_pack(
+            CodeRecipe::Repair,
+            Path::new("examples/code-agent/repair.air-profile.yaml"),
+        )
+        .unwrap();
+
+        assert_eq!(pack.recipe, "repair");
+        assert_eq!(
+            pack.default_profile,
+            "examples/code-agent/repair-core.air-profile.yaml"
+        );
+        assert!(pack.profile_override);
     }
 
     #[test]

@@ -158,6 +158,7 @@ assert turn["recipe"] == "plan", turn
 assert turn["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml", turn
 assert turn["pack"]["recipe"] == "plan", turn
 assert turn["pack"]["default_profile"] == "examples/code-agent/project-plan.air-profile.yaml", turn
+assert turn["pack"]["profile_override"] is False, turn
 assert turn["completed"] is True, turn
 assert turn["summary"]["model_call_count"] >= 1, turn
 assert "project_planner" in turn["summary"]["models"], turn["summary"]
@@ -882,6 +883,7 @@ assert output["resolved_recipe"] == "repair", output
 assert output["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml", output
 assert output["pack"]["recipe"] == "repair", output
 assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
+assert output["pack"]["profile_override"] is False, output
 assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["plan"].endswith("examples/code-agent/code-repair.air-plan.yaml"), output
 assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml"), output
@@ -896,6 +898,25 @@ assert output["budget_limit"]["exceeded"] is False, output
 assert output["loop"]["enabled"] is False, output
 assert output["loop"]["max_iterations"] == 3, output
 assert output["input"]["test_command"] == "repair_fixture_test", output
+PY
+
+cargo run -q -p air-cli -- code "fix the failing add function through explicit composed repair profile" \
+  --recipe repair \
+  --profile examples/code-agent/repair.air-profile.yaml \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --explain \
+  > target/generated/code_command_profile_override_explain.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_command_profile_override_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+assert output["resolved_recipe"] == "repair", output
+assert output["profile"] == "examples/code-agent/repair.air-profile.yaml", output
+assert output["pack"]["recipe"] == "repair", output
+assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
+assert output["pack"]["profile_override"] is True, output
 PY
 
 cargo run -q -p air-cli -- code "fix the failing add function until tests pass" \
@@ -1092,6 +1113,7 @@ for index, turn in enumerate(session["turns"], start=1):
     assert turn["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml", turn
     assert turn["pack"]["recipe"] == "explore", turn
     assert turn["pack"]["default_profile"] == "examples/code-agent/explore.air-profile.yaml", turn
+    assert turn["pack"]["profile_override"] is False, turn
     assert turn["trace_files"], turn
     assert Path(turn["trace_files"][0]).exists(), turn
     assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn
