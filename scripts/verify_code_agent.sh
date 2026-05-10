@@ -124,6 +124,8 @@ assert "repo.files" in tool_schemas, tool_schemas
 assert "file.ops" in tool_schemas, tool_schemas
 assert "test.run" in tool_schemas, tool_schemas
 assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
+assert "package" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
+assert "test_filter" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
 PY
 
 echo "[code-agent] targetless edit loop offline run"

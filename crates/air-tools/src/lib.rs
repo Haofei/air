@@ -2868,16 +2868,16 @@ fn call_repo_files_tool(
     max_files: usize,
 ) -> Result<Value, RuntimeError> {
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let (raw_query, query_source, pattern_glob) = repo_files_query_input(name, input)?;
+    let query_input = repo_files_query_input(name, input)?;
     let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
     if !matches!(mode, "fixed" | "smart") {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.mode must be fixed or smart"
         )));
     }
-    let query = raw_query.to_lowercase();
+    let query = query_input.raw_query.to_lowercase();
     let smart_terms = if mode == "smart" {
-        repo_smart_search_terms(raw_query)
+        repo_smart_search_terms(query_input.raw_query)
     } else {
         Vec::new()
     };
@@ -2893,10 +2893,10 @@ fn call_repo_files_tool(
         .and_then(Value::as_bool)
         .unwrap_or(false);
     let paths = repo_tool_paths(name, input)?;
-    let (glob, glob_source) = repo_files_glob_input(name, input, pattern_glob)?;
+    let glob_input = repo_files_glob_input(name, input, query_input.pattern_glob)?;
     let mut command = Command::new("rg");
     command.arg("--files");
-    if let Some(glob) = glob {
+    if let Some(glob) = glob_input.glob {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
     }
@@ -2945,17 +2945,17 @@ fn call_repo_files_tool(
     let content = files.join("\n");
     Ok(json!({
         "repo": repo.display().to_string(),
-        "query": raw_query,
-        "query_source": query_source,
+        "query": query_input.raw_query,
+        "query_source": query_input.query_source,
         "effective_query": effective_query,
-        "glob": glob,
-        "glob_source": glob_source,
+        "glob": glob_input.glob,
+        "glob_source": glob_input.glob_source,
         "mode": mode,
         "files": files,
         "include_all": include_all,
         "truncated": truncated,
         "artifacts": [{
-            "id": format!("repo-files:{}:{}", repo.display(), raw_query),
+            "id": format!("repo-files:{}:{}", repo.display(), query_input.raw_query),
             "kind": "repo_listing",
             "title": "repo files",
             "uri": repo.display().to_string(),
@@ -2963,11 +2963,11 @@ fn call_repo_files_tool(
             "metadata": {
                 "provider": "repo_files",
                 "repo": repo.display().to_string(),
-                "query": raw_query,
-                "query_source": query_source,
+                "query": query_input.raw_query,
+                "query_source": query_input.query_source,
                 "effective_query": effective_query,
-                "glob": glob,
-                "glob_source": glob_source,
+                "glob": glob_input.glob,
+                "glob_source": glob_input.glob_source,
                 "mode": mode,
                 "max_files": effective_max_files,
                 "include_all": include_all
@@ -2976,14 +2976,24 @@ fn call_repo_files_tool(
     }))
 }
 
+struct RepoFilesQueryInput<'a> {
+    raw_query: &'a str,
+    query_source: &'static str,
+    pattern_glob: Option<&'a str>,
+}
+
 fn repo_files_query_input<'a>(
     tool_name: &str,
     input: &'a Value,
-) -> Result<(&'a str, &'static str, Option<&'a str>), RuntimeError> {
+) -> Result<RepoFilesQueryInput<'a>, RuntimeError> {
     if let Some(query) = input.get("query") {
         return query
             .as_str()
-            .map(|query| (query.trim(), "query", None))
+            .map(|q| RepoFilesQueryInput {
+                raw_query: q.trim(),
+                query_source: "query",
+                pattern_glob: None,
+            })
             .ok_or_else(|| {
                 RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
             });
@@ -2995,23 +3005,43 @@ fn repo_files_query_input<'a>(
             })?;
             let pattern = pattern.trim();
             if repo_files_pattern_looks_like_glob(pattern) {
-                return Ok(("", "none", Some(pattern)));
+                return Ok(RepoFilesQueryInput {
+                    raw_query: "",
+                    query_source: "none",
+                    pattern_glob: Some(pattern),
+                });
             }
-            return Ok((pattern, "pattern", None));
+            return Ok(RepoFilesQueryInput {
+                raw_query: pattern,
+                query_source: "pattern",
+                pattern_glob: None,
+            });
         }
     }
-    Ok(("", "none", None))
+    Ok(RepoFilesQueryInput {
+        raw_query: "",
+        query_source: "none",
+        pattern_glob: None,
+    })
+}
+
+struct RepoFilesGlobInput<'a> {
+    glob: Option<&'a str>,
+    glob_source: &'static str,
 }
 
 fn repo_files_glob_input<'a>(
     tool_name: &str,
     input: &'a Value,
     pattern_glob: Option<&'a str>,
-) -> Result<(Option<&'a str>, &'static str), RuntimeError> {
+) -> Result<RepoFilesGlobInput<'a>, RuntimeError> {
     if let Some(glob) = input.get("glob") {
         return glob
             .as_str()
-            .map(|glob| (Some(glob), "glob"))
+            .map(|g| RepoFilesGlobInput {
+                glob: Some(g),
+                glob_source: "glob",
+            })
             .ok_or_else(|| {
                 RuntimeError::Provider(format!("tool {tool_name} input.glob must be a string"))
             });
@@ -3019,12 +3049,18 @@ fn repo_files_glob_input<'a>(
     if let Some(glob) = input.get("file_glob") {
         return glob
             .as_str()
-            .map(|glob| (Some(glob), "file_glob"))
+            .map(|g| RepoFilesGlobInput {
+                glob: Some(g),
+                glob_source: "file_glob",
+            })
             .ok_or_else(|| {
                 RuntimeError::Provider(format!("tool {tool_name} input.file_glob must be a string"))
             });
     }
-    Ok((pattern_glob, pattern_glob.map_or("none", |_| "pattern")))
+    Ok(RepoFilesGlobInput {
+        glob: pattern_glob,
+        glob_source: pattern_glob.map_or("none", |_| "pattern"),
+    })
 }
 
 fn repo_files_pattern_looks_like_glob(pattern: &str) -> bool {
@@ -4147,7 +4183,7 @@ fn render_command_arg(
                 "tool {tool_name} command template parameter {parameter} is not configured"
             ))
         })?;
-        let value = required_input_string(tool_name, input, parameter)?;
+        let value = required_command_parameter_input_string(tool_name, input, parameter)?;
         validate_command_parameter_value(tool_name, parameter, value, rule)?;
         rendered.push_str(value);
         rest = &after_start[end + 2..];
@@ -4171,6 +4207,30 @@ fn command_template_parameters(template: &str) -> Vec<String> {
         rest = &after_start[end + 2..];
     }
     parameters
+}
+
+fn required_command_parameter_input_string<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    field: &str,
+) -> Result<&'a str, RuntimeError> {
+    if let Some(value) = input.get(field) {
+        return value.as_str().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+        });
+    }
+    for alias in ["args", "arguments"] {
+        if let Some(value) = input.get(alias).and_then(|args| args.get(field)) {
+            return value.as_str().ok_or_else(|| {
+                RuntimeError::Provider(format!(
+                    "tool {tool_name} input.{alias}.{field} must be a string"
+                ))
+            });
+        }
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} input.{field} must be a string"
+    )))
 }
 
 fn validate_command_parameter_value(

@@ -4725,6 +4725,52 @@ fn command_run_renders_constrained_template_parameters() {
 }
 
 #[test]
+fn command_run_accepts_nested_args_template_parameters() {
+    let dir = temp_dir("air-tools-command-run-nested-args");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "echo_test": ["node", "-e", "console.log(process.argv[1])", "{{ test_filter }}"]
+                  },
+                  "parameters": {
+                    "test_filter": {
+                      "allow": "identifier",
+                      "max_chars": 80
+                    }
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "test.run",
+            &json!({
+                "command": "echo_test",
+                "args": {"test_filter": "module::test_name"}
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["argv"][3], json!("module::test_name"));
+    assert!(output["log"]
+        .as_str()
+        .unwrap()
+        .contains("module::test_name"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_rejects_undeclared_or_invalid_template_parameters() {
     let dir = temp_dir("air-tools-command-run-parameter-policy");
     let config_path = write_config(

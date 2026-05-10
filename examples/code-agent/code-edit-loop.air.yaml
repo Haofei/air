@@ -287,7 +287,9 @@ workflow:
                   test.run:
                     required: {command: "the supplied allowlisted test_command"}
                     optional:
-                      args: "optional structured parameters allowed by tool config"
+                      package: "top-level package parameter for configured cargo package tests"
+                      test_filter: "top-level test filter parameter for configured cargo filtered tests"
+                      args: "accepted alias object for parameters, but prefer top-level fields"
               tool_policy:
                 literal:
                   plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
