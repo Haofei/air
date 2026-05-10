@@ -79,6 +79,10 @@ state:
     type: array
     items:
       type: object
+  final_diff_result:
+    type: array
+    items:
+      type: object
   initial_target_context:
     type: array
     items:
@@ -532,10 +536,39 @@ workflow:
                             ref: test_command
               result:
                 ref: auto_verify_result
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: git.diff
+                  input:
+                    literal: {}
+          output: final_diff_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: final_diff_observed
+              rationale:
+                literal: Automatically captured the workspace diff after validation passed so the summary can cite the audited patch.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: git.diff
+                      input:
+                        literal: {}
+              result:
+                ref: final_diff_result
         - kind: set
           values:
             verification_status: passed
-            phase: choose
+            phase: summarize
 
     - id: record-manual-test-failed-output
       when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false
@@ -665,7 +698,7 @@ workflow:
             phase: choose
 
     - id: summarize
-      when: phase == "act" && decision.complete == true && verification_status == "passed"
+      when: phase == "summarize" || phase == "act" && decision.complete == true && verification_status == "passed"
       actions:
         - kind: model_call
           model: code_edit_summarizer

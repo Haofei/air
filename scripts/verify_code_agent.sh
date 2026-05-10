@@ -120,6 +120,27 @@ models = [
 ]
 assert "code_edit_decider" in models, models
 assert "code_edit_summarizer" in models, models
+auto_verify_passed_index = next(
+    index for index, event in enumerate(events)
+    if event.get("rule") == "record-auto-verify-passed"
+    and event.get("action") == "append"
+)
+summarizer_index = next(
+    index for index, event in enumerate(events)
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_summarizer"
+)
+assert not any(
+    event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+    for event in events[auto_verify_passed_index:summarizer_index]
+), events[auto_verify_passed_index:summarizer_index]
+assert any(
+    event.get("rule") == "record-auto-verify-passed"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "final_diff_observed"
+    for event in events
+), events
 decider_start = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -182,6 +203,7 @@ assert tools == [
     "file.read_many",
     "file.ops",
     "test.run",
+    "git.diff",
 ], tools
 repo_search = next(
     event for event in events
