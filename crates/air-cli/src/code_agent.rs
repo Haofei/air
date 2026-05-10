@@ -179,22 +179,25 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         Some(profile) => profile,
         None => default_profile(&pack, recipe)?,
     };
-    let mut input = build_input(CodeInputOptions {
-        task,
-        recipe,
-        target,
-        test,
-        query,
-        related,
-        search_query,
-        repo_query,
-        required_terms,
-        output,
-        brand,
-        product,
-        constraints,
-        force_patch,
-    })?;
+    let mut input = build_input_with_pack(
+        &pack,
+        CodeInputOptions {
+            task,
+            recipe,
+            target,
+            test,
+            query,
+            related,
+            search_query,
+            repo_query,
+            required_terms,
+            output,
+            brand,
+            product,
+            constraints,
+            force_patch,
+        },
+    )?;
     let mut session_state = match session.as_ref() {
         Some(path) => Some(CodeSessionState::read(path)?),
         None => None,
@@ -3391,7 +3394,16 @@ struct CodeInputOptions {
     force_patch: bool,
 }
 
+#[cfg(test)]
 fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
+    let pack = load_code_agent_pack(None)?;
+    build_input_with_pack(&pack, options)
+}
+
+fn build_input_with_pack(
+    pack: &CodeAgentPackContext,
+    options: CodeInputOptions,
+) -> Result<Map<String, Value>> {
     let CodeInputOptions {
         task,
         recipe,
@@ -3410,7 +3422,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
     } = options;
 
     let recipe = resolve_recipe_name(
-        &load_code_agent_pack(None)?,
+        pack,
         &task,
         recipe,
         target.as_ref(),
@@ -3517,12 +3529,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
             let brand = brand.unwrap_or_else(|| "Product".to_string());
             let product = product.unwrap_or_else(|| brand.clone());
             let constraints = if constraints.is_empty() {
-                vec![
-                    "single self-contained HTML file".to_string(),
-                    "no external network assets".to_string(),
-                    "responsive down to mobile width".to_string(),
-                    "buttons and text must not overlap".to_string(),
-                ]
+                code_recipe_string_array_default(pack, recipe, "constraints")?
             } else {
                 constraints
             };
@@ -3538,6 +3545,38 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
             Ok(input)
         }
     }
+}
+
+fn code_recipe_string_array_default(
+    pack: &CodeAgentPackContext,
+    recipe: CodeRecipe,
+    field: &str,
+) -> Result<Vec<String>> {
+    let pack_recipe = pack.recipe_for_id(recipe_name(recipe))?;
+    let Some(value) = pack_recipe.input.defaults.get(field) else {
+        return Ok(Vec::new());
+    };
+    let Some(items) = value.as_array() else {
+        bail!(
+            "code-agent pack {} recipe {} input default {field} must be an array of strings",
+            pack.path.display(),
+            recipe_name(recipe)
+        );
+    };
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(ToString::to_string)
+                .with_context(|| {
+                    format!(
+                        "code-agent pack {} recipe {} input default {field} must be an array of strings",
+                        pack.path.display(),
+                        recipe_name(recipe)
+                    )
+                })
+        })
+        .collect()
 }
 
 fn required_path(value: Option<PathBuf>, flag: &str, recipe: CodeRecipe) -> Result<PathBuf> {
@@ -3970,6 +4009,15 @@ mod tests {
         );
         assert_eq!(input["brand"], Value::String("Acme".to_string()));
         assert_eq!(input["product"], Value::String("Acme".to_string()));
+        assert_eq!(
+            input["constraints"],
+            Value::Array(vec![
+                Value::String("single self-contained HTML file".to_string()),
+                Value::String("no external network assets".to_string()),
+                Value::String("responsive down to mobile width".to_string()),
+                Value::String("buttons and text must not overlap".to_string()),
+            ])
+        );
     }
 
     #[test]

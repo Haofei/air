@@ -114,6 +114,12 @@ recipes:
     input:
       required: [task, output]
       optional: [brand, product, constraints]
+      defaults:
+        constraints:
+          - "single self-contained HTML file"
+          - "no external network assets"
+          - "responsive down to mobile width"
+          - "buttons and text must not overlap"
     completion:
       all:
         - equals:

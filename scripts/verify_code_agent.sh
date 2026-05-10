@@ -50,6 +50,27 @@ assert output["pack"]["completion"]["any"][1]["all"][1]["non_empty_array"] == "/
 assert output["pack"]["routing"]["auto"][0]["recipe"] == "build", output
 assert output["pack"]["routing_decision"] is None, output
 PY
+cargo run -q -p air-cli -- code "explain build recipe defaults" \
+  --pack target/generated/examples/code-agent/code-agent.air-pack.yaml \
+  --recipe build \
+  --output target/generated/build-defaults.html \
+  --explain \
+  > target/generated/code_agent_build_defaults_explain.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_build_defaults_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+expected = [
+    "single self-contained HTML file",
+    "no external network assets",
+    "responsive down to mobile width",
+    "buttons and text must not overlap",
+]
+assert output["pack"]["recipe"] == "build", output
+assert output["pack"]["input"]["defaults"]["constraints"] == expected, output
+assert output["input"]["constraints"] == expected, output
+PY
 if cargo run -q -p air-cli -- code "repair missing target" \
   --recipe repair \
   --test repair_fixture_test \
@@ -931,6 +952,7 @@ assert output["pack"]["recipe"] == "repair", output
 assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["pack"]["profile_override"] is False, output
 assert output["pack"]["input"]["required"] == ["task", "target", "test"], output
+assert output["pack"]["input"]["defaults"] == {}, output
 assert output["pack"]["completion"]["any"][0]["equals"]["path"] == "/repair/final_success", output
 assert output["pack"]["routing"]["auto"][3]["recipe"] == "repair", output
 assert output["pack"]["routing_decision"]["route_index"] == 3, output

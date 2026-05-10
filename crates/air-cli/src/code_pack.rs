@@ -1,6 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -266,6 +266,7 @@ all:
                 input: CodeAgentRecipeInput {
                     required: vec!["task".to_string()],
                     optional: vec!["unknown_flag".to_string()],
+                    defaults: Map::new(),
                 },
                 completion: None,
             }],
@@ -288,6 +289,7 @@ all:
                 input: CodeAgentRecipeInput {
                     required: vec!["task".to_string()],
                     optional: vec!["task".to_string()],
+                    defaults: Map::new(),
                 },
                 completion: None,
             }],
@@ -300,6 +302,61 @@ all:
             error.to_string().contains("both required and optional"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn pack_validation_rejects_default_for_required_input() {
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
+            recipes: vec![CodeAgentPackRecipe {
+                id: "build".to_string(),
+                default_profile: PathBuf::from("build.air-profile.yaml"),
+                intent: None,
+                input: CodeAgentRecipeInput {
+                    required: vec!["task".to_string()],
+                    optional: vec![],
+                    defaults: Map::from_iter([(
+                        "task".to_string(),
+                        Value::String("default task".to_string()),
+                    )]),
+                },
+                completion: None,
+            }],
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("input defaults should not satisfy required fields");
+
+        assert!(
+            error.to_string().contains("cannot also be required"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pack_validation_rejects_default_for_undeclared_optional_input() {
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
+            recipes: vec![CodeAgentPackRecipe {
+                id: "build".to_string(),
+                default_profile: PathBuf::from("build.air-profile.yaml"),
+                intent: None,
+                input: CodeAgentRecipeInput {
+                    required: vec!["task".to_string()],
+                    optional: vec![],
+                    defaults: Map::from_iter([(
+                        "constraints".to_string(),
+                        Value::Array(vec![Value::String("responsive".to_string())]),
+                    )]),
+                },
+                completion: None,
+            }],
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("input defaults should require optional declaration");
+
+        assert!(error.to_string().contains("must be optional"), "{error}");
     }
 
     #[test]
@@ -453,6 +510,8 @@ pub(crate) struct CodeAgentRecipeInput {
     pub(crate) required: Vec<String>,
     #[serde(default)]
     pub(crate) optional: Vec<String>,
+    #[serde(default)]
+    pub(crate) defaults: Map<String, Value>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -576,6 +635,17 @@ fn validate_recipe_input(input: &CodeAgentRecipeInput, source: &str) -> Result<(
         }
         if !optional.insert(field.as_str()) {
             bail!("{source} input declares duplicate optional field {field}");
+        }
+    }
+    for field in input.defaults.keys() {
+        if !is_known_recipe_input_field(field) {
+            bail!("{source} input defaults reference unknown field {field}");
+        }
+        if required.contains(field.as_str()) {
+            bail!("{source} input default field {field} cannot also be required");
+        }
+        if !optional.contains(field.as_str()) {
+            bail!("{source} input default field {field} must be optional");
         }
     }
     Ok(())
