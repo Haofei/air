@@ -160,17 +160,20 @@ For a repair task, the current input looks like this:
 }
 ```
 
-The expected product wrapper can make this feel like:
+Run the user-facing wrapper:
 
 ```bash
-air code "fix the failing add function and retest" \
+cargo run -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \
   --test repair_fixture_test \
-  --profile examples/code-agent/repair-core.air-profile.yaml
+  --related examples/code-agent/repair-fixture/test.js \
+  --log
 ```
 
-That wrapper should only assemble the same typed input and run the selected AIR recipe. The AIR
-module still owns permissions, bounded tool calls, trace, retry, and output schema.
+The wrapper only assembles the same typed input and runs the selected AIR recipe. The AIR module
+still owns permissions, bounded tool calls, trace, retry, and output schema. Use `--profile` to
+select another coding recipe, and `--model-config` / `--tool-config` to override the profile's
+providers.
 
 Build the Apple-style landing page:
 

@@ -195,6 +195,53 @@ assert any(
 ), trace
 PY
 
+echo "[code-agent] user-facing code command offline run"
+code_command_fixture_backup="$(mktemp)"
+cp examples/code-agent/repair-fixture/math.js "$code_command_fixture_backup"
+restore_code_command_fixture() {
+  cp "$code_command_fixture_backup" examples/code-agent/repair-fixture/math.js
+  rm -f "$code_command_fixture_backup"
+}
+trap restore_code_command_fixture EXIT
+cargo run -q -p air-cli -- code "fix the failing add function and retest" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --related examples/code-agent/repair-fixture/test.js \
+  --trace-out target/generated/code_agent_code_command.trace.jsonl \
+  > target/generated/code_agent_code_command.output.json
+node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_code_command.post_test.log
+restore_code_command_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_code_command.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+with open("target/generated/code_agent_code_command.trace.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+
+assert output["exploration"]["relevant_files"], output
+assert output["repair_context"]["related_files"], output
+repair = output["repair"]
+changed = {entry["path"] for entry in repair["changed_files"]}
+assert repair["initial_success"] is False, repair
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert "examples/code-agent/repair-fixture/math.js" in changed, repair
+assert any(
+    event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_repair_context_selector"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "file.patch"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+PY
+
 echo "[code-agent] core multifile repair offline run"
 multifile_math_backup="$(mktemp)"
 multifile_normalize_backup="$(mktemp)"

@@ -18,6 +18,7 @@ pub(crate) struct RunPlanOptions {
     pub(crate) profile: Option<PathBuf>,
     pub(crate) store: Option<PathBuf>,
     pub(crate) input: Option<PathBuf>,
+    pub(crate) input_values: Option<serde_json::Map<String, Value>>,
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
     pub(crate) trace_redact: bool,
@@ -103,6 +104,7 @@ pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
         profile,
         store,
         input,
+        input_values,
         model_config,
         trace_out,
         trace_redact,
@@ -135,7 +137,9 @@ pub(crate) fn run_plan(options: RunPlanOptions) -> Result<()> {
                 .map(|(path, profile)| resolve_profile_path(path, &profile.store))
         })
         .ok_or_else(|| anyhow::anyhow!("run-plan requires --store or --profile"))?;
-    let inputs = if let Some(input) = input {
+    let inputs = if let Some(input_values) = input_values {
+        input_values
+    } else if let Some(input) = input {
         read_json_object(input, "--input")?
     } else if let Some((path, profile)) = &profile {
         if let Some(input_file) = &profile.input_file {

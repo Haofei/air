@@ -1,11 +1,13 @@
 use air_core::Severity;
 use air_runtime::{system_return_event, Vm};
+mod code_agent;
 mod explain;
 mod models;
 mod planner;
 mod profile;
 mod run_plan;
 mod tools;
+use crate::code_agent::{code, CodeOptions};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -34,6 +36,74 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Run the default AIR coding-agent repair loop from a task and typed context.
+    Code {
+        /// Natural-language coding task.
+        task: String,
+
+        /// Primary file the coding agent is allowed to inspect and repair.
+        #[arg(long)]
+        target: PathBuf,
+
+        /// Allowlisted test command alias from the selected tool config.
+        #[arg(long)]
+        test: String,
+
+        /// Optional search/query string. Defaults to the task.
+        #[arg(long)]
+        query: Option<String>,
+
+        /// Extra related file to read. May be repeated.
+        #[arg(long)]
+        related: Vec<PathBuf>,
+
+        /// Coding-agent run profile.
+        #[arg(
+            long,
+            default_value = "examples/code-agent/repair-core.air-profile.yaml"
+        )]
+        profile: PathBuf,
+
+        /// Optional OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Optional JSONL trace output path.
+        #[arg(long)]
+        trace_out: Option<PathBuf>,
+
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
+        #[arg(long)]
+        trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact")]
+        trace_raw: bool,
+
+        /// Optional JSON state output path for AIR resume.
+        #[arg(long)]
+        state_out: Option<PathBuf>,
+
+        /// Optional JSON state checkpoint path updated after each completed module.
+        #[arg(long)]
+        checkpoint_out: Option<PathBuf>,
+
+        /// Optional JIT cache directory for trace-specialized hot-path RunPlans.
+        #[arg(long)]
+        jit_cache: Option<PathBuf>,
+
+        /// Execute eligible schedule groups and dynamic fan-out modules in parallel.
+        #[arg(long)]
+        parallel: bool,
+
+        /// Print human-readable execution logs to stderr.
+        #[arg(long)]
+        log: bool,
+
+        /// Optional tool provider config JSON.
+        #[arg(long)]
+        tool_config: Option<PathBuf>,
+    },
     /// Parse and statically verify an AIR module.
     #[command(hide = true)]
     Validate {
@@ -366,6 +436,41 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Code {
+            task,
+            target,
+            test,
+            query,
+            related,
+            profile,
+            model_config,
+            trace_out,
+            trace_redact,
+            trace_raw,
+            state_out,
+            checkpoint_out,
+            jit_cache,
+            parallel,
+            log,
+            tool_config,
+        } => code(CodeOptions {
+            task,
+            target,
+            test,
+            query,
+            related,
+            profile,
+            model_config,
+            trace_out,
+            trace_redact,
+            trace_raw,
+            state_out,
+            checkpoint_out,
+            jit_cache,
+            parallel,
+            log,
+            tool_config,
+        }),
         Command::Validate { file } => validate(file),
         Command::ValidateSystem { file } => validate_system(file),
         Command::ValidatePlan {
@@ -459,6 +564,7 @@ fn main() -> Result<()> {
             profile,
             store,
             input,
+            input_values: None,
             model_config,
             trace_out,
             trace_redact,
@@ -1363,6 +1469,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for command in [
+            "code",
             "validate-plan",
             "plan",
             "run-plan",
@@ -1389,6 +1496,51 @@ mod tests {
                 "did not expect {command} in default help"
             );
         }
+    }
+
+    #[test]
+    fn code_command_accepts_minimal_typed_repair_input() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "fix the failing add function and retest",
+            "--target",
+            "examples/code-agent/repair-fixture/math.js",
+            "--test",
+            "repair_fixture_test",
+            "--related",
+            "examples/code-agent/repair-fixture/test.js",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            task,
+            target,
+            test,
+            related,
+            profile,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert_eq!(task, "fix the failing add function and retest");
+        assert_eq!(
+            target,
+            std::path::PathBuf::from("examples/code-agent/repair-fixture/math.js")
+        );
+        assert_eq!(test, "repair_fixture_test");
+        assert_eq!(
+            related,
+            vec![std::path::PathBuf::from(
+                "examples/code-agent/repair-fixture/test.js"
+            )]
+        );
+        assert_eq!(
+            profile,
+            std::path::PathBuf::from("examples/code-agent/repair-core.air-profile.yaml")
+        );
     }
 
     #[test]
