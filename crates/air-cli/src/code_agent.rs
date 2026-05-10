@@ -1,8 +1,9 @@
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
-use crate::run_plan::{run_plan, run_plan_capture, RunPlanOptions};
-use air_runtime::{read_trace_jsonl, TraceEvent, TraceStatus};
+use crate::run_plan::{run_plan, run_plan_capture, write_trace, RunPlanOptions};
+use crate::tools::ToolProviderChoice;
+use air_runtime::{read_trace_jsonl, ToolProvider, TraceEvent, TraceStatus};
 use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -805,6 +806,9 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
 
     let mut executions = Vec::new();
     let mut prior_executions = Vec::new();
+    let mut acceptance_events = Vec::new();
+    let mut acceptance_step = 0u32;
+    let mut acceptance_tools: Option<ToolProviderChoice> = None;
     let mut completed = true;
     let mut stopped = false;
     for (index, task) in tasks.iter().take(options.max_tasks).enumerate() {
@@ -888,13 +892,24 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         });
         match task_result {
             Ok(outputs) => {
-                let task_completed = code_outputs_complete(recipe, &outputs);
+                let acceptance = run_acceptance_checks(
+                    &mut acceptance_tools,
+                    &options,
+                    task.get("acceptance"),
+                    &format!("task:{task_id}"),
+                    &mut acceptance_events,
+                    &mut acceptance_step,
+                )?;
+                let acceptance_completed = acceptance_checks_completed(&acceptance);
+                let task_completed =
+                    code_outputs_complete(recipe, &outputs) && acceptance_completed;
                 completed &= task_completed;
                 let execution = json!({
                     "task_id": task_id,
                     "title": title,
                     "recipe": recipe_name(recipe),
                     "completed": task_completed,
+                    "acceptance": acceptance,
                     "outputs": outputs,
                 });
                 prior_executions.push(execution.clone());
@@ -922,6 +937,34 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
     }
 
     let executed = executions.len();
+    let project_acceptance = if !stopped && executed == tasks.len() {
+        let acceptance = run_acceptance_checks(
+            &mut acceptance_tools,
+            &options,
+            project_plan.get("acceptance"),
+            "project",
+            &mut acceptance_events,
+            &mut acceptance_step,
+        )?;
+        completed &= acceptance_checks_completed(&acceptance);
+        acceptance
+    } else {
+        Vec::new()
+    };
+    if !acceptance_events.is_empty() {
+        if let Some(path) = options
+            .trace_out
+            .as_ref()
+            .map(|path| labeled_trace_path(path, "acceptance"))
+        {
+            write_trace(
+                &path,
+                &acceptance_events,
+                options.trace_redact || !options.trace_raw,
+            )?;
+            trace_files.push(path_ref_to_input_string(&path));
+        }
+    }
     let remaining_task_ids = tasks
         .iter()
         .skip(executed)
@@ -947,6 +990,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "max_tasks": options.max_tasks,
             "executed_tasks": executed,
             "remaining_task_ids": remaining_task_ids,
+            "acceptance": project_acceptance,
             "executions": executions,
         },
         "trace_files": trace_files,
@@ -987,6 +1031,164 @@ fn code_project_task_input(
         )),
     );
     input
+}
+
+fn run_acceptance_checks(
+    tools: &mut Option<ToolProviderChoice>,
+    options: &CodeProjectOptions,
+    checks: Option<&Value>,
+    scope: &str,
+    events: &mut Vec<TraceEvent>,
+    step: &mut u32,
+) -> Result<Vec<Value>> {
+    let checks = acceptance_checks(checks);
+    if checks.is_empty() {
+        return Ok(Vec::new());
+    }
+    let tool_config =
+        resolve_code_project_tool_config(&options.plan_profile, options.tool_config.clone())?;
+    let tools = tools.get_or_insert(ToolProviderChoice::from_config(tool_config, false)?);
+    let mut results = Vec::new();
+    for check in checks {
+        *step += 1;
+        let input = check.input.clone();
+        let output = tools.call_tool("test.run", &input);
+        match output {
+            Ok(output) => {
+                let success = output
+                    .get("success")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                events.push(TraceEvent {
+                    agent: "air-code-project".to_string(),
+                    step: *step,
+                    rule: scope.to_string(),
+                    action: "tool_call".to_string(),
+                    input: Some(input),
+                    output: Some(output.clone()),
+                    meta: Some(json!({
+                        "tool": "test.run",
+                        "acceptance_id": check.id,
+                        "scope": scope,
+                    })),
+                    status: if success {
+                        TraceStatus::Ok
+                    } else {
+                        TraceStatus::Error
+                    },
+                    error: if success {
+                        None
+                    } else {
+                        Some(format!("acceptance check {} failed", check.id))
+                    },
+                });
+                results.push(json!({
+                    "id": check.id,
+                    "scope": scope,
+                    "command": check.command,
+                    "expected": check.expected,
+                    "success": success,
+                    "output": output,
+                }));
+            }
+            Err(error) => {
+                let error = error.to_string();
+                events.push(TraceEvent {
+                    agent: "air-code-project".to_string(),
+                    step: *step,
+                    rule: scope.to_string(),
+                    action: "tool_call".to_string(),
+                    input: Some(input),
+                    output: None,
+                    meta: Some(json!({
+                        "tool": "test.run",
+                        "acceptance_id": check.id,
+                        "scope": scope,
+                    })),
+                    status: TraceStatus::Error,
+                    error: Some(error.clone()),
+                });
+                results.push(json!({
+                    "id": check.id,
+                    "scope": scope,
+                    "command": check.command,
+                    "expected": check.expected,
+                    "success": false,
+                    "error": error,
+                }));
+            }
+        }
+    }
+    Ok(results)
+}
+
+#[derive(Clone, Debug)]
+struct AcceptanceCheck {
+    id: String,
+    command: String,
+    expected: String,
+    input: Value,
+}
+
+fn acceptance_checks(value: Option<&Value>) -> Vec<AcceptanceCheck> {
+    let Some(Value::Array(items)) = value else {
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|item| match item {
+            Value::Object(object) => {
+                let command = object.get("command")?.as_str()?.to_string();
+                let id = object
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(&command)
+                    .to_string();
+                let expected = object
+                    .get("expected")
+                    .and_then(Value::as_str)
+                    .unwrap_or("command succeeds")
+                    .to_string();
+                let mut input = Map::new();
+                input.insert("command".to_string(), Value::String(command.clone()));
+                if let Some(Value::Object(parameters)) = object.get("parameters") {
+                    for (key, value) in parameters {
+                        input.insert(key.clone(), value.clone());
+                    }
+                }
+                Some(AcceptanceCheck {
+                    id,
+                    command,
+                    expected,
+                    input: Value::Object(input),
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+fn acceptance_checks_completed(checks: &[Value]) -> bool {
+    checks.iter().all(|check| {
+        check
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+    })
+}
+
+fn resolve_code_project_tool_config(
+    profile: &PathBuf,
+    explicit: Option<PathBuf>,
+) -> Result<Option<PathBuf>> {
+    if explicit.is_some() {
+        return Ok(explicit);
+    }
+    let profile_config = read_run_plan_profile(profile)?;
+    Ok(profile_config
+        .tool_config
+        .as_ref()
+        .map(|path| resolve_profile_path(profile, path)))
 }
 
 fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
@@ -1993,6 +2195,32 @@ mod tests {
         assert!(task.contains("inspect the next file"));
         assert!(task.contains("AIR project execution context from previous tasks"));
         assert!(task.contains("found routing code"));
+    }
+
+    #[test]
+    fn acceptance_checks_build_test_run_inputs() {
+        let checks = acceptance_checks(Some(&json!([
+            {
+                "id": "unit",
+                "command": "air_tools_filter",
+                "parameters": {"test_filter": "command_run"},
+                "expected": "command_run tests pass"
+            },
+            "legacy descriptive acceptance item"
+        ])));
+
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].id, "unit");
+        assert_eq!(checks[0].command, "air_tools_filter");
+        assert_eq!(checks[0].expected, "command_run tests pass");
+        assert_eq!(
+            checks[0].input["command"],
+            Value::String("air_tools_filter".to_string())
+        );
+        assert_eq!(
+            checks[0].input["test_filter"],
+            Value::String("command_run".to_string())
+        );
     }
 
     #[test]

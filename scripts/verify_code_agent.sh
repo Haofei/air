@@ -175,16 +175,23 @@ assert project["completed"] is False, project
 assert project["executed_tasks"] == 2, project
 assert [item["recipe"] for item in project["executions"]] == ["explore", "explore"], project
 assert all(item["completed"] for item in project["executions"]), project
+assert all(item["acceptance"] for item in project["executions"]), project
+assert all(item["acceptance"][0]["success"] for item in project["executions"]), project
 trace_files = [Path(path) for path in output["trace_files"]]
-assert len(trace_files) == 3, trace_files
+assert len(trace_files) == 4, trace_files
+assert any(path.name.endswith(".acceptance.jsonl") for path in trace_files), trace_files
 for path in trace_files:
     assert path.exists(), path
 with trace_files[0].open(encoding="utf-8") as handle:
     plan_events = [json.loads(line) for line in handle if line.strip()]
 with trace_files[1].open(encoding="utf-8") as handle:
     task_events = [json.loads(line) for line in handle if line.strip()]
+acceptance_trace = next(path for path in trace_files if path.name.endswith(".acceptance.jsonl"))
+with acceptance_trace.open(encoding="utf-8") as handle:
+    acceptance_events = [json.loads(line) for line in handle if line.strip()]
 assert any(event.get("meta", {}).get("model") == "project_planner" for event in plan_events), plan_events
 assert any(event.get("meta", {}).get("model") == "code_explorer" for event in task_events), task_events
+assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 
 echo "[code-agent] user-facing code command explain"

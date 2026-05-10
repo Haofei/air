@@ -57,7 +57,14 @@ outputs:
               items: string
             acceptance:
               type: array
-              items: string
+              items:
+                type: object
+                required: [id, command, expected]
+                properties:
+                  id: string
+                  command: string
+                  parameters: object
+                  expected: string
       files:
         type: array
         items:
@@ -75,6 +82,7 @@ outputs:
           properties:
             id: string
             command: string
+            parameters: object
             expected: string
       risks:
         type: array
@@ -153,7 +161,14 @@ state:
               items: string
             acceptance:
               type: array
-              items: string
+              items:
+                type: object
+                required: [id, command, expected]
+                properties:
+                  id: string
+                  command: string
+                  parameters: object
+                  expected: string
       files:
         type: array
         items:
@@ -171,6 +186,7 @@ state:
           properties:
             id: string
             command: string
+            parameters: object
             expected: string
       risks:
         type: array

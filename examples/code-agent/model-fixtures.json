@@ -51,8 +51,14 @@
             "examples/code-agent/code-project-plan.air-plan.yaml"
           ],
           "acceptance": [
-            "validate-plan succeeds for the project-plan profile",
-            "offline run returns at least one task and one acceptance command"
+            {
+              "id": "t1-command-run",
+              "command": "air_tools_filter",
+              "parameters": {
+                "test_filter": "command_run"
+              },
+              "expected": "The allowlisted command_run tool tests pass."
+            }
           ]
         },
         {
@@ -74,7 +80,14 @@
             "examples/code-agent/model-fixtures.json"
           ],
           "acceptance": [
-            "trace contains repo.files, repo.search, repo.context, and project_planner events"
+            {
+              "id": "t2-repo-search",
+              "command": "air_tools_filter",
+              "parameters": {
+                "test_filter": "repo_search"
+              },
+              "expected": "The repository search tool tests pass."
+            }
           ]
         },
         {
@@ -95,8 +108,14 @@
             "crates/air-cli/src/code_agent.rs"
           ],
           "acceptance": [
-            "air code --recipe plan works without --target",
-            "air code --explain without --target resolves to plan"
+            {
+              "id": "t3-code-agent",
+              "command": "air_tools_filter",
+              "parameters": {
+                "test_filter": "command_run"
+              },
+              "expected": "The CLI-relevant tool gate stays green."
+            }
           ]
         },
         {
@@ -119,7 +138,14 @@
             "scripts/verify_code_agent.sh"
           ],
           "acceptance": [
-            "scripts/verify_code_agent.sh validates and runs the project-plan profile"
+            {
+              "id": "t4-code-agent",
+              "command": "air_tools_filter",
+              "parameters": {
+                "test_filter": "command_run"
+              },
+              "expected": "The code-agent verification dependency remains green."
+            }
           ]
         }
       ],
@@ -143,18 +169,27 @@
       "acceptance": [
         {
           "id": "validate-plan",
-          "command": "cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/project-plan.air-profile.yaml",
-          "expected": "The profile validates."
+          "command": "air_tools_filter",
+          "parameters": {
+            "test_filter": "command_run"
+          },
+          "expected": "The AIR tools command_run tests pass."
         },
         {
           "id": "offline-run",
-          "command": "cargo run -q -p air-cli -- run-plan --profile examples/code-agent/project-plan.air-profile.yaml",
-          "expected": "The output contains project_plan.tasks and project_plan.acceptance."
+          "command": "air_tools_filter",
+          "parameters": {
+            "test_filter": "repo_context"
+          },
+          "expected": "The repository context tests pass."
         },
         {
           "id": "code-command",
-          "command": "cargo run -q -p air-cli -- code \"plan the next project\" --recipe plan --query \"code agent project plan\"",
-          "expected": "The user-facing code command returns project_plan."
+          "command": "air_tools_filter",
+          "parameters": {
+            "test_filter": "repo_files"
+          },
+          "expected": "The repository file listing tests pass."
         }
       ],
       "risks": [

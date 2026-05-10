@@ -304,7 +304,9 @@ still owns permissions, bounded tool calls, trace, retry, and output schema. Wit
 the project planner first returns `project_plan.tasks[]`; each task must declare a bounded AIR
 `recipe` and typed `input`, and the wrapper executes at most `--max-iterations` tasks through those
 existing recipes. Each planned task gets its own trace file, and later tasks receive a bounded
-summary of prior task outputs. Repair outputs include
+summary of prior task outputs. Planned task `acceptance[]` entries are also executed through the
+configured `test.run` allowlist, never as raw shell commands, and are recorded in a separate
+acceptance trace. Repair outputs include
 both changed-file metadata and a bounded `workspace_diff` artifact filtered to the files patched by
 the agent, so the actual patch is visible without replaying the trace or mixing in unrelated dirty
 workspace changes. They also include `workspace_clean_before` and `preexisting_changed_files`, so a
