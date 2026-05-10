@@ -844,14 +844,7 @@ fn code_session_insert_recovery(outputs: &mut Value, recovery: &CodeSessionRecov
 }
 
 fn code_session_project_resume(state: &CodeSessionState) -> Option<CodeProjectResume> {
-    let turn = state.turns.iter().rev().find(|turn| {
-        turn.recipe == "plan"
-            && turn
-                .outputs
-                .pointer("/project/status")
-                .and_then(Value::as_str)
-                == Some("max_tasks_exhausted")
-    })?;
+    let turn = code_session_latest_project_turn(state, "max_tasks_exhausted")?;
     let project_plan = turn.outputs.get("project_plan")?.clone();
     let executions = turn
         .outputs
@@ -880,14 +873,7 @@ fn code_project_recovery_turn_input(
     base_input: &Map<String, Value>,
     state: &CodeSessionState,
 ) -> Option<Map<String, Value>> {
-    let turn = state.turns.iter().rev().find(|turn| {
-        turn.recipe == "plan"
-            && turn
-                .outputs
-                .pointer("/project/status")
-                .and_then(Value::as_str)
-                == Some("stopped")
-    })?;
+    let turn = code_session_latest_project_turn(state, "stopped")?;
     let task = base_input.get("task").and_then(Value::as_str)?;
     let mut input = code_session_turn_input(base_input, &state.turns);
     let recovery = turn.outputs.get("recovery").or_else(|| {
@@ -922,6 +908,30 @@ fn code_project_recovery_turn_input(
         )),
     );
     Some(input)
+}
+
+fn code_session_latest_project_turn<'a>(
+    state: &'a CodeSessionState,
+    expected_status: &str,
+) -> Option<&'a CodeSessionTurn> {
+    let turn = state.turns.iter().rev().find(|turn| {
+        turn.recipe == "plan"
+            && turn
+                .outputs
+                .pointer("/project/status")
+                .and_then(Value::as_str)
+                .is_some()
+    })?;
+    if turn
+        .outputs
+        .pointer("/project/status")
+        .and_then(Value::as_str)
+        == Some(expected_status)
+    {
+        Some(turn)
+    } else {
+        None
+    }
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -2886,6 +2896,55 @@ mod tests {
             resume.executions[0]["task_id"],
             Value::String("t1".to_string())
         );
+    }
+
+    #[test]
+    fn session_project_resume_ignores_older_exhausted_after_newer_stopped() {
+        let mut state = CodeSessionState::default();
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000001".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "run two tasks".to_string(),
+            recipe: "plan".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: false,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            patch_sets: Vec::new(),
+            recovery: None,
+            outputs: json!({
+                "project_plan": {"tasks": [{"id": "t1", "depends_on": []}]},
+                "project": {
+                    "status": "max_tasks_exhausted",
+                    "executions": [{"task_id": "t1", "completed": true}]
+                }
+            }),
+        });
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000002".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "failed recovery".to_string(),
+            recipe: "plan".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: false,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            patch_sets: Vec::new(),
+            recovery: None,
+            outputs: json!({
+                "project": {
+                    "status": "stopped",
+                    "executions": [{"task_id": "fix", "completed": false}]
+                }
+            }),
+        });
+
+        assert!(code_session_project_resume(&state).is_none());
+        assert!(code_session_latest_project_turn(&state, "stopped").is_some());
     }
 
     #[test]
