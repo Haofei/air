@@ -3775,9 +3775,7 @@ mod tests {
         assert!(!metadata.read_only);
         assert!(metadata.max_estimated_model_calls > 0);
         assert!(metadata.max_estimated_tool_calls > 0);
-        assert!(metadata
-            .plan
-            .ends_with("code-repair-with-explore.air-plan.yaml"));
+        assert!(metadata.plan.ends_with("code-repair.air-plan.yaml"));
     }
 
     #[test]

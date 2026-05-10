@@ -2294,6 +2294,55 @@ fn git_diff_rejects_parent_path_filters() {
 }
 
 #[test]
+fn git_diff_includes_requested_untracked_text_file() {
+    let dir = temp_dir("air-tools-git-diff-untracked");
+    Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .arg("init")
+        .output()
+        .unwrap();
+    fs::write(dir.join("tracked.txt"), "before\n").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["add", "tracked.txt"])
+        .output()
+        .unwrap();
+    fs::write(dir.join("new.txt"), "new\ncontent\n").unwrap();
+    fs::write(dir.join("ignored.txt"), "not requested\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "git.diff": {
+                  "kind": "git_diff",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("git.diff", &json!({"path": "new.txt"}))
+        .unwrap();
+
+    let diff = output["diff"].as_str().unwrap();
+    assert!(diff.contains("diff --git a/new.txt b/new.txt"));
+    assert!(diff.contains("new file mode 100644"));
+    assert!(diff.contains("+new"));
+    assert!(diff.contains("+content"));
+    assert!(!diff.contains("ignored.txt"));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["untracked_files"],
+        json!(["new.txt"])
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn git_status_returns_structured_workspace_entries() {
     let dir = temp_dir("air-tools-git-status");
     Command::new("git")

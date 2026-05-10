@@ -2566,6 +2566,7 @@ fn call_git_diff_tool(
             &repo,
             input,
             &paths,
+            &[],
             String::new(),
             false,
             0,
@@ -2584,6 +2585,10 @@ fn call_git_diff_tool(
         command.arg("--");
         command.args(&paths);
     }
+    let staged = input
+        .get("staged")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let output = command
         .output()
         .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?;
@@ -2593,9 +2598,21 @@ fn call_git_diff_tool(
             provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
         )));
     }
-    let (diff, truncated, bytes) = bytes_to_limited_text(&output.stdout, max_bytes);
+    let mut raw_diff = String::from_utf8_lossy(&output.stdout).to_string();
+    let untracked_files = if !staged && has_filter && !paths.is_empty() {
+        append_requested_untracked_diffs(name, &repo, &paths, &mut raw_diff)?
+    } else {
+        Vec::new()
+    };
+    let (diff, truncated, bytes) = bytes_to_limited_text(raw_diff.as_bytes(), max_bytes);
     Ok(git_diff_output(
-        &repo, input, &paths, diff, truncated, bytes,
+        &repo,
+        input,
+        &paths,
+        &untracked_files,
+        diff,
+        truncated,
+        bytes,
     ))
 }
 
@@ -2603,6 +2620,7 @@ fn git_diff_output(
     repo: &Path,
     input: &Value,
     paths: &[String],
+    untracked_files: &[String],
     diff: String,
     truncated: bool,
     bytes: usize,
@@ -2631,11 +2649,74 @@ fn git_diff_output(
                 "provider": "git_diff",
                 "repo": repo.display().to_string(),
                 "paths": paths,
+                "untracked_files": untracked_files,
                 "bytes": bytes,
                 "truncated": truncated
             }
         }],
     })
+}
+
+fn append_requested_untracked_diffs(
+    name: &str,
+    repo: &Path,
+    paths: &[String],
+    diff: &mut String,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut included = Vec::new();
+    for path in paths {
+        let candidate = repo.join(path);
+        let Ok(absolute_path) = canonicalize_tool_path(name, "git diff path", &candidate) else {
+            continue;
+        };
+        if !absolute_path.starts_with(repo) || !absolute_path.is_file() {
+            continue;
+        }
+        if git_path_is_tracked(name, repo, path)? {
+            continue;
+        }
+        let body = fs::read(&absolute_path)
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
+        if is_likely_binary(&body) {
+            continue;
+        }
+        let content = std::str::from_utf8(&body).map_err(|_| {
+            RuntimeError::Provider(format!(
+                "tool {name} requested untracked file {path} is not valid UTF-8"
+            ))
+        })?;
+        if !diff.is_empty() && !diff.ends_with('\n') {
+            diff.push('\n');
+        }
+        diff.push_str(&untracked_file_unified_diff(path, content));
+        included.push(path.clone());
+    }
+    Ok(included)
+}
+
+fn git_path_is_tracked(name: &str, repo: &Path, path: &str) -> Result<bool, RuntimeError> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["ls-files", "--error-unmatch", "--"])
+        .arg(path)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} git ls-files: {error}")))?;
+    Ok(output.status.success())
+}
+
+fn untracked_file_unified_diff(path: &str, content: &str) -> String {
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut diff = format!(
+        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
+        lines.len()
+    );
+    for line in lines {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    diff
 }
 
 fn call_git_status_tool(

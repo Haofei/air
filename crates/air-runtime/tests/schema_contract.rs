@@ -311,6 +311,38 @@ impl ModelProvider for RetryModels {
     }
 }
 
+struct ProviderRetryModels {
+    calls: usize,
+}
+
+impl ModelProvider for ProviderRetryModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "retry_model");
+        self.calls += 1;
+        if self.calls == 1 {
+            assert!(input.get("_air_retry").is_none());
+            Err(RuntimeError::Provider(
+                "error sending request for url".to_string(),
+            ))
+        } else {
+            assert_eq!(input["_air_retry"]["reason"], json!("provider_error"));
+            assert!(input["_air_retry"]["previous_error"]
+                .as_str()
+                .is_some_and(|error| error.contains("error sending request")));
+            assert!(input["_air_retry"]["instruction"]
+                .as_str()
+                .is_some_and(|instruction| {
+                    instruction.contains("provider call failed")
+                        && !instruction.contains("schema validation")
+                }));
+            Ok(json!({
+                "summary": "valid provider retry result",
+                "rationale": "second attempt recovered after provider error"
+            }))
+        }
+    }
+}
+
 struct ContentWrappedModels;
 
 impl ModelProvider for ContentWrappedModels {
@@ -1155,6 +1187,44 @@ fn retries_model_call_after_schema_violation() {
     assert_eq!(
         result.outputs["result"]["summary"],
         json!("valid retry result")
+    );
+    assert_eq!(
+        result
+            .trace
+            .iter()
+            .filter(|event| event.action == "model_call" && event.status == TraceStatus::Error)
+            .count(),
+        1
+    );
+    assert_eq!(
+        result
+            .trace
+            .iter()
+            .filter(|event| event.action == "model_call" && event.status == TraceStatus::Ok)
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn retries_model_call_after_provider_error_without_schema_retry_instruction() {
+    let module = load_agent("tests/agents/model-retry.air.yaml");
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: ProviderRetryModels { calls: 0 },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("research plan"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.models.calls, 2);
+    assert_eq!(
+        result.outputs["result"]["summary"],
+        json!("valid provider retry result")
     );
     assert_eq!(
         result

@@ -17,13 +17,12 @@ This example contains bounded AIR coding agents and one preferred composed revie
   `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
   `code.review_analyze@0.1.0`.
 - `code.review@0.1.0` is the older monolithic review module kept for comparison.
-- `code.core_repair@0.1.0` is the preferred repair recipe and the smallest
-  opencode-style core loop: run read-only exploration, pass that output through an explicit
-  semantic adapter that selects bounded repair context files, then invoke `code.repair@0.1.0`
-  to edit and retest.
-- `code.core_refactor@0.1.0` reuses the same checked loop for behavior-preserving changes:
-  exploration and context selection run first, then `code.repair@0.1.0` is invoked with
-  `force_patch=true` so a passing test does not short-circuit an intentional refactor.
+- `code.core_repair@0.1.0` is the preferred repair recipe when the target file and
+  allowlisted test command are already known. It runs the smallest opencode-style edit loop:
+  read, test, generate structured file operations, dry-run, apply, and retest.
+- `code.core_refactor@0.1.0` reuses the same direct edit loop for behavior-preserving changes,
+  invoking `code.repair@0.1.0` with `force_patch=true` so a passing test does not short-circuit
+  an intentional refactor.
 - `code.repair@0.1.0` reads a target file plus bounded related files, runs an allowlisted test,
   uses structured diagnostics to gather nearby source context, asks the model for structured
   `file.ops` edits, validates them with a dry-run, applies them through constrained `file.ops`,
@@ -161,12 +160,14 @@ For fixes, the intended first choice is the repair recipe rather than the primit
 That proves the core coding loop as a reusable AIR graph:
 
 ```text
-explore -> repair_context semantic adapter -> repair -> test status
+repair -> test status
 ```
 
-The adapter is deliberately a normal AIR module. Complex interface conversion, such as turning
-`relevant_files[{path, reason}]` into a small `related_files[]` list, stays auditable as a model call
-with typed output instead of becoming hidden linker behavior.
+When the target file and test command are already known, this path follows the opencode-style
+core loop directly instead of spending an extra model call on exploration. The
+`code-repair-with-explore.air-plan.yaml` plan is still available for open-ended fixes where the
+agent must first discover the relevant files and then use the semantic adapter to select bounded
+repair context.
 
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
 search quality, source grounding, and local-code evidence can be tested.
@@ -407,7 +408,7 @@ This profile also modifies `examples/code-agent/repair-fixture/math.js`; reset o
 fixture after manual runs.
 
 Run the behavior-preserving refactor fixture. The test starts passing, but the refactor recipe
-still forces a bounded patch and then reruns the same allowlisted test:
+uses the direct edit kernel, forces a bounded patch, and then reruns the same allowlisted test:
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml

@@ -1637,6 +1637,7 @@ fn is_citation_field(field: &str) -> bool {
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RetryError {
     Message(String),
+    Provider(String),
     TokenLimit(String),
 }
 
@@ -1646,20 +1647,38 @@ impl RetryError {
             RuntimeError::Provider(message) if is_token_limit_error(message) => {
                 RetryError::TokenLimit(message.clone())
             }
+            RuntimeError::Provider(message) => RetryError::Provider(message.clone()),
             other => RetryError::Message(other.to_string()),
         }
     }
 
     fn message(&self) -> &str {
         match self {
-            RetryError::Message(message) | RetryError::TokenLimit(message) => message,
+            RetryError::Message(message)
+            | RetryError::Provider(message)
+            | RetryError::TokenLimit(message) => message,
         }
     }
 
     fn reason(&self) -> &'static str {
         match self {
             RetryError::Message(_) => "previous_error",
+            RetryError::Provider(_) => "provider_error",
             RetryError::TokenLimit(_) => "token_limit",
+        }
+    }
+
+    fn instruction(&self) -> &'static str {
+        match self {
+            RetryError::Message(_) => {
+                "The previous model response failed AIR runtime schema validation. Return only a corrected JSON object matching required_output_schema exactly."
+            }
+            RetryError::Provider(_) => {
+                "The previous provider call failed before AIR accepted a model response. Retry the task and return only a JSON object matching required_output_schema exactly."
+            }
+            RetryError::TokenLimit(_) => {
+                "The previous provider call exceeded the model context limit. Retry with the compacted input and return only a JSON object matching required_output_schema exactly."
+            }
         }
     }
 }
@@ -1685,7 +1704,7 @@ fn model_input_for_attempt(
                     .copied()
                     .or_else(|| policy.max_input_chars.last().copied())
             }),
-        RetryError::Message(_) => None,
+        RetryError::Message(_) | RetryError::Provider(_) => None,
     };
     let input = max_input_chars
         .map(|max_chars| compact_json_value(input, max_chars))
@@ -1719,9 +1738,7 @@ fn model_input_for_attempt(
     }
     retry_context.insert(
         "instruction".to_string(),
-        Value::String(
-            "The previous response failed AIR runtime schema validation. Return only a corrected JSON object matching required_output_schema exactly.".to_string(),
-        ),
+        Value::String(error.instruction().to_string()),
     );
 
     match input {

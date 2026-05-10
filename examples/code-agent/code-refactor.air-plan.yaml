@@ -1,0 +1,39 @@
+plan:
+  name: code-refactor
+  version: 0.1.0
+  description: "Core coding-agent refactor loop: read the known target, apply an intentional behavior-preserving patch, and verify with an allowlisted test."
+
+requires:
+  capabilities: [task.progress, file.read, file.write, code.read, code.test]
+
+nodes:
+  - id: repair
+    module: code.repair@0.1.0
+
+entry: repair
+
+connect:
+  - from: $input.task
+    to: repair.task
+  - from: $input.query
+    to: repair.query
+  - from: $input.target_path
+    to: repair.target_path
+  - from: $input.target_search_pattern
+    to: repair.target_search_pattern
+  - from: $input.related_files
+    to: repair.related_files
+  - from: $input.test_command
+    to: repair.test_command
+  - to: repair.force_patch
+    value:
+      literal: true
+
+outputs:
+  refactor: repair.repair
+  repair: repair.repair
+
+decisions:
+  - id: choose-core-refactor-kernel
+    rationale: "The target file and test command are already known, so run the opencode-style core edit loop directly: read, test, generate structured file operations, dry-run, apply, and retest."
+    selected: [repair]

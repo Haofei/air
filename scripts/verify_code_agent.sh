@@ -720,7 +720,7 @@ assert output["will_run"] is False, output
 assert output["requested_recipe"] == "auto", output
 assert output["resolved_recipe"] == "repair", output
 assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
-assert output["plan"].endswith("examples/code-agent/code-repair-with-explore.air-plan.yaml"), output
+assert output["plan"].endswith("examples/code-agent/code-repair.air-plan.yaml"), output
 assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml"), output
 assert "file.write" in output["capabilities"], output
 assert output["read_only"] is False, output
@@ -1022,8 +1022,6 @@ with open("target/generated/code_agent_repair_core.output.json", encoding="utf-8
 with open("target/generated/code_agent_repair_core.trace.jsonl", encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 
-assert output["exploration"]["relevant_files"], output
-assert output["repair_context"]["related_files"], output
 repair = output["repair"]
 assert repair["initial_success"] is False, repair
 assert repair["final_success"] is True, repair
@@ -1035,16 +1033,9 @@ preexisting = {entry["path"] for entry in repair["preexisting_changed_files"]}
 assert "examples/code-agent/repair-fixture/test.js" in preexisting, repair
 assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
 assert "examples/code-agent/repair-fixture/test.js" not in repair["workspace_diff"]["diff"], repair
-assert any(
+assert not any(
     event.get("action") == "model_call"
-    and event.get("meta", {}).get("model") == "code_explorer"
-    and event.get("status") == "ok"
-    for event in trace
-), trace
-assert any(
-    event.get("action") == "model_call"
-    and event.get("meta", {}).get("model") == "code_repair_context_selector"
-    and event.get("status") == "ok"
+    and event.get("meta", {}).get("model") in {"code_explorer", "code_repair_context_selector"}
     for event in trace
 ), trace
 assert any(
@@ -1261,8 +1252,6 @@ assert workspace_apply["results"][1]["success"] is True, workspace_apply
 with open(turn["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 
-assert output["exploration"]["relevant_files"], output
-assert output["repair_context"]["related_files"], output
 repair = output["repair"]
 changed = {entry["path"] for entry in repair["changed_files"]}
 assert repair["initial_success"] is False, repair
@@ -1270,10 +1259,9 @@ assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
 assert "examples/code-agent/repair-fixture/math.js" in changed, repair
 assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
-assert any(
+assert not any(
     event.get("action") == "model_call"
-    and event.get("meta", {}).get("model") == "code_repair_context_selector"
-    and event.get("status") == "ok"
+    and event.get("meta", {}).get("model") in {"code_explorer", "code_repair_context_selector"}
     for event in trace
 ), trace
 assert any(
