@@ -79,6 +79,7 @@ mod tests {
                     id: "plan".to_string(),
                     default_profile: PathBuf::from("project-plan.air-profile.yaml"),
                     intent: None,
+                    input: CodeAgentRecipeInput::default(),
                     completion: None,
                 }],
             },
@@ -116,6 +117,7 @@ mod tests {
                 id: " ".to_string(),
                 default_profile: PathBuf::from("repair.air-profile.yaml"),
                 intent: None,
+                input: CodeAgentRecipeInput::default(),
                 completion: None,
             }],
         };
@@ -134,6 +136,7 @@ mod tests {
                 id: "repair".to_string(),
                 default_profile: PathBuf::new(),
                 intent: None,
+                input: CodeAgentRecipeInput::default(),
                 completion: None,
             }],
         };
@@ -156,12 +159,14 @@ mod tests {
                     id: "repair".to_string(),
                     default_profile: PathBuf::from("repair.air-profile.yaml"),
                     intent: None,
+                    input: CodeAgentRecipeInput::default(),
                     completion: None,
                 },
                 CodeAgentPackRecipe {
                     id: "repair".to_string(),
                     default_profile: PathBuf::from("other-repair.air-profile.yaml"),
                     intent: None,
+                    input: CodeAgentRecipeInput::default(),
                     completion: None,
                 },
             ],
@@ -216,6 +221,7 @@ all:
                 id: "repair".to_string(),
                 default_profile: PathBuf::from("repair.air-profile.yaml"),
                 intent: None,
+                input: CodeAgentRecipeInput::default(),
                 completion: Some(CodeAgentCompletion {
                     all: vec![CodeAgentCompletionRule {
                         exists: Some("repair/final_success".to_string()),
@@ -230,6 +236,53 @@ all:
             .expect_err("completion paths must be JSON pointers");
 
         assert!(error.to_string().contains("JSON pointer"), "{error}");
+    }
+
+    #[test]
+    fn pack_validation_rejects_unknown_input_fields() {
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
+            recipes: vec![CodeAgentPackRecipe {
+                id: "repair".to_string(),
+                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                intent: None,
+                input: CodeAgentRecipeInput {
+                    required: vec!["task".to_string()],
+                    optional: vec!["unknown_flag".to_string()],
+                },
+                completion: None,
+            }],
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("recipe input should reject unknown fields");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
+    }
+
+    #[test]
+    fn pack_validation_rejects_overlapping_input_fields() {
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
+            recipes: vec![CodeAgentPackRecipe {
+                id: "repair".to_string(),
+                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                intent: None,
+                input: CodeAgentRecipeInput {
+                    required: vec!["task".to_string()],
+                    optional: vec!["task".to_string()],
+                },
+                completion: None,
+            }],
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("recipe input should reject required/optional overlap");
+
+        assert!(
+            error.to_string().contains("both required and optional"),
+            "{error}"
+        );
     }
 
     #[test]
@@ -284,6 +337,7 @@ all:
                 id: "repair".to_string(),
                 default_profile: PathBuf::from("repair.air-profile.yaml"),
                 intent: None,
+                input: CodeAgentRecipeInput::default(),
                 completion: None,
             }],
         };
@@ -314,6 +368,7 @@ all:
                 id: "repair".to_string(),
                 default_profile: PathBuf::from("repair.air-profile.yaml"),
                 intent: None,
+                input: CodeAgentRecipeInput::default(),
                 completion: None,
             }],
         };
@@ -332,7 +387,17 @@ pub(crate) struct CodeAgentPackRecipe {
     #[serde(default)]
     pub(crate) intent: Option<String>,
     #[serde(default)]
+    pub(crate) input: CodeAgentRecipeInput,
+    #[serde(default)]
     pub(crate) completion: Option<CodeAgentCompletion>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct CodeAgentRecipeInput {
+    #[serde(default)]
+    pub(crate) required: Vec<String>,
+    #[serde(default)]
+    pub(crate) optional: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -421,6 +486,10 @@ fn validate_code_agent_pack(pack: &CodeAgentPack, source: &str) -> Result<()> {
                 recipe.id
             );
         }
+        validate_recipe_input(
+            &recipe.input,
+            &format!("code-agent pack {source} recipe {}", recipe.id),
+        )?;
         if let Some(completion) = &recipe.completion {
             validate_completion(
                 completion,
@@ -430,6 +499,50 @@ fn validate_code_agent_pack(pack: &CodeAgentPack, source: &str) -> Result<()> {
     }
     validate_auto_routes(pack, source)?;
     Ok(())
+}
+
+fn validate_recipe_input(input: &CodeAgentRecipeInput, source: &str) -> Result<()> {
+    let mut required = HashSet::new();
+    for field in &input.required {
+        if !is_known_recipe_input_field(field) {
+            bail!("{source} input references unknown field {field}");
+        }
+        if !required.insert(field.as_str()) {
+            bail!("{source} input declares duplicate required field {field}");
+        }
+    }
+    let mut optional = HashSet::new();
+    for field in &input.optional {
+        if !is_known_recipe_input_field(field) {
+            bail!("{source} input references unknown field {field}");
+        }
+        if required.contains(field.as_str()) {
+            bail!("{source} input field {field} cannot be both required and optional");
+        }
+        if !optional.insert(field.as_str()) {
+            bail!("{source} input declares duplicate optional field {field}");
+        }
+    }
+    Ok(())
+}
+
+fn is_known_recipe_input_field(field: &str) -> bool {
+    matches!(
+        field,
+        "task"
+            | "target"
+            | "test"
+            | "query"
+            | "related"
+            | "search_query"
+            | "repo_query"
+            | "required_terms"
+            | "output"
+            | "brand"
+            | "product"
+            | "constraints"
+            | "force_patch"
+    )
 }
 
 fn validate_auto_routes(pack: &CodeAgentPack, source: &str) -> Result<()> {

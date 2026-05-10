@@ -1447,6 +1447,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
             "default_profile": pack_default_profile,
             "profile_override": active_profile != pack_default_profile,
             "intent": pack_recipe.intent,
+            "input": pack_recipe.input,
             "completion": pack_recipe.completion,
             "routing": pack.pack.routing,
             "routing_decision": routing_decision,

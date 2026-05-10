@@ -43,6 +43,8 @@ assert output["pack"]["recipe"] == "plan", output
 assert output["pack"]["default_profile"] == "target/generated/examples/code-agent/project-plan.air-profile.yaml", output
 assert output["profile"] == "target/generated/examples/code-agent/project-plan.air-profile.yaml", output
 assert output["pack"]["profile_override"] is False, output
+assert output["pack"]["input"]["required"] == ["task"], output
+assert "query" in output["pack"]["input"]["optional"], output
 assert output["pack"]["completion"]["any"][1]["all"][1]["non_empty_array"] == "/project_plan/tasks", output
 assert output["pack"]["routing"]["auto"][0]["recipe"] == "build", output
 assert output["pack"]["routing_decision"] is None, output
@@ -916,6 +918,7 @@ assert output["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml",
 assert output["pack"]["recipe"] == "repair", output
 assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["pack"]["profile_override"] is False, output
+assert output["pack"]["input"]["required"] == ["task", "target", "test"], output
 assert output["pack"]["completion"]["any"][0]["equals"]["path"] == "/repair/final_success", output
 assert output["pack"]["routing"]["auto"][3]["recipe"] == "repair", output
 assert output["pack"]["routing_decision"]["route_index"] == 3, output
