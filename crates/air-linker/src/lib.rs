@@ -39,6 +39,10 @@ pub struct AirSystem {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModuleStore {
     pub store: StoreMetadata,
+
+    #[serde(default)]
+    pub imports: Vec<PathBuf>,
+
     pub modules: BTreeMap<String, ModuleRef>,
 
     #[serde(default)]
@@ -427,6 +431,15 @@ pub enum LinkerError {
 
     #[error("trace specialization error: {0}")]
     TraceSpecialization(String),
+
+    #[error("module store import cycle at {0}")]
+    StoreImportCycle(String),
+
+    #[error("duplicate module id {module} while importing {import}")]
+    DuplicateStoreModule { module: String, import: String },
+
+    #[error("duplicate recipe id {recipe} while importing {import}")]
+    DuplicateStoreRecipe { recipe: String, import: String },
 }
 
 pub fn parse_system_file(path: impl AsRef<Path>) -> Result<AirSystem, LinkerError> {
@@ -440,11 +453,105 @@ pub fn parse_system_file(path: impl AsRef<Path>) -> Result<AirSystem, LinkerErro
 
 pub fn parse_module_store_file(path: impl AsRef<Path>) -> Result<ModuleStore, LinkerError> {
     let path = path.as_ref();
+    let mut visited = BTreeSet::new();
+    parse_module_store_file_inner(path, true, &mut visited)
+}
+
+fn parse_module_store_file_inner(
+    path: &Path,
+    preserve_local_paths: bool,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<ModuleStore, LinkerError> {
+    let canonical = path.canonicalize().map_err(|source| LinkerError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    if !visited.insert(canonical.clone()) {
+        return Err(LinkerError::StoreImportCycle(
+            canonical.display().to_string(),
+        ));
+    }
+
     let source = fs::read_to_string(path).map_err(|source| LinkerError::Read {
         path: path.display().to_string(),
         source,
     })?;
-    Ok(serde_yaml::from_str(&source)?)
+    let mut store: ModuleStore = serde_yaml::from_str(&source)?;
+    let store_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let imports = store.imports.clone();
+
+    let mut merged = ModuleStore {
+        store: store.store.clone(),
+        imports: Vec::new(),
+        modules: BTreeMap::new(),
+        recipes: Vec::new(),
+    };
+
+    for import in imports {
+        let import_path = if import.is_absolute() {
+            import
+        } else {
+            store_dir.join(import)
+        };
+        let imported = parse_module_store_file_inner(&import_path, false, visited)?;
+        merge_store_import(&mut merged, imported, &import_path)?;
+    }
+
+    if !preserve_local_paths {
+        absolutize_module_paths(&mut store, store_dir)?;
+    }
+
+    merge_store_import(&mut merged, store, path)?;
+    visited.remove(&canonical);
+    Ok(merged)
+}
+
+fn absolutize_module_paths(store: &mut ModuleStore, store_dir: &Path) -> Result<(), LinkerError> {
+    for module_ref in store.modules.values_mut() {
+        if module_ref.path.is_absolute() {
+            continue;
+        }
+        let candidate = store_dir.join(&module_ref.path);
+        module_ref.path = candidate
+            .canonicalize()
+            .map_err(|source| LinkerError::Read {
+                path: candidate.display().to_string(),
+                source,
+            })?;
+    }
+    Ok(())
+}
+
+fn merge_store_import(
+    target: &mut ModuleStore,
+    imported: ModuleStore,
+    import_path: &Path,
+) -> Result<(), LinkerError> {
+    let import = import_path.display().to_string();
+    for (module, module_ref) in imported.modules {
+        if target.modules.contains_key(&module) {
+            return Err(LinkerError::DuplicateStoreModule {
+                module,
+                import: import.clone(),
+            });
+        }
+        target.modules.insert(module, module_ref);
+    }
+    let mut recipe_ids = target
+        .recipes
+        .iter()
+        .map(|recipe| recipe.id.clone())
+        .collect::<BTreeSet<_>>();
+    for recipe in imported.recipes {
+        if !recipe_ids.insert(recipe.id.clone()) {
+            return Err(LinkerError::DuplicateStoreRecipe {
+                recipe: recipe.id,
+                import: import.clone(),
+            });
+        }
+        target.recipes.push(recipe);
+    }
+    Ok(())
 }
 
 pub fn parse_run_plan_file(path: impl AsRef<Path>) -> Result<RunPlan, LinkerError> {
@@ -5287,5 +5394,114 @@ fn array_bounds(spec: &TypeSpec) -> (Option<usize>, Option<usize>) {
             (detailed.min_items, detailed.max_items)
         }
         _ => (None, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let stamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("air-linker-{name}-{stamp}"));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn module_store_imports_modules_and_recipes() {
+        let dir = temp_dir("store-imports");
+        fs::create_dir_all(dir.join("std/context")).unwrap();
+        fs::create_dir_all(dir.join("app")).unwrap();
+        fs::write(dir.join("std/context/compact.air.yaml"), "").unwrap();
+        fs::write(dir.join("app/review.air.yaml"), "").unwrap();
+        fs::write(
+            dir.join("std/module-store.air-store.yaml"),
+            r#"
+store:
+  name: std
+  version: 0.1.0
+modules:
+  context.compact@0.1.0:
+    path: context/compact.air.yaml
+recipes:
+  - id: std.recipe@0.1.0
+    plan:
+      plan: { name: std-recipe, version: 0.1.0 }
+      nodes: []
+      entry: none
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app/module-store.air-store.yaml"),
+            r#"
+store:
+  name: app
+  version: 0.1.0
+imports:
+  - ../std/module-store.air-store.yaml
+modules:
+  code.review@0.1.0:
+    path: review.air.yaml
+"#,
+        )
+        .unwrap();
+
+        let store = parse_module_store_file(dir.join("app/module-store.air-store.yaml")).unwrap();
+        assert!(store.imports.is_empty());
+        assert!(store.modules.contains_key("code.review@0.1.0"));
+        let imported = store.modules.get("context.compact@0.1.0").unwrap();
+        assert!(imported.path.is_absolute());
+        assert!(imported.path.ends_with("std/context/compact.air.yaml"));
+        assert_eq!(store.recipes.len(), 1);
+        assert_eq!(store.recipes[0].id, "std.recipe@0.1.0");
+    }
+
+    #[test]
+    fn module_store_import_rejects_duplicate_modules() {
+        let dir = temp_dir("store-import-duplicates");
+        fs::create_dir_all(dir.join("std")).unwrap();
+        fs::create_dir_all(dir.join("app")).unwrap();
+        fs::write(dir.join("std/a.air.yaml"), "").unwrap();
+        fs::write(dir.join("app/b.air.yaml"), "").unwrap();
+        fs::write(
+            dir.join("std/module-store.air-store.yaml"),
+            r#"
+store:
+  name: std
+  version: 0.1.0
+modules:
+  duplicate.module@0.1.0:
+    path: a.air.yaml
+"#,
+        )
+        .unwrap();
+        fs::write(
+            dir.join("app/module-store.air-store.yaml"),
+            r#"
+store:
+  name: app
+  version: 0.1.0
+imports:
+  - ../std/module-store.air-store.yaml
+modules:
+  duplicate.module@0.1.0:
+    path: b.air.yaml
+"#,
+        )
+        .unwrap();
+
+        let error = parse_module_store_file(dir.join("app/module-store.air-store.yaml"))
+            .expect_err("duplicate imported module should fail");
+        assert!(matches!(
+            error,
+            LinkerError::DuplicateStoreModule { module, .. }
+                if module == "duplicate.module@0.1.0"
+        ));
     }
 }

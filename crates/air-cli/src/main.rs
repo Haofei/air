@@ -931,6 +931,7 @@ mod tests {
                 name: "test-store".to_string(),
                 version: "0.1.0".to_string(),
             },
+            imports: vec![],
             modules: Default::default(),
             recipes: vec![],
         };

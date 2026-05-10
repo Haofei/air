@@ -1486,6 +1486,7 @@ mod tests {
                 name: "test-store".to_string(),
                 version: "0.1.0".to_string(),
             },
+            imports: Vec::new(),
             modules: BTreeMap::from([(
                 "test.conditional_loop@0.1.0".to_string(),
                 air_linker::ModuleRef {

@@ -2,6 +2,9 @@ store:
   name: code-agent-store
   version: 0.1.0
 
+imports:
+  - ../../modules/std/module-store.air-store.yaml
+
 modules:
   code.review@0.1.0:
     path: examples/code-agent/code-review.air.yaml
@@ -27,14 +30,6 @@ modules:
     tags: [coding, review, analysis, provenance]
     covers: [code_review_analysis, grounded_recommendations]
     priority: 70
-  context.compact@0.1.0:
-    path: modules/std/context/compact.air.yaml
-    kind: primitive
-    visibility: public
-    description: "Generic AIR standard context budget gate and semantic compaction module."
-    tags: [context, compaction, standard]
-    covers: [measure_context, compact_context, preserve_provenance]
-    priority: 80
   code.build_page@0.1.0:
     path: examples/code-agent/code-build-page.air.yaml
     kind: composite

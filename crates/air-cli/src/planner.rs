@@ -506,17 +506,16 @@ fn infer_module_base_dir(
     start_dir: &Path,
     modules: &BTreeMap<String, air_linker::ModuleRef>,
 ) -> PathBuf {
-    if modules.values().all(|module| module.path.is_absolute()) {
-        return start_dir.to_path_buf();
-    }
-
     start_dir
         .ancestors()
         .find(|candidate| {
-            modules
-                .values()
-                .filter(|module| !module.path.is_absolute())
-                .all(|module| candidate.join(&module.path).exists())
+            modules.values().all(|module| {
+                if module.path.is_absolute() {
+                    module.path.starts_with(candidate)
+                } else {
+                    candidate.join(&module.path).exists()
+                }
+            })
         })
         .unwrap_or(start_dir)
         .to_path_buf()

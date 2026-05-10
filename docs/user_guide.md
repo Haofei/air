@@ -142,6 +142,9 @@ store:
   name: simple-helpdesk-store
   version: 0.1.0
 
+imports:
+  - ../../modules/std/module-store.air-store.yaml
+
 modules:
   helpdesk.rag@0.1.0:
     path: examples/simple-helpdesk/helpdesk-rag.air.yaml
@@ -151,6 +154,12 @@ modules:
     covers: [retrieve_docs, answer_question]
     priority: 100
 ```
+
+`imports` let an application store reuse standard or shared module stores without copying module
+refs. Imported modules and recipes are merged before local entries, and duplicate module or recipe
+ids are rejected so an import cannot silently shadow another component. Relative import paths are
+resolved from the importing store file; relative module paths inside the imported store are resolved
+from that imported store file.
 
 Planner behavior:
 
