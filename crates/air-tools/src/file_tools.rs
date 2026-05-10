@@ -40,6 +40,8 @@ pub(super) fn call_file_read_tool(
     let context_lines = optional_positive_usize_input(name, input, "context_lines")?.unwrap_or(0);
     let occurrence = optional_positive_usize_input(name, input, "occurrence")?.unwrap_or(1);
     let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(false);
+    let effective_max_bytes =
+        optional_bounded_usize_input(name, input, "max_bytes", max_bytes)?.unwrap_or(max_bytes);
     if let (Some(start), Some(end)) = (start_line, end_line) {
         if start > end {
             return Err(RuntimeError::Provider(format!(
@@ -86,7 +88,8 @@ pub(super) fn call_file_read_tool(
         (start_line, end_line, None)
     };
     let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
-    let (content, truncated, bytes) = bytes_to_limited_text(selected.as_bytes(), max_bytes);
+    let (content, truncated, bytes) =
+        bytes_to_limited_text(selected.as_bytes(), effective_max_bytes);
     let numbered_content = if line_numbers {
         Some(numbered_content(
             &content,
@@ -108,6 +111,7 @@ pub(super) fn call_file_read_tool(
         "context_lines": context_lines,
         "occurrence": occurrence,
         "total_lines": total_lines,
+        "max_bytes": effective_max_bytes,
         "truncated": truncated,
         "line_numbers": line_numbers,
         "artifacts": [{
@@ -1075,6 +1079,91 @@ pub(super) fn call_file_ops_tool(
                     },
                 );
             }
+            "replace_lines" => {
+                let path = canonicalize_tool_path(name, &format!("{label}.path"), &candidate)?;
+                if !path.starts_with(&base) {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} {label}.path is outside configured base_dir"
+                    )));
+                }
+                if options.require_read {
+                    require_fresh_read(
+                        name,
+                        &format!("{label}.path"),
+                        "replace_lines",
+                        &path,
+                        options.read_snapshots,
+                    )?;
+                }
+                let current = match pending.get(&path) {
+                    Some(file) => file.content.clone(),
+                    None => fs::read_to_string(&path).map_err(|error| {
+                        RuntimeError::Provider(format!("tool {name} read file: {error}"))
+                    })?,
+                };
+                let start_line =
+                    required_labeled_usize_input(name, operation, &label, "start_line")?;
+                let end_line = required_labeled_usize_input(name, operation, &label, "end_line")?;
+                let new_string =
+                    required_labeled_string_input(name, operation, &label, "new_string")?;
+                let Some(line_match) = line_range_edit_match(&current, start_line, end_line) else {
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "replace_lines",
+                            "start_line",
+                            format!(
+                                "{label}.start_line/{label}.end_line must select an existing inclusive line range"
+                            ),
+                        ),
+                    ));
+                };
+                let old_string = &current[line_match.start..line_match.end];
+                validate_file_edit_operation(name, &label, old_string, new_string)?;
+                diff.push_str(&edit_unified_diff(
+                    input_path,
+                    &current,
+                    &[line_match],
+                    new_string,
+                ));
+                let updated = apply_selected_edit_matches(&current, &[line_match], new_string);
+                if updated.len() > options.max_bytes {
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "replace_lines",
+                            "new_string",
+                            format!(
+                                "{label} edited content exceeds max_bytes={}",
+                                options.max_bytes
+                            ),
+                        ),
+                    ));
+                }
+                pending.insert(
+                    path.clone(),
+                    FileOpsPendingFile {
+                        path: input_path.to_string(),
+                        absolute_path: path,
+                        kind: "existing",
+                        content: updated,
+                    },
+                );
+            }
             "write" => {
                 let content = required_labeled_string_input(name, operation, &label, "content")?;
                 if content.len() > options.max_bytes {
@@ -1098,9 +1187,23 @@ pub(super) fn call_file_ops_tool(
                     resolve_file_ops_write_path(name, &label, &base, input_path)?;
                 if existed {
                     if !options.allow_overwrite {
-                        return Err(RuntimeError::Provider(format!(
-                            "tool {name} {label}.path already exists and allow_overwrite is false"
-                        )));
+                        return Ok(file_ops_failure_output(
+                            name,
+                            &base,
+                            operations.len(),
+                            &pending,
+                            &diff,
+                            FileOpsDiagnostic::new(
+                                index,
+                                label.clone(),
+                                input_path,
+                                "write",
+                                "path",
+                                format!(
+                                    "{label}.path already exists and allow_overwrite is false; use kind=edit or kind=replace_lines for existing files"
+                                ),
+                            ),
+                        ));
                     }
                     if options.require_read {
                         require_fresh_read(
@@ -1112,9 +1215,21 @@ pub(super) fn call_file_ops_tool(
                         )?;
                     }
                 } else if !options.allow_new_files {
-                    return Err(RuntimeError::Provider(format!(
-                        "tool {name} {label}.path does not exist and allow_new_files is false"
-                    )));
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        FileOpsDiagnostic::new(
+                            index,
+                            label.clone(),
+                            input_path,
+                            "write",
+                            "path",
+                            format!("{label}.path does not exist and allow_new_files is false"),
+                        ),
+                    ));
                 }
                 diff.push_str(&write_unified_diff(
                     input_path,
@@ -1133,7 +1248,7 @@ pub(super) fn call_file_ops_tool(
             }
             _ => {
                 return Err(RuntimeError::Provider(format!(
-                    "tool {name} {label}.kind must be edit or write"
+                    "tool {name} {label}.kind must be edit, replace_lines, or write"
                 )));
             }
         }
@@ -1258,6 +1373,51 @@ fn file_ops_failure_output(
                 "diff_truncated": diff_truncated
             }
         }]
+    })
+}
+
+fn required_labeled_usize_input(
+    tool_name: &str,
+    input: &Value,
+    label: &str,
+    field: &str,
+) -> Result<usize, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} {label}.{field} must be a positive integer"
+        )));
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} {label}.{field} must be a positive integer"
+        )));
+    };
+    if number == 0 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} {label}.{field} must be greater than 0"
+        )));
+    }
+    usize::try_from(number).map_err(|_| {
+        RuntimeError::Provider(format!("tool {tool_name} {label}.{field} is too large"))
+    })
+}
+
+fn line_range_edit_match(content: &str, start_line: usize, end_line: usize) -> Option<EditMatch> {
+    if start_line == 0 || end_line < start_line || content.is_empty() {
+        return None;
+    }
+    let lines = split_lines_with_offsets(content);
+    if start_line > lines.len() || end_line > lines.len() {
+        return None;
+    }
+    let end = if end_line < lines.len() {
+        lines[end_line].start
+    } else {
+        content.len()
+    };
+    Some(EditMatch {
+        start: lines[start_line - 1].start,
+        end,
     })
 }
 

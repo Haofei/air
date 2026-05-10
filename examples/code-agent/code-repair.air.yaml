@@ -537,6 +537,8 @@ workflow:
                 ref: target_path
               line_numbers:
                 literal: true
+              max_bytes:
+                literal: 20000
           output: file_context
           timeout_seconds: 10
           retry:
@@ -550,7 +552,7 @@ workflow:
               pattern:
                 ref: target_search_pattern
               context_lines:
-                literal: 8
+                literal: 80
           output: target_matches
           timeout_seconds: 10
           retry:
@@ -715,6 +717,9 @@ workflow:
                       match_strategy:
                         enum: [exact, auto, line_trimmed, whitespace_normalized, indentation_flexible]
                       note: "Prefer exact old_string from file_context, target_matches, or diagnostic_context. Set replace_all only when all matches should change."
+                    replace_lines:
+                      required: [kind, path, start_line, end_line, new_string]
+                      note: "Use for localized edits in large files. start_line/end_line are 1-based inclusive lines from file_context or target_matches; new_string should contain the complete replacement text for that line range."
                     write:
                       required: [kind, path, content]
                       note: "Use only for bounded new files or full overwrites permitted by the selected tool config."
@@ -850,6 +855,8 @@ workflow:
                 ref: target_path
               line_numbers:
                 literal: true
+              max_bytes:
+                literal: 20000
           output: file_context_retry
           timeout_seconds: 10
           retry:
@@ -863,7 +870,7 @@ workflow:
               pattern:
                 ref: target_search_pattern
               context_lines:
-                literal: 8
+                literal: 80
           output: target_matches_retry
           timeout_seconds: 10
           retry:
@@ -978,6 +985,9 @@ workflow:
                       match_strategy:
                         enum: [exact, auto, line_trimmed, whitespace_normalized, indentation_flexible]
                       note: "Prefer exact old_string from reread context. Set replace_all only when all matches should change."
+                    replace_lines:
+                      required: [kind, path, start_line, end_line, new_string]
+                      note: "Use for localized edits in large files. start_line/end_line are 1-based inclusive lines from refreshed file_context_retry or target_matches_retry; new_string should contain the complete replacement text for that line range."
                     write:
                       required: [kind, path, content]
                       note: "Use only for bounded new files or full overwrites permitted by the selected tool config."
