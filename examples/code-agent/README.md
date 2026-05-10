@@ -22,6 +22,7 @@ The review agent uses:
 - `repo.references` for LSP-lite definition/reference lookup around an identifier token, with bounded snippets;
 - `repo.context` for automatically selected nearby code snippets around repository matches, also with explicit regex mode;
 - `file.read` for the target source file, with optional numbered output for diagnostics;
+- `file.read_many` for bounded related-file context, such as nearby configs, fixtures, or tests;
 - `git.diff` for local changes to that file.
 - `git.status` for structured workspace change awareness.
 - `test.run` for an allowlisted verification command.

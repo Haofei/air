@@ -3,5 +3,9 @@
   "search_query": "Playwright browser search result extraction timeout Node.js",
   "repo_query": "playwright_search",
   "required_terms": ["playwright"],
-  "target_file": "scripts/playwright_search.cjs"
+  "target_file": "scripts/playwright_search.cjs",
+  "related_files": [
+    "examples/code-agent/tools.playwright.json",
+    "scripts/playwright_search_fixture_test.cjs"
+  ]
 }

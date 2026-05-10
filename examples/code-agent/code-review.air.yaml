@@ -11,6 +11,9 @@ inputs:
     type: array
     items: string
   target_file: string
+  related_files:
+    type: array
+    items: string
 
 outputs:
   review:
@@ -54,7 +57,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, plan, search, list_files, inspect_symbols, inspect_references, search_repo, read_context, read_file, read_diff, read_status, run_tests, read_todos, measure_context, compact_route, compact, analyze_compacted, analyze_raw, done, failed]
+    enum: [init, plan, search, list_files, inspect_symbols, inspect_references, search_repo, read_context, read_file, read_related_files, read_diff, read_status, run_tests, read_todos, measure_context, compact_route, compact, analyze_compacted, analyze_raw, done, failed]
   plan_status:
     type: object
     required: [todos, total, open_count, artifacts]
@@ -193,6 +196,19 @@ state:
       artifacts:
         type: array
         items: object
+  related_file_context:
+    type: object
+    required: [files, file_count, artifacts]
+    properties:
+      files:
+        type: array
+        items: object
+      file_count: integer
+      bytes: integer
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
   diff_context:
     type: object
     required: [repo, diff, artifacts]
@@ -323,6 +339,9 @@ tools:
     capability: network.search
     timeout_ms: 120000
   - name: file.read
+    capability: file.read
+    timeout_ms: 10000
+  - name: file.read_many
     capability: file.read
     timeout_ms: 10000
   - name: repo.files
@@ -551,6 +570,23 @@ workflow:
             max_attempts: 1
         - kind: set
           values:
+            phase: read_related_files
+
+    - id: read_related_files
+      when: phase == "read_related_files"
+      actions:
+        - kind: tool_call
+          tool: file.read_many
+          input:
+            object:
+              files:
+                ref: related_files
+          output: related_file_context
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
             phase: read_diff
 
     - id: read_diff
@@ -646,6 +682,8 @@ workflow:
                     ref: repo_context
                   file_context:
                     ref: file_context
+                  related_file_context:
+                    ref: related_file_context
                   diff_context:
                     ref: diff_context
                   workspace_status:
@@ -703,6 +741,8 @@ workflow:
                 ref: repo_context
               file_context:
                 ref: file_context
+              related_file_context:
+                ref: related_file_context
               diff_context:
                 ref: diff_context
               workspace_status:
@@ -773,6 +813,8 @@ workflow:
                 ref: repo_context
               file_context:
                 ref: file_context
+              related_file_context:
+                ref: related_file_context
               diff_context:
                 ref: diff_context
               workspace_status:
@@ -800,7 +842,7 @@ workflow:
           output: review
 
 policy:
-  max_tool_calls: 13
+  max_tool_calls: 14
   timeout_seconds: 300
 
 observability:

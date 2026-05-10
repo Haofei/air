@@ -23,6 +23,8 @@ connect:
     to: review.required_terms
   - from: $input.target_file
     to: review.target_file
+  - from: $input.related_files
+    to: review.related_files
 
 outputs:
   review: review.review
