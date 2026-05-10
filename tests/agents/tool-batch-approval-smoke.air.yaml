@@ -1,0 +1,83 @@
+agent:
+  name: tool-batch-approval-smoke-agent
+  version: 0.1.0
+
+inputs:
+  choices:
+    type: array
+    items:
+      type: object
+      required: [tool, input]
+      properties:
+        tool: string
+        input: object
+
+outputs:
+  observations:
+    type: array
+    items:
+      type: object
+      required: [tool, input, output]
+      properties:
+        tool: string
+        input: object
+        output: object
+
+state:
+  phase:
+    type: enum
+    enum: [approval, dispatch, done]
+  observations:
+    type: array
+    items:
+      type: object
+      required: [tool, input, output]
+      properties:
+        tool: string
+        input: object
+        output: object
+
+tools:
+  - name: docs.search
+    capability: retrieval.local
+  - name: file.ops
+    capability: file.write
+
+requires:
+  capabilities: [retrieval.local, file.write]
+
+workflow:
+  kind: state_machine
+  initial: approval
+  max_steps: 4
+  terminal: [done]
+  rules:
+    - id: approval
+      when: phase == "approval"
+      actions:
+        - kind: approval
+          approval_for: [file.write]
+        - kind: set
+          values:
+            phase: dispatch
+    - id: dispatch
+      when: phase == "dispatch"
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            ref: choices
+          output: observations
+          max_calls: 4
+          timeout_seconds: 5
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: observations
+
+policy:
+  max_tool_calls: 4
+  require_approval: [file.write]

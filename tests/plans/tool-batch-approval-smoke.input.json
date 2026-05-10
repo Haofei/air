@@ -1,0 +1,20 @@
+{
+  "choices": [
+    {
+      "tool": "file.ops",
+      "input": {
+        "path": "example.txt",
+        "kind": "replace_lines",
+        "start_line": 1,
+        "end_line": 1,
+        "content": "patched"
+      }
+    },
+    {
+      "tool": "docs.search",
+      "input": {
+        "query": "alpha"
+      }
+    }
+  ]
+}

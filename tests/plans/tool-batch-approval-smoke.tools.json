@@ -1,0 +1,10 @@
+{
+  "tools": {},
+  "approvals": {
+    "file.write": {
+      "approved": true,
+      "approver": "conformance",
+      "reason": "approval isolation conformance test"
+    }
+  }
+}
