@@ -12,9 +12,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod file_tools;
 use file_tools::{
-    call_file_edit_tool, call_file_patch_tool, call_file_read_many_tool, call_file_read_tool,
-    call_file_search_tool, call_file_write_tool, file_modified_time, is_likely_binary,
-    FilePatchOptions, FileWriteOptions,
+    call_file_edit_tool, call_file_ops_tool, call_file_patch_tool, call_file_read_many_tool,
+    call_file_read_tool, call_file_search_tool, call_file_write_tool, file_modified_time,
+    is_likely_binary, FileOpsOptions, FilePatchOptions, FileWriteOptions,
 };
 mod helpdesk;
 use helpdesk::helpdesk_docs;
@@ -254,6 +254,30 @@ enum ToolConfig {
         #[serde(default)]
         allow_replace_all: Option<bool>,
     },
+    FileOps {
+        #[serde(default)]
+        capability: Option<String>,
+
+        base_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+
+        #[serde(default)]
+        require_read: Option<bool>,
+
+        #[serde(default)]
+        allow_new_files: Option<bool>,
+
+        #[serde(default)]
+        allow_overwrite: Option<bool>,
+
+        #[serde(default)]
+        allow_replace_all: Option<bool>,
+    },
     FilePatch {
         #[serde(default)]
         capability: Option<String>,
@@ -465,6 +489,7 @@ impl ToolConfig {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
+            | ToolConfig::FileOps { capability, .. }
             | ToolConfig::FilePatch { capability, .. }
             | ToolConfig::GitDiff { capability, .. }
             | ToolConfig::GitStatus { capability, .. }
@@ -966,6 +991,21 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::FileOps {
+                base_dir,
+                max_bytes,
+                max_files,
+                ..
+            } => {
+                if base_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.base_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
             }
             ToolConfig::FilePatch {
                 repo_dir,
@@ -1599,6 +1639,46 @@ impl ToolProvider for ConfigTools {
                 }
                 Ok(output)
             }
+            ToolConfig::FileOps {
+                capability: _,
+                base_dir,
+                max_bytes,
+                max_files,
+                require_read,
+                allow_new_files,
+                allow_overwrite,
+                allow_replace_all,
+            } => {
+                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let output = call_file_ops_tool(
+                    name,
+                    input,
+                    FileOpsOptions {
+                        base_dir: &base_dir,
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                        max_files: max_files.unwrap_or(8),
+                        require_read: require_read.unwrap_or(true),
+                        allow_new_files: allow_new_files.unwrap_or(false),
+                        allow_overwrite: allow_overwrite.unwrap_or(false),
+                        allow_replace_all: allow_replace_all.unwrap_or(false),
+                        read_snapshots: &self.read_snapshots,
+                    },
+                )?;
+                if output
+                    .get("applied")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(files) = output.get("files").and_then(Value::as_array) {
+                        for file in files {
+                            if let Some(path) = file.get("path").and_then(Value::as_str) {
+                                self.remember_read_snapshot(&base_dir.join(path))?;
+                            }
+                        }
+                    }
+                }
+                Ok(output)
+            }
             ToolConfig::FilePatch {
                 capability: _,
                 repo_dir,
@@ -1812,6 +1892,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
+            | ToolConfig::FileOps { capability, .. }
             | ToolConfig::FilePatch { capability, .. }
             | ToolConfig::GitDiff { capability, .. }
             | ToolConfig::GitStatus { capability, .. }

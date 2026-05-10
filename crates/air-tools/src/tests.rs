@@ -1094,6 +1094,206 @@ fn file_edit_multi_edit_is_atomic_when_later_edit_fails() {
 }
 
 #[test]
+fn file_ops_dry_run_checks_edit_and_write_without_writing() {
+    let dir = temp_dir("air-tools-file-ops-dry-run");
+    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 4,
+                  "max_bytes": 4096,
+                  "allow_new_files": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "dry_run": true,
+                "operations": [
+                    {
+                        "kind": "edit",
+                        "path": "note.txt",
+                        "old_string": "AIR",
+                        "new_string": "agent IR"
+                    },
+                    {
+                        "kind": "write",
+                        "path": "new.txt",
+                        "content": "created by agent\n"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "hello AIR\n"
+    );
+    assert!(!dir.join("new.txt").exists());
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["checked"], json!(true));
+    assert_eq!(output["applied"], json!(false));
+    assert_eq!(output["file_count"], json!(2));
+    assert_eq!(output["files"][0]["path"], json!("new.txt"));
+    assert_eq!(output["files"][1]["path"], json!("note.txt"));
+    assert!(output["diff"].as_str().unwrap().contains("+agent IR"));
+    assert!(output["diff"]
+        .as_str()
+        .unwrap()
+        .contains("+created by agent"));
+    assert_eq!(output["artifacts"][0]["metadata"]["dry_run"], json!(true));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_applies_operations_atomically() {
+    let dir = temp_dir("air-tools-file-ops-apply");
+    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 4,
+                  "max_bytes": 4096,
+                  "allow_new_files": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [
+                    {
+                        "kind": "edit",
+                        "path": "note.txt",
+                        "old_string": "AIR",
+                        "new_string": "agent IR"
+                    },
+                    {
+                        "kind": "write",
+                        "path": "new.txt",
+                        "content": "created by agent\n"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "hello agent IR\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("new.txt")).unwrap(),
+        "created by agent\n"
+    );
+    assert_eq!(output["applied"], json!(true));
+    assert_eq!(tools.tool_capability("file.ops"), Some("file.write"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_is_atomic_when_later_operation_fails() {
+    let dir = temp_dir("air-tools-file-ops-atomic");
+    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 4,
+                  "max_bytes": 4096,
+                  "allow_new_files": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [
+                    {
+                        "kind": "edit",
+                        "path": "note.txt",
+                        "old_string": "AIR",
+                        "new_string": "agent IR"
+                    },
+                    {
+                        "kind": "edit",
+                        "path": "note.txt",
+                        "old_string": "missing",
+                        "new_string": "MISSING"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["checked"], json!(true));
+    assert_eq!(output["applied"], json!(false));
+    assert!(output["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("input.operations[1].old_string was not found"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "hello AIR\n"
+    );
+    assert!(!dir.join("new.txt").exists());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_edit_rejects_stale_read() {
     let dir = temp_dir("air-tools-file-edit-stale-read");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();

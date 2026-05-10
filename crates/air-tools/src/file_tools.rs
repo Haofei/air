@@ -714,6 +714,17 @@ pub(super) struct FileWriteOptions<'a> {
     pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
 }
 
+pub(super) struct FileOpsOptions<'a> {
+    pub(super) base_dir: &'a Path,
+    pub(super) max_bytes: usize,
+    pub(super) max_files: usize,
+    pub(super) require_read: bool,
+    pub(super) allow_new_files: bool,
+    pub(super) allow_overwrite: bool,
+    pub(super) allow_replace_all: bool,
+    pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
+}
+
 pub(super) fn call_file_write_tool(
     name: &str,
     input: &Value,
@@ -799,6 +810,399 @@ pub(super) fn call_file_write_tool(
             }
         }]
     }))
+}
+
+struct FileOpsPendingFile {
+    path: String,
+    absolute_path: PathBuf,
+    kind: &'static str,
+    content: String,
+}
+
+pub(super) fn call_file_ops_tool(
+    name: &str,
+    input: &Value,
+    options: FileOpsOptions<'_>,
+) -> Result<Value, RuntimeError> {
+    let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
+    let operations = input
+        .get("operations")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.operations must be an array"))
+        })?;
+    if operations.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.operations must contain at least one operation"
+        )));
+    }
+    if operations.len() > options.max_files {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.operations contains {} operations, exceeding max_files={}",
+            operations.len(),
+            options.max_files
+        )));
+    }
+
+    let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
+    let mut pending = BTreeMap::<PathBuf, FileOpsPendingFile>::new();
+    let mut diff = String::new();
+
+    for (index, operation) in operations.iter().enumerate() {
+        let label = format!("input.operations[{index}]");
+        let Some(object) = operation.as_object() else {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} {label} must be an object"
+            )));
+        };
+        let kind = required_labeled_string_input(name, operation, &label, "kind")?;
+        let input_path = required_labeled_string_input(name, operation, &label, "path")?;
+        validate_git_pathspec(name, input_path)?;
+        let candidate = base.join(input_path);
+
+        match kind {
+            "edit" => {
+                let path = canonicalize_tool_path(name, &format!("{label}.path"), &candidate)?;
+                if !path.starts_with(&base) {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} {label}.path is outside configured base_dir"
+                    )));
+                }
+                if options.require_read {
+                    require_fresh_read(
+                        name,
+                        &format!("{label}.path"),
+                        "edit",
+                        &path,
+                        options.read_snapshots,
+                    )?;
+                }
+                let current = match pending.get(&path) {
+                    Some(file) => file.content.clone(),
+                    None => fs::read_to_string(&path).map_err(|error| {
+                        RuntimeError::Provider(format!("tool {name} read file: {error}"))
+                    })?,
+                };
+                let old_string =
+                    required_labeled_string_input(name, operation, &label, "old_string")?;
+                let new_string =
+                    required_labeled_string_input(name, operation, &label, "new_string")?;
+                validate_file_edit_operation(name, &label, old_string, new_string)?;
+                let replace_all =
+                    optional_labeled_bool_input(name, operation, &label, "replace_all")?
+                        .unwrap_or(false);
+                if replace_all && !options.allow_replace_all {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} {label}.replace_all is true but allow_replace_all is false"
+                    )));
+                }
+                let match_strategy = if object.get("match_strategy").is_some() {
+                    EditMatchStrategy::from_labeled_input(name, operation, &label)?
+                } else {
+                    EditMatchStrategy::Exact
+                };
+                let matches = find_edit_matches(&current, old_string, match_strategy);
+                if matches.is_empty() {
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        format!(
+                            "{label}.old_string was not found with match_strategy={}",
+                            match_strategy.as_str()
+                        ),
+                    ));
+                }
+                if matches.len() > 1 && !replace_all {
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        format!(
+                            "{label}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
+                        matches.len(),
+                        match_strategy.as_str()
+                        ),
+                    ));
+                }
+                let selected = selected_edit_matches(&matches, replace_all);
+                diff.push_str(&edit_unified_diff(
+                    input_path, &current, &selected, new_string,
+                ));
+                let updated = apply_selected_edit_matches(&current, &selected, new_string);
+                if updated.len() > options.max_bytes {
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        format!(
+                            "{label} edited content exceeds max_bytes={}",
+                            options.max_bytes
+                        ),
+                    ));
+                }
+                pending.insert(
+                    path.clone(),
+                    FileOpsPendingFile {
+                        path: input_path.to_string(),
+                        absolute_path: path,
+                        kind: "existing",
+                        content: updated,
+                    },
+                );
+            }
+            "write" => {
+                let content = required_labeled_string_input(name, operation, &label, "content")?;
+                if content.len() > options.max_bytes {
+                    return Ok(file_ops_failure_output(
+                        name,
+                        &base,
+                        operations.len(),
+                        &pending,
+                        &diff,
+                        format!("{label}.content exceeds max_bytes={}", options.max_bytes),
+                    ));
+                }
+                let (path, existed, old_content) =
+                    resolve_file_ops_write_path(name, &label, &base, input_path)?;
+                if existed {
+                    if !options.allow_overwrite {
+                        return Err(RuntimeError::Provider(format!(
+                            "tool {name} {label}.path already exists and allow_overwrite is false"
+                        )));
+                    }
+                    if options.require_read {
+                        require_fresh_read(
+                            name,
+                            &format!("{label}.path"),
+                            "overwrite",
+                            &path,
+                            options.read_snapshots,
+                        )?;
+                    }
+                } else if !options.allow_new_files {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} {label}.path does not exist and allow_new_files is false"
+                    )));
+                }
+                diff.push_str(&write_unified_diff(
+                    input_path,
+                    old_content.as_deref(),
+                    content,
+                ));
+                pending.insert(
+                    path.clone(),
+                    FileOpsPendingFile {
+                        path: input_path.to_string(),
+                        absolute_path: path,
+                        kind: if existed { "existing" } else { "new" },
+                        content: content.to_string(),
+                    },
+                );
+            }
+            _ => {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} {label}.kind must be edit or write"
+                )));
+            }
+        }
+    }
+
+    if pending.len() > options.max_files {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.operations changes {} files, exceeding max_files={}",
+            pending.len(),
+            options.max_files
+        )));
+    }
+
+    if !dry_run {
+        for file in pending.values() {
+            if let Some(parent) = file.absolute_path.parent() {
+                fs::create_dir_all(parent).map_err(|error| {
+                    RuntimeError::Provider(format!(
+                        "tool {name} create parent directories for {}: {error}",
+                        file.path
+                    ))
+                })?;
+            }
+            fs::write(&file.absolute_path, file.content.as_bytes()).map_err(|error| {
+                RuntimeError::Provider(format!("tool {name} write {}: {error}", file.path))
+            })?;
+        }
+    }
+
+    let files = pending
+        .values()
+        .map(|file| {
+            json!({
+                "path": file.path,
+                "kind": file.kind
+            })
+        })
+        .collect::<Vec<_>>();
+    let (diff_content, diff_truncated, diff_bytes) =
+        bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
+    Ok(json!({
+        "repo": base.display().to_string(),
+        "success": true,
+        "checked": true,
+        "applied": !dry_run,
+        "files": files,
+        "file_count": pending.len(),
+        "diagnostics": [],
+        "bytes": diff_bytes,
+        "diff": diff_content,
+        "diff_truncated": diff_truncated,
+        "artifacts": [{
+            "id": format!("file-ops:{}:{}", base.display(), pending.len()),
+            "kind": "file_ops",
+            "title": format!("{} structured file operation(s)", operations.len()),
+            "uri": base.display().to_string(),
+            "content": diff_content.clone(),
+            "metadata": {
+                "provider": "file_ops",
+                "repo": base.display().to_string(),
+                "success": true,
+                "checked": true,
+                "applied": !dry_run,
+                "dry_run": dry_run,
+                "operation_count": operations.len(),
+                "file_count": pending.len(),
+                "diff_bytes": diff_bytes,
+                "diff_truncated": diff_truncated
+            }
+        }]
+    }))
+}
+
+fn file_ops_failure_output(
+    name: &str,
+    base: &Path,
+    operation_count: usize,
+    pending: &BTreeMap<PathBuf, FileOpsPendingFile>,
+    diff: &str,
+    message: String,
+) -> Value {
+    let files = pending
+        .values()
+        .map(|file| {
+            json!({
+                "path": file.path,
+                "kind": file.kind
+            })
+        })
+        .collect::<Vec<_>>();
+    let (diff_content, diff_truncated, diff_bytes) =
+        bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
+    json!({
+        "repo": base.display().to_string(),
+        "success": false,
+        "checked": true,
+        "applied": false,
+        "files": files,
+        "file_count": pending.len(),
+        "diagnostics": [{
+            "source": name,
+            "severity": "error",
+            "message": message,
+        }],
+        "bytes": diff_bytes,
+        "diff": diff_content,
+        "diff_truncated": diff_truncated,
+        "artifacts": [{
+            "id": format!("file-ops:{}:failed", base.display()),
+            "kind": "file_ops",
+            "title": "structured file operations failed validation",
+            "uri": base.display().to_string(),
+            "content": diff_content.clone(),
+            "metadata": {
+                "provider": "file_ops",
+                "repo": base.display().to_string(),
+                "success": false,
+                "checked": true,
+                "applied": false,
+                "operation_count": operation_count,
+                "file_count": pending.len(),
+                "diff_bytes": diff_bytes,
+                "diff_truncated": diff_truncated
+            }
+        }]
+    })
+}
+
+fn resolve_file_ops_write_path(
+    name: &str,
+    label: &str,
+    base: &Path,
+    input_path: &str,
+) -> Result<(PathBuf, bool, Option<String>), RuntimeError> {
+    let candidate = base.join(input_path);
+    if candidate.exists() {
+        let path = canonicalize_tool_path(name, &format!("{label}.path"), &candidate)?;
+        if !path.starts_with(base) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} {label}.path is outside configured base_dir"
+            )));
+        }
+        let content = fs::read_to_string(&path).map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} read existing file: {error}"))
+        })?;
+        return Ok((path, true, Some(content)));
+    }
+
+    let parent = candidate.parent().ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "tool {name} {label}.path must have a parent directory"
+        ))
+    })?;
+    let parent = canonicalize_tool_path(name, &format!("{label}.path parent"), parent)?;
+    if !parent.starts_with(base) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} {label}.path is outside configured base_dir"
+        )));
+    }
+    let file_name = candidate.file_name().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} {label}.path must include a file name"))
+    })?;
+    Ok((parent.join(file_name), false, None))
+}
+
+fn write_unified_diff(path: &str, old_content: Option<&str>, new_content: &str) -> String {
+    let old = old_content.unwrap_or("");
+    let mut diff = if old_content.is_some() {
+        format!("--- a/{path}\n+++ b/{path}\n")
+    } else {
+        format!("--- /dev/null\n+++ b/{path}\n")
+    };
+    diff.push_str(&format!(
+        "@@ -{},{} +{},{} @@\n",
+        if old_content.is_some() { 1 } else { 0 },
+        if old_content.is_some() {
+            diff_line_count(old)
+        } else {
+            0
+        },
+        1,
+        diff_line_count(new_content)
+    ));
+    for line in diff_lines(old) {
+        diff.push('-');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    for line in diff_lines(new_content) {
+        diff.push('+');
+        diff.push_str(line);
+        diff.push('\n');
+    }
+    diff
 }
 
 fn parse_file_edit_operations<'a>(
