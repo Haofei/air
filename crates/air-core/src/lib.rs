@@ -250,6 +250,9 @@ pub struct Policy {
     pub max_model_calls: Option<u32>,
 
     #[serde(default)]
+    pub max_repeated_tool_calls: Option<u32>,
+
+    #[serde(default)]
     pub timeout_seconds: Option<u64>,
 
     #[serde(default)]

@@ -449,6 +449,26 @@ function validateToolCapability(module, action, toolConfigRoot) {
   }
 }
 
+function enforceRepeatedToolPolicy(module, toolHistory, toolName, inputValue) {
+  const limit = module.policy?.max_repeated_tool_calls;
+  if (limit == null) {
+    return;
+  }
+  let attempted = 1;
+  for (let index = toolHistory.length - 1; index >= 0; index -= 1) {
+    const record = toolHistory[index];
+    if (record.tool === toolName && JSON.stringify(record.input) === JSON.stringify(inputValue)) {
+      attempted += 1;
+      continue;
+    }
+    break;
+  }
+  if (attempted > Number(limit)) {
+    throw new Error(`policy.max_repeated_tool_calls exceeded for tool ${toolName}: limit=${limit} attempted=${attempted}`);
+  }
+  toolHistory.push({ tool: toolName, input: inputValue });
+}
+
 function validateApprovalCapabilities(module, approvalFor) {
   const required = module.policy?.require_approval ?? [];
   for (const capability of approvalFor ?? []) {
@@ -794,6 +814,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
   const startedAt = Date.now();
   let modelCalls = 0;
   let toolCalls = 0;
+  const toolHistory = [];
 
   for (let step = 0; step < workflow.max_steps; step += 1) {
     const currentPhase = localState.phase;
@@ -859,6 +880,12 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
           throw error;
         }
         const inputValue = evalInput(localState, outputs, action.input);
+        try {
+          enforceRepeatedToolPolicy(module, toolHistory, action.tool, inputValue);
+        } catch (error) {
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_call', status: 'error', input: inputValue, meta: { tool: action.tool }, error: String(error?.message ?? error) });
+          throw error;
+        }
         const maxAttempts = Math.max(1, Number(action.retry?.max_attempts ?? 1));
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const limit = module.policy?.max_tool_calls;
@@ -896,6 +923,12 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
           throw error;
         }
         const inputValue = dispatchValue.input ?? {};
+        try {
+          enforceRepeatedToolPolicy(module, toolHistory, dispatchValue.tool, inputValue);
+        } catch (error) {
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', input: inputValue, meta: { tool: dispatchValue.tool }, error: String(error?.message ?? error) });
+          throw error;
+        }
         const maxAttempts = Math.max(1, Number(action.retry?.max_attempts ?? 1));
         for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
           const limit = module.policy?.max_tool_calls;
@@ -1494,8 +1527,10 @@ mod tests {
         assert!(code.contains("function checkModuleTimeout"));
         assert!(code.contains("policy.max_model_calls exceeded"));
         assert!(code.contains("policy.max_tool_calls exceeded"));
+        assert!(code.contains("policy.max_repeated_tool_calls exceeded"));
         assert!(code.contains("action exceeded timeout_seconds"));
         assert!(code.contains("function validateToolCapability"));
+        assert!(code.contains("function enforceRepeatedToolPolicy"));
         assert!(code.contains("provider capability"));
         assert!(code.contains("function validateApprovalCapabilities"));
         assert!(code.contains("async function requestApproval"));

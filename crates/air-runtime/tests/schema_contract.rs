@@ -63,6 +63,32 @@ impl ModelProvider for DispatchModels {
     }
 }
 
+struct UnsafeDispatchModels;
+
+impl ModelProvider for UnsafeDispatchModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "dispatcher");
+        Ok(json!({
+            "tool": "file.patch",
+            "input": {
+                "patch": input["text"]
+            }
+        }))
+    }
+}
+
+struct MalformedDispatchModels;
+
+impl ModelProvider for MalformedDispatchModels {
+    fn call_model(&mut self, name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "dispatcher");
+        Ok(json!({
+            "tool": 42,
+            "input": {}
+        }))
+    }
+}
+
 struct TimeoutRecordingModels {
     seen: Rc<RefCell<Option<Duration>>>,
 }
@@ -568,6 +594,78 @@ fn dispatches_model_selected_tool_with_runtime_governance() {
                 .meta
                 .as_ref()
                 .is_some_and(|meta| meta["tool"] == "docs.search")));
+}
+
+#[test]
+fn rejects_model_selected_undeclared_tool_dispatch() {
+    let module = load_agent("tests/agents/tool-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: UnsafeDispatchModels,
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("malicious patch"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::UndeclaredTool { module, tool }
+            if module == "tool-dispatch-agent" && tool == "file.patch"
+    ));
+    assert_eq!(vm.tools.calls, 0);
+}
+
+#[test]
+fn rejects_malformed_tool_dispatch_choice() {
+    let module = load_agent("tests/agents/tool-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: MalformedDispatchModels,
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("bad dispatch"))]),
+        )
+        .unwrap_err();
+
+    assert_schema_error_contains(error, "choice.tool expected string got integer");
+    assert_eq!(vm.tools.calls, 0);
+}
+
+#[test]
+fn rejects_repeated_identical_tool_calls_when_policy_is_set() {
+    let module = load_agent("tests/agents/repeated-tool-call.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: SchemaModels {
+            extract: json!({}),
+            score: json!({}),
+            report: json!({}),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("same query"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::RepeatedToolCallLimitExceeded {
+            tool,
+            limit: 1,
+            attempted: 2
+        } if tool == "docs.search"
+    ));
+    assert_eq!(vm.tools.calls, 1);
 }
 
 #[test]

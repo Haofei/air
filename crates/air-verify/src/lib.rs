@@ -959,6 +959,13 @@ impl Verifier {
             self.error("AIR052", "policy.max_model_calls must be at least 1");
         }
 
+        if matches!(module.policy.max_repeated_tool_calls, Some(0)) {
+            self.error(
+                "AIR053",
+                "policy.max_repeated_tool_calls must be at least 1",
+            );
+        }
+
         if matches!(module.policy.timeout_seconds, Some(0)) {
             self.error("AIR051", "policy.timeout_seconds must be at least 1");
         }

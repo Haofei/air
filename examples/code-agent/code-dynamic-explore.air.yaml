@@ -201,3 +201,4 @@ workflow:
 policy:
   max_model_calls: 4
   max_tool_calls: 3
+  max_repeated_tool_calls: 2

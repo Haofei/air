@@ -31,7 +31,7 @@ For coding agents, that means the important questions have first-class places to
 | Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
-| Did it exceed the budget? | `max_tool_calls`, `max_model_calls`, timeouts, and capability gates are checked by the runtime |
+| Did it exceed the budget or repeat itself? | `max_tool_calls`, `max_model_calls`, `max_repeated_tool_calls`, timeouts, and capability gates are checked by the runtime |
 | What will this recipe be allowed to do? | `air code --explain` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
 
 ## Status
@@ -44,7 +44,7 @@ AIR is usable as a local compiler/runtime prototype with bounded production-orie
 | Module schema validation | Supported, including opt-in strict object fields with `additional_properties: false` |
 | Model/tool providers and capability checks | Supported; common native tools live in `air-tools`; `tool_dispatch` lets a model select among declared tools without bypassing AIR capability/budget checks |
 | Reusable standard modules | Supported; `modules/std` includes generic context compaction |
-| Approval gates, retry, budgets, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
+| Approval gates, retry, budgets, repeated-tool guards, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
 | RunPlan module composition | Supported |
 | Dynamic bounded fan-out/fan-in | Supported |
 | Checkpoint, halt/resume, replay, and JIT hot-path specialization | Supported |

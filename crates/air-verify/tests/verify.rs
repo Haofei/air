@@ -74,6 +74,35 @@ fn accepts_tool_dispatch_actions() {
 }
 
 #[test]
+fn accepts_repeated_tool_call_policy() {
+    let module = parse_air_file("../../tests/agents/repeated-tool-call.air.yaml").unwrap();
+    let report = verify(&module);
+
+    assert!(
+        report.is_success(),
+        "expected success, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn rejects_zero_repeated_tool_call_policy() {
+    let mut module = parse_air_file("../../tests/agents/repeated-tool-call.air.yaml").unwrap();
+    module.policy.max_repeated_tool_calls = Some(0);
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR053"),
+        "expected AIR053, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_state_machine_approval_gate() {
     let module = parse_air_file("../../tests/agents/approval-gate.air.yaml").unwrap();
     let report = verify(&module);

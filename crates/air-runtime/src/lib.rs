@@ -139,6 +139,13 @@ pub enum RuntimeError {
     #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
     ModelCallLimitExceeded { limit: u32, attempted: u32 },
 
+    #[error("policy.max_repeated_tool_calls exceeded for tool {tool}: limit={limit} attempted={attempted}")]
+    RepeatedToolCallLimitExceeded {
+        tool: String,
+        limit: u32,
+        attempted: u32,
+    },
+
     #[error("{action} action exceeded timeout_seconds={timeout_seconds} elapsed_ms={elapsed_ms}")]
     ActionTimeoutExceeded {
         action: String,
@@ -497,6 +504,7 @@ where
         let mut trace = Vec::new();
         let mut model_calls = 0u32;
         let mut tool_calls = 0u32;
+        let mut tool_history = Vec::new();
         let mut artifact_registry = collect_initial_artifact_ids(&Value::Object(state.clone()));
         let module_started_at = Instant::now();
 
@@ -522,6 +530,7 @@ where
                             observer: &mut observer,
                             model_calls: &mut model_calls,
                             tool_calls: &mut tool_calls,
+                            tool_history: &mut tool_history,
                             artifact_registry: &mut artifact_registry,
                             module_started_at,
                             step,
@@ -546,6 +555,7 @@ where
                             observer: &mut observer,
                             model_calls: &mut model_calls,
                             tool_calls: &mut tool_calls,
+                            tool_history: &mut tool_history,
                             artifact_registry: &mut artifact_registry,
                             module_started_at,
                             step,
@@ -959,6 +969,7 @@ where
             );
             return Err(error);
         }
+        enforce_repeated_tool_policy(context, action_name, tool, &input)?;
         let max_attempts = retry
             .as_ref()
             .map(|retry| retry.max_attempts)
@@ -1534,6 +1545,50 @@ fn validate_approval_capabilities(
     Ok(())
 }
 
+fn enforce_repeated_tool_policy(
+    context: &mut ExecutionContext<'_>,
+    action_name: &str,
+    tool: &str,
+    input: &Value,
+) -> Result<(), RuntimeError> {
+    let Some(limit) = context.module.policy.max_repeated_tool_calls else {
+        return Ok(());
+    };
+
+    let repeated = context
+        .tool_history
+        .iter()
+        .rev()
+        .take_while(|record| record.tool == tool && record.input == *input)
+        .count() as u32;
+    let attempted = repeated + 1;
+    if attempted > limit {
+        let error = RuntimeError::RepeatedToolCallLimitExceeded {
+            tool: tool.to_string(),
+            limit,
+            attempted,
+        };
+        context.push_event_with_meta(
+            action_name,
+            Some(input.clone()),
+            None,
+            Some(json!({
+                "tool": tool,
+                "limit": limit,
+                "attempted": attempted,
+            })),
+            Err(error.to_string()),
+        );
+        return Err(error);
+    }
+
+    context.tool_history.push(ToolCallRecord {
+        tool: tool.to_string(),
+        input: input.clone(),
+    });
+    Ok(())
+}
+
 struct ExecutionContext<'a> {
     module: &'a AirModule,
     state: &'a mut State,
@@ -1542,10 +1597,17 @@ struct ExecutionContext<'a> {
     observer: &'a mut dyn FnMut(&TraceEvent),
     model_calls: &'a mut u32,
     tool_calls: &'a mut u32,
+    tool_history: &'a mut Vec<ToolCallRecord>,
     artifact_registry: &'a mut BTreeSet<String>,
     module_started_at: Instant,
     step: u32,
     rule: &'a str,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ToolCallRecord {
+    tool: String,
+    input: Value,
 }
 
 struct ToolExecution<'a> {

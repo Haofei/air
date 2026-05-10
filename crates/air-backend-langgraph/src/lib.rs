@@ -1114,6 +1114,29 @@ def _air_validate_tool_capability(module: dict[str, Any], action: dict[str, Any]
         )
 
 
+def _air_enforce_repeated_tool_policy(
+    module: dict[str, Any],
+    tool_history: list[dict[str, Any]],
+    tool_name: str,
+    input_value: Any,
+) -> None:
+    limit = module.get("policy", {}).get("max_repeated_tool_calls")
+    if limit is None:
+        return
+    attempted = 1
+    for record in reversed(tool_history):
+        if record.get("tool") == tool_name and record.get("input") == input_value:
+            attempted += 1
+        else:
+            break
+    if attempted > int(limit):
+        raise RuntimeError(
+            f"policy.max_repeated_tool_calls exceeded for tool {tool_name}: "
+            f"limit={limit} attempted={attempted}"
+        )
+    tool_history.append({"tool": tool_name, "input": input_value})
+
+
 def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, Any]:
     module = MODULES[module_id]
     workflow = module["workflow"]
@@ -1124,6 +1147,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
     started_at = time.monotonic()
     model_calls = 0
     tool_calls = 0
+    tool_history: list[dict[str, Any]] = []
 
     for step in range(workflow["max_steps"]):
         phase = local_state.get("phase")
@@ -1190,6 +1214,11 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     _air_emit_trace(module_id, step, rule_id, "tool_call", "error", meta={"tool": action["tool"]}, error=str(error))
                     raise
                 input_value = _air_eval_input(local_state, outputs, action["input"])
+                try:
+                    _air_enforce_repeated_tool_policy(module, tool_history, action["tool"], input_value)
+                except Exception as error:
+                    _air_emit_trace(module_id, step, rule_id, "tool_call", "error", input_value=input_value, meta={"tool": action["tool"]}, error=str(error))
+                    raise
                 retry_policy = action.get("retry") or {}
                 max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
                 for attempt in range(1, max_attempts + 1):
@@ -1228,6 +1257,11 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", meta={"tool": dispatch_value["tool"]}, error=str(error))
                     raise
                 input_value = dispatch_value.get("input", {})
+                try:
+                    _air_enforce_repeated_tool_policy(module, tool_history, dispatch_value["tool"], input_value)
+                except Exception as error:
+                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", input_value=input_value, meta={"tool": dispatch_value["tool"]}, error=str(error))
+                    raise
                 retry_policy = action.get("retry") or {}
                 max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
                 for attempt in range(1, max_attempts + 1):
@@ -2010,8 +2044,10 @@ mod tests {
         assert!(code.contains("def _air_check_module_timeout"));
         assert!(code.contains("policy.max_model_calls exceeded"));
         assert!(code.contains("policy.max_tool_calls exceeded"));
+        assert!(code.contains("policy.max_repeated_tool_calls exceeded"));
         assert!(code.contains("action exceeded timeout_seconds"));
         assert!(code.contains("def _air_validate_tool_capability"));
+        assert!(code.contains("def _air_enforce_repeated_tool_policy"));
         assert!(code.contains("is not declared by module"));
         assert!(code.contains("AIR_TOOL_PROVIDER"));
         assert!(code.contains("AIR_TOOL_CAPABILITIES"));
