@@ -1364,8 +1364,13 @@ fn enforce_allowed_path(
     if allowed_paths.contains(path) {
         return Ok(());
     }
+    let allowed = allowed_paths
+        .iter()
+        .map(|path| format!("'{path}'"))
+        .collect::<Vec<_>>()
+        .join(", ");
     Err(RuntimeError::Provider(format!(
-        "tool {tool_name} {label} {path} is outside allowed_paths"
+        "tool {tool_name} {label} {path} is outside allowed_paths; allowed_paths=[{allowed}]"
     )))
 }
 

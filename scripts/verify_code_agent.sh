@@ -94,7 +94,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.read", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
 file_ops = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
@@ -204,6 +204,122 @@ file_search = next(
 assert file_search["output"]["directory"] is True, file_search
 PY
 
+echo "[code-agent] edit loop records path error hints"
+edit_path_error_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_path_error_backup"
+restore_edit_path_error_fixture() {
+  cp "$edit_path_error_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_path_error_backup"
+}
+trap restore_edit_path_error_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.path-error.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_path_error.trace.jsonl \
+  > target/generated/code_agent_edit_path_error.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_path_error.post_test.log
+restore_edit_path_error_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_path_error.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_path_error.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+assert any(
+    event.get("rule") == "record-file-read-path-error-hint"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "path_error_hint"
+    and event.get("output", [{}])[-1].get("result", {}).get("target_path") == "examples/code-agent/edit-fixture/math.js"
+    for event in events
+), events
+assert any(
+    event.get("rule") == "preflight-target-read"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "initial_target_read"
+    for event in events
+), events
+failed_read = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.read"
+    and event.get("status") == "error"
+)
+assert failed_read["input"]["path"] == "examples/code-agent/edit-fixture/math.", failed_read
+summarizer = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_summarizer"
+)
+assert any(
+    observation.get("action") == "path_error_hint"
+    for observation in summarizer["input"]["observations"]
+), summarizer
+PY
+
+echo "[code-agent] edit loop records write path error hints"
+edit_write_path_error_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_write_path_error_backup"
+restore_edit_write_path_error_fixture() {
+  cp "$edit_write_path_error_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_write_path_error_backup"
+}
+trap restore_edit_write_path_error_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.write-path-error.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_write_path_error.trace.jsonl \
+  > target/generated/code_agent_edit_write_path_error.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_write_path_error.post_test.log
+restore_edit_write_path_error_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_write_path_error.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_write_path_error.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+assert any(
+    event.get("rule") == "record-file-ops-write-path-error-hint"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "write_path_error_hint"
+    and event.get("output", [{}])[-1].get("result", {}).get("write_paths") == ["examples/code-agent/edit-fixture/math.js"]
+    for event in events
+), events
+failed_write = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("status") == "error"
+)
+assert "allowed_paths=['examples/code-agent/edit-fixture/math.js']" in failed_write["error"], failed_write
+summarizer = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_summarizer"
+)
+assert any(
+    observation.get("action") == "write_path_error_hint"
+    for observation in summarizer["input"]["observations"]
+), summarizer
+PY
+
 echo "[code-agent] edit loop blocks premature completion"
 edit_premature_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_premature_backup"
@@ -246,7 +362,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.read", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -338,7 +454,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
+assert tools == ["file.read", "test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
 file_patch = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"

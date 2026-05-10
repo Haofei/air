@@ -47,7 +47,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, choose, act, post_act, post_verify, summarize, done, failed]
+    enum: [init, preflight, choose, act, post_act, post_verify, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -76,6 +76,10 @@ state:
     items:
       type: object
   auto_verify_result:
+    type: array
+    items:
+      type: object
+  initial_target_context:
     type: array
     items:
       type: object
@@ -167,6 +171,57 @@ workflow:
           values:
             observations: []
             verification_status: unknown
+            phase: preflight
+
+    - id: preflight-target-read
+      when: phase == "preflight" && target_path != ""
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: file.read
+                  input:
+                    object:
+                      path:
+                        ref: target_path
+                      line_numbers:
+                        literal: true
+                      max_bytes:
+                        literal: 32768
+          output: initial_target_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: initial_target_read
+              rationale:
+                literal: Deterministically read target_path before the first model decision so the edit loop starts from exact repository context.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: file.read
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+              result:
+                ref: initial_target_context
+        - kind: set
+          values:
+            phase: choose
+
+    - id: preflight-targetless
+      when: phase == "preflight" && target_path == ""
+      actions:
+        - kind: set
+          values:
             phase: choose
 
     - id: choose
@@ -316,6 +371,7 @@ workflow:
                 literal:
                   plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
                   discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
+                  paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
                   small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files."
                   edits: "Use file.ops with kind=edit old_string/new_string for anchored insertions or wording changes, especially in docs. Use kind=replace_lines only when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call."
@@ -503,6 +559,81 @@ workflow:
         - kind: set
           values:
             verification_status: failed
+            phase: choose
+
+    - id: record-file-read-path-error-hint
+      when: phase == "post_act" && observation[0].tool == "file.read" && observation[0].status == "error" && target_path != ""
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: path_error_hint
+              rationale:
+                literal: A file.read call failed. Reuse the exact target_path or rediscover the path with repo.files before retrying; do not repeat the same failing path.
+              requested:
+                ref: decision.tool_calls
+              result:
+                object:
+                  target_path:
+                    ref: target_path
+                  failed_tool:
+                    ref: observation[0].tool
+                  failed_input:
+                    ref: observation[0].input
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-file-ops-write-path-error-hint
+      when: phase == "post_act" && observation[0].tool == "file.ops" && observation[0].status == "error"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: write_path_error_hint
+              rationale:
+                literal: A write tool call failed path policy. Retry with paths copied exactly from write_paths; include the full extension and do not repeat the same rejected path.
+              requested:
+                ref: decision.tool_calls
+              result:
+                object:
+                  write_paths:
+                    ref: write_paths
+                  failed_tool:
+                    ref: observation[0].tool
+                  failed_input:
+                    ref: observation[0].input
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-file-patch-write-path-error-hint
+      when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "error"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: write_path_error_hint
+              rationale:
+                literal: A patch tool call failed path policy. Retry with patch paths copied exactly from write_paths; include the full extension and do not repeat the same rejected path.
+              requested:
+                ref: decision.tool_calls
+              result:
+                object:
+                  write_paths:
+                    ref: write_paths
+                  failed_tool:
+                    ref: observation[0].tool
+                  failed_input:
+                    ref: observation[0].input
+        - kind: set
+          values:
             phase: choose
 
     - id: continue-after-act

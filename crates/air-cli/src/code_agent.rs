@@ -2404,8 +2404,13 @@ mod tests {
             .iter()
             .filter_map(|tool| tool["name"].as_str())
             .collect::<HashSet<_>>();
-        let allowed_tools = yaml["workflow"]["rules"][1]["actions"][0]["input"]["object"]
-            ["allowed_tools"]["array"]
+        let choose_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose"))
+            .unwrap();
+        let allowed_tools = choose_rule["actions"][0]["input"]["object"]["allowed_tools"]["array"]
             .as_sequence()
             .unwrap()
             .iter()

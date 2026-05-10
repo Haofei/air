@@ -1764,7 +1764,9 @@ fn file_ops_rejects_paths_outside_allowed_paths() {
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("outside allowed_paths"));
+    let error = error.to_string();
+    assert!(error.contains("outside allowed_paths"));
+    assert!(error.contains("allowed_paths=['allowed.txt']"));
     assert_eq!(
         fs::read_to_string(dir.join("other.txt")).unwrap(),
         "other\n"
@@ -2875,7 +2877,9 @@ fn file_patch_rejects_paths_outside_allowed_paths() {
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("outside allowed_paths"));
+    let error = error.to_string();
+    assert!(error.contains("outside allowed_paths"));
+    assert!(error.contains("allowed_paths=['allowed.txt']"));
     assert_eq!(
         fs::read_to_string(dir.join("other.txt")).unwrap(),
         "other\n"

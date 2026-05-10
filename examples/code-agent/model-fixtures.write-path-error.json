@@ -1,0 +1,80 @@
+{
+  "fixtures": {
+    "code_edit_decider": {
+      "$sequence": [
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "operations": [
+                  {
+                    "kind": "replace_lines",
+                    "path": "examples/code-agent/edit-fixture/math.",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "new_string": "  return a + b;"
+                  }
+                ]
+              }
+            }
+          ],
+          "rationale": "Intentionally use a truncated write path so AIR records a write_path_error_hint."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "operations": [
+                  {
+                    "kind": "replace_lines",
+                    "path": "examples/code-agent/edit-fixture/math.js",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "new_string": "  return a + b;"
+                  }
+                ]
+              }
+            }
+          ],
+          "rationale": "Retry with the exact write_paths entry after receiving the write path hint."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "git.diff",
+              "input": {}
+            }
+          ],
+          "rationale": "Inspect the diff after validation has passed."
+        },
+        {
+          "complete": true,
+          "tool_calls": [],
+          "rationale": "The edit was applied, validation passed, and the diff was inspected."
+        }
+      ]
+    },
+    "code_edit_summarizer": {
+      "initial_success": false,
+      "final_success": true,
+      "patch_applied": true,
+      "changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "workspace_changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "preexisting_changed_files": [],
+      "workspace_diff": {
+        "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
+      },
+      "rationale": "AIR recorded a write_path_error_hint after the truncated write path failed, then the loop used the exact write path, revalidated, and inspected the diff.",
+      "observations": []
+    }
+  }
+}
