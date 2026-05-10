@@ -248,6 +248,8 @@ workflow:
             object:
               query:
                 ref: query
+              mode:
+                literal: smart
               max_symbols:
                 literal: 80
           output: repo_symbols

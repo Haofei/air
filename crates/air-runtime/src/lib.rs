@@ -455,23 +455,65 @@ fn mask_after_marker(text: &str, marker: &str) -> String {
 
 fn compact_trace_event(event: &TraceEvent) -> TraceEvent {
     let mut compact = event.clone();
-    compact.input = compact
-        .input
-        .as_ref()
-        .map(|_| json!({"_air_truncated": true}));
-    compact.output = compact
-        .output
-        .as_ref()
-        .map(|_| json!({"_air_truncated": true}));
-    compact.meta = compact
-        .meta
-        .as_ref()
-        .map(|_| json!({"_air_truncated": true}));
+    compact.input = compact.input.as_ref().map(compact_trace_payload);
+    compact.output = compact.output.as_ref().map(compact_trace_payload);
+    compact.meta = compact.meta.as_ref().map(compact_trace_meta);
     compact.error = compact
         .error
         .as_ref()
         .map(|_| "[AIR_TRUNCATED]".to_string());
     compact
+}
+
+fn compact_trace_payload(payload: &Value) -> Value {
+    let Value::Object(object) = payload else {
+        return json!({"_air_truncated": true});
+    };
+    let mut compact = Map::new();
+    compact.insert("_air_truncated".to_string(), Value::Bool(true));
+    for (key, value) in object {
+        let Some(value) = compact_trace_meta_value(value) else {
+            compact.insert(key.clone(), json!({"_air_truncated": true}));
+            continue;
+        };
+        compact.insert(key.clone(), value);
+    }
+    Value::Object(compact)
+}
+
+fn compact_trace_meta(meta: &Value) -> Value {
+    let Value::Object(object) = meta else {
+        return json!({"_air_truncated": true});
+    };
+    let mut compact = Map::new();
+    compact.insert("_air_truncated".to_string(), Value::Bool(true));
+    for (key, value) in object {
+        let Some(value) = compact_trace_meta_value(value) else {
+            continue;
+        };
+        compact.insert(key.clone(), value);
+    }
+    Value::Object(compact)
+}
+
+fn compact_trace_meta_value(value: &Value) -> Option<Value> {
+    match value {
+        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Some(value.clone()),
+        Value::Array(values) => {
+            let mut compact = Vec::new();
+            for value in values.iter().take(32) {
+                let Some(value) = compact_trace_meta_value(value) else {
+                    return Some(json!({"_air_truncated": true}));
+                };
+                compact.push(value);
+            }
+            if values.len() > compact.len() {
+                compact.push(json!({"_air_truncated": true}));
+            }
+            Some(Value::Array(compact))
+        }
+        Value::Object(_) => None,
+    }
 }
 
 pub struct Vm<T, M> {
@@ -2438,5 +2480,57 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0]["patch"], json!("diff"));
+    }
+
+    #[test]
+    fn compact_trace_event_preserves_control_metadata() {
+        let event = TraceEvent {
+            agent: "agent".to_string(),
+            step: 1,
+            rule: "rule".to_string(),
+            action: "model_call_start".to_string(),
+            input: Some(json!({
+                "task": "continue\n\nAIR project memory from previous tasks:\n...",
+                "large": {"nested": "omitted"}
+            })),
+            output: None,
+            meta: Some(json!({
+                "model": "code_explorer",
+                "output": "exploration",
+                "attempt": 1,
+                "approval_for": ["file.write"],
+                "nested": {"large": "omitted"}
+            })),
+            status: TraceStatus::Ok,
+            error: None,
+        };
+
+        let compact = compact_trace_event(&event);
+
+        assert_eq!(
+            compact.input.as_ref().unwrap()["task"],
+            json!("continue\n\nAIR project memory from previous tasks:\n...")
+        );
+        assert_eq!(
+            compact.input.as_ref().unwrap()["_air_truncated"],
+            json!(true)
+        );
+        assert_eq!(
+            compact.input.as_ref().unwrap()["large"],
+            json!({"_air_truncated": true})
+        );
+        assert_eq!(
+            compact.meta.as_ref().unwrap()["model"],
+            json!("code_explorer")
+        );
+        assert_eq!(
+            compact.meta.as_ref().unwrap()["approval_for"],
+            json!(["file.write"])
+        );
+        assert_eq!(
+            compact.meta.as_ref().unwrap()["_air_truncated"],
+            json!(true)
+        );
+        assert!(compact.meta.as_ref().unwrap().get("nested").is_none());
     }
 }

@@ -3265,12 +3265,28 @@ fn call_repo_symbols_tool(
     max_symbols: usize,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let query = input
+    let raw_query = input
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or_default()
-        .trim()
-        .to_lowercase();
+        .trim();
+    let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
+    if !matches!(mode, "fixed" | "smart") {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.mode must be fixed or smart"
+        )));
+    }
+    let query = raw_query.to_lowercase();
+    let smart_terms = if mode == "smart" {
+        repo_smart_search_terms(raw_query)
+    } else {
+        Vec::new()
+    };
+    let effective_query = if mode == "smart" {
+        smart_terms.join("|")
+    } else {
+        query.clone()
+    };
     let effective_max_symbols =
         optional_bounded_usize_input(name, input, "max_symbols", max_symbols)?
             .unwrap_or(max_symbols);
@@ -3312,7 +3328,13 @@ fn call_repo_symbols_tool(
         let Some((kind, symbol_name)) = parse_symbol_declaration(text) else {
             continue;
         };
-        if !query.is_empty()
+        if mode == "smart" {
+            if !smart_terms.is_empty()
+                && !repo_symbol_matches_any_term(&item, &symbol_name, text, &smart_terms)
+            {
+                continue;
+            }
+        } else if !query.is_empty()
             && !symbol_name.to_lowercase().contains(&query)
             && !item["path"]
                 .as_str()
@@ -3352,7 +3374,9 @@ fn call_repo_symbols_tool(
     let truncated = raw.lines().count() > symbols.len() || truncated_bytes;
     Ok(json!({
         "repo": repo.display().to_string(),
-        "query": query,
+        "query": raw_query,
+        "effective_query": effective_query,
+        "mode": mode,
         "symbols": symbols,
         "bytes": bytes,
         "truncated": truncated,
@@ -3365,7 +3389,9 @@ fn call_repo_symbols_tool(
             "metadata": {
                 "provider": "repo_symbols",
                 "repo": repo.display().to_string(),
-                "query": query,
+                "query": raw_query,
+                "effective_query": effective_query,
+                "mode": mode,
                 "paths": paths,
                 "max_symbols": effective_max_symbols,
                 "bytes": bytes,
@@ -3373,6 +3399,20 @@ fn call_repo_symbols_tool(
             }
         }]
     }))
+}
+
+fn repo_symbol_matches_any_term(
+    item: &Value,
+    symbol_name: &str,
+    declaration: &str,
+    terms: &[String],
+) -> bool {
+    let path = item["path"].as_str().unwrap_or_default().to_lowercase();
+    let name = symbol_name.to_lowercase();
+    let text = declaration.to_lowercase();
+    terms
+        .iter()
+        .any(|term| path.contains(term) || name.contains(term) || text.contains(term))
 }
 
 fn parse_symbol_declaration(line: &str) -> Option<(&'static str, String)> {

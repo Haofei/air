@@ -1035,14 +1035,78 @@ fn code_session_parts(trace_files: &[PathBuf]) -> Result<Vec<CodeSessionPart>> {
                 trace_file.display()
             )
         })?;
+        let start_meta = code_session_start_meta_by_action(&events);
         let trace_file = path_ref_to_input_string(trace_file);
-        parts.extend(
-            events
-                .iter()
-                .filter_map(|event| code_session_part_from_event(&trace_file, event)),
-        );
+        for event in &events {
+            let Some(mut part) = code_session_part_from_event(&trace_file, event) else {
+                continue;
+            };
+            if (part.model.is_none() || part.tool.is_none() || part.approval_for.is_empty())
+                && event
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("_air_truncated"))
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+            {
+                if let Some(meta) = start_meta.get(&code_session_event_key(event)) {
+                    if part.model.is_none() {
+                        part.model = meta
+                            .get("model")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string);
+                    }
+                    if part.tool.is_none() {
+                        part.tool = meta
+                            .get("tool")
+                            .and_then(Value::as_str)
+                            .map(ToString::to_string);
+                    }
+                    if part.approval_for.is_empty() {
+                        part.approval_for = meta
+                            .get("approval_for")
+                            .and_then(Value::as_array)
+                            .map(|values| {
+                                values
+                                    .iter()
+                                    .filter_map(Value::as_str)
+                                    .map(ToString::to_string)
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    }
+                }
+            }
+            parts.push(part);
+        }
     }
     Ok(parts)
+}
+
+fn code_session_start_meta_by_action(events: &[TraceEvent]) -> HashMap<String, Value> {
+    let mut start_meta = HashMap::new();
+    for event in events {
+        if !matches!(
+            event.action.as_str(),
+            "model_call_start" | "tool_call_start" | "approval_start"
+        ) {
+            continue;
+        }
+        let Some(meta) = event.meta.clone() else {
+            continue;
+        };
+        let action = event.action.trim_end_matches("_start");
+        start_meta.insert(code_session_event_key_with_action(event, action), meta);
+    }
+    start_meta
+}
+
+fn code_session_event_key(event: &TraceEvent) -> String {
+    code_session_event_key_with_action(event, &event.action)
+}
+
+fn code_session_event_key_with_action(event: &TraceEvent, action: &str) -> String {
+    format!("{}:{}:{}:{}", event.agent, event.step, event.rule, action)
 }
 
 fn code_session_turn_summary(parts: &[CodeSessionPart]) -> CodeSessionTurnSummary {
@@ -4730,6 +4794,51 @@ mod tests {
         assert!(task.contains("tools=repo.search"));
         assert!(task.contains("files=src/lib.rs"));
         assert!(task.contains("Found the dispatch implementation"));
+    }
+
+    #[test]
+    fn session_parts_recover_model_from_start_event_when_completion_meta_is_truncated() {
+        let events = vec![
+            serde_json::from_value::<TraceEvent>(json!({
+                "agent": "planner",
+                "step": 1,
+                "rule": "plan",
+                "action": "model_call_start",
+                "input": {},
+                "output": null,
+                "meta": {
+                    "model": "project_planner",
+                    "output": "project_plan",
+                    "timeout_seconds": 120
+                },
+                "status": "ok",
+                "error": null
+            }))
+            .unwrap(),
+            serde_json::from_value::<TraceEvent>(json!({
+                "agent": "planner",
+                "step": 1,
+                "rule": "plan",
+                "action": "model_call",
+                "input": {},
+                "output": {"project_plan": {"summary": "large output omitted"}},
+                "meta": {"_air_truncated": true},
+                "status": "ok",
+                "error": null
+            }))
+            .unwrap(),
+        ];
+        let start_meta = code_session_start_meta_by_action(&events);
+        let mut part = code_session_part_from_event("trace.jsonl", &events[1]).unwrap();
+        assert!(part.model.is_none());
+        if let Some(meta) = start_meta.get(&code_session_event_key(&events[1])) {
+            part.model = meta
+                .get("model")
+                .and_then(Value::as_str)
+                .map(ToString::to_string);
+        }
+
+        assert_eq!(part.model, Some("project_planner".to_string()));
     }
 
     #[test]

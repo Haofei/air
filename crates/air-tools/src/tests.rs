@@ -3037,6 +3037,73 @@ fn repo_symbols_supports_path_and_glob_filters() {
 }
 
 #[test]
+fn repo_symbols_supports_smart_natural_language_queries() {
+    let dir = temp_dir("air-tools-repo-symbols-smart");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/math.js"),
+        "function sum(values) {\n  return values.reduce((total, value) => total + value, 0);\n}\nfunction unrelated() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.symbols",
+            &json!({"query": "refactor the sum fixture implementation to make it cleaner", "mode": "smart"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["mode"], json!("smart"));
+    assert!(output["effective_query"].as_str().unwrap().contains("sum"));
+    assert_eq!(output["symbols"].as_array().unwrap().len(), 1);
+    assert_eq!(output["symbols"][0]["name"], json!("sum"));
+    assert_eq!(output["artifacts"][0]["metadata"]["mode"], json!("smart"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_symbols_rejects_unknown_mode() {
+    let dir = temp_dir("air-tools-repo-symbols-mode");
+    fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool("repo.symbols", &json!({"query": "alpha", "mode": "glob"}))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("input.mode must be fixed or smart"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_references_returns_definition_references_and_snippets() {
     let dir = temp_dir("air-tools-repo-references");
     fs::create_dir_all(dir.join("src")).unwrap();

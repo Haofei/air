@@ -132,6 +132,8 @@ assert "project_planner" in models, models
 PY
 
 echo "[code-agent] user-facing project plan command offline run"
+rm -f target/generated/code_project_plan.session.json
+rm -rf target/generated/code_project_plan.session.traces
 cargo run -q -p air-cli -- code "plan a project-level task graph for the AIR code agent" \
   --recipe plan \
   --query "code agent project plan task graph" \
