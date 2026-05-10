@@ -263,6 +263,7 @@ fn planner_instructions() -> Vec<&'static str> {
 
 fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value]) -> Value {
     let task_terms = tokenize_for_component_match(task);
+    let read_only_exploration = task_is_read_only_exploration(&task_terms);
     let mut candidates = Vec::new();
 
     for recipe in recipes {
@@ -285,7 +286,9 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
             ],
         );
         let match_penalty = if matched_terms.is_empty() { -2_000 } else { 0 };
-        let score = priority + 1_000 + (matched_terms.len() as i64 * 25) + match_penalty;
+        let intent_penalty = component_intent_penalty(recipe, read_only_exploration);
+        let score =
+            priority + 1_000 + (matched_terms.len() as i64 * 25) + match_penalty + intent_penalty;
         candidates.push(json!({
             "id": id,
             "source": "recipe",
@@ -338,7 +341,12 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
             _ => -100,
         };
         let match_penalty = if matched_terms.is_empty() { -1_000 } else { 0 };
-        let score = priority + tier_bonus + (matched_terms.len() as i64 * 20) + match_penalty;
+        let intent_penalty = component_intent_penalty(module, read_only_exploration);
+        let score = priority
+            + tier_bonus
+            + (matched_terms.len() as i64 * 20)
+            + match_penalty
+            + intent_penalty;
         candidates.push(json!({
             "id": id,
             "source": "module",
@@ -392,6 +400,48 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
         "recommended": recommended,
         "fallback_requirement": "If using lower-tier components while a higher-tier candidate is present, explain the missing contract in decisions."
     })
+}
+
+fn task_is_read_only_exploration(task_terms: &BTreeSet<String>) -> bool {
+    let asks_for_exploration = ["explore", "exploration", "inspect", "understand"]
+        .iter()
+        .any(|term| task_terms.contains(*term));
+    let asks_for_mutation = [
+        "fix",
+        "repair",
+        "patch",
+        "edit",
+        "write",
+        "build",
+        "create",
+        "implement",
+        "test",
+        "retest",
+        "review",
+    ]
+    .iter()
+    .any(|term| task_terms.contains(*term));
+    asks_for_exploration && !asks_for_mutation
+}
+
+fn component_intent_penalty(component: &Value, read_only_exploration: bool) -> i64 {
+    if read_only_exploration && component_requires_capability(component, "file.write") {
+        -900
+    } else {
+        0
+    }
+}
+
+fn component_requires_capability(component: &Value, capability: &str) -> bool {
+    component
+        .get("requires")
+        .and_then(|requires| requires.get("capabilities"))
+        .and_then(Value::as_array)
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|value| value.as_str() == Some(capability))
+        })
 }
 
 fn candidate_has_matched_terms(candidate: &Value) -> bool {
@@ -592,6 +642,7 @@ pub(crate) fn recipe_catalog(
             "tags": recipe.tags,
             "covers": recipe.covers,
             "priority": recipe.priority,
+            "requires": &recipe.plan.requires,
             "topology": {
                 "nodes": recipe.plan.nodes.iter().map(|node| {
                     json!({

@@ -1245,6 +1245,34 @@ mod tests {
     }
 
     #[test]
+    fn planner_request_ranks_dynamic_code_explore_for_plan_act_observe_tasks() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let store = air_linker::parse_module_store_file(
+            root.join("examples/code-agent/module-store.air-store.yaml"),
+        )
+        .unwrap();
+        let catalog = module_catalog(&store, &root, true).unwrap();
+        let recipes = recipe_catalog(&store, &root, true).unwrap();
+
+        let request = planner_request(
+            "Explore the repository with a dynamic plan-act-observe loop that lets the model choose declared read-only tools.",
+            &store,
+            catalog,
+            recipes,
+            true,
+        );
+
+        assert_eq!(
+            request["module_store"]["component_selection"]["first_choice"]["id"],
+            json!("code.dynamic_explore@0.1.0")
+        );
+        assert_eq!(
+            request["module_store"]["component_selection"]["first_choice"]["source"],
+            json!("module")
+        );
+    }
+
+    #[test]
     fn planner_request_routes_code_agent_task_shapes_to_matching_components() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(

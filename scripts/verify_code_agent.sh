@@ -194,6 +194,11 @@ check_code_agent_route \
   "Explore how command_run is implemented and identify relevant repository files." \
   "code.explore@0.1.0" \
   "module"
+check_code_agent_route \
+  "dynamic_explore" \
+  "Explore the repository with a dynamic plan-act-observe loop that lets the model choose declared read-only tools." \
+  "code.dynamic_explore@0.1.0" \
+  "module"
 
 echo "[code-agent] read-only explore offline run"
 cargo run -q -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml \
