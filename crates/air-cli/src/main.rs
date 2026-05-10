@@ -1068,6 +1068,54 @@ mod tests {
     }
 
     #[test]
+    fn planner_request_routes_code_agent_task_shapes_to_matching_components() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let store = air_linker::parse_module_store_file(
+            root.join("examples/code-agent/module-store.air-store.yaml"),
+        )
+        .unwrap();
+
+        for (task, expected_id, expected_source) in [
+            (
+                "Review the command_run implementation for safety, provenance, and diagnostics.",
+                "code.review_with_std_context@0.1.0",
+                "recipe",
+            ),
+            (
+                "Fix a failing test using structured diagnostics, apply a bounded patch, and retest.",
+                "code.repair@0.1.0",
+                "module",
+            ),
+            (
+                "Create a polished static landing page and verify it with browser screenshots.",
+                "code.build_page@0.1.0",
+                "module",
+            ),
+            (
+                "Explore how command_run is implemented and identify relevant repository files.",
+                "code.explore@0.1.0",
+                "module",
+            ),
+        ] {
+            let catalog = module_catalog(&store, &root, true).unwrap();
+            let recipes = recipe_catalog(&store, &root, true).unwrap();
+            let request = planner_request(task, &store, catalog, recipes, true);
+            let first_choice = &request["module_store"]["component_selection"]["first_choice"];
+
+            assert_eq!(
+                first_choice["id"],
+                json!(expected_id),
+                "task should route to {expected_id}: {task}"
+            );
+            assert_eq!(
+                first_choice["source"],
+                json!(expected_source),
+                "task should route through {expected_source}: {task}"
+            );
+        }
+    }
+
+    #[test]
     fn local_docs_search_dedupes_raw_content_before_limit() {
         let documents = vec![
             LocalDoc {
