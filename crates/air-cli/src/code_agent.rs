@@ -772,6 +772,12 @@ fn code_session_turn_pack(
     })
 }
 
+fn code_pack_metadata_value(recipe: CodeRecipe, active_profile: &Path) -> Value {
+    code_session_turn_pack(recipe, active_profile)
+        .and_then(|pack| serde_json::to_value(pack).ok())
+        .unwrap_or(Value::Null)
+}
+
 fn default_session_trace_path(session_path: &Path, turn_number: usize) -> PathBuf {
     let parent = session_path.parent().unwrap_or_else(|| Path::new(""));
     let stem = session_path
@@ -1839,9 +1845,11 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 recipe_name(recipe)
             );
         }
+        let task_profile = default_profile(recipe);
+        let task_pack = code_pack_metadata_value(recipe, &task_profile);
         let task_result = run_plan_capture(RunPlanOptions {
             plan: None,
-            profile: Some(default_profile(recipe)),
+            profile: Some(task_profile),
             store: None,
             input: None,
             input_values: Some(task_input),
@@ -1881,6 +1889,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "task_id": task_id,
                     "title": title,
                     "recipe": recipe_name(recipe),
+                    "pack": task_pack,
                     "depends_on": task.depends_on.clone(),
                     "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
                     "completed": task_completed,
@@ -1901,6 +1910,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "task_id": task_id,
                     "title": title,
                     "recipe": recipe_name(recipe),
+                    "pack": task_pack,
                     "depends_on": task.depends_on.clone(),
                     "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
                     "completed": false,
@@ -2145,11 +2155,13 @@ fn code_project_task_budget(task: &CodeProjectScheduledTask) -> Value {
         }
     };
     let profile = default_profile(recipe);
+    let pack = code_pack_metadata_value(recipe, &profile);
     let metadata_profile = code_profile_metadata_path(&profile);
     match explain_metadata_for_profile(&metadata_profile) {
         Ok(metadata) => json!({
             "task_id": task.id.clone(),
             "recipe": recipe_name(recipe),
+            "pack": pack,
             "profile": path_ref_to_input_string(&profile),
             "plan": path_ref_to_input_string(&metadata.plan),
             "store": path_ref_to_input_string(&metadata.store),
@@ -2163,6 +2175,7 @@ fn code_project_task_budget(task: &CodeProjectScheduledTask) -> Value {
         Err(error) => json!({
             "task_id": task.id.clone(),
             "recipe": recipe_name(recipe),
+            "pack": pack,
             "profile": path_ref_to_input_string(&profile),
             "depends_on": task.depends_on.clone(),
             "error": error.to_string(),

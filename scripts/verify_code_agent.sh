@@ -188,6 +188,9 @@ assert [item["recipe"] for item in project["executions"]] == ["explore", "explor
 assert all(item["completed"] for item in project["executions"]), project
 assert all(item["acceptance"] for item in project["executions"]), project
 assert all(item["acceptance"][0]["success"] for item in project["executions"]), project
+assert all(item["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml" for item in project["executions"]), project
+assert all(item["pack"]["recipe"] == "explore" for item in project["executions"]), project
+assert all(item["pack"]["default_profile"] == "examples/code-agent/explore.air-profile.yaml" for item in project["executions"]), project
 budget = project["budget"]
 assert budget["task_count"] == len(project["scheduled_task_ids"]), budget
 assert budget["max_estimated_model_calls"] > 0, budget
@@ -196,6 +199,7 @@ assert len(budget["tasks"]) == len(project["scheduled_task_ids"]), budget
 assert [item["task_id"] for item in budget["tasks"]] == project["scheduled_task_ids"], budget
 assert all(item["budget"]["max_estimated_model_calls"] > 0 for item in project["executions"]), project
 assert all(item["budget"]["max_estimated_tool_calls"] > 0 for item in project["executions"]), project
+assert all(item["budget"]["pack"]["recipe"] == item["recipe"] for item in project["executions"]), project
 memory = project["memory"]
 assert memory["task_count"] == 2, memory
 assert memory["completed_task_count"] == 2, memory
@@ -356,6 +360,9 @@ assert len(project["executions"]) == 1, project
 execution = project["executions"][0]
 assert execution["task_id"] == "repair-add", execution
 assert execution["recipe"] == "repair", execution
+assert execution["pack"]["recipe"] == "repair", execution
+assert execution["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", execution
+assert execution["budget"]["pack"]["recipe"] == "repair", execution
 assert execution["completed"] is True, execution
 repair = execution["outputs"]["repair"]
 assert repair["final_success"] is True, repair
