@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
@@ -212,11 +213,15 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
 
     if let Some(path) = session.as_ref() {
         let state = session_state.get_or_insert_with(CodeSessionState::default);
+        let turn_number = state.turns.len() + 1;
+        let turn_time = CodeSessionTurnTime::now();
         let trace_files =
             code_session_trace_files(effective_trace_out.as_ref(), loop_enabled, &outputs);
         let parts = code_session_parts(&trace_files)?;
         let summary = code_session_turn_summary(&parts);
         state.append_turn(CodeSessionTurn {
+            id: code_session_turn_id(turn_number),
+            time: turn_time,
             task: session_input
                 .get("task")
                 .and_then(Value::as_str)
@@ -251,6 +256,10 @@ struct CodeSessionState {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct CodeSessionTurn {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    time: CodeSessionTurnTime,
     task: String,
     recipe: String,
     profile: String,
@@ -263,6 +272,22 @@ struct CodeSessionTurn {
     #[serde(default)]
     parts: Vec<CodeSessionPart>,
     outputs: Value,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct CodeSessionTurnTime {
+    created: u64,
+    updated: u64,
+}
+
+impl CodeSessionTurnTime {
+    fn now() -> Self {
+        let now = unix_millis();
+        Self {
+            created: now,
+            updated: now,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -316,6 +341,17 @@ struct CodeSessionPart {
 
 fn code_session_version() -> u32 {
     1
+}
+
+fn code_session_turn_id(turn_number: usize) -> String {
+    format!("turn-{turn_number:06}")
+}
+
+fn unix_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u128::from(u64::MAX)) as u64)
+        .unwrap_or_default()
 }
 
 impl CodeSessionState {
@@ -1561,6 +1597,11 @@ mod tests {
             Value::String("src/lib.rs".to_string()),
         );
         let turns = vec![CodeSessionTurn {
+            id: "turn-000001".to_string(),
+            time: CodeSessionTurnTime {
+                created: 1,
+                updated: 1,
+            },
             task: "inspect repo".to_string(),
             recipe: "explore".to_string(),
             profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
@@ -1601,6 +1642,11 @@ mod tests {
         let large_output = "x".repeat(default_context_budget_chars() + 1024);
         let turns = vec![
             CodeSessionTurn {
+                id: "turn-000001".to_string(),
+                time: CodeSessionTurnTime {
+                    created: 1,
+                    updated: 1,
+                },
                 task: "old".to_string(),
                 recipe: "explore".to_string(),
                 profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
@@ -1612,6 +1658,11 @@ mod tests {
                 outputs: json!({"summary": "older turn"}),
             },
             CodeSessionTurn {
+                id: "turn-000002".to_string(),
+                time: CodeSessionTurnTime {
+                    created: 2,
+                    updated: 2,
+                },
                 task: "new".to_string(),
                 recipe: "repair".to_string(),
                 profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
@@ -1658,6 +1709,11 @@ mod tests {
         ));
         let mut state = CodeSessionState::default();
         state.append_turn(CodeSessionTurn {
+            id: code_session_turn_id(1),
+            time: CodeSessionTurnTime {
+                created: 42,
+                updated: 42,
+            },
             task: "fix it".to_string(),
             recipe: "repair".to_string(),
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
@@ -1675,6 +1731,9 @@ mod tests {
 
         assert_eq!(roundtrip.version, 1);
         assert_eq!(roundtrip.turns.len(), 1);
+        assert_eq!(roundtrip.turns[0].id, "turn-000001");
+        assert_eq!(roundtrip.turns[0].time.created, 42);
+        assert_eq!(roundtrip.turns[0].time.updated, 42);
         assert_eq!(roundtrip.turns[0].recipe, "repair");
         assert!(!roundtrip.turns[0].completed);
     }

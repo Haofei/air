@@ -298,6 +298,9 @@ assert len(session["turns"]) == 2, session
 assert session["turns"][0]["recipe"] == "explore", session
 assert session["turns"][1]["completed"] is True, session
 for index, turn in enumerate(session["turns"], start=1):
+    assert turn["id"] == f"turn-{index:06}", turn
+    assert turn["time"]["created"] > 0, turn
+    assert turn["time"]["updated"] >= turn["time"]["created"], turn
     assert turn["trace_files"], turn
     assert Path(turn["trace_files"][0]).exists(), turn
     assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn
