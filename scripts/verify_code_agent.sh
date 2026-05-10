@@ -102,4 +102,45 @@ assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profil
 assert output["input"]["test_command"] == "edit_fixture_test", output
 PY
 
+echo "[code-agent] edit loop patch run"
+edit_patch_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_patch_backup"
+restore_edit_patch_fixture() {
+  cp "$edit_patch_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_patch_backup"
+}
+trap restore_edit_patch_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.patch.input.json \
+  --model-config examples/code-agent/model-fixtures.patch.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_patch.trace.jsonl \
+  > target/generated/code_agent_edit_patch.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_patch.post_test.log
+restore_edit_patch_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_patch.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+assert "examples/code-agent/edit-fixture/math.js" in edit["workspace_diff"]["diff"], edit
+
+with open("target/generated/code_agent_edit_patch.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == ["test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
+assert any(event.get("action") == "approval" and event.get("status") == "ok" for event in events), events
+PY
+
 echo "[code-agent] ok"
