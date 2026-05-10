@@ -15,6 +15,7 @@ cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review-compose
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs
@@ -98,8 +99,8 @@ check_code_agent_route \
 check_code_agent_route \
   "repair" \
   "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
-  "code.repair@0.1.0" \
-  "module"
+  "code.core_repair@0.1.0" \
+  "recipe"
 check_code_agent_route \
   "build" \
   "Build an Apple-style landing page as a single HTML file and verify screenshots." \
@@ -133,6 +134,54 @@ if node examples/code-agent/repair-fixture/test.js > target/generated/code_agent
 fi
 grep -q "examples/code-agent/repair-fixture/math.js:2:10: error:" \
   target/generated/code_agent_repair_fixture.log
+
+echo "[code-agent] core explore-repair offline run"
+repair_fixture_backup="$(mktemp)"
+cp examples/code-agent/repair-fixture/math.js "$repair_fixture_backup"
+restore_core_repair_fixture() {
+  cp "$repair_fixture_backup" examples/code-agent/repair-fixture/math.js
+  rm -f "$repair_fixture_backup"
+}
+trap restore_core_repair_fixture EXIT
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/repair-core.air-profile.yaml \
+  --trace-out target/generated/code_agent_repair_core.trace.jsonl \
+  > target/generated/code_agent_repair_core.output.json
+node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_repair_core.post_test.log
+restore_core_repair_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_repair_core.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+with open("target/generated/code_agent_repair_core.trace.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+
+assert output["exploration"]["relevant_files"], output
+assert output["repair_context"]["related_files"], output
+repair = output["repair"]
+assert repair["initial_success"] is False, repair
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert any(
+    event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_explorer"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_repair_context_selector"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "file.patch"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+PY
 
 if [[ "${AIR_CODE_AGENT_REAL:-0}" == "1" ]]; then
   echo "[code-agent] real repair smoke"

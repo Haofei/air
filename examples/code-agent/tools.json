@@ -6,6 +6,21 @@
       "max_results": 4,
       "documents": [
         {
+          "id": "docs-command-run-safety",
+          "title": "Command runner safety for coding agents",
+          "content": "Coding agents should use allowlisted command aliases, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
+        },
+        {
+          "id": "docs-code-agent-loop",
+          "title": "Core coding-agent loop",
+          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with allowlisted tests."
+        },
+        {
+          "id": "docs-repair-safety",
+          "title": "Repair safety",
+          "content": "Repair loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
+        },
+        {
           "id": "docs-playwright-timeouts",
           "title": "Playwright timeout and navigation guidance",
           "content": "Playwright pages support default navigation and action timeouts. Browser automation code should set bounded timeouts for page.goto, selectors, and page evaluation. Tools that run inside larger agents should expose diagnostics when a page fails, times out, or returns empty content."

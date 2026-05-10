@@ -14,6 +14,14 @@ modules:
     tags: [coding, explore, search, code_read, provenance]
     covers: [code_exploration, repository_question_answering, documentation_lookup, source_grounding]
     priority: 110
+  code.repair_context@0.1.0:
+    path: examples/code-agent/code-repair-context.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Semantic adapter that selects bounded repair context files from read-only exploration output."
+    tags: [coding, repair, semantic_adapter, context_selection]
+    covers: [code_fix_context_selection, interface_adaptation, bounded_repair_context]
+    priority: 70
   code.review@0.1.0:
     path: examples/code-agent/code-review.air.yaml
     kind: composite
@@ -56,6 +64,65 @@ modules:
     priority: 95
 
 recipes:
+  - id: code.core_repair@0.1.0
+    visibility: public
+    description: "Core coding-agent repair loop: gather read-only context, select bounded repair files, apply a constrained patch, and retest."
+    tags: [coding, repair, fix, diagnostics, patch, test]
+    covers: [code_fix, failing_test_repair, diagnostics_loop, bounded_patch, retest]
+    priority: 150
+    plan:
+      plan:
+        name: code-repair-with-explore-recipe
+        version: 0.1.0
+      requires:
+        capabilities: [task.progress, network.search, file.read, file.write, code.read, code.test]
+      nodes:
+        - id: explore
+          module: code.explore@0.1.0
+        - id: select_context
+          module: code.repair_context@0.1.0
+        - id: repair
+          module: code.repair@0.1.0
+      entry: explore
+      edges:
+        - from: explore
+          to: select_context
+        - from: select_context
+          to: repair
+      connect:
+        - from: $input.task
+          to: explore.task
+        - from: $input.query
+          to: explore.query
+        - from: $input.target_path
+          to: explore.target_path
+        - from: $input.task
+          to: select_context.task
+        - from: $input.target_path
+          to: select_context.target_path
+        - to: select_context.related_files
+          value:
+            coalesce:
+              - from: $input.related_files
+              - literal: []
+        - from: explore.exploration
+          to: select_context.exploration
+        - from: $input.task
+          to: repair.task
+        - from: select_context.repair_context.target_path
+          to: repair.target_path
+        - from: select_context.repair_context.related_files
+          to: repair.related_files
+        - from: $input.test_command
+          to: repair.test_command
+      outputs:
+        exploration: explore.exploration
+        repair_context: select_context.repair_context
+        repair: repair.repair
+      decisions:
+        - id: use-core-code-repair-loop
+          rationale: "Use the higher-level repair recipe so the primary coding agent explores first, adapts context explicitly, then patches and retests."
+          selected: [code.core_repair@0.1.0]
   - id: code.review_with_std_context@0.1.0
     visibility: public
     description: "Grounded code review workflow that composes evidence gathering, the AIR standard context compactor, and final analysis."

@@ -1,0 +1,117 @@
+agent:
+  name: code-repair-context-agent
+  version: 0.1.0
+  description: "Semantic adapter that turns read-only exploration output into bounded repair context inputs."
+
+inputs:
+  task: string
+  target_path: string
+  related_files:
+    type: array
+    items: string
+  exploration:
+    type: object
+    required: [summary, relevant_files, findings, source_ids, next_steps]
+    properties:
+      summary: string
+      relevant_files:
+        type: array
+        items:
+          type: object
+          required: [path, reason]
+          properties:
+            path: string
+            reason: string
+      findings:
+        type: array
+        items:
+          type: object
+          required: [title, evidence, source_ids]
+          properties:
+            title: string
+            evidence: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      next_steps:
+        type: array
+        items: string
+
+outputs:
+  repair_context:
+    type: object
+    required: [target_path, related_files, rationale]
+    properties:
+      target_path: string
+      related_files:
+        type: array
+        items: string
+      rationale: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, select, done, failed]
+  repair_context:
+    type: object
+    required: [target_path, related_files, rationale]
+    properties:
+      target_path: string
+      related_files:
+        type: array
+        items: string
+      rationale: string
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: select
+
+    - id: select
+      when: phase == "select"
+      actions:
+        - kind: model_call
+          model: code_repair_context_selector
+          input:
+            object:
+              task:
+                ref: task
+              target_path:
+                ref: target_path
+              user_related_files:
+                ref: related_files
+              exploration:
+                ref: exploration
+              instruction:
+                literal: "Select a small list of repository-relative files that the repair agent should read alongside target_path. Prefer user_related_files when provided. Do not include target_path itself."
+          output: repair_context
+          timeout_seconds: 60
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: repair_context
+
+policy:
+  timeout_seconds: 90
+  max_model_calls: 2
+
+observability:
+  traces: true

@@ -1090,8 +1090,8 @@ mod tests {
             ),
             (
                 "Fix a failing test using structured diagnostics, apply a bounded patch, and retest.",
-                "code.repair@0.1.0",
-                "module",
+                "code.core_repair@0.1.0",
+                "recipe",
             ),
             (
                 "Create a polished static landing page and verify it with browser screenshots.",

@@ -1,0 +1,115 @@
+{
+  "tools": {
+    "web.search": {
+      "kind": "local_docs_search",
+      "capability": "network.search",
+      "max_results": 4,
+      "documents": [
+        {
+          "id": "docs-command-run-safety",
+          "title": "Command runner safety for coding agents",
+          "content": "Coding agents should use allowlisted command aliases, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
+        },
+        {
+          "id": "docs-code-agent-loop",
+          "title": "Core coding-agent loop",
+          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with allowlisted tests."
+        },
+        {
+          "id": "docs-repair-safety",
+          "title": "Repair safety",
+          "content": "Repair loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
+        }
+      ]
+    },
+    "todo.write": {
+      "kind": "todo_write",
+      "capability": "task.progress",
+      "max_items": 8,
+      "max_content_chars": 120
+    },
+    "todo.read": {
+      "kind": "todo_read",
+      "capability": "task.progress"
+    },
+    "repo.files": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 100
+    },
+    "repo.search": {
+      "kind": "repo_search",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 80,
+      "max_bytes": 65536
+    },
+    "repo.context": {
+      "kind": "repo_context",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 80,
+      "max_files": 8,
+      "context_lines": 8,
+      "max_bytes": 65536
+    },
+    "repo.symbols": {
+      "kind": "repo_symbols",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_symbols": 120,
+      "max_bytes": 65536
+    },
+    "file.read": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 65536
+    },
+    "file.read_many": {
+      "kind": "file_read_many",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_files": 4,
+      "max_bytes": 65536
+    },
+    "file.patch": {
+      "kind": "file_patch",
+      "capability": "file.write",
+      "repo_dir": "../..",
+      "require_read": true,
+      "allow_new_files": false,
+      "allow_delete_files": false,
+      "max_files": 1,
+      "max_bytes": 65536
+    },
+    "diagnostic.context": {
+      "kind": "diagnostic_context",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_diagnostics": 10,
+      "context_lines": 4,
+      "max_bytes": 65536
+    },
+    "git.status": {
+      "kind": "git_status",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 200
+    },
+    "test.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "repair_fixture_test": [
+          "node",
+          "examples/code-agent/repair-fixture/test.js"
+        ]
+      },
+      "timeout_seconds": 30,
+      "max_bytes": 65536
+    }
+  }
+}

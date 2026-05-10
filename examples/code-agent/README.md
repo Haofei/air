@@ -9,6 +9,10 @@ This example contains bounded AIR coding agents and one preferred composed revie
   `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
   `code.review_analyze@0.1.0`.
 - `code.review@0.1.0` is the older monolithic review module kept for comparison.
+- `code.core_repair@0.1.0` is the preferred repair recipe and the smallest
+  opencode-style core loop: run read-only exploration, pass that output through an explicit
+  semantic adapter that selects bounded repair context files, then invoke `code.repair@0.1.0`
+  to patch and retest.
 - `code.repair@0.1.0` reads a target file plus bounded related files, runs an allowlisted test,
   uses structured diagnostics to gather nearby source context, generates a unified diff, validates
   it with `file.patch` dry-run, applies it through constrained `file.patch`, then retests with one
@@ -126,6 +130,17 @@ component covers the task. `plan --explain` is deterministic and model-free, so 
 assert that review, repair, page-build, and read-only exploration tasks route to the intended AIR
 component before any model is asked to generate a RunPlan.
 
+For fixes, the intended first choice is the repair recipe rather than the primitive repair module.
+That proves the core coding loop as a reusable AIR graph:
+
+```text
+explore -> repair_context semantic adapter -> repair -> test status
+```
+
+The adapter is deliberately a normal AIR module. Complex interface conversion, such as turning
+`relevant_files[{path, reason}]` into a small `related_files[]` list, stays auditable as a model call
+with typed output instead of becoming hidden linker behavior.
+
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
 search quality, source grounding, and local-code evidence can be tested.
 
@@ -147,6 +162,17 @@ cargo run -p air-cli -- run-plan --profile examples/code-agent/repair.air-profil
 
 The repair fixture intentionally starts with a failing implementation so the agent has a concrete
 diagnostic to fix. Running the repair profile modifies `examples/code-agent/repair-fixture/math.js`.
+
+Run the preferred core repair loop, including exploration and context selection:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
+
+cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-core.air-profile.yaml --log
+```
+
+This profile also modifies `examples/code-agent/repair-fixture/math.js`; reset or restore the
+fixture after manual runs.
 
 Deterministic verification for these examples:
 

@@ -42,8 +42,8 @@ run_route \
 run_route \
   "repair" \
   "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
-  "code.repair@0.1.0" \
-  "module"
+  "code.core_repair@0.1.0" \
+  "recipe"
 run_route \
   "build" \
   "Build an Apple-style landing page as a single HTML file and verify screenshots." \
@@ -106,11 +106,11 @@ restore_fixture() {
 }
 trap restore_fixture EXIT
 
-cargo run -q -p air-cli -- run-plan examples/code-agent/code-repair.air-plan.yaml \
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-repair-with-explore.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/repair.input.json \
+  --input examples/code-agent/repair-core.input.json \
   --model-config examples/code-agent/model-fixtures.json \
-  --tool-config examples/code-agent/tools.repair.json \
+  --tool-config examples/code-agent/tools.core.json \
   --trace-out target/generated/code-agent-bench/repair.trace.jsonl \
   > target/generated/code-agent-bench/repair.output.json
 node examples/code-agent/repair-fixture/test.js > target/generated/code-agent-bench/repair.post_test.log
@@ -144,7 +144,10 @@ with (root / "build.output.json").open(encoding="utf-8") as handle:
 with (root / "build.trace.jsonl").open(encoding="utf-8") as handle:
     build_trace = [json.loads(line) for line in handle if line.strip()]
 with (root / "repair.output.json").open(encoding="utf-8") as handle:
-    repair = json.load(handle)["repair"]
+    repair_output = json.load(handle)
+exploration = repair_output["exploration"]
+repair_context = repair_output["repair_context"]
+repair = repair_output["repair"]
 with (root / "repair.trace.jsonl").open(encoding="utf-8") as handle:
     repair_trace = [json.loads(line) for line in handle if line.strip()]
 
@@ -165,8 +168,16 @@ assert any(
 assert repair["initial_success"] is False, repair
 assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
+assert exploration["relevant_files"], exploration
+assert repair_context["related_files"], repair_context
 changed_paths = [entry["path"] for entry in repair["changed_files"]]
 assert repair["target_path"] in changed_paths, repair
+assert any(
+    event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_repair_context_selector"
+    and event.get("status") == "ok"
+    for event in repair_trace
+), repair_trace
 assert any(
     event.get("action") == "tool_call"
     and event.get("meta", {}).get("tool") == "file.read_many"
@@ -200,6 +211,8 @@ summary = {
         "patch_applied": repair["patch_applied"],
         "target_changed": repair["target_path"] in changed_paths,
         "workspace_changed_files": len(changed_paths),
+        "explored_files": len(exploration["relevant_files"]),
+        "selected_related_files": len(repair_context["related_files"]),
     },
 }
 

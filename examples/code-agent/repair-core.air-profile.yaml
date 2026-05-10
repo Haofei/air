@@ -1,0 +1,5 @@
+plan: code-repair-with-explore.air-plan.yaml
+store: module-store.air-store.yaml
+input_file: repair-core.input.json
+model_config: model-fixtures.json
+tool_config: tools.core.json
