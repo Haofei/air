@@ -154,5 +154,15 @@ Deterministic verification for these examples:
 bash scripts/verify_code_agent.sh
 ```
 
+Run the offline code-agent bench harness:
+
+```bash
+bash scripts/bench_code_agent.sh
+```
+
+The bench writes route decisions and offline review/explore/repair outputs under
+`target/generated/code-agent-bench/`, then emits `summary.json`. Set
+`AIR_CODE_AGENT_BENCH_REAL_BUILD=1` to include the real-model page build path.
+
 Set `AIR_CODE_AGENT_REAL=1` to include the real-model repair smoke; the script restores the repair
 fixture afterward.

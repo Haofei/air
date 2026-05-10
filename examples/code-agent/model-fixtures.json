@@ -77,6 +77,10 @@
         "This fixture output is intentionally static for offline regression."
       ]
     },
+    "code_repairer": {
+      "patch": "diff --git a/examples/code-agent/repair-fixture/math.js b/examples/code-agent/repair-fixture/math.js\n--- a/examples/code-agent/repair-fixture/math.js\n+++ b/examples/code-agent/repair-fixture/math.js\n@@ -1,5 +1,5 @@\n function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n \n module.exports = { add };\n",
+      "rationale": "The failing diagnostic shows add(2, 3) returned -1 because the implementation subtracts. Replace subtraction with addition and keep the CommonJS export unchanged."
+    },
     "code_reviewer": {
       "summary": "Fixture review completed: the composed code-review workflow gathered evidence, routed it through the standard context module, and produced schema-valid grounded guidance.",
       "findings": [
