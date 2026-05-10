@@ -186,6 +186,8 @@ cargo run -p air-cli -- lower-plan examples/deep-research/deep-research-dynamic.
 
 The native VM is the conformance runtime. Generated backends preserve AIR schema validation, retry inputs, dynamic fan-out runtime, trace events, tool contracts, and approval host hooks.
 
+Because tools are resolved at the profile/runtime level rather than in the IR, tool implementations can be compiled to WASM and shared across backends. A tool compiled to a `.wasm` module needs no per-platform rewrite: the AIR runtime loads it through the same `ToolProvider` interface used by native Rust tools today.
+
 ## CLI Surface
 
 Primary user-facing commands:
