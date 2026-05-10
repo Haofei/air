@@ -3164,6 +3164,40 @@ fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
 }
 
 #[test]
+fn code_agent_self_tools_allow_project_verification_aliases() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let config_path = root.join("examples/code-agent/tools.self.json");
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "candidate.validate",
+            &json!({
+                "candidate": {
+                    "target_path": "crates/air-tools/src/lib.rs",
+                    "related_files": ["crates/air-tools/src/tests.rs"],
+                    "test_command": "verify_code_agent"
+                }
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["valid"], json!(true));
+    assert_eq!(output["test_command"], json!("verify_code_agent"));
+
+    let error = tools
+        .call_tool(
+            "test.run",
+            &json!({
+                "command": "cargo_test_package",
+                "package": "not-a-package"
+            }),
+        )
+        .unwrap_err();
+    assert!(error.to_string().contains("not an allowed value"));
+}
+
+#[test]
 fn repo_search_returns_structured_matches() {
     let dir = temp_dir("air-tools-repo-search");
     fs::create_dir_all(dir.join("src")).unwrap();

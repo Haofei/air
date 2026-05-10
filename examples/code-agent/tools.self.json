@@ -134,7 +134,17 @@
       "capability": "code.read",
       "base_dir": "../..",
       "allowed_test_commands": [
-        "edit_fixture_test"
+        "cargo_air_cli_code_budget_tests",
+        "cargo_air_tools_repo_tests",
+        "cargo_air_tools_file_tests",
+        "cargo_air_tools_tests",
+        "cargo_test_workspace",
+        "cargo_clippy_workspace",
+        "verify_code_agent",
+        "verify_backend_conformance",
+        "bench_code_agent",
+        "cargo_test_package",
+        "cargo_test_package_filter"
       ]
     },
     "git.status": {
@@ -184,7 +194,72 @@
           "-q",
           "-p",
           "air-tools"
+        ],
+        "cargo_test_workspace": [
+          "cargo",
+          "test",
+          "-q",
+          "--workspace"
+        ],
+        "cargo_clippy_workspace": [
+          "cargo",
+          "clippy",
+          "-q",
+          "--workspace",
+          "--all-targets",
+          "--",
+          "-D",
+          "warnings"
+        ],
+        "verify_code_agent": [
+          "bash",
+          "scripts/verify_code_agent.sh"
+        ],
+        "verify_backend_conformance": [
+          "bash",
+          "scripts/verify_backend_conformance.sh"
+        ],
+        "bench_code_agent": [
+          "bash",
+          "scripts/bench_code_agent.sh"
+        ],
+        "cargo_test_package": [
+          "cargo",
+          "test",
+          "-q",
+          "-p",
+          "{{ package }}"
+        ],
+        "cargo_test_package_filter": [
+          "cargo",
+          "test",
+          "-q",
+          "-p",
+          "{{ package }}",
+          "{{ test_filter }}"
         ]
+      },
+      "parameters": {
+        "package": {
+          "allow": "identifier",
+          "values": [
+            "air-cli",
+            "air-core",
+            "air-linker",
+            "air-parser",
+            "air-runtime",
+            "air-tools",
+            "air-verify",
+            "air-backend-langgraph",
+            "air-backend-openai",
+            "air-backend-openai-agents-js"
+          ],
+          "max_chars": 80
+        },
+        "test_filter": {
+          "allow": "identifier",
+          "max_chars": 120
+        }
       },
       "timeout_seconds": 120,
       "max_bytes": 65536

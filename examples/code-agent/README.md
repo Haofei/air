@@ -23,6 +23,8 @@ init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 
 The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `file.read`, `file.search`, `file.ops`, `file.patch`, `test.run`, and `git.diff`.
 
+`tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind `test.run` aliases for workspace tests, clippy, the code-agent gate, backend conformance, and bounded package/test-filter runs.
+
 Run the deterministic fixture:
 
 ```bash
