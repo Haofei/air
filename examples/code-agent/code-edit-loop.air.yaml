@@ -433,7 +433,7 @@ workflow:
           output: decision
           timeout_seconds: 90
           retry:
-            max_attempts: 2
+            max_attempts: 4
         - kind: set
           values:
             phase: act

@@ -394,6 +394,14 @@ mod tests {
             "code_edit_decider prompt must forbid bare tool_calls wrappers"
         );
         assert!(
+            edit_prompt.contains("\"content\""),
+            "code_edit_decider prompt must forbid provider-style content wrappers"
+        );
+        assert!(
+            edit_prompt.contains("read/search tool_calls"),
+            "code_edit_decider prompt must convert information needs into tool calls"
+        );
+        assert!(
             edit_prompt.contains("full extensions such as .json"),
             "code_edit_decider prompt must preserve concrete path extensions"
         );

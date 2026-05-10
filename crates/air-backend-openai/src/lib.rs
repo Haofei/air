@@ -39,6 +39,9 @@ pub struct OpenAiModelConfig {
 
     #[serde(default)]
     pub response_format: Option<Value>,
+
+    #[serde(default)]
+    pub extra_body: Option<Value>,
 }
 
 #[derive(Debug, Error)]
@@ -154,6 +157,14 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
                 ));
             }
         }
+        if let Some(extra_body) = &model.extra_body {
+            if !extra_body.is_object() {
+                return Err(invalid_config(
+                    path,
+                    format!("models.{alias}.extra_body must be a JSON object"),
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -234,6 +245,9 @@ impl OpenAiCompatibleModelProvider {
             "messages": messages
         });
 
+        if let Some(extra_body) = &model_config.extra_body {
+            merge_extra_body(&mut body, extra_body);
+        }
         if let Some(temperature) = model_config.temperature {
             body["temperature"] = json!(temperature);
         }
@@ -364,6 +378,15 @@ fn resolved_response_format(model_config: &OpenAiModelConfig) -> Option<Value> {
         return Some(json!({"type": "json_object"}));
     }
     None
+}
+
+fn merge_extra_body(body: &mut Value, extra_body: &Value) {
+    let (Some(body), Some(extra_body)) = (body.as_object_mut(), extra_body.as_object()) else {
+        return;
+    };
+    for (key, value) in extra_body {
+        body.entry(key.clone()).or_insert_with(|| value.clone());
+    }
 }
 
 fn input_to_content(input: &Value) -> Result<String, RuntimeError> {
@@ -601,6 +624,7 @@ mod tests {
             system_prompt: None,
             json_mode: Some(true),
             response_format: None,
+            extra_body: None,
         };
 
         assert_eq!(
@@ -625,6 +649,7 @@ mod tests {
                 "type": "json_schema",
                 "json_schema": {"name": "decision", "schema": {"type": "object"}}
             })),
+            extra_body: None,
         };
 
         assert_eq!(
@@ -691,6 +716,97 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_file_accepts_extra_body_object() {
+        let path = temp_file_path("air-model-config-extra-body", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "glm-5.1",
+                  "extra_body": {
+                    "thinking": {
+                      "type": "enabled",
+                      "clear_thinking": false
+                    }
+                  }
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            config.models["planner"].extra_body,
+            Some(json!({
+                "thinking": {
+                    "type": "enabled",
+                    "clear_thinking": false
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_config_file_rejects_non_object_extra_body() {
+        let path = temp_file_path("air-model-config-extra-body-invalid", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "glm-5.1",
+                  "extra_body": "thinking"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let error = parse_config_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        let message = error.to_string();
+
+        assert!(message.contains("models.planner.extra_body"));
+        assert!(message.contains("JSON object"));
+    }
+
+    #[test]
+    fn extra_body_merges_provider_specific_request_fields() {
+        let mut body = json!({
+            "model": "glm-5.1",
+            "messages": []
+        });
+
+        merge_extra_body(
+            &mut body,
+            &json!({
+                "thinking": {
+                    "type": "enabled",
+                    "clear_thinking": false
+                },
+                "model": "overridden"
+            }),
+        );
+
+        assert_eq!(
+            body["thinking"],
+            json!({
+                "type": "enabled",
+                "clear_thinking": false
+            })
+        );
+        assert_eq!(body["model"], json!("glm-5.1"));
+    }
+
+    #[test]
     fn effective_request_timeout_uses_smaller_action_deadline() {
         assert_eq!(
             effective_request_timeout(Some(30), Some(Duration::from_secs(5))),
@@ -746,6 +862,7 @@ mod tests {
             system_prompt: None,
             json_mode: None,
             response_format: None,
+            extra_body: None,
         };
 
         assert_eq!(
@@ -771,6 +888,7 @@ mod tests {
             system_prompt: None,
             json_mode: None,
             response_format: None,
+            extra_body: None,
         };
 
         assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");

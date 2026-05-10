@@ -2643,6 +2643,15 @@ mod tests {
         let max_model_calls = yaml["policy"]["max_model_calls"].as_u64().unwrap();
         let max_tool_calls = yaml["policy"]["max_tool_calls"].as_u64().unwrap();
         let max_repeated_tool_calls = yaml["policy"]["max_repeated_tool_calls"].as_u64().unwrap();
+        let choose_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose"))
+            .unwrap();
+        let choose_retry_attempts = choose_rule["actions"][0]["retry"]["max_attempts"]
+            .as_u64()
+            .unwrap();
 
         assert!(
             (120..=200).contains(&max_steps),
@@ -2659,6 +2668,10 @@ mod tests {
         assert!(
             (12..=20).contains(&max_repeated_tool_calls),
             "repeated test/read cycles are normal, but still need a cap"
+        );
+        assert!(
+            (4..=6).contains(&choose_retry_attempts),
+            "real models sometimes need multiple schema retries before a valid decider object"
         );
     }
 

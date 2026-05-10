@@ -222,6 +222,13 @@ AIR uses OpenAI-compatible model config for real model calls:
       "model_env": "OPENAI_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 120,
+      "json_mode": true,
+      "extra_body": {
+        "thinking": {
+          "type": "enabled",
+          "clear_thinking": false
+        }
+      },
       "system_prompt": "Return only JSON."
     }
   }
@@ -229,6 +236,8 @@ AIR uses OpenAI-compatible model config for real model calls:
 ```
 
 `request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout for each HTTP request. AIR also records elapsed-time violations in the runtime trace.
+
+OpenAI-compatible providers are not identical. Use `json_mode` or `response_format` for structured-output support, and use `extra_body` to pass provider-specific request fields such as Zhipu/GLM thinking controls, self-hosted gateway flags, or other vendor extensions. AIR merges `extra_body` into the chat/completions request body while preserving the configured AIR fields.
 
 For deterministic offline smoke tests, the native CLI also accepts fixture model configs:
 
