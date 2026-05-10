@@ -22,6 +22,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-mu
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refactor.air-profile.yaml
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
+cargo test -q -p air-cli pack_validation_rejects
 rm -rf target/generated/examples/code-agent target/generated/modules
 mkdir -p target/generated/examples
 cp -R examples/code-agent target/generated/examples/code-agent
