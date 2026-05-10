@@ -14,7 +14,10 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.ai
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs
 node --check scripts/playwright_search_fixture_test.cjs
+node --check scripts/playwright_page_audit.cjs
+node --check scripts/playwright_page_audit_fixture_test.cjs
 node scripts/playwright_search_fixture_test.cjs
+node scripts/playwright_page_audit_fixture_test.cjs
 cargo test -q -p air-tools file_read
 cargo test -q -p air-tools file_read_many
 cargo test -q -p air-tools file_patch
@@ -24,6 +27,7 @@ cargo test -q -p air-tools git_status
 cargo test -q -p air-tools todo_write
 cargo test -q -p air-tools todo_read
 cargo test -q -p air-tools context_measure
+cargo test -q -p air-tools playwright_page_audit
 cargo test -q -p air-tools repo_search
 cargo test -q -p air-tools repo_symbols
 cargo test -q -p air-tools repo_references

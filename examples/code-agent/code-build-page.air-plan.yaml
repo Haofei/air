@@ -4,7 +4,7 @@ plan:
   description: "Build one bounded static HTML page through an AIR code builder module."
 
 requires:
-  capabilities: [file.write, code.test]
+  capabilities: [file.write, code.test, browser.audit]
 
 nodes:
   - id: build

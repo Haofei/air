@@ -217,6 +217,29 @@ enum ToolConfig {
         #[serde(default)]
         timeout_seconds: Option<u64>,
     },
+    PlaywrightPageAudit {
+        #[serde(default)]
+        capability: Option<String>,
+
+        script_path: PathBuf,
+
+        base_dir: PathBuf,
+
+        #[serde(default)]
+        screenshot_dir: Option<PathBuf>,
+
+        #[serde(default)]
+        viewports: Option<Vec<Value>>,
+
+        #[serde(default)]
+        navigation_timeout_ms: Option<u64>,
+
+        #[serde(default)]
+        max_text_chars: Option<usize>,
+
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
     FileRead {
         #[serde(default)]
         capability: Option<String>,
@@ -442,6 +465,7 @@ impl ToolConfig {
             | ToolConfig::HttpJson { capability, .. }
             | ToolConfig::WebFetch { capability, .. }
             | ToolConfig::PlaywrightSearch { capability, .. }
+            | ToolConfig::PlaywrightPageAudit { capability, .. }
             | ToolConfig::FileRead { capability, .. }
             | ToolConfig::FileReadMany { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
@@ -797,6 +821,61 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     path,
                     &format!("tools.{name}.cache_ttl_seconds"),
                     *cache_ttl_seconds,
+                )?;
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.timeout_seconds"),
+                    *timeout_seconds,
+                )?;
+            }
+            ToolConfig::PlaywrightPageAudit {
+                script_path,
+                base_dir,
+                screenshot_dir,
+                viewports,
+                navigation_timeout_ms,
+                max_text_chars,
+                timeout_seconds,
+                ..
+            } => {
+                if script_path.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.script_path must not be empty",
+                        path.display()
+                    );
+                }
+                if base_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.base_dir must not be empty",
+                        path.display()
+                    );
+                }
+                if screenshot_dir
+                    .as_ref()
+                    .is_some_and(|value| value.as_os_str().is_empty())
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.screenshot_dir must not be empty when provided",
+                        path.display()
+                    );
+                }
+                if let Some(viewports) = viewports {
+                    if viewports.is_empty() {
+                        anyhow::bail!(
+                            "tool config {} tools.{name}.viewports must not be empty when provided",
+                            path.display()
+                        );
+                    }
+                }
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.navigation_timeout_ms"),
+                    *navigation_timeout_ms,
+                )?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_text_chars"),
+                    *max_text_chars,
                 )?;
                 validate_positive_u64(
                     path,
@@ -1310,6 +1389,31 @@ impl ToolProvider for ConfigTools {
                     action_timeout: Some(timeout),
                 },
             ),
+            ToolConfig::PlaywrightPageAudit {
+                capability: _,
+                script_path,
+                base_dir,
+                screenshot_dir,
+                viewports,
+                navigation_timeout_ms,
+                max_text_chars,
+                timeout_seconds,
+            } => call_playwright_page_audit_tool(
+                name,
+                input,
+                PlaywrightPageAuditConfig {
+                    script_path: &resolve_config_path(&self.config_dir, &script_path),
+                    base_dir: &resolve_config_path(&self.config_dir, &base_dir),
+                    screenshot_dir: screenshot_dir
+                        .as_deref()
+                        .map(|path| resolve_config_path(&self.config_dir, path)),
+                    viewports: viewports.as_deref(),
+                    navigation_timeout_ms,
+                    max_text_chars,
+                    timeout_seconds,
+                    action_timeout: Some(timeout),
+                },
+            ),
             ToolConfig::FileRead {
                 capability: _,
                 base_dir,
@@ -1590,6 +1694,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::HttpJson { capability, .. }
             | ToolConfig::WebFetch { capability, .. }
             | ToolConfig::PlaywrightSearch { capability, .. }
+            | ToolConfig::PlaywrightPageAudit { capability, .. }
             | ToolConfig::FileRead { capability, .. }
             | ToolConfig::FileReadMany { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
@@ -1759,6 +1864,17 @@ struct PlaywrightSearchConfig<'a> {
     action_timeout: Option<Duration>,
 }
 
+struct PlaywrightPageAuditConfig<'a> {
+    script_path: &'a Path,
+    base_dir: &'a Path,
+    screenshot_dir: Option<PathBuf>,
+    viewports: Option<&'a [Value]>,
+    navigation_timeout_ms: Option<u64>,
+    max_text_chars: Option<usize>,
+    timeout_seconds: Option<u64>,
+    action_timeout: Option<Duration>,
+}
+
 fn call_web_fetch_tool(
     name: &str,
     input: &Value,
@@ -1829,6 +1945,144 @@ fn call_web_fetch_tool(
             }
         }],
     }))
+}
+
+fn call_playwright_page_audit_tool(
+    name: &str,
+    input: &Value,
+    config: PlaywrightPageAuditConfig<'_>,
+) -> Result<Value, RuntimeError> {
+    let script = canonicalize_tool_path(name, "script_path", config.script_path)?;
+    let base = canonicalize_tool_path(name, "base_dir", config.base_dir)?;
+    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(30));
+    let request_timeout = config
+        .action_timeout
+        .map(|timeout| timeout.min(configured_timeout))
+        .unwrap_or(configured_timeout);
+
+    let mut request = Map::new();
+    match (
+        input.get("path").and_then(Value::as_str),
+        input.get("url").and_then(Value::as_str),
+    ) {
+        (Some(path), _) if !path.trim().is_empty() => {
+            let candidate = if Path::new(path).is_absolute() {
+                PathBuf::from(path)
+            } else {
+                base.join(path)
+            };
+            let path = canonicalize_tool_path(name, "input.path", &candidate)?;
+            if !path.starts_with(&base) {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.path must stay inside base_dir"
+                )));
+            }
+            request.insert(
+                "path".to_string(),
+                Value::String(path.display().to_string()),
+            );
+        }
+        (_, Some(url)) if !url.trim().is_empty() => {
+            if !(url.starts_with("http://") || url.starts_with("https://")) {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.url must start with http:// or https://"
+                )));
+            }
+            request.insert("url".to_string(), Value::String(url.to_string()));
+        }
+        _ => {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} requires input.path or input.url"
+            )))
+        }
+    }
+    if let Some(value) = input.get("viewports") {
+        request.insert("viewports".to_string(), value.clone());
+    } else if let Some(viewports) = config.viewports {
+        request.insert("viewports".to_string(), Value::Array(viewports.to_vec()));
+    }
+    if let Some(value) = input.get("navigation_timeout_ms") {
+        request.insert("navigation_timeout_ms".to_string(), value.clone());
+    } else if let Some(navigation_timeout_ms) = config.navigation_timeout_ms {
+        request.insert(
+            "navigation_timeout_ms".to_string(),
+            Value::Number(navigation_timeout_ms.into()),
+        );
+    }
+    if let Some(value) = input.get("max_text_chars") {
+        request.insert("max_text_chars".to_string(), value.clone());
+    } else if let Some(max_text_chars) = config.max_text_chars {
+        request.insert(
+            "max_text_chars".to_string(),
+            Value::Number(max_text_chars.into()),
+        );
+    }
+    if let Some(value) = input.get("screenshot_dir") {
+        request.insert("screenshot_dir".to_string(), value.clone());
+    } else if let Some(screenshot_dir) = config.screenshot_dir {
+        request.insert(
+            "screenshot_dir".to_string(),
+            Value::String(screenshot_dir.display().to_string()),
+        );
+    }
+
+    let mut child = Command::new("node")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} launch playwright page audit: {error}"))
+        })?;
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "tool {name} playwright page audit stdin unavailable"
+            ))
+        })?;
+        serde_json::to_writer(&mut stdin, &Value::Object(request)).map_err(|error| {
+            RuntimeError::Provider(format!(
+                "tool {name} write playwright page audit input: {error}"
+            ))
+        })?;
+    }
+
+    let started_at = std::time::Instant::now();
+    loop {
+        match child.try_wait().map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} playwright page audit wait: {error}"))
+        })? {
+            Some(status) => {
+                let output = child.wait_with_output().map_err(|error| {
+                    RuntimeError::Provider(format!(
+                        "tool {name} playwright page audit collect output: {error}"
+                    ))
+                })?;
+                if !status.success() {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} playwright page audit failed: {}",
+                        provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+                    )));
+                }
+                return serde_json::from_slice(&output.stdout).map_err(|error| {
+                    RuntimeError::Provider(format!(
+                        "tool {name} playwright page audit output was not valid JSON: {error}; body={}",
+                        provider_error_snippet(&String::from_utf8_lossy(&output.stdout))
+                    ))
+                });
+            }
+            None if started_at.elapsed() >= request_timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} playwright page audit exceeded timeout_seconds={}",
+                    request_timeout.as_secs()
+                )));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
 }
 
 fn call_playwright_search_tool(
@@ -7695,6 +7949,82 @@ process.stdin.on('end', () => {
         assert_eq!(output["received"]["cache_ttl_seconds"], json!(3600));
         assert_eq!(output["artifacts"][0]["id"], json!("web:example"));
         assert_eq!(tools.tool_capability("web.search"), Some("network.search"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn playwright_page_audit_invokes_script_and_bounds_paths() {
+        let dir = temp_dir("air-tools-playwright-page-audit");
+        fs::write(
+            dir.join("index.html"),
+            "<!doctype html><html><body>ok</body></html>",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("audit.cjs"),
+            r#"
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  process.stdout.write(JSON.stringify({
+    target: input.path || input.url,
+    received: input,
+    success: true,
+    viewport_count: input.viewports.length,
+    viewports: [{ width: input.viewports[0].width, height: input.viewports[0].height, horizontal_overflow: false, overlap_count: 0, screenshot_path: input.screenshot_dir + '/page.png' }],
+    diagnostics: [],
+    artifacts: [{ id: 'browser-screenshot:test', kind: 'browser_screenshot', title: 'audit', uri: input.screenshot_dir + '/page.png', content: '', metadata: { provider: 'playwright_page_audit' } }]
+  }));
+});
+"#,
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "browser.audit": {
+                  "kind": "playwright_page_audit",
+                  "capability": "browser.audit",
+                  "script_path": "audit.cjs",
+                  "base_dir": ".",
+                  "screenshot_dir": "screens",
+                  "viewports": [{ "label": "desktop", "width": 1280, "height": 900 }],
+                  "navigation_timeout_ms": 1000,
+                  "max_text_chars": 500,
+                  "timeout_seconds": 5
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("browser.audit", &json!({"path": "index.html"}))
+            .unwrap();
+
+        assert_eq!(output["success"], json!(true));
+        assert_eq!(output["viewport_count"], json!(1));
+        assert!(output["received"]["path"]
+            .as_str()
+            .unwrap()
+            .ends_with("index.html"));
+        assert_eq!(output["received"]["viewports"][0]["width"], json!(1280));
+        assert!(output["received"]["screenshot_dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("screens"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("browser_screenshot"));
+        assert_eq!(
+            tools.tool_capability("browser.audit"),
+            Some("browser.audit")
+        );
+
+        let error = tools
+            .call_tool("browser.audit", &json!({"path": "../outside.html"}))
+            .unwrap_err();
+        assert!(error.to_string().contains("input.path"));
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -9,7 +9,8 @@ This example contains two bounded AIR coding agents:
   first patch does not fix the test. It finishes by calling `git.status` so the returned summary
   includes workspace cleanliness and changed files.
 - `code.build_page@0.1.0` generates one static HTML file, writes it through constrained `file.write`,
-  then runs an allowlisted smoke test.
+  runs an allowlisted smoke test, renders desktop/mobile screenshots through `browser.audit`, and
+  gets one bounded revision pass if either the smoke test or browser audit fails.
 
 The review agent uses:
 
@@ -52,13 +53,18 @@ When `require_read` is enabled, `file.write`, `file.edit`, and `file.patch` reje
 that were not read or were modified after the last read. `file.patch` also supports `dry_run: true`
 for `git apply --check` validation without mutating files; the repair agent uses that check before
 every patch apply.
+For frontend agents, `browser.audit` uses Playwright to open a local file or URL, capture desktop
+and mobile screenshots, and return structured layout diagnostics for console errors, page errors,
+horizontal overflow, and coarse text/click-target overlap. The build-page agent feeds those
+diagnostics back into one bounded revision pass instead of relying only on string checks.
 
 The default `tools.json` uses deterministic local search documents so release verification does
 not depend on network access. For real research, switch to `tools.playwright.json`.
-The verification script also runs `scripts/playwright_search_fixture_test.cjs` when a local
+The verification script also runs `scripts/playwright_search_fixture_test.cjs` and
+`scripts/playwright_page_audit_fixture_test.cjs` when a local
 Playwright Chromium browser is installed; that fixture serves Bing-like HTML from localhost and
-checks real DOM extraction, URL normalization, page fetch, and artifact output without external
-network access. `tools.playwright.json` enables a TTL page-content cache under
+checks real DOM extraction, URL normalization, page fetch, screenshot capture, layout diagnostics,
+and artifact output without external network access. `tools.playwright.json` enables a TTL page-content cache under
 `target/generated/playwright_search_cache` so repeated research loops avoid re-fetching the same
 result pages.
 

@@ -15,9 +15,9 @@ modules:
     path: examples/code-agent/code-build-page.air.yaml
     kind: composite
     visibility: public
-    description: "Bounded static page builder using model generation, constrained file write, and smoke verification."
-    tags: [coding, build, static_site, file_write]
-    covers: [static_page_build, landing_page, bounded_file_write, smoke_test]
+    description: "Bounded static page builder using model generation, constrained file write, smoke verification, browser screenshots, and one visual revision pass."
+    tags: [coding, build, static_site, file_write, browser_audit]
+    covers: [static_page_build, landing_page, bounded_file_write, smoke_test, visual_audit]
     priority: 90
   code.repair@0.1.0:
     path: examples/code-agent/code-repair.air.yaml

@@ -273,6 +273,7 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `http_json` | `web.search` / custom API | tool input object | JSON response body | Calls REST endpoints; response must be JSON. |
 | `web_fetch` | `web.fetch` | `{ "url": "https://..." }` | `{ url, status, content_type, text, bytes, truncated, artifacts[] }` | GET only; supports headers, bearer token env, timeout, max bytes. |
 | `playwright_search` | `web.search` | `{ "query": "...", "query_variants": [...], "search_base_url": "https://www.bing.com/search", "cache_dir": "target/search-cache" }` | `{ query, queries, documents[], artifacts[], diagnostics }` | Browser-backed search for research and coding agents; supports query variants, domain filters, per-domain dedupe, concurrent page fetch, timeouts, fixtureable search base URLs, optional TTL page-content cache, selector/latency diagnostics, and artifact output. |
+| `playwright_page_audit` | `browser.audit` | `{ "path": "examples/app/index.html" }` or `{ "url": "https://localhost:3000" }` | `{ success, viewport_count, screenshot_paths[], viewports[], diagnostics[], artifacts[] }` | Browser-backed render audit for frontend coding agents. Opens a local file constrained by `base_dir` or an http(s) URL, renders configured desktop/mobile viewports, captures screenshots, checks console/page errors, horizontal overflow, and coarse overlapping text/click targets. |
 | `file_read` | `file.read` | `{ "path": "relative/file.txt", "start_line": 10, "end_line": 80, "line_numbers": true }` or `{ "path": "...", "contains": "symbol", "occurrence": 2, "context_lines": 8 }` | `{ path, content, numbered_content, bytes, start_line, end_line, match_line, contains, occurrence, total_lines, truncated, artifacts[] }` | Read-only and constrained to configured `base_dir`; line ranges, numbered output, and fixed-string `contains` locators are optional. `contains` returns the requested matching line plus bounded surrounding context and fails if the string or occurrence is absent, preventing accidental unrelated reads. Binary and non-UTF-8 files are rejected instead of lossy-decoded into agent context. |
 | `file_read_many` | `file.read_many` | `{ "files": ["src/a.rs", { "path": "src/b.rs", "contains": "fn run", "context_lines": 8 }] }` | `{ files[], file_count, bytes, truncated, artifacts[] }` | Batch variant of `file.read` for bounded multi-file context gathering. Each entry is validated with the same path, UTF-8, binary, range, and `contains` rules as `file.read`; `max_files` keeps one call from flooding context. |
 | `file_write` | `file.write` | `{ "path": "relative/file.txt", "content": "..." }` | `{ path, bytes, created, overwritten, artifacts[] }` | Write tool constrained to configured `base_dir`; optional directory creation, overwrite policy, and read-before-overwrite policy are set in tool config. When `require_read` is enabled, overwrites are rejected if the file changed after the last `file.read`. |
@@ -304,7 +305,7 @@ Artifact-producing tools return a common shape:
   "artifacts": [
     {
       "id": "doc-1",
-      "kind": "web_page | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | repo_symbols | repo_references | code_context | diagnostic_context | todo_list | context_measure | git_diff | git_status | test_log",
+      "kind": "web_page | browser_screenshot | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | repo_symbols | repo_references | code_context | diagnostic_context | todo_list | context_measure | git_diff | git_status | test_log",
       "title": "Readable title",
       "uri": "file-or-web-location",
       "content": "Evidence text",
@@ -323,11 +324,13 @@ checked source list and gives coding agents checked references to file reads, di
 test logs. Existing modules without artifact-producing tools continue to run without citation
 enforcement.
 
-The `examples/code-agent` workflows show two coding-agent patterns: review agents search for
+The `examples/code-agent` workflows show three coding-agent patterns: review agents search for
 external references, list repository files, search local code, gather automatic `repo.context`
 snippets, inspect a target file and diff, run one allowlisted verification command, and ask a model
 for review findings that cite exact artifact ids. Build agents can generate a bounded artifact,
-write it through `file.write`, and run an allowlisted smoke command.
+write it through `file.write`, run an allowlisted smoke command, render browser screenshots, and
+perform one bounded revision from smoke-test or browser-audit feedback. Repair agents use
+diagnostics, source snippets, patch dry-runs, constrained patch apply, retest, and workspace status.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 

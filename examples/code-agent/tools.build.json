@@ -22,6 +22,20 @@
       },
       "timeout_seconds": 30,
       "max_bytes": 65536
+    },
+    "browser.audit": {
+      "kind": "playwright_page_audit",
+      "capability": "browser.audit",
+      "script_path": "../../scripts/playwright_page_audit.cjs",
+      "base_dir": "../..",
+      "screenshot_dir": "../../target/generated/page-audit",
+      "viewports": [
+        { "label": "desktop", "width": 1440, "height": 1000 },
+        { "label": "mobile", "width": 390, "height": 844 }
+      ],
+      "navigation_timeout_ms": 10000,
+      "max_text_chars": 2000,
+      "timeout_seconds": 30
     }
   }
 }
