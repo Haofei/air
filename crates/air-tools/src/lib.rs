@@ -1271,12 +1271,6 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                if commands.is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.commands must not be empty",
-                        path.display()
-                    );
-                }
                 for (alias, command) in commands {
                     if alias.trim().is_empty() {
                         anyhow::bail!(

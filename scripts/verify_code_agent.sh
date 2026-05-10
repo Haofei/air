@@ -38,6 +38,25 @@ cargo test -q -p air-tools repo_search
 cargo test -q -p air-tools repo_context
 cargo test -q -p air-tools diagnostic_context
 
+echo "[code-agent] default explore profile run"
+cargo run -q -p air-cli -- code "check whether build is a public code-agent primitive" \
+  --recipe explore \
+  --target examples/code-agent/code-agent.air-pack.yaml \
+  --query "build code agent recipe primitive" \
+  --trace-out target/generated/code_agent_explore.trace.jsonl \
+  > target/generated/code_agent_explore.output.json
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_explore.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+exploration = output["exploration"]
+assert isinstance(exploration["summary"], str) and exploration["summary"], exploration
+assert isinstance(exploration["relevant_files"], list), exploration
+assert isinstance(exploration["findings"], list), exploration
+PY
+
 echo "[code-agent] edit loop offline run"
 edit_fixture_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_fixture_backup"

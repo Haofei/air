@@ -4121,6 +4121,35 @@ fn command_run_accepts_test_command_alias() {
 }
 
 #[test]
+fn command_run_allows_empty_command_map_until_called() {
+    let dir = temp_dir("air-tools-command-run-empty-command-map");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {},
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool("test.run", &json!({"command": "unit"}))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("tool test.run command unit is not configured"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_extracts_structured_diagnostics() {
     let dir = temp_dir("air-tools-command-run-diagnostics");
     let config_path = write_config(
