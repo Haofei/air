@@ -145,6 +145,9 @@ pub enum StateAction {
 
         #[serde(default)]
         retry: Option<RetryPolicy>,
+
+        #[serde(default)]
+        on_error: ToolErrorMode,
     },
     Approval {
         #[serde(default)]
@@ -153,6 +156,14 @@ pub enum StateAction {
     Return {
         output: String,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolErrorMode {
+    #[default]
+    Fail,
+    Observe,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

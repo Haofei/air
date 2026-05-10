@@ -49,6 +49,24 @@ impl ToolProvider for CountingTools {
     }
 }
 
+struct FailingBatchTools {
+    calls: usize,
+}
+
+impl ToolProvider for FailingBatchTools {
+    fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "docs.search");
+        self.calls += 1;
+        if input["query"] == json!("bad") {
+            return Err(RuntimeError::Provider("synthetic tool failure".to_string()));
+        }
+        Ok(json!({
+            "call": self.calls,
+            "query": input["query"]
+        }))
+    }
+}
+
 struct BatchApprovalTools {
     calls: usize,
 }
@@ -861,6 +879,62 @@ fn dispatches_bounded_model_selected_tool_batch() {
         .iter()
         .any(|event| event.action == "tool_batch_dispatch"
             && event.meta.as_ref().is_some_and(|meta| meta["count"] == 2)));
+}
+
+#[test]
+fn tool_batch_dispatch_can_observe_provider_errors() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch { on_error, .. } =
+        workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *on_error = air_core::ToolErrorMode::Observe;
+
+    let mut vm = Vm {
+        tools: FailingBatchTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "docs.search", "input": {"query": "bad"}},
+                {"tool": "docs.search", "input": {"query": "good"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 2);
+    assert_eq!(result.outputs["observations"][0]["status"], json!("error"));
+    assert_eq!(
+        result.outputs["observations"][0]["error"],
+        json!("provider error: synthetic tool failure")
+    );
+    assert_eq!(result.outputs["observations"][1]["status"], json!("ok"));
+    assert_eq!(
+        result.outputs["observations"][1]["output"]["query"],
+        json!("good")
+    );
+    assert!(result.trace.iter().any(|event| {
+        event.action == "tool_batch_dispatch"
+            && event.status == TraceStatus::Ok
+            && event
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["error_count"] == 1)
+    }));
+    assert!(result.trace.iter().any(|event| {
+        event.action == "tool_batch_dispatch_item"
+            && event.status == TraceStatus::Error
+            && event.error.as_deref() == Some("provider error: synthetic tool failure")
+    }));
 }
 
 #[test]

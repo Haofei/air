@@ -993,6 +993,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         }
         const batchOutputs = [];
         const maxAttempts = Math.max(1, Number(action.retry?.max_attempts ?? 1));
+        const observeErrors = action.on_error === 'observe';
         for (let index = 0; index < batchValue.length; index += 1) {
           const dispatchValue = batchValue[index];
           if (!dispatchValue || typeof dispatchValue !== 'object' || Array.isArray(dispatchValue) || typeof dispatchValue.tool !== 'string') {
@@ -1027,11 +1028,18 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
               resultValue = await callTool(toolConfig, dispatchValue.tool, inputValue);
               checkActionTimeout('tool_batch_dispatch_item', action.timeout_seconds, actionStartedAt);
               emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'ok', input: inputValue, output: resultValue, meta: { ...actionMeta(dispatchedAction, { elapsedMs: Date.now() - actionStartedAt, attempt, maxAttempts, willRetry: false }), index } });
-              batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, output: resultValue });
+              batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, status: 'ok', output: resultValue });
               break;
             } catch (error) {
               emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', input: inputValue, output: resultValue, meta: { ...actionMeta(dispatchedAction, { elapsedMs: Date.now() - actionStartedAt, attempt, maxAttempts, willRetry: attempt !== maxAttempts }), index }, error: String(error?.message ?? error) });
-              if (attempt === maxAttempts) throw error;
+              if (attempt === maxAttempts) {
+                if (observeErrors) {
+                  const message = String(error?.message ?? error);
+                  batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
+                  break;
+                }
+                throw error;
+              }
             }
           }
         }
@@ -1042,7 +1050,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
           throw error;
         }
         localState[action.output] = batchOutputs;
-        emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch', status: 'ok', input: batchValue, output: batchOutputs, meta: { count: batchOutputs.length, max_calls: maxCalls } });
+        emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch', status: 'ok', input: batchValue, output: batchOutputs, meta: { count: batchOutputs.length, max_calls: maxCalls, error_count: batchOutputs.filter((item) => item?.status === 'error').length } });
       } else if (action.kind === 'approval') {
         try {
           const decision = await requestApproval(toolConfig, module, action, localState);
@@ -1663,6 +1671,8 @@ mod tests {
         assert!(code.contains("approval-required capability"));
         assert!(code.contains("tool_batch_dispatch_item_start"));
         assert!(code.contains("batchOutputs.push"));
+        assert!(code.contains("const observeErrors = action.on_error === 'observe'"));
+        assert!(code.contains("status: 'error'"));
     }
 
     #[test]

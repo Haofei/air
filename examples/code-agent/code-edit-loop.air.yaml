@@ -220,6 +220,7 @@ workflow:
           output: observation
           max_calls: 4
           timeout_seconds: 30
+          on_error: observe
         - kind: append
           target: observations
           value:

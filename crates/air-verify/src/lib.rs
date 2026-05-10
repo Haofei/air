@@ -579,6 +579,7 @@ impl Verifier {
                 timeout_seconds,
                 max_calls,
                 retry,
+                ..
             } => {
                 if tools_by_name.is_empty() {
                     self.error(

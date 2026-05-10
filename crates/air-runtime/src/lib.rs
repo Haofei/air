@@ -1,6 +1,6 @@
 use air_core::{
-    validate_value_against_type, AirModule, Expr, InputSpec, RetryPolicy, StateAction, TypeSpec,
-    Workflow,
+    validate_value_against_type, AirModule, Expr, InputSpec, RetryPolicy, StateAction,
+    ToolErrorMode, TypeSpec, Workflow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -917,6 +917,7 @@ where
                 timeout_seconds,
                 max_calls,
                 retry,
+                on_error,
             } => {
                 let batch = resolve_input(context.state, context.outputs, input)?;
                 self.execute_tool_batch_dispatch(
@@ -927,6 +928,7 @@ where
                         timeout_seconds: *timeout_seconds,
                         max_calls: *max_calls,
                         retry,
+                        on_error: *on_error,
                     },
                 )?;
             }
@@ -1194,6 +1196,7 @@ where
             timeout_seconds,
             max_calls,
             retry,
+            on_error,
         } = batch;
         reject_control_field_write("tool_batch_dispatch", output)?;
         let dispatches = resolve_tool_batch_dispatch(&input)?;
@@ -1307,6 +1310,14 @@ where
                             Err(error.to_string()),
                         );
                         if is_final_attempt {
+                            if on_error == ToolErrorMode::Observe {
+                                item_output = Some(tool_batch_error_observation(
+                                    &tool,
+                                    &tool_input,
+                                    &error.to_string(),
+                                ));
+                                break;
+                            }
                             return Err(error);
                         }
                         continue;
@@ -1336,6 +1347,14 @@ where
                         Err(error.to_string()),
                     );
                     if is_final_attempt {
+                        if on_error == ToolErrorMode::Observe {
+                            item_output = Some(tool_batch_error_observation(
+                                &tool,
+                                &tool_input,
+                                &error.to_string(),
+                            ));
+                            break;
+                        }
                         return Err(error);
                     }
                     continue;
@@ -1363,6 +1382,7 @@ where
                 item_output = Some(json!({
                     "tool": tool,
                     "input": tool_input,
+                    "status": "ok",
                     "output": result,
                 }));
                 break;
@@ -1388,7 +1408,18 @@ where
             "tool_batch_dispatch",
             Some(input),
             context.state.get(output).cloned(),
-            Some(json!({"count": attempted, "max_calls": max_calls})),
+            Some(json!({
+                "count": attempted,
+                "max_calls": max_calls,
+                "error_count": context
+                    .state
+                    .get(output)
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter(|item| item.get("status").and_then(Value::as_str) == Some("error"))
+                    .count()
+            })),
             Ok(()),
         );
         Ok(())
@@ -2003,6 +2034,19 @@ fn resolve_tool_batch_dispatch(batch: &Value) -> Result<Vec<(String, Value)>, Ru
         .collect()
 }
 
+fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value {
+    json!({
+        "tool": tool,
+        "input": input,
+        "status": "error",
+        "error": error,
+        "output": {
+            "status": "error",
+            "error": error,
+        }
+    })
+}
+
 fn validate_approval_capabilities(
     module: &AirModule,
     approval_for: &[String],
@@ -2098,6 +2142,7 @@ struct ToolBatchExecution<'a> {
     timeout_seconds: u64,
     max_calls: u32,
     retry: &'a Option<RetryPolicy>,
+    on_error: ToolErrorMode,
 }
 
 impl ExecutionContext<'_> {

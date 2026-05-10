@@ -1,4 +1,4 @@
-use air_core::{AirModule, Expr, InputSpec, StateAction, Workflow};
+use air_core::{AirModule, Expr, InputSpec, StateAction, ToolErrorMode, Workflow};
 use air_linker::{resolve_module_path, ModuleStore, RunPlan};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -643,8 +643,10 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
             input,
             output: output_field,
             max_calls,
+            on_error,
             ..
         } => {
+            let observe_errors = *on_error == ToolErrorMode::Observe;
             output.push_str(&format!("    batch_value = {}\n", input_expr(input)?));
             output.push_str("    if not isinstance(batch_value, list):\n");
             output.push_str(
@@ -666,8 +668,15 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
                 "            raise ValueError(f\"tool_batch_dispatch input[{index}].tool must be a string\")\n",
             );
             output.push_str("        tool_input = dispatch_value.get(\"input\", {})\n");
-            output.push_str("        result_value = call_tool(tool_name, tool_input)\n");
-            output.push_str("        batch_outputs.append({\"tool\": tool_name, \"input\": tool_input, \"output\": result_value})\n");
+            output.push_str("        try:\n");
+            output.push_str("            result_value = call_tool(tool_name, tool_input)\n");
+            output.push_str("            batch_outputs.append({\"tool\": tool_name, \"input\": tool_input, \"status\": \"ok\", \"output\": result_value})\n");
+            output.push_str("        except Exception as error:\n");
+            if observe_errors {
+                output.push_str("            batch_outputs.append({\"tool\": tool_name, \"input\": tool_input, \"status\": \"error\", \"error\": str(error), \"output\": {\"status\": \"error\", \"error\": str(error)}})\n");
+            } else {
+                output.push_str("            raise\n");
+            }
             output.push_str(&format!(
                 "    _air_validate_output(AIR_MODULE, {}, batch_outputs)\n",
                 py_string(output_field)?
@@ -1370,6 +1379,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                 if not isinstance(batch_value, list):
                     raise ValueError("tool_batch_dispatch input must be an array")
                 max_calls = int(action["max_calls"])
+                observe_errors = action.get("on_error") == "observe"
                 if len(batch_value) > max_calls:
                     error = RuntimeError(f"tool_batch_dispatch max_calls exceeded: limit={max_calls} attempted={len(batch_value)}")
                     _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "error", input_value=batch_value, meta={"max_calls": max_calls, "attempted": len(batch_value)}, error=str(error))
@@ -1421,13 +1431,16 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                             meta["index"] = index
                             _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, output_value=locals().get("result_value"), meta=meta, error=str(error))
                             if attempt == max_attempts:
+                                if observe_errors:
+                                    batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
+                                    break
                                 raise
                             continue
                         elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
                         meta = _air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=False)
                         meta["index"] = index
                         _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "ok", input_value=input_value, output_value=result_value, meta=meta)
-                        batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "output": result_value})
+                        batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "status": "ok", "output": result_value})
                         break
                 try:
                     _air_validate_output(module, action["output"], batch_outputs)
@@ -1435,7 +1448,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "error", input_value=batch_value, output_value=batch_outputs, meta={"count": len(batch_outputs), "max_calls": max_calls}, error=str(error))
                     raise
                 local_state[action["output"]] = batch_outputs
-                _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "ok", input_value=batch_value, output_value=batch_outputs, meta={"count": len(batch_outputs), "max_calls": max_calls})
+                _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "ok", input_value=batch_value, output_value=batch_outputs, meta={"count": len(batch_outputs), "max_calls": max_calls, "error_count": sum(1 for item in batch_outputs if isinstance(item, dict) and item.get("status") == "error")})
             elif kind == "approval":
                 try:
                     decision = request_approval(action.get("approval_for", []), module, local_state)
@@ -2180,6 +2193,28 @@ mod tests {
         assert!(code.contains("_air_enforce_approval_required_batch_isolation"));
         assert!(code.contains("call_tool(tool_name, tool_input)"));
         assert!(code.contains("\"output\": result_value"));
+    }
+
+    #[test]
+    fn lowers_observed_tool_batch_errors_to_langgraph_runtime() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let mut module =
+            air_parser::parse_air_file(root.join("tests/agents/tool-batch-dispatch.air.yaml"))
+                .unwrap();
+        let Workflow::StateMachine(workflow) = &mut module.workflow else {
+            panic!("expected state machine");
+        };
+        let StateAction::ToolBatchDispatch { on_error, .. } =
+            workflow.rules[2].actions.first_mut().unwrap()
+        else {
+            panic!("expected tool_batch_dispatch");
+        };
+        *on_error = ToolErrorMode::Observe;
+
+        let code = lower_module(&module).unwrap();
+
+        assert!(code.contains("\"status\": \"error\""));
+        assert!(code.contains("\"error\": str(error)"));
     }
 
     #[test]
