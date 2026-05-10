@@ -256,6 +256,8 @@ workflow:
             object:
               path:
                 ref: target_path
+              line_numbers:
+                literal: true
           output: file_context
           timeout_seconds: 10
           retry:
@@ -445,6 +447,8 @@ workflow:
             object:
               path:
                 ref: target_path
+              line_numbers:
+                literal: true
           output: file_context_retry
           timeout_seconds: 10
           retry:

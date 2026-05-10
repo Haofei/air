@@ -17,7 +17,7 @@ The review agent uses:
 - `repo.files` for relevant repository paths;
 - `repo.search` for symbol or text matches;
 - `repo.context` for automatically selected nearby code snippets around repository matches;
-- `file.read` for the target source file;
+- `file.read` for the target source file, with optional numbered output for diagnostics;
 - `git.diff` for local changes to that file.
 - `git.status` for structured workspace change awareness.
 - `test.run` for an allowlisted verification command.

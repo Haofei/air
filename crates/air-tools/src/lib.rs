@@ -1702,6 +1702,7 @@ fn call_file_read_tool(
     let total_lines = full_content.lines().count();
     let start_line = optional_positive_usize_input(name, input, "start_line")?;
     let end_line = optional_positive_usize_input(name, input, "end_line")?;
+    let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(false);
     if let (Some(start), Some(end)) = (start_line, end_line) {
         if start > end {
             return Err(RuntimeError::Provider(format!(
@@ -1711,15 +1712,22 @@ fn call_file_read_tool(
     }
     let selected = select_line_range(&full_content, start_line, end_line);
     let (content, truncated, bytes) = bytes_to_limited_text(selected.as_bytes(), max_bytes);
+    let numbered_content = if line_numbers {
+        Some(numbered_content(&content, start_line.unwrap_or(1)))
+    } else {
+        None
+    };
     Ok(json!({
         "path": path.display().to_string(),
         "content": content.clone(),
+        "numbered_content": numbered_content,
         "bytes": bytes,
         "source_bytes": body.len(),
         "start_line": start_line,
         "end_line": end_line,
         "total_lines": total_lines,
         "truncated": truncated,
+        "line_numbers": line_numbers,
         "artifacts": [{
             "id": format!("file:{}", path.display()),
             "kind": "file_span",
@@ -1737,10 +1745,20 @@ fn call_file_read_tool(
                 "start_line": start_line,
                 "end_line": end_line,
                 "total_lines": total_lines,
-                "truncated": truncated
+                "truncated": truncated,
+                "line_numbers": line_numbers
             }
         }],
     }))
+}
+
+fn numbered_content(content: &str, first_line: usize) -> String {
+    content
+        .lines()
+        .enumerate()
+        .map(|(index, line)| format!("{:05}| {}", first_line + index, line))
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn is_likely_binary(bytes: &[u8]) -> bool {
@@ -3722,6 +3740,44 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("not valid UTF-8"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_can_return_numbered_content() {
+        let dir = temp_dir("air-tools-file-read-numbered");
+        fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.read",
+                &json!({"path": "note.txt", "start_line": 2, "line_numbers": true}),
+            )
+            .unwrap();
+
+        assert_eq!(output["content"], json!("two\nthree"));
+        assert_eq!(output["line_numbers"], json!(true));
+        assert_eq!(
+            output["numbered_content"],
+            json!("00002| two\n00003| three")
+        );
+        assert_eq!(
+            output["artifacts"][0]["metadata"]["line_numbers"],
+            json!(true)
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
