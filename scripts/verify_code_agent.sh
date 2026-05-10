@@ -1145,6 +1145,7 @@ for index, turn in enumerate(session["turns"], start=1):
     assert turn["pack"]["recipe"] == "explore", turn
     assert turn["pack"]["default_profile"] == "examples/code-agent/explore.air-profile.yaml", turn
     assert turn["pack"]["profile_override"] is False, turn
+    assert turn["pack"]["completion"]["any"][0]["exists"] == "/exploration", turn
     assert turn["trace_files"], turn
     assert Path(turn["trace_files"][0]).exists(), turn
     assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn

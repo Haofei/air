@@ -1,4 +1,4 @@
-use crate::code_pack::{load_code_agent_pack, CodeAgentPackContext};
+use crate::code_pack::{load_code_agent_pack, CodeAgentCompletion, CodeAgentPackContext};
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -467,6 +467,8 @@ struct CodeSessionTurnPack {
     profile_override: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     intent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    completion: Option<CodeAgentCompletion>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -779,6 +781,7 @@ fn code_session_turn_pack(
         profile_override: active_profile != default_profile,
         default_profile,
         intent: recipe.intent,
+        completion: recipe.completion,
     })
 }
 
@@ -5096,6 +5099,10 @@ mod tests {
             "examples/code-agent/repair-core.air-profile.yaml"
         );
         assert!(!pack.profile_override);
+        assert_eq!(
+            serde_json::to_value(&pack.completion).unwrap()["any"][0]["equals"]["path"],
+            Value::String("/repair/final_success".to_string())
+        );
         assert!(!roundtrip.turns[0].completed);
     }
 
@@ -5114,6 +5121,7 @@ mod tests {
             "examples/code-agent/repair-core.air-profile.yaml"
         );
         assert!(pack.profile_override);
+        assert!(pack.completion.is_some());
     }
 
     #[test]
