@@ -31,8 +31,24 @@ grep -q "condition  :=" docs/condition_dsl.md
 
 echo "[air-1.0] packaged examples"
 cargo run -q -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/context-compact/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
+cargo run -q -p air-cli -- run-plan examples/context-compact/context-compact.air-plan.yaml \
+  --store examples/context-compact/module-store.air-store.yaml \
+  --input examples/context-compact/input.json \
+  --tool-config examples/context-compact/tools.json \
+  > target/generated/context_compact.output.json
+"$PYTHON" - <<'PY'
+import json
+
+with open("target/generated/context_compact.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+context = output["context"]
+assert context["compacted"] is False
+assert context["raw_payload"]["task"].startswith("Decide whether AIR context compaction")
+assert context["context_budget"]["should_compact"] is False
+PY
 bash scripts/verify_code_agent.sh
 
 echo "[air-1.0] HTTP JSON tool provider smoke"

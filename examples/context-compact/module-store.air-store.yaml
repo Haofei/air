@@ -1,0 +1,12 @@
+store:
+  name: context-compact-store
+  version: 0.1.0
+
+modules:
+  context.compact@0.1.0:
+    path: examples/context-compact/context-compact.air.yaml
+    kind: primitive
+    visibility: public
+    description: "Generic context budget gate and semantic compaction module."
+    covers: [measure_context, compact_context, preserve_provenance]
+    priority: 100

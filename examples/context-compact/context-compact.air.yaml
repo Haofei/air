@@ -1,0 +1,311 @@
+agent:
+  name: context-compact-agent
+  version: 0.1.0
+  description: "Generic context budget gate and semantic compaction module."
+
+inputs:
+  payload: object
+  compact_for: string
+  max_context_chars: integer
+  threshold_percent: integer
+
+outputs:
+  context:
+    type: object
+    required:
+      - compacted
+      - summary
+      - retained_facts
+      - source_ids
+      - open_tasks
+      - risks
+      - limitations
+      - context_budget
+      - raw_payload
+    properties:
+      compacted: boolean
+      summary: string
+      retained_facts:
+        type: array
+        items:
+          type: object
+          required: [fact, source_ids]
+          properties:
+            fact: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      open_tasks:
+        type: array
+        items: string
+      risks:
+        type: array
+        items: string
+      limitations:
+        type: array
+        items: string
+      context_budget:
+        type: object
+        required:
+          - chars
+          - max_context_chars
+          - threshold_percent
+          - threshold_chars
+          - usage_ratio
+          - should_compact
+          - fields
+          - artifacts
+        properties:
+          chars: integer
+          max_context_chars: integer
+          threshold_percent: integer
+          threshold_chars: integer
+          usage_ratio: number
+          should_compact: boolean
+          fields:
+            type: array
+            items:
+              type: object
+          artifacts:
+            type: array
+            items:
+              type: object
+      raw_payload: object
+
+requires:
+  capabilities: [context.manage]
+
+state:
+  phase:
+    type: enum
+    enum: [init, measure, route, compact, passthrough, done, failed]
+  context_budget:
+    type: object
+    required:
+      - chars
+      - max_context_chars
+      - threshold_percent
+      - threshold_chars
+      - usage_ratio
+      - should_compact
+      - fields
+      - artifacts
+    properties:
+      chars: integer
+      max_context_chars: integer
+      threshold_percent: integer
+      threshold_chars: integer
+      usage_ratio: number
+      should_compact: boolean
+      fields:
+        type: array
+        items:
+          type: object
+      artifacts:
+        type: array
+        items:
+          type: object
+  compact_body:
+    type: object
+    required: [summary, retained_facts, source_ids, open_tasks, risks, limitations]
+    properties:
+      summary: string
+      retained_facts:
+        type: array
+        items:
+          type: object
+          required: [fact, source_ids]
+          properties:
+            fact: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      open_tasks:
+        type: array
+        items: string
+      risks:
+        type: array
+        items: string
+      limitations:
+        type: array
+        items: string
+  context:
+    type: object
+    required:
+      - compacted
+      - summary
+      - retained_facts
+      - source_ids
+      - open_tasks
+      - risks
+      - limitations
+      - context_budget
+      - raw_payload
+    properties:
+      compacted: boolean
+      summary: string
+      retained_facts:
+        type: array
+        items:
+          type: object
+          required: [fact, source_ids]
+          properties:
+            fact: string
+            source_ids:
+              type: array
+              items: string
+      source_ids:
+        type: array
+        items: string
+      open_tasks:
+        type: array
+        items: string
+      risks:
+        type: array
+        items: string
+      limitations:
+        type: array
+        items: string
+      context_budget:
+        type: object
+      raw_payload: object
+
+tools:
+  - name: context.measure
+    capability: context.manage
+    timeout_ms: 10000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 8
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: measure
+
+    - id: measure
+      when: phase == "measure"
+      actions:
+        - kind: tool_call
+          tool: context.measure
+          input:
+            object:
+              payload:
+                ref: payload
+              max_context_chars:
+                ref: max_context_chars
+              threshold_percent:
+                ref: threshold_percent
+          output: context_budget
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: route
+
+    - id: route-compact
+      when: phase == "route" && context_budget.should_compact == true
+      actions:
+        - kind: set
+          values:
+            phase: compact
+
+    - id: route-passthrough
+      when: phase == "route" && context_budget.should_compact == false
+      actions:
+        - kind: set
+          values:
+            phase: passthrough
+
+    - id: compact
+      when: phase == "compact"
+      actions:
+        - kind: model_call
+          model: context_compactor
+          input:
+            object:
+              compact_for:
+                ref: compact_for
+              payload:
+                ref: payload
+              context_budget:
+                ref: context_budget
+          output: compact_body
+          timeout_seconds: 120
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            context:
+              object:
+                compacted:
+                  literal: true
+                summary:
+                  path: compact_body.summary
+                retained_facts:
+                  path: compact_body.retained_facts
+                source_ids:
+                  path: compact_body.source_ids
+                open_tasks:
+                  path: compact_body.open_tasks
+                risks:
+                  path: compact_body.risks
+                limitations:
+                  path: compact_body.limitations
+                context_budget:
+                  ref: context_budget
+                raw_payload:
+                  object: {}
+            phase: done
+
+    - id: passthrough
+      when: phase == "passthrough"
+      actions:
+        - kind: set
+          values:
+            context:
+              object:
+                compacted:
+                  literal: false
+                summary:
+                  literal: Context is under the configured threshold; raw payload retained.
+                retained_facts:
+                  array: []
+                source_ids:
+                  array: []
+                open_tasks:
+                  array: []
+                risks:
+                  array: []
+                limitations:
+                  array: []
+                context_budget:
+                  ref: context_budget
+                raw_payload:
+                  ref: payload
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: context
+
+policy:
+  max_tool_calls: 1
+  timeout_seconds: 180
+
+observability:
+  traces: true

@@ -1,0 +1,20 @@
+{
+  "compact_for": "a downstream agent that needs a concise, source-grounded working context",
+  "max_context_chars": 2000,
+  "threshold_percent": 80,
+  "payload": {
+    "task": "Decide whether AIR context compaction should be a generic module or code-agent-only behavior.",
+    "artifacts": [
+      {
+        "id": "design-compact",
+        "kind": "design_note",
+        "content": "Context compaction should be available to any bounded agent. The deterministic measurement step decides whether semantic compression is needed, and the model step preserves facts, risks, tasks, limitations, and source ids."
+      },
+      {
+        "id": "code-agent-usage",
+        "kind": "trace_note",
+        "content": "The code review agent already uses context.measure to route large evidence bundles through a context_compactor model before final analysis."
+      }
+    ]
+  }
+}

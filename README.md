@@ -163,6 +163,7 @@ It demonstrates:
 - schedule groups and opt-in parallel execution;
 - model/tool call budgets and action timeouts;
 - schema retry and token-limit compaction retry;
+- reusable context-budget measurement and semantic compaction module;
 - local tool capability handshakes;
 - checkpoint/resume;
 - JIT hot-path specialization;

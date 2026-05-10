@@ -288,6 +288,12 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `context_measure` | `context.measure` | `{ "payload": {...}, "max_context_chars": 128000, "threshold_percent": 80 }` | `{ chars, max_context_chars, threshold_percent, threshold_chars, usage_ratio, should_compact, fields[], artifacts[] }` | Deterministically estimates serialized context size and returns whether a module should route through a semantic compaction step. This is generic and can be used by coding, research, planning, or support agents. |
 | `command_run` | `test.run` | `{ "command": "alias" }` | `{ command, success, status, log, diagnostics[], artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Extracts common Rust/TypeScript/file-line diagnostics for repair loops. |
 
+The reusable `examples/context-compact/context-compact.air.yaml` module wraps `context.measure`
+with conditional routing. Under budget it returns the raw payload; over budget it calls the shared
+`context_compactor` model and returns a bounded brief with retained facts, source ids, open tasks,
+risks, and limitations. Coding agents, research agents, support agents, and planner agents can all
+compose this module instead of each defining their own compaction state machine.
+
 Artifact-producing tools return a common shape:
 
 ```json

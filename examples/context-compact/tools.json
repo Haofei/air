@@ -1,0 +1,10 @@
+{
+  "tools": {
+    "context.measure": {
+      "kind": "context_measure",
+      "capability": "context.manage",
+      "max_context_chars": 128000,
+      "threshold_percent": 80
+    }
+  }
+}

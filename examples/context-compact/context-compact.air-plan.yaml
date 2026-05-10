@@ -1,0 +1,26 @@
+plan:
+  name: context-compact
+  version: 0.1.0
+  description: "Run the reusable generic context compaction module."
+
+requires:
+  capabilities: [context.manage]
+
+nodes:
+  - id: compact
+    module: context.compact@0.1.0
+
+entry: compact
+
+connect:
+  - from: $input.payload
+    to: compact.payload
+  - from: $input.compact_for
+    to: compact.compact_for
+  - from: $input.max_context_chars
+    to: compact.max_context_chars
+  - from: $input.threshold_percent
+    to: compact.threshold_percent
+
+outputs:
+  context: compact.context
