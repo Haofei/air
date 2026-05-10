@@ -473,8 +473,10 @@ fn require_fresh_read(
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EditMatchStrategy {
+    Auto,
     Exact,
     LineTrimmed,
+    WhitespaceNormalized,
     IndentationFlexible,
 }
 
@@ -493,19 +495,23 @@ impl EditMatchStrategy {
             return Ok(Self::Exact);
         };
         match value {
+            "auto" => Ok(Self::Auto),
             "exact" => Ok(Self::Exact),
             "line_trimmed" => Ok(Self::LineTrimmed),
+            "whitespace_normalized" => Ok(Self::WhitespaceNormalized),
             "indentation_flexible" => Ok(Self::IndentationFlexible),
             _ => Err(RuntimeError::Provider(format!(
-                "tool {tool_name} {label}.match_strategy must be one of exact, line_trimmed, indentation_flexible"
+                "tool {tool_name} {label}.match_strategy must be one of auto, exact, line_trimmed, whitespace_normalized, indentation_flexible"
             ))),
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
+            Self::Auto => "auto",
             Self::Exact => "exact",
             Self::LineTrimmed => "line_trimmed",
+            Self::WhitespaceNormalized => "whitespace_normalized",
             Self::IndentationFlexible => "indentation_flexible",
         }
     }
@@ -532,8 +538,42 @@ fn find_edit_matches(
     content: &str,
     old_string: &str,
     strategy: EditMatchStrategy,
+) -> (EditMatchStrategy, Vec<EditMatch>) {
+    if strategy == EditMatchStrategy::Auto {
+        let mut first_non_empty = None;
+        for candidate in [
+            EditMatchStrategy::Exact,
+            EditMatchStrategy::LineTrimmed,
+            EditMatchStrategy::IndentationFlexible,
+            EditMatchStrategy::WhitespaceNormalized,
+        ] {
+            let matches = find_edit_matches_with_strategy(content, old_string, candidate);
+            if matches.is_empty() {
+                continue;
+            }
+            if matches.len() == 1 {
+                return (candidate, matches);
+            }
+            if first_non_empty.is_none() {
+                first_non_empty = Some((candidate, matches));
+            }
+        }
+        return first_non_empty.unwrap_or((EditMatchStrategy::Exact, Vec::new()));
+    }
+
+    (
+        strategy,
+        find_edit_matches_with_strategy(content, old_string, strategy),
+    )
+}
+
+fn find_edit_matches_with_strategy(
+    content: &str,
+    old_string: &str,
+    strategy: EditMatchStrategy,
 ) -> Vec<EditMatch> {
     match strategy {
+        EditMatchStrategy::Auto => unreachable!("auto expands before concrete matching"),
         EditMatchStrategy::Exact => content
             .match_indices(old_string)
             .map(|(start, value)| EditMatch {
@@ -543,6 +583,9 @@ fn find_edit_matches(
             .collect(),
         EditMatchStrategy::LineTrimmed => {
             find_line_based_edit_matches(content, old_string, |line| line.trim().to_string())
+        }
+        EditMatchStrategy::WhitespaceNormalized => {
+            find_line_based_edit_matches(content, old_string, normalize_whitespace)
         }
         EditMatchStrategy::IndentationFlexible => {
             find_line_based_edit_matches(content, old_string, strip_common_indentation)
@@ -705,6 +748,10 @@ fn strip_common_indentation(text: &str) -> String {
         .join("\n")
 }
 
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub(super) struct FileWriteOptions<'a> {
     pub(super) base_dir: &'a Path,
     pub(super) max_bytes: usize,
@@ -847,6 +894,7 @@ pub(super) fn call_file_ops_tool(
     let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
     let mut pending = BTreeMap::<PathBuf, FileOpsPendingFile>::new();
     let mut diff = String::new();
+    let mut match_strategies = Vec::new();
 
     for (index, operation) in operations.iter().enumerate() {
         let label = format!("input.operations[{index}]");
@@ -899,9 +947,10 @@ pub(super) fn call_file_ops_tool(
                 let match_strategy = if object.get("match_strategy").is_some() {
                     EditMatchStrategy::from_labeled_input(name, operation, &label)?
                 } else {
-                    EditMatchStrategy::Exact
+                    EditMatchStrategy::Auto
                 };
-                let matches = find_edit_matches(&current, old_string, match_strategy);
+                let (effective_match_strategy, matches) =
+                    find_edit_matches(&current, old_string, match_strategy);
                 if matches.is_empty() {
                     return Ok(file_ops_failure_output(
                         name,
@@ -925,11 +974,12 @@ pub(super) fn call_file_ops_tool(
                         format!(
                             "{label}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
                         matches.len(),
-                        match_strategy.as_str()
+                        effective_match_strategy.as_str()
                         ),
                     ));
                 }
                 let selected = selected_edit_matches(&matches, replace_all);
+                match_strategies.push(effective_match_strategy.as_str());
                 diff.push_str(&edit_unified_diff(
                     input_path, &current, &selected, new_string,
                 ));
@@ -1057,6 +1107,7 @@ pub(super) fn call_file_ops_tool(
         "files": files,
         "file_count": pending.len(),
         "diagnostics": [],
+        "match_strategies": match_strategies,
         "bytes": diff_bytes,
         "diff": diff_content,
         "diff_truncated": diff_truncated,
@@ -1075,6 +1126,7 @@ pub(super) fn call_file_ops_tool(
                 "dry_run": dry_run,
                 "operation_count": operations.len(),
                 "file_count": pending.len(),
+                "match_strategies": match_strategies,
                 "diff_bytes": diff_bytes,
                 "diff_truncated": diff_truncated
             }
@@ -1335,7 +1387,8 @@ pub(super) fn call_file_edit_tool(
     let mut diff = String::new();
     let mut strategies = Vec::new();
     for operation in &operations {
-        let matches = find_edit_matches(&updated, operation.old_string, operation.match_strategy);
+        let (effective_match_strategy, matches) =
+            find_edit_matches(&updated, operation.old_string, operation.match_strategy);
         if matches.is_empty() {
             return Err(RuntimeError::Provider(format!(
                 "tool {name} {}.old_string was not found with match_strategy={}",
@@ -1348,7 +1401,7 @@ pub(super) fn call_file_edit_tool(
                 "tool {name} {}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
                 operation.label,
                 matches.len(),
-                operation.match_strategy.as_str()
+                effective_match_strategy.as_str()
             )));
         }
         let selected_matches = selected_edit_matches(&matches, operation.replace_all);
@@ -1359,7 +1412,7 @@ pub(super) fn call_file_edit_tool(
             operation.new_string,
         ));
         total_replacements += selected_matches.len();
-        strategies.push(operation.match_strategy.as_str());
+        strategies.push(effective_match_strategy.as_str());
         updated = apply_selected_edit_matches(&updated, &selected_matches, operation.new_string);
     }
 

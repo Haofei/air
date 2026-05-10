@@ -1294,6 +1294,124 @@ fn file_ops_is_atomic_when_later_operation_fails() {
 }
 
 #[test]
+fn file_ops_defaults_to_auto_match_strategy() {
+    let dir = temp_dir("air-tools-file-ops-auto-match");
+    fs::write(
+        dir.join("note.txt"),
+        "function demo() {\n    return \"before\";\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 4,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [
+                    {
+                        "kind": "edit",
+                        "path": "note.txt",
+                        "old_string": "function demo() {\nreturn \"before\";\n}",
+                        "new_string": "function demo() {\n    return \"after\";\n}"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["match_strategies"], json!(["line_trimmed"]));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "function demo() {\n    return \"after\";\n}\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_respects_explicit_exact_match_strategy() {
+    let dir = temp_dir("air-tools-file-ops-exact-match");
+    fs::write(
+        dir.join("note.txt"),
+        "function demo() {\n    return \"before\";\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 4,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [
+                    {
+                        "kind": "edit",
+                        "path": "note.txt",
+                        "old_string": "function demo() {\nreturn \"before\";\n}",
+                        "new_string": "function demo() {\n    return \"after\";\n}",
+                        "match_strategy": "exact"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert!(output["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("match_strategy=exact"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "function demo() {\n    return \"before\";\n}\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_edit_rejects_stale_read() {
     let dir = temp_dir("air-tools-file-edit-stale-read");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
