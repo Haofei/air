@@ -211,6 +211,7 @@ with acceptance_trace.open(encoding="utf-8") as handle:
 assert any(event.get("meta", {}).get("model") == "project_planner" for event in plan_events), plan_events
 assert any(event.get("meta", {}).get("model") == "code_explorer" for event in task_events), task_events
 assert any("AIR project memory from previous tasks" in json.dumps(event.get("input", {})) for event in task2_events), task2_events
+assert any("Available project artifacts from previous tasks" in json.dumps(event.get("input", {})) for event in task2_events), task2_events
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 

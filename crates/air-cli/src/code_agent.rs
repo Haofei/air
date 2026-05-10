@@ -2095,10 +2095,15 @@ fn code_project_task_input(
         &serde_json::to_string_pretty(&code_project_memory(prior_executions)).unwrap_or_default(),
         default_context_budget_chars(),
     );
+    let available_artifacts = truncate_for_context(
+        &serde_json::to_string_pretty(&code_project_artifacts(&[], prior_executions))
+            .unwrap_or_default(),
+        default_context_budget_chars(),
+    );
     input.insert(
         "task".to_string(),
         Value::String(format!(
-            "{task}\n\nAIR project memory from previous tasks:\n{memory}"
+            "{task}\n\nAIR project memory from previous tasks:\n{memory}\n\nAvailable project artifacts from previous tasks:\n{available_artifacts}"
         )),
     );
     input
@@ -3945,7 +3950,12 @@ mod tests {
         let previous = vec![json!({
             "task_id": "t1",
             "completed": true,
-            "outputs": {"exploration": {"summary": "found routing code"}}
+            "outputs": {
+                "exploration": {
+                    "summary": "found routing code",
+                    "artifacts": [{"id": "repo-search:routing", "kind": "repo_search"}]
+                }
+            }
         })];
 
         let next = code_project_task_input(&input, &previous);
@@ -3954,7 +3964,9 @@ mod tests {
         let task = next["task"].as_str().unwrap();
         assert!(task.contains("inspect the next file"));
         assert!(task.contains("AIR project memory from previous tasks"));
+        assert!(task.contains("Available project artifacts from previous tasks"));
         assert!(task.contains("found routing code"));
+        assert!(task.contains("repo-search:routing"));
     }
 
     #[test]

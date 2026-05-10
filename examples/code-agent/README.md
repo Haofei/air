@@ -236,6 +236,9 @@ turning every trace into prompt text.
 artifacts declared by task outputs, changed files, and recovery forks. The memory object references
 the same artifact ids, so downstream tasks can cite concrete project artifacts instead of relying on
 natural-language summaries.
+When executing later tasks, the wrapper injects an `Available project artifacts from previous tasks`
+section into the task text so unchanged AIR modules can still see the artifact ids without expanding
+their input schema.
 
 Then run it:
 
