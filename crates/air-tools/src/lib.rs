@@ -3164,8 +3164,9 @@ fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> 
                     "raw": raw
                 }));
             }
-        } else if let Some(diagnostic) =
-            parse_typescript_diagnostic(trimmed).or_else(|| parse_colon_diagnostic(trimmed))
+        } else if let Some(diagnostic) = parse_typescript_diagnostic(trimmed)
+            .or_else(|| parse_colon_diagnostic(trimmed))
+            .or_else(|| parse_colon_line_diagnostic(trimmed))
         {
             diagnostics.push(diagnostic);
             pending_rust = None;
@@ -3280,6 +3281,44 @@ fn parse_colon_diagnostic(line: &str) -> Option<Value> {
             "path": path,
             "line": line_number,
             "column": column,
+            "message": message,
+            "raw": line
+        }));
+    }
+    None
+}
+
+fn parse_colon_line_diagnostic(line: &str) -> Option<Value> {
+    let parts = line.split(':').collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return None;
+    }
+    for index in 1..parts.len().saturating_sub(1) {
+        let Ok(line_number) = parts[index].trim().parse::<u64>() else {
+            continue;
+        };
+        let rest = parts[index + 1..].join(":");
+        let rest = rest.trim();
+        if rest.is_empty() {
+            continue;
+        }
+        let path = parts[..index].join(":");
+        if path.trim().is_empty() {
+            continue;
+        }
+        let (severity, message) = if let Some((severity, message)) = split_severity_message(rest) {
+            (severity, message)
+        } else if let Some(message) = parse_python_exception_line(rest) {
+            ("error".to_string(), message)
+        } else {
+            continue;
+        };
+        return Some(json!({
+            "source": "command_run",
+            "severity": severity,
+            "path": path,
+            "line": line_number,
+            "column": 1,
             "message": message,
             "raw": line
         }));
@@ -5154,6 +5193,33 @@ AssertionError: broken invariant
         assert_eq!(
             diagnostics[0]["message"],
             json!("AssertionError: broken invariant")
+        );
+    }
+
+    #[test]
+    fn extract_command_diagnostics_parses_line_only_colon_diagnostics() {
+        let diagnostics = extract_command_diagnostics(
+            "src/app.py:12: error: Incompatible return value type\n\
+             tests/test_app.py:7: AssertionError: expected true\n\
+             src/app.py:12: in handler\n",
+            10,
+        );
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0]["severity"], json!("error"));
+        assert_eq!(diagnostics[0]["path"], json!("src/app.py"));
+        assert_eq!(diagnostics[0]["line"], json!(12));
+        assert_eq!(diagnostics[0]["column"], json!(1));
+        assert_eq!(
+            diagnostics[0]["message"],
+            json!("Incompatible return value type")
+        );
+        assert_eq!(diagnostics[1]["severity"], json!("error"));
+        assert_eq!(diagnostics[1]["path"], json!("tests/test_app.py"));
+        assert_eq!(diagnostics[1]["line"], json!(7));
+        assert_eq!(
+            diagnostics[1]["message"],
+            json!("AssertionError: expected true")
         );
     }
 
