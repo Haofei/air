@@ -677,7 +677,7 @@ workflow:
               action:
                 literal: write_path_error_hint
               rationale:
-                literal: A write tool call failed path policy. Retry with paths copied exactly from write_paths; include the full extension and do not repeat the same rejected path.
+                literal: A write tool call failed AIR write policy. If the error is about path policy, retry with paths copied exactly from write_paths. If it is about max_changed_lines or size, split the edit into smaller replace_lines/file.ops operations.
               requested:
                 ref: decision.tool_calls
               result:
@@ -688,6 +688,8 @@ workflow:
                     ref: observation[0].tool
                   failed_input:
                     ref: observation[0].input
+                  failed_error:
+                    ref: observation[0].error
         - kind: set
           values:
             phase: choose
@@ -702,7 +704,7 @@ workflow:
               action:
                 literal: write_path_error_hint
               rationale:
-                literal: A patch tool call failed path policy. Retry with patch paths copied exactly from write_paths; include the full extension and do not repeat the same rejected path.
+                literal: A patch tool call failed AIR write policy. If the error is about path policy, retry with patch paths copied exactly from write_paths. If it is about max_changed_lines or size, split the patch into smaller file.ops replace_lines operations.
               requested:
                 ref: decision.tool_calls
               result:
@@ -713,6 +715,8 @@ workflow:
                     ref: observation[0].tool
                   failed_input:
                     ref: observation[0].input
+                  failed_error:
+                    ref: observation[0].error
         - kind: set
           values:
             phase: choose

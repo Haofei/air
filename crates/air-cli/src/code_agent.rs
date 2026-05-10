@@ -2564,6 +2564,33 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_write_tool_errors_preserve_policy_error_context() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        let file_ops_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("record-file-ops-write-path-error-hint"))
+            .unwrap();
+        let rationale = file_ops_rule["actions"][0]["value"]["object"]["rationale"]["literal"]
+            .as_str()
+            .unwrap();
+        let result = &file_ops_rule["actions"][0]["value"]["object"]["result"]["object"];
+
+        assert!(
+            rationale.contains("max_changed_lines"),
+            "write tool policy errors should tell the model to split oversized edits"
+        );
+        assert_eq!(
+            result["failed_error"]["ref"],
+            serde_yaml::Value::String("observation[0].error".to_string())
+        );
+    }
+
+    #[test]
     fn completion_detection_matches_recipe_outputs() {
         let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(
