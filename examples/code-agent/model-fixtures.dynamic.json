@@ -51,6 +51,16 @@
               }
             },
             {
+              "tool": "file.search",
+              "input": {
+                "path": "crates/air-runtime/src/lib.rs",
+                "pattern": "ToolBatchDispatch|ToolBatchExecution",
+                "context_lines": 2,
+                "max_matches": 3,
+                "max_line_chars": 160
+              }
+            },
+            {
               "tool": "file.read_many",
               "input": {
                 "paths": [
@@ -61,7 +71,7 @@
               }
             }
           ],
-          "rationale": "Use the first batch to narrow into nearby implementation context and bounded file reads before summarizing."
+          "rationale": "Use the first batch to narrow into nearby implementation context, verify exact in-file matches with bounded file.search, and read the key files before summarizing."
         },
         {
           "complete": true,

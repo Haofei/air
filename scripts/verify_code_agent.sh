@@ -1131,6 +1131,7 @@ dispatches = [
         "repo.symbols",
         "repo.references",
         "repo.context",
+        "file.search",
         "file.read_many",
     }
 ]
@@ -1141,14 +1142,24 @@ assert {
     "repo.symbols",
     "repo.references",
     "repo.context",
+    "file.search",
     "file.read_many",
 } <= seen_tools, seen_tools
+file_search_events = [
+    event for event in dispatches
+    if event.get("meta", {}).get("tool") == "file.search"
+]
+assert file_search_events, seen_tools
+file_search_output = file_search_events[0]["output"]
+assert file_search_output["max_matches"] == 3, file_search_output
+assert file_search_output["max_line_chars"] == 160, file_search_output
+assert file_search_output["returned_match_count"] <= 3, file_search_output
 batch_done = [
     event for event in events
     if event.get("action") == "tool_batch_dispatch"
 ]
 batch_counts = [event.get("meta", {}).get("count") for event in batch_done]
-assert batch_counts == [4, 2], batch_counts
+assert batch_counts == [4, 3], batch_counts
 PY
 
 echo "[code-agent] user-facing explore command offline run"
