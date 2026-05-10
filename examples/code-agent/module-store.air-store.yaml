@@ -6,6 +6,14 @@ imports:
   - ../../modules/std/module-store.air-store.yaml
 
 modules:
+  code.explore@0.1.0:
+    path: examples/code-agent/code-explore.air.yaml
+    kind: composite
+    visibility: public
+    description: "Read-only code exploration subagent for open-ended repository questions."
+    tags: [coding, explore, search, code_read, provenance]
+    covers: [code_exploration, repository_question_answering, documentation_lookup, source_grounding]
+    priority: 110
   code.review@0.1.0:
     path: examples/code-agent/code-review.air.yaml
     kind: composite

@@ -12,6 +12,7 @@ cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review.air-pla
   --store examples/code-agent/module-store.air-store.yaml
 cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review-composed.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
 
@@ -59,6 +60,20 @@ review = output["review"]
 assert review["summary"].startswith("Fixture review completed")
 assert review["findings"][0]["severity"] == "info"
 assert review["search_quality"]["sufficient"] is True
+PY
+
+echo "[code-agent] read-only explore offline run"
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml \
+  > target/generated/code_explore_fixture.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_explore_fixture.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+exploration = output["exploration"]
+assert exploration["summary"].startswith("Fixture exploration completed")
+assert any(item["path"] == "crates/air-tools/src/lib.rs" for item in exploration["relevant_files"])
+assert exploration["findings"][0]["source_ids"]
 PY
 
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"

@@ -1,0 +1,28 @@
+plan:
+  name: code-explore
+  version: 0.1.0
+
+requires:
+  capabilities: [task.progress, network.search, file.read, code.read]
+
+nodes:
+  - id: explore
+    module: code.explore@0.1.0
+
+entry: explore
+
+connect:
+  - from: $input.task
+    to: explore.task
+  - from: $input.query
+    to: explore.query
+  - from: $input.target_path
+    to: explore.target_path
+
+outputs:
+  exploration: explore.exploration
+
+decisions:
+  - id: use-read-only-code-explore-subagent
+    rationale: "The task asks for open-ended repository understanding, so use the bounded read-only explore subagent instead of editing or running tests."
+    selected: [code.explore@0.1.0]

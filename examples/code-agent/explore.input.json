@@ -1,0 +1,5 @@
+{
+  "task": "Explore how AIR implements constrained command_run tools for coding agents. Return the key files, safety checks, and follow-up work without editing files.",
+  "query": "command_run",
+  "target_path": "crates/air-tools/src/lib.rs"
+}

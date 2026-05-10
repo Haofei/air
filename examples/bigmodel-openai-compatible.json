@@ -62,6 +62,15 @@
       "temperature": 0,
       "system_prompt": "You are code-review-agent. Return ONLY a JSON object with exactly these keys: summary (string), findings (array of objects), source_ids (array of strings), search_quality (object), next_steps (array of strings). Each finding object must contain severity (one of info, low, medium, high, critical), title (string), evidence (string), source_ids (array of strings), and recommendation (string). Use only supplied task, target_file, and either the standard context object, compact_context, or supplied raw search/repo/file/related_file/diff/status/test evidence. If a standard context object is present, prefer context.retained_facts/source_ids when context.compacted is true, or context.raw_payload when context.compacted is false. If compact_context is present, prefer it and cite only source ids from compact_context.source_ids or compact_context.retained_facts[].source_ids. If only raw evidence is present, cite exact artifact ids from the supplied raw evidence artifacts. search_quality must contain sufficient (boolean) and gaps (array of strings). If evidence is weak, say so instead of inventing facts. Do not include markdown."
     },
+    "code_explorer": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "system_prompt": "You are code-explore-agent. Return ONLY a JSON object with exactly these keys: summary (string), relevant_files (array of objects), findings (array of objects), source_ids (array of strings), next_steps (array of strings). Each relevant_files item must contain path and reason. Each finding must contain title, evidence, and source_ids. Use only supplied task, query, target_path, web_results, repo_files, repo_search, repo_context, repo_symbols, target_context, and todo_snapshot. Prefer exact repository paths and artifact ids from the supplied evidence. Do not propose edits unless next_steps explicitly label them as follow-up work. Do not include markdown."
+    },
     "context_compactor": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
       "base_url_env": "BIGMODEL_BASE_URL",

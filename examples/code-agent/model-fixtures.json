@@ -1,5 +1,50 @@
 {
   "fixtures": {
+    "code_explorer": {
+      "summary": "Fixture exploration completed: command_run is implemented as a fixed allowlisted argv runner with constrained template parameters, structured diagnostics, and bounded output artifacts.",
+      "relevant_files": [
+        {
+          "path": "crates/air-tools/src/lib.rs",
+          "reason": "Defines command_run configuration, parameter validation, template rendering, execution, and diagnostics extraction."
+        },
+        {
+          "path": "examples/code-agent/tools.json",
+          "reason": "Shows how a coding agent exposes allowlisted cargo test aliases and constrained test_filter parameters."
+        },
+        {
+          "path": "scripts/verify_code_agent.sh",
+          "reason": "Runs the command_run regression coverage as part of the code-agent gate."
+        }
+      ],
+      "findings": [
+        {
+          "title": "Shell access is intentionally not exposed",
+          "evidence": "The fixture target uses configured argv aliases and parameter policy checks instead of letting the model provide an arbitrary shell command.",
+          "source_ids": [
+            "repo-search:/Users/hwang/work/air:command_run",
+            "repo-context:/Users/hwang/work/air:command_run",
+            "file:/Users/hwang/work/air/crates/air-tools/src/lib.rs"
+          ]
+        },
+        {
+          "title": "The tool supports targeted repair loops",
+          "evidence": "Rendered argv and diagnostics are returned in the command_run output so downstream repair modules can run a focused test and inspect file/line failures.",
+          "source_ids": [
+            "repo-context:/Users/hwang/work/air:command_run",
+            "file:/Users/hwang/work/air/crates/air-tools/src/lib.rs"
+          ]
+        }
+      ],
+      "source_ids": [
+        "repo-search:/Users/hwang/work/air:command_run",
+        "repo-context:/Users/hwang/work/air:command_run",
+        "file:/Users/hwang/work/air/crates/air-tools/src/lib.rs"
+      ],
+      "next_steps": [
+        "Use code.explore for open-ended repository questions before invoking code.repair or code.build_page.",
+        "Keep command aliases narrow and prefer parameter policies over raw shell access."
+      ]
+    },
     "context_compactor": {
       "summary": "Fixture compacted code-review evidence covering search relevance, timeouts, provenance, diagnostics, and local verification.",
       "retained_facts": [

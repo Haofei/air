@@ -1,7 +1,10 @@
 # Code Agent Example
 
-This example contains three bounded AIR coding agents:
+This example contains bounded AIR coding agents and one preferred composed review recipe:
 
+- `code.explore@0.1.0` is a read-only exploration subagent for open-ended repository questions.
+  It mirrors the opencode pattern of delegating broad codebase search to a specialized child agent:
+  gather web/repo/file/symbol context, then return a concise answer with exact source ids.
 - `code.review_with_std_context@0.1.0` is the preferred review recipe. It composes
   `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
   `code.review_analyze@0.1.0`.
@@ -17,7 +20,7 @@ This example contains three bounded AIR coding agents:
   `smoke_log`, `audit_diagnostics`, `screenshots`, and `revised` so callers can judge a failed build
   without digging through the raw trace.
 
-The review agent uses:
+The explore/review agents use:
 
 - `todo.write` for a structured progress artifact before evidence gathering;
 - `todo.read` for re-reading the current task-progress artifact before analysis;
@@ -69,8 +72,9 @@ diagnostics back into one bounded revision pass instead of relying only on strin
 
 The default `tools.json` uses deterministic local search documents so release verification does
 not depend on network access. For real research, switch to `tools.playwright.json`.
-`model-fixtures.json` provides deterministic schema-valid outputs for `context_compactor` and
-`code_reviewer`, so the composed review plan can run end-to-end offline in CI without an API key.
+`model-fixtures.json` provides deterministic schema-valid outputs for `code_explorer`,
+`context_compactor`, and `code_reviewer`, so the explore and composed review plans can run
+end-to-end offline in CI without an API key.
 The verification script also runs `scripts/playwright_search_fixture_test.cjs` and
 `scripts/playwright_page_audit_fixture_test.cjs` when a local
 Playwright Chromium browser is installed; that fixture serves Bing-like HTML from localhost and
@@ -98,6 +102,14 @@ cargo run -p air-cli -- run-plan examples/code-agent/code-review-composed.air-pl
   --input examples/code-agent/input.json \
   --model-config examples/code-agent/model-fixtures.json \
   --tool-config examples/code-agent/tools.json
+```
+
+Run the read-only exploration subagent:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
+
+cargo run -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml --log
 ```
 
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
