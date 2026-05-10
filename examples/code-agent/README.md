@@ -54,7 +54,9 @@ not depend on network access. For real research, switch to `tools.playwright.jso
 The verification script also runs `scripts/playwright_search_fixture_test.cjs` when a local
 Playwright Chromium browser is installed; that fixture serves Bing-like HTML from localhost and
 checks real DOM extraction, URL normalization, page fetch, and artifact output without external
-network access.
+network access. `tools.playwright.json` enables a TTL page-content cache under
+`target/generated/playwright_search_cache` so repeated research loops avoid re-fetching the same
+result pages.
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml

@@ -3,6 +3,7 @@
 
 const fs = require('node:fs');
 const http = require('node:http');
+const os = require('node:os');
 const path = require('node:path');
 const { spawn } = require('node:child_process');
 const { chromium } = require('playwright');
@@ -110,9 +111,12 @@ async function main() {
 
   try {
     port = await listen(server);
-    const output = await runSearch({
+    const cacheDir = fs.mkdtempSync(path.join(os.tmpdir(), 'air-playwright-search-cache-'));
+    const input = {
       query: 'Playwright timeout Node.js',
       search_base_url: `http://127.0.0.1:${port}/search`,
+      cache_dir: cacheDir,
+      cache_ttl_seconds: 3600,
       max_results: 2,
       max_results_per_query: 5,
       max_per_domain: 2,
@@ -122,7 +126,8 @@ async function main() {
       page_concurrency: 2,
       retry_count: 0,
       fetch_pages: true,
-    });
+    };
+    const output = await runSearch(input);
 
     assert(output.documents.length === 2, `expected 2 documents, got ${output.documents.length}`);
     assert(output.diagnostics.search_runs[0].result_count === 2, 'expected 2 extracted search results');
@@ -133,6 +138,12 @@ async function main() {
     assert(output.documents[0].content.includes('Alpha page body about Playwright timeout'), 'first page content missing');
     assert(output.artifacts[0].kind === 'web_page', 'expected web_page artifact');
     assert(output.artifacts[0].uri === output.documents[0].url, 'artifact URI should match normalized URL');
+    assert(output.diagnostics.cache_enabled === true, 'cache should be enabled');
+
+    const cachedOutput = await runSearch(input);
+    assert(cachedOutput.documents[0].fetch_status === 'cache_hit', 'second run should use cached page content');
+    assert(cachedOutput.documents[0].cache_hit === true, 'cache_hit flag should be true');
+    assert(cachedOutput.documents[0].fetch_attempts === 0, 'cache hit should not count fetch attempts');
     console.log('[playwright-search-fixture] ok');
   } finally {
     await close(server);

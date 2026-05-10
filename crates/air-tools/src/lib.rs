@@ -161,6 +161,9 @@ enum ToolConfig {
         query_variants: Option<Vec<String>>,
 
         #[serde(default)]
+        search_base_url: Option<String>,
+
+        #[serde(default)]
         max_results: Option<usize>,
 
         #[serde(default)]
@@ -204,6 +207,12 @@ enum ToolConfig {
 
         #[serde(default)]
         fetch_pages: Option<bool>,
+
+        #[serde(default)]
+        cache_dir: Option<PathBuf>,
+
+        #[serde(default)]
+        cache_ttl_seconds: Option<u64>,
 
         #[serde(default)]
         timeout_seconds: Option<u64>,
@@ -653,6 +662,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
             ToolConfig::PlaywrightSearch {
                 script_path,
                 query_variants,
+                search_base_url,
                 max_results,
                 max_results_per_query,
                 max_per_domain,
@@ -668,6 +678,8 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 retry_count,
                 user_agent,
                 fetch_pages: _,
+                cache_dir,
+                cache_ttl_seconds,
                 timeout_seconds,
                 ..
             } => {
@@ -682,6 +694,17 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.query_variants"),
                     query_variants.as_deref(),
                 )?;
+                if let Some(search_base_url) = search_base_url {
+                    let value = search_base_url.trim();
+                    if value.is_empty()
+                        || !(value.starts_with("http://") || value.starts_with("https://"))
+                    {
+                        anyhow::bail!(
+                            "tool config {} tools.{name}.search_base_url must be an http(s) URL",
+                            path.display()
+                        );
+                    }
+                }
                 validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
                 validate_positive_usize(
                     path,
@@ -748,6 +771,20 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
+                if cache_dir
+                    .as_ref()
+                    .is_some_and(|value| value.as_os_str().is_empty())
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.cache_dir must not be empty when provided",
+                        path.display()
+                    );
+                }
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.cache_ttl_seconds"),
+                    *cache_ttl_seconds,
+                )?;
                 validate_positive_u64(
                     path,
                     &format!("tools.{name}.timeout_seconds"),
@@ -1196,6 +1233,7 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 script_path,
                 query_variants,
+                search_base_url,
                 max_results,
                 max_results_per_query,
                 max_per_domain,
@@ -1211,6 +1249,8 @@ impl ToolProvider for ConfigTools {
                 retry_count,
                 user_agent,
                 fetch_pages,
+                cache_dir,
+                cache_ttl_seconds,
                 timeout_seconds,
             } => call_playwright_search_tool(
                 name,
@@ -1218,6 +1258,7 @@ impl ToolProvider for ConfigTools {
                 &resolve_config_path(&self.config_dir, &script_path),
                 PlaywrightSearchConfig {
                     query_variants: query_variants.as_deref(),
+                    search_base_url: search_base_url.as_deref(),
                     max_results,
                     max_results_per_query,
                     max_per_domain,
@@ -1233,6 +1274,10 @@ impl ToolProvider for ConfigTools {
                     retry_count,
                     user_agent: user_agent.as_deref(),
                     fetch_pages,
+                    cache_dir: cache_dir
+                        .as_deref()
+                        .map(|path| resolve_config_path(&self.config_dir, path)),
+                    cache_ttl_seconds,
                     timeout_seconds,
                     action_timeout: Some(timeout),
                 },
@@ -1641,6 +1686,7 @@ struct WebFetchToolConfig<'a> {
 
 struct PlaywrightSearchConfig<'a> {
     query_variants: Option<&'a [String]>,
+    search_base_url: Option<&'a str>,
     max_results: Option<usize>,
     max_results_per_query: Option<usize>,
     max_per_domain: Option<usize>,
@@ -1656,6 +1702,8 @@ struct PlaywrightSearchConfig<'a> {
     retry_count: Option<usize>,
     user_agent: Option<&'a str>,
     fetch_pages: Option<bool>,
+    cache_dir: Option<PathBuf>,
+    cache_ttl_seconds: Option<u64>,
     timeout_seconds: Option<u64>,
     action_timeout: Option<Duration>,
 }
@@ -1826,10 +1874,34 @@ fn call_playwright_search_tool(
             Value::String(user_agent.to_string()),
         );
     }
+    if let Some(value) = input.get("search_base_url") {
+        request.insert("search_base_url".to_string(), value.clone());
+    } else if let Some(search_base_url) = config.search_base_url {
+        request.insert(
+            "search_base_url".to_string(),
+            Value::String(search_base_url.to_string()),
+        );
+    }
     if let Some(value) = input.get("fetch_pages") {
         request.insert("fetch_pages".to_string(), value.clone());
     } else if let Some(fetch_pages) = config.fetch_pages {
         request.insert("fetch_pages".to_string(), Value::Bool(fetch_pages));
+    }
+    if let Some(value) = input.get("cache_dir") {
+        request.insert("cache_dir".to_string(), value.clone());
+    } else if let Some(cache_dir) = config.cache_dir {
+        request.insert(
+            "cache_dir".to_string(),
+            Value::String(cache_dir.display().to_string()),
+        );
+    }
+    if let Some(value) = input.get("cache_ttl_seconds") {
+        request.insert("cache_ttl_seconds".to_string(), value.clone());
+    } else if let Some(cache_ttl_seconds) = config.cache_ttl_seconds {
+        request.insert(
+            "cache_ttl_seconds".to_string(),
+            Value::Number(cache_ttl_seconds.into()),
+        );
     }
     insert_input_or_config_array(&mut request, input, "query_variants", config.query_variants);
     insert_input_or_config_array(
@@ -6889,6 +6961,8 @@ process.stdin.on('end', () => {
                   "retry_count": 1,
                   "user_agent": "AIR test",
                   "fetch_pages": false,
+                  "cache_dir": "cache",
+                  "cache_ttl_seconds": 3600,
                   "timeout_seconds": 5
                 }
               }
@@ -6923,6 +6997,11 @@ process.stdin.on('end', () => {
         assert_eq!(output["received"]["retry_count"], json!(1));
         assert_eq!(output["received"]["user_agent"], json!("AIR test"));
         assert_eq!(output["received"]["fetch_pages"], json!(false));
+        assert!(output["received"]["cache_dir"]
+            .as_str()
+            .unwrap()
+            .ends_with("cache"));
+        assert_eq!(output["received"]["cache_ttl_seconds"], json!(3600));
         assert_eq!(output["artifacts"][0]["id"], json!("web:example"));
         assert_eq!(tools.tool_capability("web.search"), Some("network.search"));
         let _ = fs::remove_dir_all(dir);

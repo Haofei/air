@@ -26,6 +26,8 @@
       "search_delay_ms": 500,
       "retry_count": 1,
       "fetch_pages": true,
+      "cache_dir": "../../target/generated/playwright_search_cache",
+      "cache_ttl_seconds": 86400,
       "timeout_seconds": 120
     },
     "file.read": {

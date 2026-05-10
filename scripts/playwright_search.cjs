@@ -3,6 +3,8 @@
 
 const { chromium } = require('playwright');
 const crypto = require('node:crypto');
+const fs = require('node:fs/promises');
+const path = require('node:path');
 
 const SECOND_LEVEL_TLDS = new Set(['co.uk', 'org.uk', 'ac.uk', 'com.au', 'com.br', 'co.jp']);
 
@@ -36,6 +38,8 @@ async function run(input) {
   const retryCount = nonNegativeInt(input.retry_count, 1);
   const fetchPages = input.fetch_pages !== false;
   const searchBaseUrl = searchBaseUrlFromInput(input.search_base_url);
+  const cacheDir = optionalCacheDir(input.cache_dir);
+  const cacheTtlSeconds = nonNegativeInt(input.cache_ttl_seconds, 0);
   const queries = uniqueNonEmpty([query, ...stringArray(input.query_variants)]).slice(0, 8);
   const includeDomains = domainArray(input.include_domains);
   const excludeDomains = domainArray(input.exclude_domains);
@@ -159,6 +163,8 @@ async function run(input) {
             maxChars: maxContentChars,
             retryCount,
             deadlineAt,
+            cacheDir,
+            cacheTtlSeconds,
           });
           return { ...candidate, ...pageResult };
         })
@@ -188,6 +194,7 @@ async function run(input) {
       content_type: result.content_type,
       language: result.language,
       fetch_error: result.fetch_error,
+      cache_hit: Boolean(result.cache_hit),
     }));
 
     const artifacts = documents.map((doc) => ({
@@ -210,6 +217,7 @@ async function run(input) {
         status: doc.status,
         content_type: doc.content_type,
         language: doc.language,
+        cache_hit: doc.cache_hit,
       },
     }));
 
@@ -246,6 +254,8 @@ async function run(input) {
         search_delay_ms: searchDelayMs,
         retry_count: retryCount,
         search_base_url: searchBaseUrl,
+        cache_enabled: Boolean(cacheDir && cacheTtlSeconds > 0),
+        cache_ttl_seconds: cacheTtlSeconds,
       },
     };
   } finally {
@@ -267,6 +277,16 @@ async function fetchPageText(context, url, options) {
       language: '',
     };
   }
+  const cached = await readPageCache(url, options.cacheDir, options.cacheTtlSeconds);
+  if (cached) {
+    return {
+      ...cached,
+      fetch_status: cached.fetch_status === 'ok' ? 'cache_hit' : cached.fetch_status,
+      fetch_error: '',
+      fetch_attempts: 0,
+      cache_hit: true,
+    };
+  }
   let lastFailure = null;
   for (let attempt = 0; attempt <= options.retryCount; attempt += 1) {
     if (deadlineExceeded(options.deadlineAt)) {
@@ -284,14 +304,16 @@ async function fetchPageText(context, url, options) {
     }
     const result = await fetchPageTextOnce(context, url, options);
     if (result.fetch_status !== 'failed') {
-      return { ...result, fetch_attempts: attempt + 1 };
+      const output = { ...result, fetch_attempts: attempt + 1, cache_hit: false };
+      await writePageCache(url, output, options.cacheDir, options.cacheTtlSeconds);
+      return output;
     }
     lastFailure = result;
     if (attempt < options.retryCount) {
       await delay(Math.min(30_000, 500 * 2 ** attempt));
     }
   }
-  return { ...lastFailure, fetch_attempts: options.retryCount + 1 };
+  return { ...lastFailure, fetch_attempts: options.retryCount + 1, cache_hit: false };
 }
 
 async function fetchPageTextOnce(context, url, options) {
@@ -500,6 +522,13 @@ function searchBaseUrlFromInput(value) {
   return baseUrl;
 }
 
+function optionalCacheDir(value) {
+  const cacheDir = String(value || '').trim();
+  if (!cacheDir) return '';
+  if (path.isAbsolute(cacheDir)) return cacheDir;
+  return path.resolve(process.cwd(), cacheDir);
+}
+
 function searchUrl(query, baseUrl) {
   const parsed = new URL(baseUrl);
   parsed.searchParams.set('q', query);
@@ -617,6 +646,48 @@ function stableId(url) {
   } catch (_error) {
     return `web:${hashId(url)}`;
   }
+}
+
+async function readPageCache(url, cacheDir, ttlSeconds) {
+  if (!cacheDir || ttlSeconds <= 0) return null;
+  try {
+    const filePath = cachePath(cacheDir, url);
+    const body = await fs.readFile(filePath, 'utf8');
+    const entry = JSON.parse(body);
+    if (entry.url !== url || !entry.cached_at) return null;
+    const ageMs = Date.now() - Date.parse(entry.cached_at);
+    if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > ttlSeconds * 1000) return null;
+    return entry.result || null;
+  } catch (_error) {
+    return null;
+  }
+}
+
+async function writePageCache(url, result, cacheDir, ttlSeconds) {
+  if (!cacheDir || ttlSeconds <= 0 || result.fetch_status === 'failed') return;
+  try {
+    await fs.mkdir(cacheDir, { recursive: true });
+    const entry = {
+      url,
+      cached_at: new Date().toISOString(),
+      result: {
+        content: result.content || '',
+        content_chars: result.content_chars || 0,
+        truncated: Boolean(result.truncated),
+        fetch_status: result.fetch_status,
+        status: result.status || 0,
+        content_type: result.content_type || '',
+        language: result.language || '',
+      },
+    };
+    await fs.writeFile(cachePath(cacheDir, url), JSON.stringify(entry), 'utf8');
+  } catch (_error) {
+    // Cache is an optimization; search results should not fail because cache writes fail.
+  }
+}
+
+function cachePath(cacheDir, url) {
+  return path.join(cacheDir, `${hashId(url)}.json`);
 }
 
 function positiveInt(value, fallback) {
