@@ -15,7 +15,7 @@ inputs:
 outputs:
   build:
     type: object
-    required: [path, bytes, created, overwritten, test_success, audit_success, screenshots, notes]
+    required: [path, bytes, created, overwritten, test_success, audit_success, revised, smoke_log, audit_diagnostics, screenshots, notes]
     properties:
       path: string
       bytes: integer
@@ -23,6 +23,11 @@ outputs:
       overwritten: boolean
       test_success: boolean
       audit_success: boolean
+      revised: boolean
+      smoke_log: string
+      audit_diagnostics:
+        type: array
+        items: object
       screenshots:
         type: array
         items: string
@@ -133,7 +138,7 @@ state:
         items: object
   build:
     type: object
-    required: [path, bytes, created, overwritten, test_success, audit_success, screenshots, notes]
+    required: [path, bytes, created, overwritten, test_success, audit_success, revised, smoke_log, audit_diagnostics, screenshots, notes]
     properties:
       path: string
       bytes: integer
@@ -141,6 +146,11 @@ state:
       overwritten: boolean
       test_success: boolean
       audit_success: boolean
+      revised: boolean
+      smoke_log: string
+      audit_diagnostics:
+        type: array
+        items: object
       screenshots:
         type: array
         items: string
@@ -269,6 +279,12 @@ workflow:
                   ref: test_results.success
                 audit_success:
                   ref: audit_result.success
+                revised:
+                  literal: false
+                smoke_log:
+                  ref: test_results.log
+                audit_diagnostics:
+                  ref: audit_result.diagnostics
                 screenshots:
                   ref: audit_result.screenshot_paths
                 notes:
@@ -376,6 +392,12 @@ workflow:
                   ref: test_results_retry.success
                 audit_success:
                   ref: audit_result_retry.success
+                revised:
+                  literal: true
+                smoke_log:
+                  ref: test_results_retry.log
+                audit_diagnostics:
+                  ref: audit_result_retry.diagnostics
                 screenshots:
                   ref: audit_result_retry.screenshot_paths
                 notes:

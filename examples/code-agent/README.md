@@ -10,7 +10,9 @@ This example contains two bounded AIR coding agents:
   includes workspace cleanliness and changed files.
 - `code.build_page@0.1.0` generates one static HTML file, writes it through constrained `file.write`,
   runs an allowlisted smoke test, renders desktop/mobile screenshots through `browser.audit`, and
-  gets one bounded revision pass if either the smoke test or browser audit fails.
+  gets one bounded revision pass if either the smoke test or browser audit fails. Its output includes
+  `smoke_log`, `audit_diagnostics`, `screenshots`, and `revised` so callers can judge a failed build
+  without digging through the raw trace.
 
 The review agent uses:
 
