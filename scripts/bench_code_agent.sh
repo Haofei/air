@@ -67,6 +67,35 @@ echo "[code-agent-bench] offline explore"
 cargo run -q -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml \
   > target/generated/code-agent-bench/explore.output.json
 
+echo "[code-agent-bench] offline build"
+build_output="examples/apple-landing/index.html"
+build_backup="$(mktemp)"
+build_had_output=0
+if [[ -f "$build_output" ]]; then
+  cp "$build_output" "$build_backup"
+  build_had_output=1
+fi
+restore_build_output() {
+  if [[ "$build_had_output" == "1" ]]; then
+    mkdir -p "$(dirname "$build_output")"
+    cp "$build_backup" "$build_output"
+  else
+    rm -f "$build_output"
+  fi
+  rm -f "$build_backup"
+}
+trap restore_build_output EXIT
+
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-build-page.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/apple-landing.input.json \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.build.json \
+  --trace-out target/generated/code-agent-bench/build.trace.jsonl \
+  > target/generated/code-agent-bench/build.output.json
+restore_build_output
+trap - EXIT
+
 echo "[code-agent-bench] offline repair"
 repair_fixture="examples/code-agent/repair-fixture/math.js"
 repair_fixture_backup="$(mktemp)"
@@ -110,6 +139,10 @@ with (root / "review.output.json").open(encoding="utf-8") as handle:
     review = json.load(handle)["review"]
 with (root / "explore.output.json").open(encoding="utf-8") as handle:
     explore = json.load(handle)["exploration"]
+with (root / "build.output.json").open(encoding="utf-8") as handle:
+    build = json.load(handle)["build"]
+with (root / "build.trace.jsonl").open(encoding="utf-8") as handle:
+    build_trace = [json.loads(line) for line in handle if line.strip()]
 with (root / "repair.output.json").open(encoding="utf-8") as handle:
     repair = json.load(handle)["repair"]
 with (root / "repair.trace.jsonl").open(encoding="utf-8") as handle:
@@ -119,6 +152,16 @@ assert review["search_quality"]["sufficient"] is True
 assert review["findings"], review
 assert explore["relevant_files"], explore
 assert explore["findings"][0]["source_ids"], explore
+assert build["test_success"] is True, build
+assert build["audit_success"] is True, build
+assert build["revised"] is False, build
+assert len(build["screenshots"]) >= 2, build
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "browser.audit"
+    and event.get("status") == "ok"
+    for event in build_trace
+), build_trace
 assert repair["initial_success"] is False, repair
 assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
@@ -143,6 +186,14 @@ summary = {
         "relevant_files": len(explore["relevant_files"]),
         "findings": len(explore["findings"]),
     },
+    "build": {
+        "path": build["path"],
+        "bytes": build["bytes"],
+        "test_success": build["test_success"],
+        "audit_success": build["audit_success"],
+        "screenshots": len(build["screenshots"]),
+        "revised": build["revised"],
+    },
     "repair": {
         "initial_success": repair["initial_success"],
         "final_success": repair["final_success"],
@@ -154,12 +205,13 @@ summary = {
 
 if (root / "build.real.output.json").exists():
     with (root / "build.real.output.json").open(encoding="utf-8") as handle:
-        build = json.load(handle)["build"]
+        real_build = json.load(handle)["build"]
     summary["build_real"] = {
-        "success": build["success"],
-        "output_path": build["output_path"],
-        "revised": build["revised"],
-        "screenshots": len(build["screenshots"]),
+        "test_success": real_build["test_success"],
+        "audit_success": real_build["audit_success"],
+        "path": real_build["path"],
+        "revised": real_build["revised"],
+        "screenshots": len(real_build["screenshots"]),
     }
 
 with (root / "summary.json").open("w", encoding="utf-8") as handle:
