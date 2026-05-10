@@ -460,8 +460,8 @@ workflow:
           values:
             phase: post_verify
 
-    - id: record-auto-verify-failed-output
-      when: phase == "post_verify" && auto_verify_result[0].output.success == false
+    - id: record-auto-verify-failed-tool
+      when: phase == "post_verify" && auto_verify_result[0].status == "error"
       actions:
         - kind: append
           target: observations
@@ -470,7 +470,7 @@ workflow:
               action:
                 literal: auto_verify_failed
               rationale:
-                literal: Automatically ran validation after a workspace edit; output.success=false, so diagnostics must be fixed before completion.
+                literal: Automatically ran validation after a workspace edit; the validation tool returned an error and must be fixed before completion.
               requested:
                 array:
                   - object:
@@ -487,8 +487,8 @@ workflow:
             verification_status: failed
             phase: choose
 
-    - id: record-auto-verify-failed-tool
-      when: phase == "post_verify" && auto_verify_result[0].status == "error"
+    - id: record-auto-verify-failed-output
+      when: phase == "post_verify" && auto_verify_result[0].output.success == false
       actions:
         - kind: append
           target: observations
@@ -497,7 +497,7 @@ workflow:
               action:
                 literal: auto_verify_failed
               rationale:
-                literal: Automatically ran validation after a workspace edit; the validation tool returned an error and must be fixed before completion.
+                literal: Automatically ran validation after a workspace edit; output.success=false, so diagnostics must be fixed before completion.
               requested:
                 array:
                   - object:

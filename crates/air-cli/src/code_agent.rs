@@ -2444,6 +2444,34 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_handles_auto_verify_tool_errors_before_output_checks() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rule_ids = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule["id"].as_str())
+            .collect::<Vec<_>>();
+        let failed_tool = rule_ids
+            .iter()
+            .position(|id| *id == "record-auto-verify-failed-tool")
+            .unwrap();
+        let failed_output = rule_ids
+            .iter()
+            .position(|id| *id == "record-auto-verify-failed-output")
+            .unwrap();
+
+        assert!(
+            failed_tool < failed_output,
+            "tool-error branch must run before reading auto_verify_result[0].output.success"
+        );
+    }
+
+    #[test]
     fn completion_detection_matches_recipe_outputs() {
         let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(
