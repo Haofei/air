@@ -55,6 +55,9 @@ a raw shell. `command_run` returns both raw logs and structured `diagnostics[]`,
 focus on file/line/column errors instead of re-parsing terminal output from scratch.
 `diagnostic.context` turns those diagnostics into bounded nearby source snippets, which keeps repair
 models grounded without forcing them to calculate line ranges by hand.
+`command_run` can also expose constrained argv templates such as
+`["cargo", "test", "-q", "-p", "air-tools", "{{test_filter}}"]`; every placeholder must have a
+declared parameter policy, so agents can target one test without receiving raw shell access.
 When `require_read` is enabled, `file.write`, `file.edit`, and `file.patch` reject edits to files
 that were not read or were modified after the last read. `file.patch` also supports `dry_run: true`
 for `git apply --check` validation without mutating files; the repair agent uses that check before

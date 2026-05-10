@@ -459,11 +459,35 @@ enum ToolConfig {
         commands: BTreeMap<String, Vec<String>>,
 
         #[serde(default)]
+        parameters: BTreeMap<String, CommandParameterRule>,
+
+        #[serde(default)]
         timeout_seconds: Option<u64>,
 
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct CommandParameterRule {
+    #[serde(default)]
+    values: Option<Vec<String>>,
+
+    #[serde(default)]
+    max_chars: Option<usize>,
+
+    #[serde(default)]
+    allow: CommandParameterAllow,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+enum CommandParameterAllow {
+    Identifier,
+    Path,
+    #[default]
+    SafeArg,
 }
 
 impl ToolConfig {
@@ -1146,6 +1170,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
             ToolConfig::CommandRun {
                 cwd,
                 commands,
+                parameters,
                 timeout_seconds,
                 max_bytes,
                 ..
@@ -1174,6 +1199,49 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                             "tool config {} tools.{name}.commands.{alias} must contain non-empty command parts",
                             path.display()
                         );
+                    }
+                }
+                for (parameter, rule) in parameters {
+                    if parameter.trim().is_empty() {
+                        anyhow::bail!(
+                            "tool config {} tools.{name}.parameters contains an empty parameter name",
+                            path.display()
+                        );
+                    }
+                    validate_positive_usize(
+                        path,
+                        &format!("tools.{name}.parameters.{parameter}.max_chars"),
+                        rule.max_chars,
+                    )?;
+                    if rule.values.as_ref().is_some_and(Vec::is_empty) {
+                        anyhow::bail!(
+                            "tool config {} tools.{name}.parameters.{parameter}.values must not be empty",
+                            path.display()
+                        );
+                    }
+                    if let Some(values) = &rule.values {
+                        for value in values {
+                            if value.is_empty() {
+                                anyhow::bail!(
+                                    "tool config {} tools.{name}.parameters.{parameter}.values must contain non-empty strings",
+                                    path.display()
+                                );
+                            }
+                            validate_command_parameter_value(name, parameter, value, rule)
+                                .map_err(|error| anyhow::anyhow!("{error}"))?;
+                        }
+                    }
+                }
+                for (alias, command) in commands {
+                    for part in command {
+                        for parameter in command_template_parameters(part) {
+                            if !parameters.contains_key(&parameter) {
+                                anyhow::bail!(
+                                    "tool config {} tools.{name}.commands.{alias} references parameter {parameter}, but tools.{name}.parameters.{parameter} is not declared",
+                                    path.display()
+                                );
+                            }
+                        }
                     }
                 }
                 validate_positive_u64(
@@ -1702,6 +1770,7 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 cwd,
                 commands,
+                parameters,
                 timeout_seconds,
                 max_bytes,
             } => call_command_run_tool(
@@ -1709,6 +1778,7 @@ impl ToolProvider for ConfigTools {
                 input,
                 &resolve_config_path(&self.config_dir, &cwd),
                 &commands,
+                &parameters,
                 timeout_seconds.unwrap_or(120),
                 max_bytes.unwrap_or(256 * 1024),
             ),
@@ -4528,6 +4598,7 @@ fn call_command_run_tool(
     input: &Value,
     cwd: &Path,
     commands: &BTreeMap<String, Vec<String>>,
+    parameters: &BTreeMap<String, CommandParameterRule>,
     timeout_seconds: u64,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
@@ -4541,8 +4612,12 @@ fn call_command_run_tool(
     let (program, args) = command.split_first().ok_or_else(|| {
         RuntimeError::Provider(format!("tool {name} command {command_name} is empty"))
     })?;
+    let rendered_args = render_command_args(name, input, args, parameters)?;
+    let mut argv = Vec::with_capacity(command.len());
+    argv.push(program.clone());
+    argv.extend(rendered_args.iter().cloned());
     let mut child = Command::new(program)
-        .args(args)
+        .args(&rendered_args)
         .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -4571,7 +4646,7 @@ fn call_command_run_tool(
                 let (log, truncated, bytes) = bytes_to_limited_text(&combined, max_bytes);
                 return Ok(json!({
                     "command": command_name,
-                    "argv": command,
+                    "argv": argv,
                     "cwd": cwd.display().to_string(),
                     "status": status.code(),
                     "success": status.success(),
@@ -4588,7 +4663,7 @@ fn call_command_run_tool(
                         "metadata": {
                             "provider": "command_run",
                             "command": command_name,
-                            "argv": command,
+                            "argv": argv,
                             "cwd": cwd.display().to_string(),
                             "status": status.code(),
                             "success": status.success(),
@@ -4609,6 +4684,124 @@ fn call_command_run_tool(
             None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
+}
+
+fn render_command_args(
+    tool_name: &str,
+    input: &Value,
+    args: &[String],
+    parameters: &BTreeMap<String, CommandParameterRule>,
+) -> Result<Vec<String>, RuntimeError> {
+    args.iter()
+        .map(|arg| render_command_arg(tool_name, input, arg, parameters))
+        .collect()
+}
+
+fn render_command_arg(
+    tool_name: &str,
+    input: &Value,
+    arg: &str,
+    parameters: &BTreeMap<String, CommandParameterRule>,
+) -> Result<String, RuntimeError> {
+    if !arg.contains("{{") {
+        return Ok(arg.to_string());
+    }
+
+    let mut rendered = String::new();
+    let mut rest = arg;
+    while let Some(start) = rest.find("{{") {
+        let (before, after_start) = rest.split_at(start);
+        rendered.push_str(before);
+        let after_start = &after_start[2..];
+        let Some(end) = after_start.find("}}") else {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} command template contains an unterminated parameter"
+            )));
+        };
+        let parameter = after_start[..end].trim();
+        if parameter.is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} command template contains an empty parameter"
+            )));
+        }
+        let rule = parameters.get(parameter).ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "tool {tool_name} command template parameter {parameter} is not configured"
+            ))
+        })?;
+        let value = required_input_string(tool_name, input, parameter)?;
+        validate_command_parameter_value(tool_name, parameter, value, rule)?;
+        rendered.push_str(value);
+        rest = &after_start[end + 2..];
+    }
+    rendered.push_str(rest);
+    Ok(rendered)
+}
+
+fn command_template_parameters(template: &str) -> Vec<String> {
+    let mut parameters = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let after_start = &rest[start + 2..];
+        let Some(end) = after_start.find("}}") else {
+            break;
+        };
+        let parameter = after_start[..end].trim();
+        if !parameter.is_empty() {
+            parameters.push(parameter.to_string());
+        }
+        rest = &after_start[end + 2..];
+    }
+    parameters
+}
+
+fn validate_command_parameter_value(
+    tool_name: &str,
+    parameter: &str,
+    value: &str,
+    rule: &CommandParameterRule,
+) -> Result<(), RuntimeError> {
+    if value.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{parameter} must not be empty"
+        )));
+    }
+    if let Some(max_chars) = rule.max_chars {
+        let chars = value.chars().count();
+        if chars > max_chars {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} input.{parameter} must contain at most {max_chars} characters"
+            )));
+        }
+    }
+    if let Some(values) = &rule.values {
+        if !values.iter().any(|allowed| allowed == value) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} input.{parameter} is not an allowed value"
+            )));
+        }
+    }
+    let valid = match rule.allow {
+        CommandParameterAllow::Identifier => value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')),
+        CommandParameterAllow::Path => {
+            validate_git_pathspec(tool_name, value).is_ok()
+                && value.chars().all(|ch| {
+                    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':')
+                })
+        }
+        CommandParameterAllow::SafeArg => value.chars().all(|ch| {
+            ch.is_ascii_alphanumeric()
+                || matches!(ch, '_' | '-' | '.' | '/' | ':' | '+' | '=' | '@')
+        }),
+    };
+    if !valid {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{parameter} contains characters not allowed by command parameter policy"
+        )));
+    }
+    Ok(())
 }
 
 fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> {
@@ -7787,6 +7980,85 @@ mod tests {
             output["artifacts"][0]["metadata"]["diagnostics_count"],
             json!(1)
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn command_run_renders_constrained_template_parameters() {
+        let dir = temp_dir("air-tools-command-run-parameters");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "echo_test": ["node", "-e", "console.log(process.argv[1])", "{{ test_filter }}"]
+                  },
+                  "parameters": {
+                    "test_filter": {
+                      "allow": "identifier",
+                      "max_chars": 80
+                    }
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "test.run",
+                &json!({"command": "echo_test", "test_filter": "module::test_name"}),
+            )
+            .unwrap();
+
+        assert_eq!(output["success"], json!(true));
+        assert_eq!(output["argv"][3], json!("module::test_name"));
+        assert!(output["log"]
+            .as_str()
+            .unwrap()
+            .contains("module::test_name"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn command_run_rejects_undeclared_or_invalid_template_parameters() {
+        let dir = temp_dir("air-tools-command-run-parameter-policy");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "cwd": ".",
+                  "commands": {
+                    "echo_test": ["node", "-e", "console.log(process.argv[1])", "{{test_filter}}"]
+                  },
+                  "parameters": {
+                    "test_filter": {
+                      "allow": "identifier",
+                      "values": ["safe_test"]
+                    }
+                  }
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "test.run",
+                &json!({"command": "echo_test", "test_filter": "--eval=bad"}),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("not an allowed value"));
         let _ = fs::remove_dir_all(dir);
     }
 

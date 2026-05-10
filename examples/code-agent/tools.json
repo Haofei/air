@@ -111,7 +111,14 @@
       "capability": "code.test",
       "cwd": "../..",
       "commands": {
-        "air_tools": ["cargo", "test", "-q", "-p", "air-tools"]
+        "air_tools": ["cargo", "test", "-q", "-p", "air-tools"],
+        "air_tools_filter": ["cargo", "test", "-q", "-p", "air-tools", "{{test_filter}}"]
+      },
+      "parameters": {
+        "test_filter": {
+          "allow": "identifier",
+          "max_chars": 120
+        }
       },
       "timeout_seconds": 120,
       "max_bytes": 65536

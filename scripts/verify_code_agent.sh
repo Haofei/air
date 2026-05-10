@@ -37,7 +37,7 @@ cargo test -q -p air-tools repo_symbols
 cargo test -q -p air-tools repo_references
 cargo test -q -p air-tools repo_context
 cargo test -q -p air-tools diagnostic_context
-cargo test -q -p air-tools command_run_extracts_structured_diagnostics
+cargo test -q -p air-tools command_run
 cargo test -q -p air-tools extract_command_diagnostics_parses_rustc_location_blocks
 cargo test -q -p air-tools extract_command_diagnostics_parses_python_tracebacks
 cargo test -q -p air-tools extract_command_diagnostics_parses_line_only_colon_diagnostics
