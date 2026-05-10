@@ -12,6 +12,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.a
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.self.air-profile.yaml
 
 echo "[code-agent] pack and model schema tests"
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
@@ -100,6 +101,29 @@ assert output["resolved_recipe"] == "edit", output
 assert output["pack"]["recipe"] == "edit", output
 assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profile.yaml", output
 assert output["input"]["test_command"] == "edit_fixture_test", output
+PY
+
+echo "[code-agent] user-facing self edit command explain"
+cargo run -q -p air-cli -- code "update AIR code-agent docs and run the code-agent gate" \
+  --recipe edit \
+  --profile examples/code-agent/edit.self.air-profile.yaml \
+  --target examples/code-agent/README.md \
+  --test verify_code_agent \
+  --explain \
+  > target/generated/code_agent_edit_self_explain.output.json
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_self_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+assert output["resolved_recipe"] == "edit", output
+assert output["profile"] == "examples/code-agent/edit.self.air-profile.yaml", output
+assert output["pack"]["recipe"] == "edit", output
+assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profile.yaml", output
+assert output["pack"]["profile_override"] is True, output
+assert output["input"]["target_path"] == "examples/code-agent/README.md", output
+assert output["input"]["test_command"] == "verify_code_agent", output
 PY
 
 echo "[code-agent] edit loop patch run"

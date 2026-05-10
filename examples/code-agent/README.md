@@ -25,6 +25,16 @@ The fixed structure is only the loop boundary. The model chooses one to four pla
 
 `tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind `test.run` aliases for workspace tests, clippy, the code-agent gate, backend conformance, and bounded package/test-filter runs.
 
+Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
+
+```bash
+cargo run -p air-cli -- code "update the AIR code-agent docs and run the code-agent gate" \
+  --recipe edit \
+  --profile examples/code-agent/edit.self.air-profile.yaml \
+  --target examples/code-agent/README.md \
+  --test verify_code_agent
+```
+
 Run the deterministic fixture:
 
 ```bash
