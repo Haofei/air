@@ -9,6 +9,9 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 
+const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
+const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeRecipe {
     /// Select a recipe from typed flags, preferring read-only exploration when ambiguous.
@@ -467,24 +470,46 @@ fn code_session_turn_input(
 }
 
 fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
+    let budget = default_context_budget_chars();
     let mut lines = Vec::new();
-    for (index, turn) in previous_turns.iter().enumerate() {
+    let mut used = 0usize;
+    let mut omitted = 0usize;
+    for (index, turn) in previous_turns.iter().enumerate().rev() {
         let turn_number = index + 1;
-        let mut output_summary = serde_json::to_string(&turn.outputs).unwrap_or_default();
-        const MAX_OUTPUT_SUMMARY_CHARS: usize = 200_000;
-        if output_summary.chars().count() > MAX_OUTPUT_SUMMARY_CHARS {
-            output_summary = output_summary
-                .chars()
-                .take(MAX_OUTPUT_SUMMARY_CHARS)
-                .collect::<String>();
-            output_summary.push_str(" [AIR_TRUNCATED]");
+        let prefix = format!(
+            "- turn {turn_number}: recipe={}; completed={}; outputs={output_summary}",
+            turn.recipe,
+            turn.completed,
+            output_summary = ""
+        );
+        let available = budget.saturating_sub(used + prefix.chars().count());
+        if available == 0 {
+            omitted += 1;
+            continue;
         }
-        lines.push(format!(
+        let output_summary = truncate_for_context(
+            &serde_json::to_string(&turn.outputs).unwrap_or_default(),
+            available,
+        );
+        let line = format!(
             "- turn {turn_number}: recipe={}; completed={}; outputs={output_summary}",
             turn.recipe, turn.completed
-        ));
+        );
+        used += line.chars().count() + 1;
+        lines.push(line);
+        if used >= budget {
+            omitted += index;
+            break;
+        }
     }
-    lines.join("\n")
+    if omitted > 0 {
+        lines.push(
+            format!(
+                "- {omitted} older turn(s) omitted because AIR session context is capped at {budget} chars"
+            ),
+        );
+    }
+    truncate_for_context(&lines.join("\n"), budget)
 }
 
 fn code_loop_iteration_input(
@@ -510,8 +535,11 @@ fn code_loop_iteration_input(
 }
 
 fn code_loop_feedback(previous_iterations: &[Value]) -> String {
+    let budget = default_context_budget_chars();
     let mut lines = Vec::new();
-    for iteration in previous_iterations {
+    let mut used = 0usize;
+    let mut omitted = 0usize;
+    for iteration in previous_iterations.iter().rev() {
         let iteration_number = iteration
             .get("iteration")
             .and_then(Value::as_u64)
@@ -521,20 +549,58 @@ fn code_loop_feedback(previous_iterations: &[Value]) -> String {
             .and_then(Value::as_bool)
             .unwrap_or(false);
         let outputs = iteration.get("outputs").cloned().unwrap_or(Value::Null);
-        let mut output_summary = serde_json::to_string(&outputs).unwrap_or_default();
-        const MAX_OUTPUT_SUMMARY_CHARS: usize = 200_000;
-        if output_summary.chars().count() > MAX_OUTPUT_SUMMARY_CHARS {
-            output_summary = output_summary
-                .chars()
-                .take(MAX_OUTPUT_SUMMARY_CHARS)
-                .collect::<String>();
-            output_summary.push_str(" [AIR_TRUNCATED]");
+        let prefix = format!(
+            "- iteration {iteration_number}: completed={completed}; outputs={output_summary}",
+            output_summary = ""
+        );
+        let available = budget.saturating_sub(used + prefix.chars().count());
+        if available == 0 {
+            omitted += 1;
+            continue;
         }
-        lines.push(format!(
+        let output_summary = truncate_for_context(
+            &serde_json::to_string(&outputs).unwrap_or_default(),
+            available,
+        );
+        let line = format!(
             "- iteration {iteration_number}: completed={completed}; outputs={output_summary}"
-        ));
+        );
+        used += line.chars().count() + 1;
+        lines.push(line);
+        if used >= budget {
+            omitted += iteration_number.saturating_sub(1) as usize;
+            break;
+        }
     }
-    lines.join("\n")
+    if omitted > 0 {
+        lines.push(
+            format!(
+                "- {omitted} older iteration(s) omitted because AIR loop context is capped at {budget} chars"
+            ),
+        );
+    }
+    truncate_for_context(&lines.join("\n"), budget)
+}
+
+fn default_context_budget_chars() -> usize {
+    DEFAULT_CONTEXT_MAX_CHARS.saturating_mul(DEFAULT_CONTEXT_THRESHOLD_PERCENT) / 100
+}
+
+fn truncate_for_context(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars == 0 {
+        return "[AIR_TRUNCATED]".to_string();
+    }
+    const MARKER: &str = " [AIR_TRUNCATED]";
+    if max_chars <= MARKER.chars().count() {
+        return MARKER.chars().take(max_chars).collect();
+    }
+    let keep = max_chars - MARKER.chars().count();
+    let mut truncated = value.chars().take(keep).collect::<String>();
+    truncated.push_str(MARKER);
+    truncated
 }
 
 fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
@@ -1081,6 +1147,50 @@ mod tests {
         assert!(task.starts_with("continue investigation"));
         assert!(task.contains("AIR session context from previous turns"));
         assert!(task.contains("Found the dispatch implementation"));
+    }
+
+    #[test]
+    fn session_feedback_is_bounded_and_prefers_recent_turns() {
+        let large_output = "x".repeat(default_context_budget_chars() + 1024);
+        let turns = vec![
+            CodeSessionTurn {
+                task: "old".to_string(),
+                recipe: "explore".to_string(),
+                profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
+                input: json!({"task": "old"}),
+                completed: true,
+                outputs: json!({"summary": "older turn"}),
+            },
+            CodeSessionTurn {
+                task: "new".to_string(),
+                recipe: "repair".to_string(),
+                profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
+                input: json!({"task": "new"}),
+                completed: false,
+                outputs: json!({"summary": large_output}),
+            },
+        ];
+
+        let feedback = code_session_feedback(&turns);
+
+        assert!(feedback.chars().count() <= default_context_budget_chars());
+        assert!(feedback.contains("turn 2"));
+        assert!(feedback.contains("AIR_TRUNCATED"));
+    }
+
+    #[test]
+    fn loop_feedback_is_bounded_and_prefers_recent_iterations() {
+        let large_output = "y".repeat(default_context_budget_chars() + 1024);
+        let iterations = vec![
+            json!({"iteration": 1, "completed": false, "outputs": {"summary": "old"}}),
+            json!({"iteration": 2, "completed": false, "outputs": {"summary": large_output}}),
+        ];
+
+        let feedback = code_loop_feedback(&iterations);
+
+        assert!(feedback.chars().count() <= default_context_budget_chars());
+        assert!(feedback.contains("iteration 2"));
+        assert!(feedback.contains("AIR_TRUNCATED"));
     }
 
     #[test]

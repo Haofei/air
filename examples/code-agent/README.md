@@ -248,7 +248,10 @@ cargo run -p air-cli -- code "continue from the previous AIR turn" \
 This is intentionally a thin shell over verified AIR turns, not an unrestricted chat runtime. The
 session file records each turn's recipe, profile, typed input, completion flag, and outputs. On the
 next invocation, a bounded summary of previous turn outputs is appended to the new task, so the
-following `model_call` trace shows exactly what session context the model received.
+following `model_call` trace shows exactly what session context the model received. The injected
+session context uses the same default budget posture as AIR context management: assume a 200k
+context window, inject at most the 80% working threshold, and prefer recent turns when older history
+must be omitted.
 
 The same command can select the other public coding-agent recipes:
 
