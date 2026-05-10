@@ -27,7 +27,7 @@ For coding agents, that means the important questions have first-class places to
 
 | Question | AIR audit surface |
 | --- | --- |
-| Which files changed? | `file.edit`, `file.patch`, `file.write`, repair `workspace_diff`, and repair baseline fields distinguish agent changes from pre-existing dirty files |
+| Which files changed? | `file.ops`, `git.diff`, edit-loop `workspace_diff`, and session baseline fields distinguish agent changes from pre-existing dirty files |
 | Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
@@ -79,7 +79,7 @@ The repository intentionally keeps examples focused:
 | --- | --- |
 | `examples/simple-helpdesk/` | One-agent RAG workflow with local document search, model call, typed output, and provider capability check |
 | `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, parallel execution, and backend lowering |
-| `examples/code-agent/` | Bounded coding workflow with exploration, review, repair, page build, context compaction, constrained tools, and patch audit traces |
+| `examples/code-agent/` | Bounded coding workflow with planning, exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
 
 The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json`.
 
