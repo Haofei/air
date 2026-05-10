@@ -221,6 +221,159 @@ assert any("Available project artifacts from previous tasks" in json.dumps(event
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 
+echo "[code-agent] project plan executes repair tasks offline"
+cat > target/generated/code_project_repair_model_fixtures.json <<'JSON'
+{
+  "fixtures": {
+    "project_planner": {
+      "summary": "Fixture project repair plan completed: execute one bounded repair task and verify the failing fixture.",
+      "scope": {
+        "goal": "Repair the add function in the code-agent repair fixture and confirm the allowlisted test passes.",
+        "non_goals": [
+          "Do not change unrelated fixtures.",
+          "Do not run raw shell commands outside configured test aliases."
+        ],
+        "assumptions": [
+          "The failing implementation lives in examples/code-agent/repair-fixture/math.js.",
+          "The repair_fixture_test command is configured in the code-agent tool config."
+        ]
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "title": "Repair fixture",
+          "objective": "Patch the failing add implementation and retest it.",
+          "task_ids": [
+            "repair-add"
+          ]
+        }
+      ],
+      "tasks": [
+        {
+          "id": "repair-add",
+          "title": "Fix add and retest",
+          "description": "Replace subtraction with addition in the repair fixture and run the allowlisted test command.",
+          "kind": "repair",
+          "recipe": "repair",
+          "input": {
+            "task": "Fix the failing add function and retest.",
+            "query": "repair fixture add function",
+            "target_path": "examples/code-agent/repair-fixture/math.js",
+            "related_files": [
+              "examples/code-agent/repair-fixture/test.js"
+            ],
+            "test_command": "repair_fixture_test"
+          },
+          "depends_on": [],
+          "files": [
+            "examples/code-agent/repair-fixture/math.js"
+          ],
+          "acceptance": [
+            {
+              "id": "repair-test",
+              "command": "repair_fixture_test",
+              "expected": "The repair fixture test passes after the patch."
+            }
+          ]
+        }
+      ],
+      "files": [
+        {
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "purpose": "Fix the add implementation.",
+          "change_type": "modify"
+        }
+      ],
+      "acceptance": [
+        {
+          "id": "repair-test",
+          "command": "repair_fixture_test",
+          "expected": "The repair fixture test passes after the patch."
+        }
+      ],
+      "risks": [
+        {
+          "risk": "A project plan could schedule only read-only exploration and never exercise the repair executor.",
+          "mitigation": "This fixture schedules an explicit repair recipe and asserts patch plus retest trace events."
+        }
+      ],
+      "source_ids": [
+        "docs-repair-safety"
+      ],
+      "next_steps": [
+        "Use this fixture to keep project execution wired to mutating repair tasks."
+      ]
+    },
+    "code_repairer": {
+      "operations": [
+        {
+          "kind": "edit",
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "old_string": "function add(a, b) {\n  return a - b;\n}",
+          "new_string": "function add(a, b) {\n  return a + b;\n}"
+        }
+      ],
+      "rationale": "The failing fixture subtracts instead of adding. Replace the operator and keep the module export unchanged."
+    }
+  }
+}
+JSON
+repair_fixture_backup="$(mktemp)"
+cp examples/code-agent/repair-fixture/math.js "$repair_fixture_backup"
+restore_project_repair_fixture() {
+  cp "$repair_fixture_backup" examples/code-agent/repair-fixture/math.js
+  rm -f "$repair_fixture_backup"
+}
+trap restore_project_repair_fixture EXIT
+cargo run -q -p air-cli -- code "plan and execute a project repair task for the AIR code agent" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 1 \
+  --query "repair fixture add function" \
+  --model-config target/generated/code_project_repair_model_fixtures.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_project_repair_execute.trace.jsonl \
+  > target/generated/code_project_repair_execute.output.json
+node examples/code-agent/repair-fixture/test.js > target/generated/code_project_repair_execute.post_test.log
+restore_project_repair_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_repair_execute.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+project = output["project"]
+assert project["status"] == "completed", project
+assert project["completed"] is True, project
+assert project["executed_this_run"] == 1, project
+assert len(project["executions"]) == 1, project
+execution = project["executions"][0]
+assert execution["task_id"] == "repair-add", execution
+assert execution["recipe"] == "repair", execution
+assert execution["completed"] is True, execution
+repair = execution["outputs"]["repair"]
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert repair["workspace_diff"]["diff"], repair
+assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
+trace_files = [Path(path) for path in output["trace_files"]]
+assert any(path.name.endswith(".plan.jsonl") for path in trace_files), trace_files
+assert any(path.name.endswith(".task1.jsonl") for path in trace_files), trace_files
+plan_trace = next(path for path in trace_files if path.name.endswith(".plan.jsonl"))
+task_trace = next(path for path in trace_files if path.name.endswith(".task1.jsonl"))
+with plan_trace.open(encoding="utf-8") as handle:
+    plan_events = [json.loads(line) for line in handle if line.strip()]
+with task_trace.open(encoding="utf-8") as handle:
+    task_events = [json.loads(line) for line in handle if line.strip()]
+assert any(event.get("meta", {}).get("model") == "project_planner" for event in plan_events), plan_events
+assert any(event.get("meta", {}).get("model") == "code_repairer" for event in task_events), task_events
+assert any(event.get("meta", {}).get("tool") == "file.ops" for event in task_events), task_events
+assert any(event.get("meta", {}).get("tool") == "test.run" for event in task_events), task_events
+with open("target/generated/code_project_repair_execute.post_test.log", encoding="utf-8") as handle:
+    assert "ok repair fixture" in handle.read()
+PY
+
 echo "[code-agent] project execution respects estimated budget limits"
 cargo run -q -p air-cli -- code "plan and start executing a project-level task graph for the AIR code agent" \
   --recipe plan \
