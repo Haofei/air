@@ -32,8 +32,15 @@
       "rationale": "The target and test fixture are enough to attempt the bounded repair."
     },
     "code_repairer": {
-      "patch": "diff --git a/examples/code-agent/repair-fixture/math.js b/examples/code-agent/repair-fixture/math.js\n--- a/examples/code-agent/repair-fixture/math.js\n+++ b/examples/code-agent/repair-fixture/math.js\n@@ -1,5 +1,5 @@\n function add(a, b) {\n-  return a * b;\n+  return a + b;\n }\n \n module.exports = { add };\n",
-      "rationale": "Intentionally invalid fixture patch: the old line does not match, so file.patch dry-run should fail and force the outer loop to carry feedback into the next iteration."
+      "operations": [
+        {
+          "kind": "edit",
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "old_string": "function add(a, b) {\n  return a * b;\n}",
+          "new_string": "function add(a, b) {\n  return a + b;\n}"
+        }
+      ],
+      "rationale": "Intentionally invalid fixture operation: the old string does not match, so file.ops dry-run should fail and force the outer loop to carry feedback into the next iteration."
     }
   }
 }

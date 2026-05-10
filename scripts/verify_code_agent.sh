@@ -31,6 +31,7 @@ cargo test -q -p air-tools file_read
 cargo test -q -p air-tools file_read_many
 cargo test -q -p air-tools file_patch
 cargo test -q -p air-tools file_edit
+cargo test -q -p air-tools file_ops
 cargo test -q -p air-tools stale_read
 cargo test -q -p air-tools git_status
 cargo test -q -p air-tools todo_write
@@ -642,7 +643,14 @@ cat > target/generated/code_project_recover_model_fixtures.json <<'JSON'
       "rationale": "The test file is the minimal related context needed to repair add."
     },
     "code_repairer": {
-      "patch": "diff --git a/examples/code-agent/repair-fixture/math.js b/examples/code-agent/repair-fixture/math.js\n--- a/examples/code-agent/repair-fixture/math.js\n+++ b/examples/code-agent/repair-fixture/math.js\n@@ -1,5 +1,5 @@\n function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n \n module.exports = { add };\n",
+      "operations": [
+        {
+          "kind": "edit",
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "old_string": "function add(a, b) {\n  return a - b;\n}",
+          "new_string": "function add(a, b) {\n  return a + b;\n}"
+        }
+      ],
       "rationale": "The failed diagnostic shows add subtracts instead of summing; replace subtraction with addition."
     }
   }
@@ -1037,7 +1045,7 @@ assert any(
 ), trace
 assert any(
     event.get("action") == "tool_call"
-    and event.get("meta", {}).get("tool") == "file.patch"
+    and event.get("meta", {}).get("tool") == "file.ops"
     and event.get("status") == "ok"
     for event in trace
 ), trace
@@ -1115,15 +1123,15 @@ assert turn["trace_files"], turn
 assert Path(turn["trace_files"][0]).exists(), turn
 assert any(
     part["kind"] == "tool_call"
-    and part.get("tool") == "file.patch"
+    and part.get("tool") == "file.ops"
     and "examples/code-agent/repair-fixture/math.js" in part.get("files", [])
-    and "file_patch" in part.get("artifact_kinds", [])
+    and "file_ops" in part.get("artifact_kinds", [])
     for part in turn["parts"]
 ), turn["parts"]
-assert "file.patch" in turn["summary"]["tools"], turn["summary"]
+assert "file.ops" in turn["summary"]["tools"], turn["summary"]
 assert "file.write" in turn["summary"]["approvals"], turn["summary"]
 assert "examples/code-agent/repair-fixture/math.js" in turn["summary"]["files"], turn["summary"]
-assert "file_patch" in turn["summary"]["artifact_kinds"], turn["summary"]
+assert "file_ops" in turn["summary"]["artifact_kinds"], turn["summary"]
 assert turn["patch_sets"], turn
 patch_set = turn["patch_sets"][0]
 assert patch_set["source"].endswith(".repair"), patch_set
@@ -1176,7 +1184,7 @@ assert any(
 ), trace
 assert any(
     event.get("action") == "tool_call"
-    and event.get("meta", {}).get("tool") == "file.patch"
+    and event.get("meta", {}).get("tool") == "file.ops"
     and event.get("status") == "ok"
     for event in trace
 ), trace
@@ -1266,7 +1274,7 @@ assert turn["trace_files"][0].endswith("turn1.trace.iter1.jsonl"), turn
 assert turn["trace_files"][1].endswith("turn1.trace.iter2.jsonl"), turn
 assert turn["summary"]["model_call_count"] >= 2, turn
 assert turn["summary"]["tool_call_count"] >= 2, turn
-assert "file.patch" in turn["summary"]["tools"], turn
+assert "file.ops" in turn["summary"]["tools"], turn
 
 with open(turn["trace_files"][1], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
@@ -1280,7 +1288,8 @@ assert repair_calls, trace
 task = repair_calls[0]["input"]["task"]
 assert "AIR loop context from previous iterations" in task, task
 assert '"final_success":false' in task, task
-assert "Patch validation failed before apply" in task, task
+assert "file.ops" in task, task
+assert "old_string was not found" in task, task
 PY
 
 echo "[code-agent] core multifile repair offline run"
@@ -1328,7 +1337,7 @@ assert any(
 ), trace
 assert any(
     event.get("action") == "tool_call"
-    and event.get("meta", {}).get("tool") == "file.patch"
+    and event.get("meta", {}).get("tool") == "file.ops"
     and event.get("status") == "ok"
     and event.get("output", {}).get("file_count") == 2
     for event in trace

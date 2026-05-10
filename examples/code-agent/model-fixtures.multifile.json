@@ -38,7 +38,20 @@
       "rationale": "The helper and test fixture are the narrow related files needed to repair both failing numeric behaviors."
     },
     "code_repairer": {
-      "patch": "diff --git a/examples/code-agent/repair-multifile/math.js b/examples/code-agent/repair-multifile/math.js\n--- a/examples/code-agent/repair-multifile/math.js\n+++ b/examples/code-agent/repair-multifile/math.js\n@@ -1,7 +1,7 @@\n const { normalize } = require(\"./normalize\");\n \n function add(a, b) {\n-  return normalize(a - b);\n+  return normalize(a + b);\n }\n \n function multiply(a, b) {\ndiff --git a/examples/code-agent/repair-multifile/normalize.js b/examples/code-agent/repair-multifile/normalize.js\n--- a/examples/code-agent/repair-multifile/normalize.js\n+++ b/examples/code-agent/repair-multifile/normalize.js\n@@ -1,5 +1,5 @@\n function normalize(value) {\n-  return String(value);\n+  return value;\n }\n \n module.exports = { normalize };\n",
+      "operations": [
+        {
+          "kind": "edit",
+          "path": "examples/code-agent/repair-multifile/math.js",
+          "old_string": "function add(a, b) {\n  return normalize(a - b);\n}",
+          "new_string": "function add(a, b) {\n  return normalize(a + b);\n}"
+        },
+        {
+          "kind": "edit",
+          "path": "examples/code-agent/repair-multifile/normalize.js",
+          "old_string": "function normalize(value) {\n  return String(value);\n}",
+          "new_string": "function normalize(value) {\n  return value;\n}"
+        }
+      ],
       "rationale": "The add implementation subtracts instead of adding, and normalize returns strings. Change add to use addition and keep numeric values unchanged so both assertions pass."
     }
   }

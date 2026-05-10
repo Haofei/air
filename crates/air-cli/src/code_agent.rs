@@ -2087,6 +2087,7 @@ fn code_project_task_input(
     prior_executions: &[Value],
 ) -> Map<String, Value> {
     let mut input = normalized_code_project_task_paths(base_input);
+    ensure_repair_task_defaults(&mut input);
     if prior_executions.is_empty() {
         return input;
     }
@@ -2110,6 +2111,25 @@ fn code_project_task_input(
         )),
     );
     input
+}
+
+fn ensure_repair_task_defaults(input: &mut Map<String, Value>) {
+    if input.contains_key("target_path") {
+        if !input.contains_key("target_search_pattern") {
+            let query = input
+                .get("query")
+                .or_else(|| input.get("task"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            input.insert(
+                "target_search_pattern".to_string(),
+                Value::String(code_search_pattern(query)),
+            );
+        }
+        input
+            .entry("force_patch".to_string())
+            .or_insert(Value::Bool(false));
+    }
 }
 
 fn normalized_code_project_task_paths(base_input: &Map<String, Value>) -> Map<String, Value> {
@@ -4164,6 +4184,11 @@ mod tests {
         let next = code_project_task_input(&input, &previous);
 
         assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
+        assert_eq!(
+            next["target_search_pattern"],
+            Value::String("inspect|the|next|file".to_string())
+        );
+        assert_eq!(next["force_patch"], Value::Bool(false));
         let task = next["task"].as_str().unwrap();
         assert!(task.contains("inspect the next file"));
         assert!(task.contains("AIR project memory from previous tasks"));
@@ -4202,7 +4227,47 @@ mod tests {
             next["target_path"],
             Value::String(path_ref_to_input_string(&lib))
         );
+        assert_eq!(
+            next["target_search_pattern"],
+            Value::String("explore|tool".to_string())
+        );
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_task_input_preserves_explicit_target_search_pattern() {
+        let mut input = Map::new();
+        input.insert("task".to_string(), Value::String("fix it".to_string()));
+        input.insert(
+            "target_path".to_string(),
+            Value::String("src/lib.rs".to_string()),
+        );
+        input.insert(
+            "target_search_pattern".to_string(),
+            Value::String("ExplicitSymbol".to_string()),
+        );
+
+        let next = code_project_task_input(&input, &[]);
+
+        assert_eq!(
+            next["target_search_pattern"],
+            Value::String("ExplicitSymbol".to_string())
+        );
+    }
+
+    #[test]
+    fn project_task_input_preserves_explicit_force_patch() {
+        let mut input = Map::new();
+        input.insert("task".to_string(), Value::String("fix it".to_string()));
+        input.insert(
+            "target_path".to_string(),
+            Value::String("src/lib.rs".to_string()),
+        );
+        input.insert("force_patch".to_string(), Value::Bool(true));
+
+        let next = code_project_task_input(&input, &[]);
+
+        assert_eq!(next["force_patch"], Value::Bool(true));
     }
 
     #[test]

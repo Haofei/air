@@ -1,7 +1,7 @@
 agent:
   name: code-repair-agent
   version: 0.1.0
-  description: "Bounded coding repair agent: read one target file plus related context files, run an allowlisted test, generate a unified diff from diagnostics, apply it through file.patch, retest, and optionally run one more bounded repair pass."
+  description: "Bounded coding repair agent: read one target file plus related context files, run an allowlisted test, generate structured file operations from diagnostics, dry-run them through file.ops, apply, retest, and optionally run one more bounded repair pass."
 
 inputs:
   task: string
@@ -130,9 +130,11 @@ state:
         items: object
   repair_plan:
     type: object
-    required: [patch, rationale]
+    required: [operations, rationale]
     properties:
-      patch: string
+      operations:
+        type: array
+        items: object
       rationale: string
   patch_result:
     type: object
@@ -230,9 +232,11 @@ state:
         items: object
   repair_plan_retry:
     type: object
-    required: [patch, rationale]
+    required: [operations, rationale]
     properties:
-      patch: string
+      operations:
+        type: array
+        items: object
       rationale: string
   patch_result_retry:
     type: object
@@ -402,7 +406,7 @@ tools:
   - name: file.search
     capability: file.read
     timeout_ms: 10000
-  - name: file.patch
+  - name: file.ops
     capability: file.write
     timeout_ms: 10000
   - name: file.read_many
@@ -678,11 +682,11 @@ workflow:
         - kind: approval
           approval_for: [file.write]
         - kind: tool_call
-          tool: file.patch
+          tool: file.ops
           input:
             object:
-              patch:
-                ref: repair_plan.patch
+              operations:
+                ref: repair_plan.operations
               dry_run:
                 literal: true
           output: patch_check_result
@@ -714,7 +718,7 @@ workflow:
                 status:
                   literal: 1
                 log:
-                  literal: "patch dry-run failed before apply"
+                  literal: "structured file operations dry-run failed before apply"
                 diagnostics:
                   ref: patch_check_result.diagnostics
                 artifacts:
@@ -725,11 +729,11 @@ workflow:
       when: phase == "patch"
       actions:
         - kind: tool_call
-          tool: file.patch
+          tool: file.ops
           input:
             object:
-              patch:
-                ref: repair_plan.patch
+              operations:
+                ref: repair_plan.operations
           output: patch_result
           timeout_seconds: 10
           retry:
@@ -923,11 +927,11 @@ workflow:
       when: phase == "patch_check_again"
       actions:
         - kind: tool_call
-          tool: file.patch
+          tool: file.ops
           input:
             object:
-              patch:
-                ref: repair_plan_retry.patch
+              operations:
+                ref: repair_plan_retry.operations
               dry_run:
                 literal: true
           output: patch_check_result_retry
@@ -961,7 +965,7 @@ workflow:
                 patch_applied:
                   literal: false
                 rationale:
-                  template: "{{repair_plan.rationale}}\n\nSecond pass patch validation failed before apply: {{repair_plan_retry.rationale}}"
+                  template: "{{repair_plan.rationale}}\n\nSecond pass structured file operations validation failed before apply: {{repair_plan_retry.rationale}}"
                 diagnostics:
                   ref: patch_check_result_retry.diagnostics
                 changed_files:
@@ -972,11 +976,11 @@ workflow:
       when: phase == "patch_again"
       actions:
         - kind: tool_call
-          tool: file.patch
+          tool: file.ops
           input:
             object:
-              patch:
-                ref: repair_plan_retry.patch
+              operations:
+                ref: repair_plan_retry.operations
           output: patch_result_retry
           timeout_seconds: 10
           retry:
