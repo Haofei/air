@@ -1555,6 +1555,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                         0,
                         options.budget_limits
                     ),
+                    "memory": code_project_memory(&[]),
                     "acceptance": [],
                     "executions": [{
                         "completed": false,
@@ -1640,6 +1641,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 "budget": project_budget,
                 "remaining_budget": remaining_budget,
                 "budget_limit": budget_limit,
+                "memory": code_project_memory(&executions),
                 "acceptance": [],
                 "executions": executions,
             },
@@ -1838,6 +1840,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "budget": project_budget,
             "remaining_budget": remaining_budget,
             "budget_limit": budget_limit,
+            "memory": code_project_memory(&executions),
             "acceptance": project_acceptance,
             "executions": executions,
         },
@@ -2062,14 +2065,324 @@ fn code_project_task_input(
         .get("task")
         .and_then(Value::as_str)
         .unwrap_or("execute planned project task");
-    let feedback = code_loop_feedback(prior_executions);
+    let memory = truncate_for_context(
+        &serde_json::to_string_pretty(&code_project_memory(prior_executions)).unwrap_or_default(),
+        default_context_budget_chars(),
+    );
     input.insert(
         "task".to_string(),
         Value::String(format!(
-            "{task}\n\nAIR project execution context from previous tasks:\n{feedback}"
+            "{task}\n\nAIR project memory from previous tasks:\n{memory}"
         )),
     );
     input
+}
+
+fn code_project_memory(executions: &[Value]) -> Value {
+    let tasks = executions
+        .iter()
+        .map(code_project_execution_memory)
+        .collect::<Vec<_>>();
+    let mut changed_files = Vec::new();
+    let mut artifact_ids = Vec::new();
+    let mut artifact_kinds = Vec::new();
+    for task in &tasks {
+        collect_string_array_field(task.get("changed_files"), &mut changed_files);
+        collect_string_array_field(task.get("artifact_ids"), &mut artifact_ids);
+        collect_string_array_field(task.get("artifact_kinds"), &mut artifact_kinds);
+    }
+    changed_files.sort();
+    changed_files.dedup();
+    artifact_ids.sort();
+    artifact_ids.dedup();
+    artifact_kinds.sort();
+    artifact_kinds.dedup();
+
+    json!({
+        "task_count": executions.len(),
+        "completed_task_count": executions
+            .iter()
+            .filter(|execution| execution.get("completed").and_then(Value::as_bool).unwrap_or(false))
+            .count(),
+        "failed_task_count": executions
+            .iter()
+            .filter(|execution| !execution.get("completed").and_then(Value::as_bool).unwrap_or(false))
+            .count(),
+        "changed_files": changed_files,
+        "artifact_ids": artifact_ids,
+        "artifact_kinds": artifact_kinds,
+        "tasks": tasks,
+    })
+}
+
+fn code_project_execution_memory(execution: &Value) -> Value {
+    let mut memory = Map::new();
+    for key in [
+        "task_id",
+        "title",
+        "recipe",
+        "depends_on",
+        "completed",
+        "error",
+    ] {
+        if let Some(value) = execution.get(key) {
+            memory.insert(key.to_string(), value.clone());
+        }
+    }
+    if let Some(acceptance) = execution.get("acceptance").and_then(Value::as_array) {
+        memory.insert(
+            "acceptance".to_string(),
+            Value::Array(
+                acceptance
+                    .iter()
+                    .map(code_project_acceptance_memory)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+    if let Some(outputs) = execution.get("outputs") {
+        memory.insert(
+            "output_keys".to_string(),
+            Value::Array(
+                value_keys(Some(outputs))
+                    .into_iter()
+                    .map(Value::String)
+                    .collect(),
+            ),
+        );
+        memory.insert("outputs".to_string(), code_project_outputs_memory(outputs));
+        let changed_files = code_project_changed_files(outputs);
+        if !changed_files.is_empty() {
+            memory.insert(
+                "changed_files".to_string(),
+                Value::Array(changed_files.into_iter().map(Value::String).collect()),
+            );
+        }
+        let artifact_ids = collect_artifact_field_values(outputs, "id");
+        if !artifact_ids.is_empty() {
+            memory.insert(
+                "artifact_ids".to_string(),
+                Value::Array(artifact_ids.into_iter().map(Value::String).collect()),
+            );
+        }
+        let artifact_kinds = collect_artifact_field_values(outputs, "kind");
+        if !artifact_kinds.is_empty() {
+            memory.insert(
+                "artifact_kinds".to_string(),
+                Value::Array(artifact_kinds.into_iter().map(Value::String).collect()),
+            );
+        }
+    }
+    Value::Object(memory)
+}
+
+fn code_project_acceptance_memory(acceptance: &Value) -> Value {
+    let mut memory = Map::new();
+    for key in ["id", "scope", "command", "expected", "success", "error"] {
+        if let Some(value) = acceptance.get(key) {
+            memory.insert(key.to_string(), value.clone());
+        }
+    }
+    Value::Object(memory)
+}
+
+fn code_project_outputs_memory(outputs: &Value) -> Value {
+    let mut memory = Map::new();
+    if let Some(exploration) = outputs.get("exploration") {
+        copy_selected_output_fields(
+            &mut memory,
+            "exploration",
+            exploration,
+            &[
+                "summary",
+                "findings",
+                "relevant_files",
+                "source_ids",
+                "next_steps",
+            ],
+        );
+    }
+    if let Some(review) = outputs.get("review") {
+        copy_selected_output_fields(
+            &mut memory,
+            "review",
+            review,
+            &[
+                "summary",
+                "findings",
+                "search_quality",
+                "source_ids",
+                "recommended_actions",
+            ],
+        );
+    }
+    if let Some(repair) = outputs.get("repair") {
+        copy_selected_output_fields(
+            &mut memory,
+            "repair",
+            repair,
+            &[
+                "target_path",
+                "initial_success",
+                "final_success",
+                "patch_applied",
+                "changed_files",
+                "workspace_changed_files",
+                "preexisting_changed_files",
+                "diagnostics",
+                "summary",
+            ],
+        );
+        if let Some(diff) = repair.get("workspace_diff") {
+            copy_selected_output_fields(
+                &mut memory,
+                "repair_workspace_diff",
+                diff,
+                &["repo", "bytes", "truncated", "artifacts"],
+            );
+        }
+    }
+    if let Some(build) = outputs.get("build") {
+        copy_selected_output_fields(
+            &mut memory,
+            "build",
+            build,
+            &[
+                "path",
+                "bytes",
+                "test_success",
+                "audit_success",
+                "screenshots",
+                "revised",
+            ],
+        );
+    }
+    if memory.is_empty() {
+        collect_summary_fields(outputs, "$", &mut memory);
+    }
+    Value::Object(memory)
+}
+
+fn copy_selected_output_fields(
+    memory: &mut Map<String, Value>,
+    namespace: &str,
+    value: &Value,
+    fields: &[&str],
+) {
+    let mut object = Map::new();
+    for field in fields {
+        if let Some(value) = value.get(*field) {
+            object.insert((*field).to_string(), value.clone());
+        }
+    }
+    if !object.is_empty() {
+        memory.insert(namespace.to_string(), Value::Object(object));
+    }
+}
+
+fn collect_summary_fields(value: &Value, path: &str, output: &mut Map<String, Value>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let next = if path == "$" {
+                    key.to_string()
+                } else {
+                    format!("{path}.{key}")
+                };
+                if matches!(key.as_str(), "summary" | "reason" | "recommended_action") {
+                    output.insert(next.clone(), value.clone());
+                }
+                collect_summary_fields(value, &next, output);
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_summary_fields(value, &format!("{path}[{index}]"), output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn code_project_changed_files(outputs: &Value) -> Vec<String> {
+    let mut files = Vec::new();
+    collect_path_values(
+        outputs
+            .get("repair")
+            .and_then(|repair| repair.get("changed_files")),
+        &mut files,
+    );
+    collect_path_values(
+        outputs
+            .get("repair")
+            .and_then(|repair| repair.get("workspace_changed_files")),
+        &mut files,
+    );
+    collect_path_values(
+        outputs
+            .get("repair")
+            .and_then(|repair| repair.get("workspace_diff"))
+            .and_then(|diff| diff.get("artifacts")),
+        &mut files,
+    );
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn collect_path_values(value: Option<&Value>, output: &mut Vec<String>) {
+    match value {
+        Some(Value::Array(values)) => {
+            for value in values {
+                collect_path_values(Some(value), output);
+            }
+        }
+        Some(Value::Object(object)) => {
+            if let Some(path) = object.get("path").and_then(Value::as_str) {
+                output.push(path.to_string());
+            }
+        }
+        Some(Value::String(path)) => output.push(path.clone()),
+        _ => {}
+    }
+}
+
+fn collect_artifact_field_values(value: &Value, field: &str) -> Vec<String> {
+    let mut values = Vec::new();
+    collect_artifact_field_values_into(value, field, &mut values);
+    values.sort();
+    values.dedup();
+    values
+}
+
+fn collect_artifact_field_values_into(value: &Value, field: &str, output: &mut Vec<String>) {
+    match value {
+        Value::Object(object) => {
+            if let Some(artifacts) = object.get("artifacts").and_then(Value::as_array) {
+                for artifact in artifacts {
+                    if let Some(value) = artifact.get(field).and_then(Value::as_str) {
+                        output.push(value.to_string());
+                    }
+                }
+            }
+            for value in object.values() {
+                collect_artifact_field_values_into(value, field, output);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_artifact_field_values_into(value, field, output);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_string_array_field(value: Option<&Value>, output: &mut Vec<String>) {
+    let Some(Value::Array(values)) = value else {
+        return;
+    };
+    output.extend(values.iter().filter_map(Value::as_str).map(str::to_string));
 }
 
 fn run_acceptance_checks(
@@ -3501,8 +3814,51 @@ mod tests {
         assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
         let task = next["task"].as_str().unwrap();
         assert!(task.contains("inspect the next file"));
-        assert!(task.contains("AIR project execution context from previous tasks"));
+        assert!(task.contains("AIR project memory from previous tasks"));
         assert!(task.contains("found routing code"));
+    }
+
+    #[test]
+    fn project_memory_extracts_stable_task_facts() {
+        let executions = vec![json!({
+            "task_id": "fix",
+            "title": "Fix math",
+            "recipe": "repair",
+            "depends_on": ["inspect"],
+            "completed": true,
+            "acceptance": [{"id": "unit", "success": true, "output": {"large": "omitted"}}],
+            "outputs": {
+                "repair": {
+                    "target_path": "examples/math.js",
+                    "final_success": true,
+                    "patch_applied": true,
+                    "workspace_changed_files": [{"path": "examples/math.js"}],
+                    "workspace_diff": {
+                        "bytes": 333,
+                        "truncated": false,
+                        "artifacts": [{"id": "git-diff:examples/math.js", "kind": "file_patch", "path": "examples/math.js"}]
+                    }
+                }
+            }
+        })];
+
+        let memory = code_project_memory(&executions);
+
+        assert_eq!(memory["task_count"], Value::from(1));
+        assert_eq!(memory["completed_task_count"], Value::from(1));
+        assert_eq!(
+            memory["changed_files"][0],
+            Value::String("examples/math.js".to_string())
+        );
+        assert_eq!(
+            memory["artifact_ids"][0],
+            Value::String("git-diff:examples/math.js".to_string())
+        );
+        assert_eq!(
+            memory["tasks"][0]["outputs"]["repair"]["final_success"],
+            Value::Bool(true)
+        );
+        assert_eq!(memory["tasks"][0]["acceptance"][0].get("output"), None);
     }
 
     #[test]

@@ -185,6 +185,11 @@ assert len(budget["tasks"]) == len(project["scheduled_task_ids"]), budget
 assert [item["task_id"] for item in budget["tasks"]] == project["scheduled_task_ids"], budget
 assert all(item["budget"]["max_estimated_model_calls"] > 0 for item in project["executions"]), project
 assert all(item["budget"]["max_estimated_tool_calls"] > 0 for item in project["executions"]), project
+memory = project["memory"]
+assert memory["task_count"] == 2, memory
+assert memory["completed_task_count"] == 2, memory
+assert [item["task_id"] for item in memory["tasks"]] == ["t1", "t2"], memory
+assert "exploration" in memory["tasks"][0]["outputs"], memory
 trace_files = [Path(path) for path in output["trace_files"]]
 assert len(trace_files) == 4, trace_files
 assert any(path.name.endswith(".acceptance.jsonl") for path in trace_files), trace_files
@@ -194,11 +199,14 @@ with trace_files[0].open(encoding="utf-8") as handle:
     plan_events = [json.loads(line) for line in handle if line.strip()]
 with trace_files[1].open(encoding="utf-8") as handle:
     task_events = [json.loads(line) for line in handle if line.strip()]
+with trace_files[2].open(encoding="utf-8") as handle:
+    task2_events = [json.loads(line) for line in handle if line.strip()]
 acceptance_trace = next(path for path in trace_files if path.name.endswith(".acceptance.jsonl"))
 with acceptance_trace.open(encoding="utf-8") as handle:
     acceptance_events = [json.loads(line) for line in handle if line.strip()]
 assert any(event.get("meta", {}).get("model") == "project_planner" for event in plan_events), plan_events
 assert any(event.get("meta", {}).get("model") == "code_explorer" for event in task_events), task_events
+assert any("AIR project memory from previous tasks" in json.dumps(event.get("input", {})) for event in task2_events), task2_events
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 

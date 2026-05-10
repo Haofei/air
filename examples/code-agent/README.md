@@ -227,6 +227,11 @@ For project execution, AIR plans first, computes the remaining task budget from 
 recipes, and returns `project.status = "budget_exceeded"` without starting task execution when the
 remaining task graph is over either limit.
 
+Project execution also returns `project.memory`, a compact structured rollup of completed tasks,
+acceptance results, changed files, artifact ids, and high-value recipe outputs. Later tasks receive
+that project memory instead of raw prior outputs, so long project runs keep stable context without
+turning every trace into prompt text.
+
 Then run it:
 
 ```bash
