@@ -163,7 +163,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 28
+  max_steps: 160
   terminal: [done, failed]
   rules:
     - id: init
@@ -759,6 +759,29 @@ workflow:
           values:
             phase: choose
 
+    - id: record-batch-dispatch-error
+      when: phase == "post_act" && observation[0].tool == "<batch>" && observation[0].status == "error"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: batch_dispatch_error
+              rationale:
+                literal: A tool batch was rejected before individual tools ran. If the error mentions approval-required file.write isolation, retry the write tool alone in its own batch; run reads or tests in a later turn.
+              requested:
+                ref: decision.tool_calls
+              result:
+                object:
+                  failed_error:
+                    ref: observation[0].error
+                  failed_input:
+                    ref: observation[0].input
+        - kind: set
+          values:
+            phase: choose
+
     - id: continue-after-act
       when: phase == "post_act"
       actions:
@@ -823,7 +846,7 @@ workflow:
           output: edit
 
 policy:
-  max_model_calls: 8
-  max_tool_calls: 20
-  max_repeated_tool_calls: 4
+  max_model_calls: 40
+  max_tool_calls: 200
+  max_repeated_tool_calls: 16
   require_approval: [file.write]

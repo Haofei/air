@@ -2591,6 +2591,78 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_handles_batch_dispatch_errors_before_continue() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rule_ids = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule["id"].as_str())
+            .collect::<Vec<_>>();
+        let batch_error = rule_ids
+            .iter()
+            .position(|id| *id == "record-batch-dispatch-error")
+            .unwrap();
+        let continue_after_act = rule_ids
+            .iter()
+            .position(|id| *id == "continue-after-act")
+            .unwrap();
+
+        assert!(
+            batch_error < continue_after_act,
+            "batch dispatch errors must be explained before the generic post_act transition"
+        );
+        let rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("record-batch-dispatch-error"))
+            .unwrap();
+        let rationale = rule["actions"][0]["value"]["object"]["rationale"]["literal"]
+            .as_str()
+            .unwrap();
+        assert!(
+            rationale.contains("write tool alone"),
+            "batch errors should steer write tools into isolated turns"
+        );
+    }
+
+    #[test]
+    fn edit_loop_uses_realistic_bounded_coding_budget() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+
+        let max_steps = yaml["workflow"]["max_steps"].as_u64().unwrap();
+        let max_model_calls = yaml["policy"]["max_model_calls"].as_u64().unwrap();
+        let max_tool_calls = yaml["policy"]["max_tool_calls"].as_u64().unwrap();
+        let max_repeated_tool_calls = yaml["policy"]["max_repeated_tool_calls"].as_u64().unwrap();
+
+        assert!(
+            (120..=200).contains(&max_steps),
+            "edit loop needs enough steps for explore/edit/verify/fix cycles while staying bounded"
+        );
+        assert!(
+            (32..=48).contains(&max_model_calls),
+            "real code-agent loops need room for multiple model-guided edit and verification rounds"
+        );
+        assert!(
+            (160..=240).contains(&max_tool_calls),
+            "tool budget should allow repeated narrow reads, writes, tests, diagnostics, and diffs"
+        );
+        assert!(
+            (12..=20).contains(&max_repeated_tool_calls),
+            "repeated test/read cycles are normal, but still need a cap"
+        );
+    }
+
+    #[test]
     fn completion_detection_matches_recipe_outputs() {
         let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(

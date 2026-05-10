@@ -287,6 +287,59 @@ assert any(
 ), summarizer
 PY
 
+echo "[code-agent] edit loop records batch dispatch errors"
+edit_batch_error_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_batch_error_backup"
+restore_edit_batch_error_fixture() {
+  cp "$edit_batch_error_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_batch_error_backup"
+}
+trap restore_edit_batch_error_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.batch-error.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_batch_error.trace.jsonl \
+  > target/generated/code_agent_edit_batch_error.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_batch_error.post_test.log
+restore_edit_batch_error_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_batch_error.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_batch_error.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+assert any(
+    event.get("rule") == "record-batch-dispatch-error"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "batch_dispatch_error"
+    and "write tool alone" in event.get("output", [{}])[-1].get("rationale", "")
+    for event in events
+), events
+batch_error = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch"
+    and event.get("meta", {}).get("error_count") == 1
+    and event.get("output", [{}])[0].get("tool") == "<batch>"
+)
+assert "approval-required capability file.write must be isolated" in batch_error["output"][0]["error"], batch_error
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == ["file.search", "file.ops", "test.run", "git.diff"], tools
+PY
+
 echo "[code-agent] edit loop records edit validation failures"
 edit_validation_failed_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_validation_failed_backup"

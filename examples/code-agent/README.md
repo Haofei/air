@@ -37,6 +37,8 @@ The fixed structure is only the loop boundary. The model chooses one to four pla
 
 Completion is blocked until verification has passed. The loop does not transition to `summarize -> done` until a `test.run` invocation returns `success: true`. This means every edit cycle must ultimately prove its change through the configured verification command; if tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
+The default edit budget is sized for real bounded coding work rather than a smoke test: `max_steps: 160`, `max_model_calls: 40`, `max_tool_calls: 200`, and `max_repeated_tool_calls: 16`. This gives the loop room for repeated explore -> edit -> verify -> fix cycles while AIR still enforces approval, tool, and trace boundaries.
+
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 
 ```bash
