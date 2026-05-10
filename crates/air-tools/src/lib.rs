@@ -2086,6 +2086,7 @@ fn call_file_read_tool(
     let end_line = optional_positive_usize_input(name, input, "end_line")?;
     let contains = optional_string_input(name, input, "contains")?;
     let context_lines = optional_positive_usize_input(name, input, "context_lines")?.unwrap_or(0);
+    let occurrence = optional_positive_usize_input(name, input, "occurrence")?.unwrap_or(1);
     let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(false);
     if let (Some(start), Some(end)) = (start_line, end_line) {
         if start > end {
@@ -2105,9 +2106,14 @@ fn call_file_read_tool(
                 "tool {name} input.contains must not be empty"
             )));
         }
-        let Some(index) = full_content.lines().position(|line| line.contains(needle)) else {
+        let Some(index) = full_content
+            .lines()
+            .enumerate()
+            .filter_map(|(index, line)| line.contains(needle).then_some(index))
+            .nth(occurrence - 1)
+        else {
             return Err(RuntimeError::Provider(format!(
-                "tool {name} input.contains was not found"
+                "tool {name} input.contains occurrence={occurrence} was not found"
             )));
         };
         let line = index + 1;
@@ -2115,6 +2121,11 @@ fn call_file_read_tool(
         let end = (line + context_lines).min(total_lines);
         (Some(start), Some(end), Some(line))
     } else {
+        if input.get("occurrence").is_some() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.occurrence requires input.contains"
+            )));
+        }
         if input.get("context_lines").is_some() {
             return Err(RuntimeError::Provider(format!(
                 "tool {name} input.context_lines requires input.contains"
@@ -2143,6 +2154,7 @@ fn call_file_read_tool(
         "match_line": match_line,
         "contains": contains,
         "context_lines": context_lines,
+        "occurrence": occurrence,
         "total_lines": total_lines,
         "truncated": truncated,
         "line_numbers": line_numbers,
@@ -2165,6 +2177,7 @@ fn call_file_read_tool(
                 "match_line": match_line,
                 "contains": contains,
                 "context_lines": context_lines,
+                "occurrence": occurrence,
                 "total_lines": total_lines,
                 "truncated": truncated,
                 "line_numbers": line_numbers
@@ -6600,6 +6613,48 @@ mod tests {
             output["artifacts"][0]["metadata"]["contains"],
             json!("target")
         );
+        assert_eq!(output["occurrence"], json!(1));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_can_return_context_around_later_contains_occurrence() {
+        let dir = temp_dir("air-tools-file-read-contains-occurrence");
+        fs::write(
+            dir.join("note.txt"),
+            "target first\nmiddle\nbefore\ntarget second\nafter\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.read",
+                &json!({
+                    "path": "note.txt",
+                    "contains": "target",
+                    "occurrence": 2,
+                    "context_lines": 1
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["content"], json!("before\ntarget second\nafter"));
+        assert_eq!(output["match_line"], json!(4));
+        assert_eq!(output["occurrence"], json!(2));
+        assert_eq!(output["artifacts"][0]["metadata"]["occurrence"], json!(2));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -6628,7 +6683,40 @@ mod tests {
             )
             .unwrap_err();
 
-        assert!(error.to_string().contains("input.contains was not found"));
+        assert!(error
+            .to_string()
+            .contains("input.contains occurrence=1 was not found"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_rejects_missing_contains_occurrence() {
+        let dir = temp_dir("air-tools-file-read-contains-occurrence-missing");
+        fs::write(dir.join("note.txt"), "target once\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.read",
+                &json!({"path": "note.txt", "contains": "target", "occurrence": 2}),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("input.contains occurrence=2 was not found"));
         let _ = fs::remove_dir_all(dir);
     }
 

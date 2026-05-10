@@ -36,7 +36,7 @@ This keeps context growth explicit and auditable without adding a new AIR instru
 
 For editing agents, prefer the opencode-style tool split already available in `air-tools`:
 `todo.write` and `todo.read` for explicit task tracking on non-trivial work,
-`file.read` for context, including `contains` + `context_lines` when the agent has a symbol or error
+`file.read` for context, including `contains` + `occurrence` + `context_lines` when the agent has a symbol or error
 string but should not guess line numbers, `file.read_many` for bounded multi-file context gathering,
 `file.edit` for exact-string changes that require a prior read by default and explicit
 whitespace-tolerant strategies for indentation drift. Use `file.edit` with `edits[]` for atomic
