@@ -194,6 +194,117 @@ assert any(event.get("meta", {}).get("model") == "code_explorer" for event in ta
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 
+echo "[code-agent] project execution respects task dependencies"
+cat > target/generated/code_project_dependency_model_fixtures.json <<'JSON'
+{
+  "fixtures": {
+    "project_planner": {
+      "summary": "Fixture project plan intentionally lists dependent tasks out of order.",
+      "scope": {
+        "goal": "Exercise AIR code project dependency scheduling.",
+        "non_goals": [],
+        "assumptions": ["The executor should run dependencies before dependent tasks."]
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "title": "Dependency scheduling",
+          "objective": "Run t1 before t2 even though t2 is listed first.",
+          "task_ids": ["t1", "t2"]
+        }
+      ],
+      "tasks": [
+        {
+          "id": "t2",
+          "title": "Run after dependency",
+          "description": "This task is listed first but depends on t1.",
+          "kind": "test",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect dependency scheduling after the prerequisite task.",
+            "query": "code project dependency scheduling",
+            "target_path": "crates/air-cli/src/code_agent.rs"
+          },
+          "depends_on": ["t1"],
+          "files": ["crates/air-cli/src/code_agent.rs"],
+          "acceptance": []
+        },
+        {
+          "id": "t1",
+          "title": "Run dependency first",
+          "description": "This prerequisite task is listed second and should run first.",
+          "kind": "test",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect dependency scheduling prerequisite context.",
+            "query": "code project dependency scheduling",
+            "target_path": "crates/air-cli/src/code_agent.rs"
+          },
+          "depends_on": [],
+          "files": ["crates/air-cli/src/code_agent.rs"],
+          "acceptance": []
+        }
+      ],
+      "files": [
+        {
+          "path": "crates/air-cli/src/code_agent.rs",
+          "purpose": "Dependency scheduler implementation.",
+          "change_type": "modify"
+        }
+      ],
+      "acceptance": [],
+      "risks": [],
+      "source_ids": ["docs-code-agent-loop"],
+      "next_steps": ["Confirm execution order follows dependencies."]
+    },
+    "code_explorer": {
+      "summary": "Fixture exploration completed for dependency scheduling.",
+      "relevant_files": [
+        {
+          "path": "crates/air-cli/src/code_agent.rs",
+          "reason": "Contains project task scheduling."
+        }
+      ],
+      "findings": [
+        {
+          "title": "Project tasks are dependency ordered",
+          "evidence": "The executor should use depends_on instead of raw array order.",
+          "source_ids": ["docs-provenance"]
+        }
+      ],
+      "source_ids": ["docs-provenance"],
+      "next_steps": ["Run dependent tasks only after prerequisites complete."]
+    }
+  }
+}
+JSON
+cargo run -q -p air-cli -- code "plan and execute an out-of-order dependency graph" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 2 \
+  --query "code agent project dependency scheduling" \
+  --model-config target/generated/code_project_dependency_model_fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --trace-out target/generated/code_project_dependency.trace.jsonl \
+  > target/generated/code_project_dependency.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_dependency.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+project = output["project"]
+assert project["status"] == "completed", project
+assert project["completed"] is True, project
+assert project["scheduled_task_ids"] == ["t1", "t2"], project
+assert [item["task_id"] for item in project["executions"]] == ["t1", "t2"], project
+assert project["executions"][1]["depends_on"] == ["t1"], project
+assert project["remaining_task_ids"] == [], project
+trace_files = [Path(path) for path in output["trace_files"]]
+assert len(trace_files) == 3, trace_files
+assert all(path.exists() for path in trace_files), trace_files
+PY
+
 echo "[code-agent] project execution failure recovery fork"
 cat > target/generated/code_project_fail_model_fixtures.json <<'JSON'
 {

@@ -8,6 +8,7 @@ use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -1227,6 +1228,31 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let scheduled_tasks = match code_project_task_schedule(&tasks) {
+        Ok(schedule) => schedule,
+        Err(error) => {
+            return Ok(json!({
+                "project_plan": project_plan,
+                "project": {
+                    "status": "stopped",
+                    "completed": false,
+                    "max_tasks": options.max_tasks,
+                    "executed_tasks": 0,
+                    "remaining_task_ids": code_project_task_ids(&tasks),
+                    "acceptance": [],
+                    "executions": [{
+                        "completed": false,
+                        "error": error.to_string(),
+                    }],
+                },
+                "trace_files": trace_files,
+            }));
+        }
+    };
+    let scheduled_task_ids = scheduled_tasks
+        .iter()
+        .map(|task| Value::String(task.id.clone()))
+        .collect::<Vec<_>>();
 
     let mut executions = Vec::new();
     let mut prior_executions = Vec::new();
@@ -1235,19 +1261,16 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
     let mut acceptance_tools: Option<ToolProviderChoice> = None;
     let mut completed = true;
     let mut stopped = false;
-    for (index, task) in tasks.iter().take(options.max_tasks).enumerate() {
+    for (index, task) in scheduled_tasks.iter().take(options.max_tasks).enumerate() {
         let task_number = index + 1;
-        let task_id = task
-            .get("id")
-            .and_then(Value::as_str)
-            .unwrap_or("task")
-            .to_string();
+        let task_id = task.id.clone();
         let title = task
+            .definition
             .get("title")
             .and_then(Value::as_str)
             .unwrap_or("")
             .to_string();
-        let recipe = match task_recipe(task) {
+        let recipe = match task_recipe(&task.definition) {
             Ok(recipe) => recipe,
             Err(error) => {
                 completed = false;
@@ -1261,7 +1284,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 break;
             }
         };
-        let Some(input) = task.get("input").and_then(Value::as_object) else {
+        let Some(input) = task.definition.get("input").and_then(Value::as_object) else {
             completed = false;
             stopped = true;
             executions.push(json!({
@@ -1319,7 +1342,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 let acceptance = run_acceptance_checks(
                     &mut acceptance_tools,
                     &options,
-                    task.get("acceptance"),
+                    task.definition.get("acceptance"),
                     &format!("task:{task_id}"),
                     &mut acceptance_events,
                     &mut acceptance_step,
@@ -1332,6 +1355,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "task_id": task_id,
                     "title": title,
                     "recipe": recipe_name(recipe),
+                    "depends_on": task.depends_on.clone(),
                     "completed": task_completed,
                     "acceptance": acceptance,
                     "outputs": outputs,
@@ -1350,6 +1374,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "task_id": task_id,
                     "title": title,
                     "recipe": recipe_name(recipe),
+                    "depends_on": task.depends_on.clone(),
                     "completed": false,
                     "error": error.to_string(),
                 });
@@ -1361,7 +1386,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
     }
 
     let executed = executions.len();
-    let project_acceptance = if !stopped && executed == tasks.len() {
+    let project_acceptance = if !stopped && executed == scheduled_tasks.len() {
         let acceptance = run_acceptance_checks(
             &mut acceptance_tools,
             &options,
@@ -1389,15 +1414,18 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             trace_files.push(path_ref_to_input_string(&path));
         }
     }
-    let remaining_task_ids = tasks
+    let executed_task_ids = executions
         .iter()
-        .skip(executed)
-        .filter_map(|task| task.get("id").and_then(Value::as_str))
-        .map(|id| Value::String(id.to_string()))
+        .filter_map(|execution| execution.get("task_id").and_then(Value::as_str))
+        .collect::<HashSet<_>>();
+    let remaining_task_ids = scheduled_tasks
+        .iter()
+        .filter(|task| !executed_task_ids.contains(task.id.as_str()))
+        .map(|task| Value::String(task.id.clone()))
         .collect::<Vec<_>>();
     let status = if stopped {
         "stopped"
-    } else if tasks.len() > executed {
+    } else if scheduled_tasks.len() > executed {
         completed = false;
         "max_tasks_exhausted"
     } else if completed {
@@ -1413,6 +1441,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "completed": completed,
             "max_tasks": options.max_tasks,
             "executed_tasks": executed,
+            "scheduled_task_ids": scheduled_task_ids,
             "remaining_task_ids": remaining_task_ids,
             "acceptance": project_acceptance,
             "executions": executions,
@@ -1433,6 +1462,99 @@ fn task_recipe(task: &Value) -> Result<CodeRecipe> {
         "build" => Ok(CodeRecipe::Build),
         other => bail!("unsupported planned task recipe {other:?}"),
     }
+}
+
+#[derive(Clone, Debug)]
+struct CodeProjectScheduledTask {
+    id: String,
+    depends_on: Vec<String>,
+    definition: Value,
+}
+
+fn code_project_task_ids(tasks: &[Value]) -> Vec<Value> {
+    tasks
+        .iter()
+        .filter_map(|task| task.get("id").and_then(Value::as_str))
+        .map(|id| Value::String(id.to_string()))
+        .collect()
+}
+
+fn code_project_task_schedule(tasks: &[Value]) -> Result<Vec<CodeProjectScheduledTask>> {
+    let mut parsed = Vec::new();
+    let mut id_to_index = HashMap::new();
+    for (index, task) in tasks.iter().enumerate() {
+        let id = task
+            .get("id")
+            .and_then(Value::as_str)
+            .filter(|id| !id.trim().is_empty())
+            .with_context(|| format!("planned task at index {index} is missing non-empty id"))?
+            .to_string();
+        if id_to_index.insert(id.clone(), index).is_some() {
+            bail!("planned task id {id:?} is duplicated");
+        }
+        let depends_on = task
+            .get("depends_on")
+            .and_then(Value::as_array)
+            .map(|deps| {
+                deps.iter()
+                    .enumerate()
+                    .map(|(dep_index, dep)| {
+                        dep.as_str()
+                            .filter(|dep| !dep.trim().is_empty())
+                            .map(str::to_string)
+                            .with_context(|| {
+                                format!(
+                                    "planned task {id:?} depends_on[{dep_index}] is not a non-empty string"
+                                )
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()
+            })
+            .transpose()?
+            .unwrap_or_default();
+        parsed.push(CodeProjectScheduledTask {
+            id,
+            depends_on,
+            definition: task.clone(),
+        });
+    }
+
+    for task in &parsed {
+        for dependency in &task.depends_on {
+            if !id_to_index.contains_key(dependency) {
+                bail!(
+                    "planned task {:?} depends on missing task {:?}",
+                    task.id,
+                    dependency
+                );
+            }
+        }
+    }
+
+    let mut remaining = (0..parsed.len()).collect::<Vec<_>>();
+    let mut scheduled = Vec::new();
+    let mut completed_ids = HashSet::new();
+    while !remaining.is_empty() {
+        let Some(ready_position) = remaining.iter().position(|index| {
+            parsed[*index]
+                .depends_on
+                .iter()
+                .all(|dependency| completed_ids.contains(dependency))
+        }) else {
+            let blocked = remaining
+                .iter()
+                .map(|index| parsed[*index].id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            bail!("planned task dependency cycle blocks: {blocked}");
+        };
+        let index = remaining.remove(ready_position);
+        let task = parsed[index].clone();
+        completed_ids.insert(task.id.clone());
+        scheduled.push(task);
+    }
+
+    Ok(scheduled)
 }
 
 fn code_project_task_input(
@@ -2719,6 +2841,72 @@ mod tests {
         assert!(task.contains("inspect the next file"));
         assert!(task.contains("AIR project execution context from previous tasks"));
         assert!(task.contains("found routing code"));
+    }
+
+    #[test]
+    fn project_task_schedule_respects_dependencies() {
+        let tasks = vec![
+            json!({
+                "id": "package",
+                "depends_on": ["build"],
+                "recipe": "explore",
+                "input": {}
+            }),
+            json!({
+                "id": "build",
+                "depends_on": ["plan"],
+                "recipe": "explore",
+                "input": {}
+            }),
+            json!({
+                "id": "plan",
+                "depends_on": [],
+                "recipe": "explore",
+                "input": {}
+            }),
+        ];
+
+        let schedule = code_project_task_schedule(&tasks).unwrap();
+        let ids = schedule
+            .iter()
+            .map(|task| task.id.as_str())
+            .collect::<Vec<_>>();
+
+        assert_eq!(ids, vec!["plan", "build", "package"]);
+    }
+
+    #[test]
+    fn project_task_schedule_rejects_missing_dependency() {
+        let error = code_project_task_schedule(&[json!({
+            "id": "build",
+            "depends_on": ["plan"],
+            "recipe": "explore",
+            "input": {}
+        })])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("depends on missing task"));
+    }
+
+    #[test]
+    fn project_task_schedule_rejects_cycles() {
+        let error = code_project_task_schedule(&[
+            json!({
+                "id": "a",
+                "depends_on": ["b"],
+                "recipe": "explore",
+                "input": {}
+            }),
+            json!({
+                "id": "b",
+                "depends_on": ["a"],
+                "recipe": "explore",
+                "input": {}
+            }),
+        ])
+        .unwrap_err();
+
+        assert!(error.to_string().contains("dependency cycle"));
     }
 
     #[test]
