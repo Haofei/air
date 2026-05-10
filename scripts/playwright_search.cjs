@@ -35,6 +35,7 @@ async function run(input) {
   const pageConcurrency = positiveInt(input.page_concurrency, 3);
   const retryCount = nonNegativeInt(input.retry_count, 1);
   const fetchPages = input.fetch_pages !== false;
+  const searchBaseUrl = searchBaseUrlFromInput(input.search_base_url);
   const queries = uniqueNonEmpty([query, ...stringArray(input.query_variants)]).slice(0, 8);
   const includeDomains = domainArray(input.include_domains);
   const excludeDomains = domainArray(input.exclude_domains);
@@ -63,19 +64,19 @@ async function run(input) {
       if (deadlineExceeded(deadlineAt)) {
         searchRuns.push({
           query: currentQuery,
-          search_url: bingSearchUrl(currentQuery),
+          search_url: searchUrl(currentQuery, searchBaseUrl),
           ok: false,
           error: 'overall_timeout_exceeded',
           results: [],
         });
         continue;
       }
-      const searchUrl = bingSearchUrl(currentQuery);
+      const currentSearchUrl = searchUrl(currentQuery, searchBaseUrl);
       const timeoutMs = remainingTimeout(deadlineAt, navigationTimeoutMs);
       if (timeoutMs < 500) {
         searchRuns.push({
           query: currentQuery,
-          search_url: searchUrl,
+          search_url: currentSearchUrl,
           ok: false,
           error: 'overall_timeout_exceeded',
           results: [],
@@ -86,7 +87,7 @@ async function run(input) {
       page.setDefaultNavigationTimeout(timeoutMs);
       page.setDefaultTimeout(timeoutMs);
       try {
-        await page.goto(searchUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
+        await page.goto(currentSearchUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
         const results = await collectSearchResults(page);
         const title = await page.title().catch(() => '');
         const body_preview =
@@ -114,7 +115,7 @@ async function run(input) {
           );
         searchRuns.push({
           query: currentQuery,
-          search_url: searchUrl,
+          search_url: currentSearchUrl,
           ok: true,
           page_title: title,
           body_preview,
@@ -129,7 +130,7 @@ async function run(input) {
       } catch (error) {
         searchRuns.push({
           query: currentQuery,
-          search_url: searchUrl,
+          search_url: currentSearchUrl,
           ok: false,
           error: errorMessage(error),
           results: [],
@@ -244,6 +245,7 @@ async function run(input) {
         overall_timeout_ms: overallTimeoutMs,
         search_delay_ms: searchDelayMs,
         retry_count: retryCount,
+        search_base_url: searchBaseUrl,
       },
     };
   } finally {
@@ -490,8 +492,18 @@ function cleanText(text) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
-function bingSearchUrl(query) {
-  return `https://www.bing.com/search?q=${encodeURIComponent(query)}`;
+function searchBaseUrlFromInput(value) {
+  const baseUrl = String(value || 'https://www.bing.com/search').trim();
+  if (!isValidHttpUrl(baseUrl)) {
+    throw new Error('input.search_base_url must be an http(s) URL when provided');
+  }
+  return baseUrl;
+}
+
+function searchUrl(query, baseUrl) {
+  const parsed = new URL(baseUrl);
+  parsed.searchParams.set('q', query);
+  return parsed.toString();
 }
 
 function unwrapSearchRedirectUrl(url) {

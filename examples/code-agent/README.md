@@ -51,6 +51,10 @@ every patch apply.
 
 The default `tools.json` uses deterministic local search documents so release verification does
 not depend on network access. For real research, switch to `tools.playwright.json`.
+The verification script also runs `scripts/playwright_search_fixture_test.cjs` when a local
+Playwright Chromium browser is installed; that fixture serves Bing-like HTML from localhost and
+checks real DOM extraction, URL normalization, page fetch, and artifact output without external
+network access.
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
