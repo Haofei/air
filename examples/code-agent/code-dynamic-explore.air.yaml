@@ -170,6 +170,111 @@ workflow:
                   - literal: file.read
                   - literal: file.read_many
                   - literal: file.search
+              tool_specs:
+                array:
+                  - object:
+                      tool:
+                        literal: repo.files
+                      purpose:
+                        literal: "List repository files before selecting a narrower read target."
+                      input_schema:
+                        literal:
+                          required: []
+                          optional:
+                            query: "string: filename/path token to filter files"
+                            path: "string: optional repo-relative directory"
+                            max_files: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.search
+                      purpose:
+                        literal: "Search file contents across the repository and return matching lines."
+                      input_schema:
+                        literal:
+                          required:
+                            query: "string: regex or fixed search text"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            mode: "string: fixed or regex"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.symbols
+                      purpose:
+                        literal: "Find likely code symbols by name before reading files."
+                      input_schema:
+                        literal:
+                          required:
+                            query: "string: symbol or identifier fragment"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            glob: "string: optional filename glob"
+                            max_symbols: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.references
+                      purpose:
+                        literal: "Find references and nearby snippets for one symbol."
+                      input_schema:
+                        literal:
+                          required:
+                            symbol: "string: exact symbol or identifier"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            context_lines: "integer: optional per-call context capped by tool config"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.context
+                      purpose:
+                        literal: "Return contextual snippets around repository search hits."
+                      input_schema:
+                        literal:
+                          required:
+                            query: "string: regex or fixed search text"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            mode: "string: fixed or regex"
+                            context_lines: "integer: optional per-call context capped by tool config"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: file.read
+                      purpose:
+                        literal: "Read one known text file or a line range."
+                      input_schema:
+                        literal:
+                          required:
+                            path: "string: repo-relative file path"
+                          optional:
+                            start_line: "integer: first 1-based line"
+                            end_line: "integer: last 1-based line"
+                            line_numbers: "boolean: include numbered_content"
+                  - object:
+                      tool:
+                        literal: file.read_many
+                      purpose:
+                        literal: "Read several known text files in one bounded call."
+                      input_schema:
+                        literal:
+                          required:
+                            files: "array: repo-relative file paths or objects with path"
+                          optional:
+                            line_numbers: "boolean: include numbered_content per file"
+                  - object:
+                      tool:
+                        literal: file.search
+                      purpose:
+                        literal: "Search within one known file and return matching lines with optional context."
+                      input_schema:
+                        literal:
+                          required:
+                            path: "string: repo-relative file path"
+                            pattern: "string: regular expression"
+                          optional:
+                            context_lines: "integer: optional context capped by tool config"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                            max_line_chars: "integer: optional per-line limit capped by tool config"
           output: decision
           timeout_seconds: 30
         - kind: set

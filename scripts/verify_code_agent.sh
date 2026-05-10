@@ -1111,6 +1111,17 @@ assert any(item["path"] == "crates/air-runtime/src/lib.rs" for item in explorati
 
 with open("target/generated/code_dynamic_explore_fixture.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
+planner_inputs = [
+    event["input"] for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_tool_planner"
+]
+assert planner_inputs, events
+tool_specs = planner_inputs[0]["tool_specs"]
+assert [item["tool"] for item in tool_specs] == planner_inputs[0]["allowed_tools"], tool_specs
+file_search = next(item for item in tool_specs if item["tool"] == "file.search")
+assert file_search["input_schema"]["required"]["pattern"].startswith("string"), file_search
+assert "max_line_chars" in file_search["input_schema"]["optional"], file_search
 dispatches = [
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
