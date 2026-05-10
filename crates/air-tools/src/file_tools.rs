@@ -273,6 +273,12 @@ pub(super) fn call_file_search_tool(
         max_context_lines,
     )?
     .unwrap_or(0);
+    let effective_max_matches =
+        optional_bounded_usize_input(name, input, "max_matches", max_matches)?
+            .unwrap_or(max_matches);
+    let effective_max_line_chars =
+        optional_bounded_usize_input(name, input, "max_line_chars", max_line_chars)?
+            .unwrap_or(max_line_chars);
     let lines = content.lines().collect::<Vec<_>>();
     let total_lines = lines.len();
     let mut total_match_count = 0usize;
@@ -283,13 +289,13 @@ pub(super) fn call_file_search_tool(
             continue;
         }
         total_match_count += 1;
-        if matches.len() >= max_matches {
+        if matches.len() >= effective_max_matches {
             continue;
         }
         let line_number = index + 1;
         let before_start = line_number.saturating_sub(context_lines).max(1);
         let before = (before_start..line_number)
-            .filter_map(|number| line_json(&lines, number, max_line_chars))
+            .filter_map(|number| line_json(&lines, number, effective_max_line_chars))
             .inspect(|line| {
                 any_line_truncated |= line
                     .get("line_truncated")
@@ -299,7 +305,7 @@ pub(super) fn call_file_search_tool(
             .collect::<Vec<_>>();
         let after_end = (line_number + context_lines).min(total_lines);
         let after = ((line_number + 1)..=after_end)
-            .filter_map(|number| line_json(&lines, number, max_line_chars))
+            .filter_map(|number| line_json(&lines, number, effective_max_line_chars))
             .inspect(|line| {
                 any_line_truncated |= line
                     .get("line_truncated")
@@ -307,7 +313,7 @@ pub(super) fn call_file_search_tool(
                     .unwrap_or(false);
             })
             .collect::<Vec<_>>();
-        let (line, line_truncated) = truncate_line_text(line, max_line_chars);
+        let (line, line_truncated) = truncate_line_text(line, effective_max_line_chars);
         any_line_truncated |= line_truncated;
         matches.push(json!({
             "line_number": line_number,
@@ -350,7 +356,8 @@ pub(super) fn call_file_search_tool(
         "returned_match_count": matches.len(),
         "total_lines": total_lines,
         "context_lines": context_lines,
-        "max_line_chars": max_line_chars,
+        "max_matches": effective_max_matches,
+        "max_line_chars": effective_max_line_chars,
         "line_truncated": any_line_truncated,
         "truncated": truncated,
         "bytes": bytes,
@@ -368,8 +375,8 @@ pub(super) fn call_file_search_tool(
                 "returned_match_count": matches.len(),
                 "total_lines": total_lines,
                 "context_lines": context_lines,
-                "max_matches": max_matches,
-                "max_line_chars": max_line_chars,
+                "max_matches": effective_max_matches,
+                "max_line_chars": effective_max_line_chars,
                 "line_truncated": any_line_truncated,
                 "truncated": truncated
             }

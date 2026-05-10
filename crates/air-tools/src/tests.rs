@@ -633,6 +633,67 @@ fn file_search_truncates_long_structured_lines() {
 }
 
 #[test]
+fn file_search_supports_bounded_per_call_limits() {
+    let dir = temp_dir("air-tools-file-search-per-call-limits");
+    fs::write(
+        dir.join("note.txt"),
+        "needle-abcdef\nneedle-bcdefg\nneedle-cdefgh\nneedle-defghi\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 4096,
+                  "max_matches": 3,
+                  "max_context_lines": 4,
+                  "max_line_chars": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.search",
+            &json!({
+                "path": "note.txt",
+                "pattern": "needle",
+                "max_matches": 2,
+                "max_line_chars": 8
+            }),
+        )
+        .unwrap();
+    assert_eq!(output["match_count"], json!(4));
+    assert_eq!(output["returned_match_count"], json!(2));
+    assert_eq!(output["max_matches"], json!(2));
+    assert_eq!(output["max_line_chars"], json!(8));
+    assert_eq!(output["matches"][0]["line"], json!("needle-a"));
+    assert_eq!(output["truncated"], json!(true));
+
+    let capped = tools
+        .call_tool(
+            "file.search",
+            &json!({
+                "path": "note.txt",
+                "pattern": "needle",
+                "max_matches": 99,
+                "max_line_chars": 99
+            }),
+        )
+        .unwrap();
+    assert_eq!(capped["returned_match_count"], json!(3));
+    assert_eq!(capped["max_matches"], json!(3));
+    assert_eq!(capped["max_line_chars"], json!(10));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_satisfies_read_before_file_ops_edit() {
     let dir = temp_dir("air-tools-file-search-read-before-edit");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
