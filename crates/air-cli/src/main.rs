@@ -5,6 +5,7 @@ mod code_context;
 mod code_input;
 mod code_loop;
 mod code_pack;
+mod code_project_acceptance;
 mod code_project_context;
 mod code_session;
 mod explain;

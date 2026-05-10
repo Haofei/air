@@ -14,6 +14,9 @@ use crate::code_pack::CodeAgentRouteFacts;
 use crate::code_pack::{
     load_code_agent_pack, CodeAgentInputFacts, CodeAgentPackContext, CodeAgentRouteDecision,
 };
+#[cfg(test)]
+use crate::code_project_acceptance::acceptance_checks;
+use crate::code_project_acceptance::{acceptance_checks_completed, run_acceptance_checks};
 use crate::code_project_context::{
     code_project_artifacts, code_project_memory, push_project_artifact,
 };
@@ -28,7 +31,7 @@ use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::run_plan::{run_plan, run_plan_capture, write_trace, RunPlanOptions};
 use crate::tools::ToolProviderChoice;
-use air_runtime::{read_trace_jsonl, ToolProvider, TraceEvent, TraceStatus};
+use air_runtime::{read_trace_jsonl, TraceEvent, TraceStatus};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
 use std::collections::{HashMap, HashSet};
@@ -1576,7 +1579,8 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             Ok(outputs) => {
                 let acceptance = run_acceptance_checks(
                     &mut acceptance_tools,
-                    &options,
+                    &options.plan_profile,
+                    options.tool_config.clone(),
                     task.definition.get("acceptance"),
                     &format!("task:{task_id}"),
                     &mut acceptance_events,
@@ -1629,7 +1633,8 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
     let project_acceptance = if !stopped && executed == scheduled_tasks.len() {
         let acceptance = run_acceptance_checks(
             &mut acceptance_tools,
-            &options,
+            &options.plan_profile,
+            options.tool_config.clone(),
             project_plan.get("acceptance"),
             "project",
             &mut acceptance_events,
@@ -2092,164 +2097,6 @@ fn is_likely_code_agent_context_file(path: &Path) -> bool {
                     | "css"
             )
         })
-}
-
-fn run_acceptance_checks(
-    tools: &mut Option<ToolProviderChoice>,
-    options: &CodeProjectOptions,
-    checks: Option<&Value>,
-    scope: &str,
-    events: &mut Vec<TraceEvent>,
-    step: &mut u32,
-) -> Result<Vec<Value>> {
-    let checks = acceptance_checks(checks);
-    if checks.is_empty() {
-        return Ok(Vec::new());
-    }
-    let tool_config =
-        resolve_code_project_tool_config(&options.plan_profile, options.tool_config.clone())?;
-    let tools = tools.get_or_insert(ToolProviderChoice::from_config(tool_config, false)?);
-    let mut results = Vec::new();
-    for check in checks {
-        *step += 1;
-        let input = check.input.clone();
-        let output = tools.call_tool("test.run", &input);
-        match output {
-            Ok(output) => {
-                let success = output
-                    .get("success")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-                events.push(TraceEvent {
-                    agent: "air-code-project".to_string(),
-                    step: *step,
-                    rule: scope.to_string(),
-                    action: "tool_call".to_string(),
-                    input: Some(input),
-                    output: Some(output.clone()),
-                    meta: Some(json!({
-                        "tool": "test.run",
-                        "acceptance_id": check.id,
-                        "scope": scope,
-                    })),
-                    status: if success {
-                        TraceStatus::Ok
-                    } else {
-                        TraceStatus::Error
-                    },
-                    error: if success {
-                        None
-                    } else {
-                        Some(format!("acceptance check {} failed", check.id))
-                    },
-                });
-                results.push(json!({
-                    "id": check.id,
-                    "scope": scope,
-                    "command": check.command,
-                    "expected": check.expected,
-                    "success": success,
-                    "output": output,
-                }));
-            }
-            Err(error) => {
-                let error = error.to_string();
-                events.push(TraceEvent {
-                    agent: "air-code-project".to_string(),
-                    step: *step,
-                    rule: scope.to_string(),
-                    action: "tool_call".to_string(),
-                    input: Some(input),
-                    output: None,
-                    meta: Some(json!({
-                        "tool": "test.run",
-                        "acceptance_id": check.id,
-                        "scope": scope,
-                    })),
-                    status: TraceStatus::Error,
-                    error: Some(error.clone()),
-                });
-                results.push(json!({
-                    "id": check.id,
-                    "scope": scope,
-                    "command": check.command,
-                    "expected": check.expected,
-                    "success": false,
-                    "error": error,
-                }));
-            }
-        }
-    }
-    Ok(results)
-}
-
-#[derive(Clone, Debug)]
-struct AcceptanceCheck {
-    id: String,
-    command: String,
-    expected: String,
-    input: Value,
-}
-
-fn acceptance_checks(value: Option<&Value>) -> Vec<AcceptanceCheck> {
-    let Some(Value::Array(items)) = value else {
-        return Vec::new();
-    };
-    items
-        .iter()
-        .filter_map(|item| match item {
-            Value::Object(object) => {
-                let command = object.get("command")?.as_str()?.to_string();
-                let id = object
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&command)
-                    .to_string();
-                let expected = object
-                    .get("expected")
-                    .and_then(Value::as_str)
-                    .unwrap_or("command succeeds")
-                    .to_string();
-                let mut input = Map::new();
-                input.insert("command".to_string(), Value::String(command.clone()));
-                if let Some(Value::Object(parameters)) = object.get("parameters") {
-                    for (key, value) in parameters {
-                        input.insert(key.clone(), value.clone());
-                    }
-                }
-                Some(AcceptanceCheck {
-                    id,
-                    command,
-                    expected,
-                    input: Value::Object(input),
-                })
-            }
-            _ => None,
-        })
-        .collect()
-}
-
-fn acceptance_checks_completed(checks: &[Value]) -> bool {
-    checks.iter().all(|check| {
-        check
-            .get("success")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    })
-}
-
-fn resolve_code_project_tool_config(
-    profile: &PathBuf,
-    explicit: Option<PathBuf>,
-) -> Result<Option<PathBuf>> {
-    if explicit.is_some() {
-        return Ok(explicit);
-    }
-    let profile_config = read_run_plan_profile(profile)?;
-    Ok(profile_config
-        .tool_config
-        .as_ref()
-        .map(|path| resolve_profile_path(profile, path)))
 }
 
 fn code_session_turn_input(
