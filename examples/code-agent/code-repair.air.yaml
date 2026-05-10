@@ -56,6 +56,23 @@ state:
       artifacts:
         type: array
         items: object
+  diagnostic_context:
+    type: object
+    required: [repo, diagnostics, snippets, unreadable, artifacts]
+    properties:
+      repo: string
+      diagnostics:
+        type: array
+        items: object
+      snippets:
+        type: array
+        items: object
+      unreadable:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
   repair_plan:
     type: object
     required: [patch, rationale]
@@ -118,6 +135,23 @@ state:
     properties:
       path: string
       content: string
+      artifacts:
+        type: array
+        items: object
+  diagnostic_context_retry:
+    type: object
+    required: [repo, diagnostics, snippets, unreadable, artifacts]
+    properties:
+      repo: string
+      diagnostics:
+        type: array
+        items: object
+      snippets:
+        type: array
+        items: object
+      unreadable:
+        type: array
+        items: object
       artifacts:
         type: array
         items: object
@@ -227,6 +261,9 @@ tools:
   - name: file.patch
     capability: file.write
     timeout_ms: 10000
+  - name: diagnostic.context
+    capability: code.read
+    timeout_ms: 10000
   - name: git.status
     capability: code.read
     timeout_ms: 10000
@@ -279,6 +316,18 @@ workflow:
           timeout_seconds: 30
           retry:
             max_attempts: 1
+        - kind: tool_call
+          tool: diagnostic.context
+          input:
+            object:
+              diagnostics:
+                ref: test_results.diagnostics
+              context_lines:
+                literal: 3
+          output: diagnostic_context
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: set
           values:
             phase: route
@@ -319,6 +368,8 @@ workflow:
                 ref: file_context
               diagnostics:
                 ref: test_results.diagnostics
+              diagnostic_context:
+                ref: diagnostic_context
               log:
                 ref: test_results.log
           output: repair_plan
@@ -453,6 +504,18 @@ workflow:
           timeout_seconds: 10
           retry:
             max_attempts: 1
+        - kind: tool_call
+          tool: diagnostic.context
+          input:
+            object:
+              diagnostics:
+                ref: final_test_results.diagnostics
+              context_lines:
+                literal: 3
+          output: diagnostic_context_retry
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: set
           values:
             phase: repair_again
@@ -472,6 +535,8 @@ workflow:
                 ref: file_context_retry
               diagnostics:
                 ref: final_test_results.diagnostics
+              diagnostic_context:
+                ref: diagnostic_context_retry
               log:
                 ref: final_test_results.log
               previous_rationale:
@@ -619,7 +684,7 @@ workflow:
           output: repair
 
 policy:
-  max_tool_calls: 10
+  max_tool_calls: 12
   max_model_calls: 2
   timeout_seconds: 360
 

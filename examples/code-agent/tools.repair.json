@@ -16,6 +16,14 @@
       "max_files": 1,
       "max_bytes": 65536
     },
+    "diagnostic.context": {
+      "kind": "diagnostic_context",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_diagnostics": 10,
+      "context_lines": 4,
+      "max_bytes": 65536
+    },
     "git.status": {
       "kind": "git_status",
       "capability": "code.read",

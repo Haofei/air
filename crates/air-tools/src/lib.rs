@@ -328,6 +328,21 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    DiagnosticContext {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_diagnostics: Option<usize>,
+
+        #[serde(default)]
+        context_lines: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
     TodoWrite {
         #[serde(default)]
         capability: Option<String>,
@@ -371,6 +386,7 @@ impl ToolConfig {
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
@@ -818,6 +834,31 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
+            ToolConfig::DiagnosticContext {
+                repo_dir,
+                max_diagnostics,
+                context_lines,
+                max_bytes,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_diagnostics"),
+                    *max_diagnostics,
+                )?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.context_lines"),
+                    *context_lines,
+                )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
             ToolConfig::TodoWrite {
                 max_items,
                 max_content_chars,
@@ -1241,6 +1282,20 @@ impl ToolProvider for ConfigTools {
                 context_lines.unwrap_or(6),
                 max_bytes.unwrap_or(256 * 1024),
             ),
+            ToolConfig::DiagnosticContext {
+                capability: _,
+                repo_dir,
+                max_diagnostics,
+                context_lines,
+                max_bytes,
+            } => call_diagnostic_context_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_diagnostics.unwrap_or(20),
+                context_lines.unwrap_or(4),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
             ToolConfig::TodoWrite {
                 capability: _,
                 max_items,
@@ -1284,6 +1339,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
@@ -3054,6 +3110,239 @@ fn call_repo_context_tool(
             }
         }]
     }))
+}
+
+fn call_diagnostic_context_tool(
+    name: &str,
+    input: &Value,
+    repo_dir: &Path,
+    max_diagnostics: usize,
+    context_lines: usize,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    let diagnostics = input
+        .get("diagnostics")
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.diagnostics is required"))
+        })?
+        .as_array()
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.diagnostics must be an array"))
+        })?;
+    let effective_max_diagnostics =
+        optional_bounded_usize_input(name, input, "max_diagnostics", max_diagnostics)?
+            .unwrap_or(max_diagnostics);
+    let effective_context_lines =
+        optional_bounded_usize_input(name, input, "context_lines", context_lines)?
+            .unwrap_or(context_lines);
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let mut files: BTreeMap<PathBuf, DiagnosticContextFile> = BTreeMap::new();
+    let mut considered = Vec::new();
+    let mut unreadable = Vec::new();
+
+    for (index, diagnostic) in diagnostics
+        .iter()
+        .take(effective_max_diagnostics)
+        .enumerate()
+    {
+        let path = diagnostic.get("path").and_then(Value::as_str);
+        let line = diagnostic.get("line").and_then(Value::as_u64);
+        let Some(path) = path else {
+            unreadable.push(json!({
+                "diagnostic_index": index,
+                "reason": "missing path"
+            }));
+            continue;
+        };
+        let Some(line) = line
+            .and_then(|line| usize::try_from(line).ok())
+            .filter(|line| *line > 0)
+        else {
+            unreadable.push(json!({
+                "diagnostic_index": index,
+                "path": path,
+                "reason": "missing positive line"
+            }));
+            continue;
+        };
+        let Some((absolute_path, relative_path)) = resolve_diagnostic_context_path(&repo, path)
+        else {
+            unreadable.push(json!({
+                "diagnostic_index": index,
+                "path": path,
+                "reason": "path is outside repo_dir or cannot be read"
+            }));
+            continue;
+        };
+        let body = match fs::read(&absolute_path) {
+            Ok(body) => body,
+            Err(error) => {
+                unreadable.push(json!({
+                    "diagnostic_index": index,
+                    "path": relative_path,
+                    "reason": format!("read failed: {error}")
+                }));
+                continue;
+            }
+        };
+        if is_likely_binary(&body) {
+            unreadable.push(json!({
+                "diagnostic_index": index,
+                "path": relative_path,
+                "reason": "file appears to be binary"
+            }));
+            continue;
+        }
+        let content = match std::str::from_utf8(&body) {
+            Ok(content) => content.to_string(),
+            Err(_) => {
+                unreadable.push(json!({
+                    "diagnostic_index": index,
+                    "path": relative_path,
+                    "reason": "file is not valid UTF-8"
+                }));
+                continue;
+            }
+        };
+        let total_lines = content.lines().count().max(1);
+        if line > total_lines {
+            unreadable.push(json!({
+                "diagnostic_index": index,
+                "path": relative_path,
+                "line": line,
+                "reason": "line is outside file"
+            }));
+            continue;
+        }
+        considered.push(diagnostic.clone());
+        let file = files
+            .entry(absolute_path)
+            .or_insert_with(|| DiagnosticContextFile {
+                relative_path,
+                content,
+                total_lines,
+                lines: Vec::new(),
+                diagnostic_indexes: Vec::new(),
+            });
+        file.lines.push(line);
+        file.diagnostic_indexes.push(index);
+    }
+
+    let mut snippets = Vec::new();
+    let mut rendered = String::new();
+    let mut truncated = diagnostics.len() > effective_max_diagnostics;
+    for file in files.values() {
+        for (start_line, end_line) in
+            merge_line_ranges(&file.lines, file.total_lines, effective_context_lines)
+        {
+            let content = numbered_line_range(&file.content, start_line, end_line);
+            let remaining = max_bytes.saturating_sub(rendered.len());
+            if remaining == 0 {
+                truncated = true;
+                break;
+            }
+            let (limited_content, content_truncated, _source_bytes) =
+                bytes_to_limited_text(content.as_bytes(), remaining);
+            let diagnostic_indexes = file
+                .lines
+                .iter()
+                .zip(file.diagnostic_indexes.iter())
+                .filter_map(|(line, index)| {
+                    (*line >= start_line && *line <= end_line).then_some(*index)
+                })
+                .collect::<Vec<_>>();
+            truncated |= content_truncated;
+            if !rendered.is_empty() {
+                rendered.push_str("\n\n");
+            }
+            rendered.push_str(&format!(
+                "== {}:{}-{} ==\n{}",
+                file.relative_path, start_line, end_line, limited_content
+            ));
+            snippets.push(json!({
+                "path": file.relative_path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "content": limited_content,
+                "diagnostic_indexes": diagnostic_indexes,
+                "truncated": content_truncated
+            }));
+            if content_truncated {
+                break;
+            }
+        }
+        if rendered.len() >= max_bytes {
+            truncated = true;
+            break;
+        }
+    }
+    let bytes = rendered.len();
+
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "diagnostics": considered,
+        "snippets": snippets,
+        "unreadable": unreadable,
+        "diagnostic_count": diagnostics.len(),
+        "max_diagnostics": effective_max_diagnostics,
+        "context_lines": effective_context_lines,
+        "bytes": bytes,
+        "truncated": truncated,
+        "artifacts": [{
+            "id": format!("diagnostic-context:{}", repo.display()),
+            "kind": "diagnostic_context",
+            "title": "diagnostic context",
+            "uri": repo.display().to_string(),
+            "content": rendered,
+            "metadata": {
+                "provider": "diagnostic_context",
+                "repo": repo.display().to_string(),
+                "diagnostic_count": diagnostics.len(),
+                "snippet_count": snippets.len(),
+                "unreadable_count": unreadable.len(),
+                "max_diagnostics": effective_max_diagnostics,
+                "context_lines": effective_context_lines,
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }]
+    }))
+}
+
+#[derive(Debug)]
+struct DiagnosticContextFile {
+    relative_path: String,
+    content: String,
+    total_lines: usize,
+    lines: Vec<usize>,
+    diagnostic_indexes: Vec<usize>,
+}
+
+fn resolve_diagnostic_context_path(
+    repo: &Path,
+    diagnostic_path: &str,
+) -> Option<(PathBuf, String)> {
+    let raw_path = Path::new(diagnostic_path);
+    if !raw_path.is_absolute()
+        && validate_git_pathspec("diagnostic.context", diagnostic_path).is_err()
+    {
+        return None;
+    }
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        repo.join(raw_path)
+    };
+    let absolute = candidate.canonicalize().ok()?;
+    if !absolute.starts_with(repo) {
+        return None;
+    }
+    let relative = absolute
+        .strip_prefix(repo)
+        .ok()?
+        .to_string_lossy()
+        .to_string();
+    Some((absolute, relative))
 }
 
 fn call_command_run_tool(
@@ -5334,6 +5623,104 @@ mod tests {
         assert!(error
             .to_string()
             .contains("input.mode must be fixed or regex"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn diagnostic_context_returns_source_snippets_for_command_diagnostics() {
+        let dir = temp_dir("air-tools-diagnostic-context");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "line 1\nline 2\nfn broken() {}\nline 4\nline 5\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "diagnostic.context": {
+                  "kind": "diagnostic_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_diagnostics": 5,
+                  "context_lines": 1,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "diagnostic.context",
+                &json!({
+                    "diagnostics": [{
+                        "source": "command_run",
+                        "severity": "error",
+                        "path": "src/lib.rs",
+                        "line": 3,
+                        "column": 4,
+                        "message": "expected value"
+                    }]
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["snippets"].as_array().unwrap().len(), 1);
+        assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
+        assert_eq!(output["snippets"][0]["start_line"], json!(2));
+        assert_eq!(output["snippets"][0]["end_line"], json!(4));
+        assert!(output["snippets"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("3: fn broken() {}"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("diagnostic_context"));
+        assert_eq!(
+            output["artifacts"][0]["metadata"]["provider"],
+            json!("diagnostic_context")
+        );
+        assert!(output["unreadable"].as_array().unwrap().is_empty());
+        assert_eq!(
+            tools.tool_capability("diagnostic.context"),
+            Some("code.read")
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn diagnostic_context_skips_paths_outside_repo() {
+        let dir = temp_dir("air-tools-diagnostic-context-boundary");
+        fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "diagnostic.context": {
+                  "kind": "diagnostic_context",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "diagnostic.context",
+                &json!({
+                    "diagnostics": [{
+                        "path": "../secret.txt",
+                        "line": 1
+                    }]
+                }),
+            )
+            .unwrap();
+
+        assert!(output["snippets"].as_array().unwrap().is_empty());
+        assert_eq!(output["unreadable"].as_array().unwrap().len(), 1);
         let _ = fs::remove_dir_all(dir);
     }
 

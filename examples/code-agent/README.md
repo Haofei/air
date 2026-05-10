@@ -4,10 +4,10 @@ This example contains two bounded AIR coding agents:
 
 - `code.review@0.1.0` gathers evidence and returns review guidance that cites concrete artifacts.
 - `code.repair@0.1.0` reads a target file, runs an allowlisted test, uses structured diagnostics to
-  generate a unified diff, validates it with `file.patch` dry-run, applies it through constrained
-  `file.patch`, then retests with one bounded retry pass if the first patch does not fix the test.
-  It finishes by calling `git.status` so the returned summary includes workspace cleanliness and
-  changed files.
+  gather nearby source context, generates a unified diff, validates it with `file.patch` dry-run,
+  applies it through constrained `file.patch`, then retests with one bounded retry pass if the
+  first patch does not fix the test. It finishes by calling `git.status` so the returned summary
+  includes workspace cleanliness and changed files.
 - `code.build_page@0.1.0` generates one static HTML file, writes it through constrained `file.write`,
   then runs an allowlisted smoke test.
 
@@ -32,6 +32,8 @@ audit,
 explicit overwrites. Keep shell execution behind `command_run` aliases instead of giving the model
 a raw shell. `command_run` returns both raw logs and structured `diagnostics[]`, so repair loops can
 focus on file/line/column errors instead of re-parsing terminal output from scratch.
+`diagnostic.context` turns those diagnostics into bounded nearby source snippets, which keeps repair
+models grounded without forcing them to calculate line ranges by hand.
 When `require_read` is enabled, `file.write`, `file.edit`, and `file.patch` reject edits to files
 that were not read or were modified after the last read. `file.patch` also supports `dry_run: true`
 for `git apply --check` validation without mutating files; the repair agent uses that check before

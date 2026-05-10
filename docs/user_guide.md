@@ -280,6 +280,7 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `repo_files` | `repo.files` | `{ "query": "...", "path": "optional/dir" }` | `{ repo, query, files[], truncated, artifacts[] }` | Read-only repository file listing through `rg --files`; optional query/path/glob filtering. |
 | `repo_search` | `repo.search` | `{ "query": "...", "mode": "fixed", "path": "optional/dir", "max_matches": 20 }` | `{ repo, query, mode, matches[], truncated, artifacts[] }` | Read-only search through `rg`; defaults to fixed-string mode and supports explicit `mode: "regex"` for grep-style code discovery. Per-call `max_matches` is capped by tool config. Returns path/line/column/text matches. |
 | `repo_context` | `repo.context` | `{ "query": "...", "mode": "fixed", "context_lines": 8 }` | `{ repo, query, mode, matches[], snippets[], truncated, artifacts[] }` | Read-only code context through `rg`; defaults to fixed-string mode and supports explicit `mode: "regex"`. Groups matches by file and returns nearby numbered snippets with a `code_context` artifact. |
+| `diagnostic_context` | `diagnostic.context` | `{ "diagnostics": [{ "path": "src/lib.rs", "line": 42 }], "context_lines": 4 }` | `{ repo, diagnostics[], snippets[], unreadable[], truncated, artifacts[] }` | Converts structured command diagnostics into nearby source snippets. Paths must resolve inside `repo_dir`; unreadable, missing, or out-of-bounds diagnostics are reported in `unreadable[]` instead of leaking outside the repository. |
 | `todo_write` | `todo.write` | `{ "todos": [{ "id": "inspect", "content": "...", "status": "in_progress", "priority": "high" }] }` | `{ todos[], total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts[] }` | Writes a structured task-progress artifact for complex agents. Status must be `pending`, `in_progress`, `completed`, or `cancelled`; priority must be `high`, `medium`, or `low`; at most one item may be `in_progress`. |
 | `command_run` | `test.run` | `{ "command": "alias" }` | `{ command, success, status, log, diagnostics[], artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Extracts common Rust/TypeScript/file-line diagnostics for repair loops. |
 
@@ -290,7 +291,7 @@ Artifact-producing tools return a common shape:
   "artifacts": [
     {
       "id": "doc-1",
-      "kind": "web_page | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | code_context | todo_list | git_diff | git_status | test_log",
+      "kind": "web_page | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | code_context | diagnostic_context | todo_list | git_diff | git_status | test_log",
       "title": "Readable title",
       "uri": "file-or-web-location",
       "content": "Evidence text",
