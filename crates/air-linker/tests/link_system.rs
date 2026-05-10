@@ -251,7 +251,7 @@ impl ModelProvider for DeepResearchModels {
                     input["evidence"]["final_direction"]["rationale"].as_str().unwrap()
                 ),
                 "sources": [
-                    format!("source:{}", input["topic"].as_str().unwrap())
+                    format!("doc:{}", input["topic"].as_str().unwrap())
                 ]
             })),
             "research_refiner" => {

@@ -3,12 +3,12 @@ use air_runtime::{
 };
 use anyhow::{Context, Result};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 #[derive(Clone)]
 pub struct EchoTools;
@@ -99,6 +99,7 @@ struct ToolConfigFile {
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
+#[allow(clippy::large_enum_variant)]
 enum ToolConfig {
     LocalDocsSearch {
         #[serde(default)]
@@ -150,6 +151,63 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    PlaywrightSearch {
+        #[serde(default)]
+        capability: Option<String>,
+
+        script_path: PathBuf,
+
+        #[serde(default)]
+        query_variants: Option<Vec<String>>,
+
+        #[serde(default)]
+        max_results: Option<usize>,
+
+        #[serde(default)]
+        max_results_per_query: Option<usize>,
+
+        #[serde(default)]
+        max_per_domain: Option<usize>,
+
+        #[serde(default)]
+        max_content_chars: Option<usize>,
+
+        #[serde(default)]
+        include_domains: Option<Vec<String>>,
+
+        #[serde(default)]
+        exclude_domains: Option<Vec<String>>,
+
+        #[serde(default)]
+        required_terms: Option<Vec<String>>,
+
+        #[serde(default)]
+        exclude_terms: Option<Vec<String>>,
+
+        #[serde(default)]
+        page_concurrency: Option<usize>,
+
+        #[serde(default)]
+        navigation_timeout_ms: Option<u64>,
+
+        #[serde(default)]
+        overall_timeout_ms: Option<u64>,
+
+        #[serde(default)]
+        search_delay_ms: Option<u64>,
+
+        #[serde(default)]
+        retry_count: Option<usize>,
+
+        #[serde(default)]
+        user_agent: Option<String>,
+
+        #[serde(default)]
+        fetch_pages: Option<bool>,
+
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+    },
     FileRead {
         #[serde(default)]
         capability: Option<String>,
@@ -159,11 +217,127 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    FileWrite {
+        #[serde(default)]
+        capability: Option<String>,
+
+        base_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+
+        #[serde(default)]
+        create_dirs: Option<bool>,
+
+        #[serde(default)]
+        allow_overwrite: Option<bool>,
+
+        #[serde(default)]
+        require_read: Option<bool>,
+    },
+    FileEdit {
+        #[serde(default)]
+        capability: Option<String>,
+
+        base_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+
+        #[serde(default)]
+        require_read: Option<bool>,
+
+        #[serde(default)]
+        allow_replace_all: Option<bool>,
+    },
+    FilePatch {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+
+        #[serde(default)]
+        require_read: Option<bool>,
+
+        #[serde(default)]
+        allow_new_files: Option<bool>,
+
+        #[serde(default)]
+        allow_delete_files: Option<bool>,
+    },
     GitDiff {
         #[serde(default)]
         capability: Option<String>,
 
         repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    GitStatus {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+    },
+    RepoFiles {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+    },
+    RepoSearch {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_matches: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    RepoContext {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_matches: Option<usize>,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+
+        #[serde(default)]
+        context_lines: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    CommandRun {
+        #[serde(default)]
+        capability: Option<String>,
+
+        cwd: PathBuf,
+
+        commands: BTreeMap<String, Vec<String>>,
+
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
 
         #[serde(default)]
         max_bytes: Option<usize>,
@@ -177,8 +351,17 @@ impl ToolConfig {
             | ToolConfig::LocalReflection { capability }
             | ToolConfig::HttpJson { capability, .. }
             | ToolConfig::WebFetch { capability, .. }
+            | ToolConfig::PlaywrightSearch { capability, .. }
             | ToolConfig::FileRead { capability, .. }
-            | ToolConfig::GitDiff { capability, .. } => capability.as_deref(),
+            | ToolConfig::FileWrite { capability, .. }
+            | ToolConfig::FileEdit { capability, .. }
+            | ToolConfig::FilePatch { capability, .. }
+            | ToolConfig::GitDiff { capability, .. }
+            | ToolConfig::GitStatus { capability, .. }
+            | ToolConfig::RepoFiles { capability, .. }
+            | ToolConfig::RepoSearch { capability, .. }
+            | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
 }
@@ -213,6 +396,7 @@ pub struct ConfigTools {
     tools: BTreeMap<String, ToolConfig>,
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
+    read_snapshots: BTreeMap<PathBuf, SystemTime>,
 }
 
 impl ConfigTools {
@@ -229,6 +413,7 @@ impl ConfigTools {
                 .parent()
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
+            read_snapshots: BTreeMap::new(),
         })
     }
 
@@ -252,7 +437,17 @@ impl ConfigTools {
             )]),
             approvals: BTreeMap::new(),
             config_dir: PathBuf::from("."),
+            read_snapshots: BTreeMap::new(),
         }
+    }
+
+    fn remember_read_snapshot(&mut self, path: &Path) -> Result<(), RuntimeError> {
+        let path = fs::canonicalize(path).map_err(|error| {
+            RuntimeError::Provider(format!("tool file snapshot canonicalize path: {error}"))
+        })?;
+        let modified = file_modified_time("tool", "path", &path)?;
+        self.read_snapshots.insert(path, modified);
+        Ok(())
     }
 }
 
@@ -377,6 +572,110 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
+            ToolConfig::PlaywrightSearch {
+                script_path,
+                query_variants,
+                max_results,
+                max_results_per_query,
+                max_per_domain,
+                max_content_chars,
+                include_domains,
+                exclude_domains,
+                required_terms,
+                exclude_terms,
+                page_concurrency,
+                navigation_timeout_ms,
+                overall_timeout_ms,
+                search_delay_ms,
+                retry_count,
+                user_agent,
+                fetch_pages: _,
+                timeout_seconds,
+                ..
+            } => {
+                if script_path.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.script_path must not be empty",
+                        path.display()
+                    );
+                }
+                validate_non_empty_strings(
+                    path,
+                    &format!("tools.{name}.query_variants"),
+                    query_variants.as_deref(),
+                )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_results_per_query"),
+                    *max_results_per_query,
+                )?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_per_domain"),
+                    *max_per_domain,
+                )?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_content_chars"),
+                    *max_content_chars,
+                )?;
+                validate_domain_filters(
+                    path,
+                    &format!("tools.{name}.include_domains"),
+                    include_domains.as_deref(),
+                )?;
+                validate_domain_filters(
+                    path,
+                    &format!("tools.{name}.exclude_domains"),
+                    exclude_domains.as_deref(),
+                )?;
+                validate_non_empty_strings(
+                    path,
+                    &format!("tools.{name}.required_terms"),
+                    required_terms.as_deref(),
+                )?;
+                validate_non_empty_strings(
+                    path,
+                    &format!("tools.{name}.exclude_terms"),
+                    exclude_terms.as_deref(),
+                )?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.page_concurrency"),
+                    *page_concurrency,
+                )?;
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.navigation_timeout_ms"),
+                    *navigation_timeout_ms,
+                )?;
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.overall_timeout_ms"),
+                    *overall_timeout_ms,
+                )?;
+                validate_non_negative_u64(
+                    path,
+                    &format!("tools.{name}.search_delay_ms"),
+                    *search_delay_ms,
+                )?;
+                validate_retry_count(path, &format!("tools.{name}.retry_count"), *retry_count)?;
+                if user_agent
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.user_agent must not be empty when provided",
+                        path.display()
+                    );
+                }
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.timeout_seconds"),
+                    *timeout_seconds,
+                )?;
+            }
             ToolConfig::FileRead {
                 base_dir,
                 max_bytes,
@@ -390,6 +689,47 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
+            ToolConfig::FileWrite {
+                base_dir,
+                max_bytes,
+                ..
+            } => {
+                if base_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.base_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::FileEdit {
+                base_dir,
+                max_bytes,
+                ..
+            } => {
+                if base_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.base_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::FilePatch {
+                repo_dir,
+                max_bytes,
+                max_files,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+            }
             ToolConfig::GitDiff {
                 repo_dir,
                 max_bytes,
@@ -401,6 +741,110 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::GitStatus {
+                repo_dir,
+                max_files,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+            }
+            ToolConfig::RepoFiles {
+                repo_dir,
+                max_files,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+            }
+            ToolConfig::RepoSearch {
+                repo_dir,
+                max_matches,
+                max_bytes,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::RepoContext {
+                repo_dir,
+                max_matches,
+                max_files,
+                context_lines,
+                max_bytes,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.context_lines"),
+                    *context_lines,
+                )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::CommandRun {
+                cwd,
+                commands,
+                timeout_seconds,
+                max_bytes,
+                ..
+            } => {
+                if cwd.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.cwd must not be empty",
+                        path.display()
+                    );
+                }
+                if commands.is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.commands must not be empty",
+                        path.display()
+                    );
+                }
+                for (alias, command) in commands {
+                    if alias.trim().is_empty() {
+                        anyhow::bail!(
+                            "tool config {} tools.{name}.commands contains an empty alias",
+                            path.display()
+                        );
+                    }
+                    if command.is_empty() || command.iter().any(|part| part.trim().is_empty()) {
+                        anyhow::bail!(
+                            "tool config {} tools.{name}.commands.{alias} must contain non-empty command parts",
+                            path.display()
+                        );
+                    }
+                }
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.timeout_seconds"),
+                    *timeout_seconds,
+                )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
         }
@@ -428,12 +872,66 @@ fn validate_positive_u64(path: &Path, field: &str, value: Option<u64>) -> Result
     Ok(())
 }
 
+fn validate_non_negative_u64(path: &Path, field: &str, value: Option<u64>) -> Result<()> {
+    if value.is_some_and(|value| value > 300_000) {
+        anyhow::bail!(
+            "tool config {} {field} must be less than or equal to 300000",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn validate_positive_usize(path: &Path, field: &str, value: Option<usize>) -> Result<()> {
     if value.is_some_and(|value| value == 0) {
         anyhow::bail!(
             "tool config {} {field} must be greater than 0",
             path.display()
         );
+    }
+    Ok(())
+}
+
+fn validate_retry_count(path: &Path, field: &str, value: Option<usize>) -> Result<()> {
+    if value.is_some_and(|value| value > 32) {
+        anyhow::bail!(
+            "tool config {} {field} must be less than or equal to 32",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_non_empty_strings(path: &Path, field: &str, values: Option<&[String]>) -> Result<()> {
+    if values
+        .unwrap_or_default()
+        .iter()
+        .any(|value| value.trim().is_empty())
+    {
+        anyhow::bail!(
+            "tool config {} {field} entries must not be empty",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_domain_filters(path: &Path, field: &str, values: Option<&[String]>) -> Result<()> {
+    let Some(values) = values else {
+        return Ok(());
+    };
+    for value in values {
+        let domain = value.trim();
+        if domain.is_empty()
+            || domain.contains('/')
+            || domain.contains(':')
+            || domain.contains(char::is_whitespace)
+        {
+            anyhow::bail!(
+                "tool config {} {field} entries must be hostnames or hostname suffixes",
+                path.display()
+            );
+        }
     }
     Ok(())
 }
@@ -459,7 +957,7 @@ impl ToolProvider for ConfigTools {
         input: &Value,
         timeout: Duration,
     ) -> Result<Value, RuntimeError> {
-        let Some(tool) = self.tools.get(name) else {
+        let Some(tool) = self.tools.get(name).cloned() else {
             return Err(RuntimeError::Provider(format!(
                 "unknown configured tool {name}"
             )));
@@ -469,7 +967,7 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 documents,
                 max_results,
-            } => Ok(search_docs(input, documents, max_results.unwrap_or(3))),
+            } => Ok(search_docs(input, &documents, max_results.unwrap_or(3))),
             ToolConfig::LocalReflection { capability: _ } => Ok(json!({
                 "reflection": input
                     .get("reflection")
@@ -488,12 +986,12 @@ impl ToolProvider for ConfigTools {
                 name,
                 input,
                 HttpJsonToolConfig {
-                    url,
-                    method,
-                    headers,
+                    url: &url,
+                    method: &method,
+                    headers: &headers,
                     bearer_token_env: bearer_token_env.as_deref(),
                     body: body.as_ref(),
-                    timeout_seconds: *timeout_seconds,
+                    timeout_seconds,
                     action_timeout: Some(timeout),
                 },
             ),
@@ -507,23 +1005,162 @@ impl ToolProvider for ConfigTools {
                 name,
                 input,
                 WebFetchToolConfig {
-                    headers,
+                    headers: &headers,
                     bearer_token_env: bearer_token_env.as_deref(),
-                    timeout_seconds: *timeout_seconds,
+                    timeout_seconds,
                     action_timeout: Some(timeout),
                     max_bytes: max_bytes.unwrap_or(256 * 1024),
+                },
+            ),
+            ToolConfig::PlaywrightSearch {
+                capability: _,
+                script_path,
+                query_variants,
+                max_results,
+                max_results_per_query,
+                max_per_domain,
+                max_content_chars,
+                include_domains,
+                exclude_domains,
+                required_terms,
+                exclude_terms,
+                page_concurrency,
+                navigation_timeout_ms,
+                overall_timeout_ms,
+                search_delay_ms,
+                retry_count,
+                user_agent,
+                fetch_pages,
+                timeout_seconds,
+            } => call_playwright_search_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &script_path),
+                PlaywrightSearchConfig {
+                    query_variants: query_variants.as_deref(),
+                    max_results,
+                    max_results_per_query,
+                    max_per_domain,
+                    max_content_chars,
+                    include_domains: include_domains.as_deref(),
+                    exclude_domains: exclude_domains.as_deref(),
+                    required_terms: required_terms.as_deref(),
+                    exclude_terms: exclude_terms.as_deref(),
+                    page_concurrency,
+                    navigation_timeout_ms,
+                    overall_timeout_ms,
+                    search_delay_ms,
+                    retry_count,
+                    user_agent: user_agent.as_deref(),
+                    fetch_pages,
+                    timeout_seconds,
+                    action_timeout: Some(timeout),
                 },
             ),
             ToolConfig::FileRead {
                 capability: _,
                 base_dir,
                 max_bytes,
-            } => call_file_read_tool(
-                name,
-                input,
-                &resolve_config_path(&self.config_dir, base_dir),
-                max_bytes.unwrap_or(256 * 1024),
-            ),
+            } => {
+                let output = call_file_read_tool(
+                    name,
+                    input,
+                    &resolve_config_path(&self.config_dir, &base_dir),
+                    max_bytes.unwrap_or(256 * 1024),
+                )?;
+                if let Some(path) = output.get("path").and_then(Value::as_str) {
+                    self.remember_read_snapshot(Path::new(path))?;
+                }
+                Ok(output)
+            }
+            ToolConfig::FileWrite {
+                capability: _,
+                base_dir,
+                max_bytes,
+                create_dirs,
+                allow_overwrite,
+                require_read,
+            } => {
+                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let output = call_file_write_tool(
+                    name,
+                    input,
+                    FileWriteOptions {
+                        base_dir: &base_dir,
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                        create_dirs: create_dirs.unwrap_or(false),
+                        allow_overwrite: allow_overwrite.unwrap_or(false),
+                        require_read: require_read.unwrap_or(false),
+                        read_snapshots: &self.read_snapshots,
+                    },
+                )?;
+                if let Some(path) = output.get("path").and_then(Value::as_str) {
+                    self.remember_read_snapshot(Path::new(path))?;
+                }
+                Ok(output)
+            }
+            ToolConfig::FileEdit {
+                capability: _,
+                base_dir,
+                max_bytes,
+                require_read,
+                allow_replace_all,
+            } => {
+                let output = call_file_edit_tool(
+                    name,
+                    input,
+                    &resolve_config_path(&self.config_dir, &base_dir),
+                    max_bytes.unwrap_or(256 * 1024),
+                    require_read.unwrap_or(true),
+                    allow_replace_all.unwrap_or(false),
+                    &self.read_snapshots,
+                )?;
+                if let Some(path) = output.get("path").and_then(Value::as_str) {
+                    self.remember_read_snapshot(Path::new(path))?;
+                }
+                Ok(output)
+            }
+            ToolConfig::FilePatch {
+                capability: _,
+                repo_dir,
+                max_bytes,
+                max_files,
+                require_read,
+                allow_new_files,
+                allow_delete_files,
+            } => {
+                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let output = call_file_patch_tool(
+                    name,
+                    input,
+                    FilePatchOptions {
+                        repo_dir: &repo_dir,
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                        max_files: max_files.unwrap_or(20),
+                        require_read: require_read.unwrap_or(true),
+                        allow_new_files: allow_new_files.unwrap_or(true),
+                        allow_delete_files: allow_delete_files.unwrap_or(false),
+                        read_snapshots: &self.read_snapshots,
+                    },
+                )?;
+                if output
+                    .get("applied")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    if let Some(files) = output.get("files").and_then(Value::as_array) {
+                        for file in files {
+                            if file.get("kind").and_then(Value::as_str) == Some("delete") {
+                                continue;
+                            }
+                            if let Some(path) = file.get("path").and_then(Value::as_str) {
+                                self.remember_read_snapshot(&repo_dir.join(path))?;
+                            }
+                        }
+                    }
+                }
+                Ok(output)
+            }
             ToolConfig::GitDiff {
                 capability: _,
                 repo_dir,
@@ -531,7 +1168,68 @@ impl ToolProvider for ConfigTools {
             } => call_git_diff_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, repo_dir),
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
+            ToolConfig::GitStatus {
+                capability: _,
+                repo_dir,
+                max_files,
+            } => call_git_status_tool(
+                name,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_files.unwrap_or(200),
+            ),
+            ToolConfig::RepoFiles {
+                capability: _,
+                repo_dir,
+                max_files,
+            } => call_repo_files_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_files.unwrap_or(200),
+            ),
+            ToolConfig::RepoSearch {
+                capability: _,
+                repo_dir,
+                max_matches,
+                max_bytes,
+            } => call_repo_search_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_matches.unwrap_or(80),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
+            ToolConfig::RepoContext {
+                capability: _,
+                repo_dir,
+                max_matches,
+                max_files,
+                context_lines,
+                max_bytes,
+            } => call_repo_context_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_matches.unwrap_or(40),
+                max_files.unwrap_or(8),
+                context_lines.unwrap_or(6),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
+            ToolConfig::CommandRun {
+                capability: _,
+                cwd,
+                commands,
+                timeout_seconds,
+                max_bytes,
+            } => call_command_run_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &cwd),
+                &commands,
+                timeout_seconds.unwrap_or(120),
                 max_bytes.unwrap_or(256 * 1024),
             ),
         }
@@ -543,8 +1241,17 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::LocalReflection { capability }
             | ToolConfig::HttpJson { capability, .. }
             | ToolConfig::WebFetch { capability, .. }
+            | ToolConfig::PlaywrightSearch { capability, .. }
             | ToolConfig::FileRead { capability, .. }
-            | ToolConfig::GitDiff { capability, .. } => capability.as_deref(),
+            | ToolConfig::FileWrite { capability, .. }
+            | ToolConfig::FileEdit { capability, .. }
+            | ToolConfig::FilePatch { capability, .. }
+            | ToolConfig::GitDiff { capability, .. }
+            | ToolConfig::GitStatus { capability, .. }
+            | ToolConfig::RepoFiles { capability, .. }
+            | ToolConfig::RepoSearch { capability, .. }
+            | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
 
@@ -673,6 +1380,27 @@ struct WebFetchToolConfig<'a> {
     max_bytes: usize,
 }
 
+struct PlaywrightSearchConfig<'a> {
+    query_variants: Option<&'a [String]>,
+    max_results: Option<usize>,
+    max_results_per_query: Option<usize>,
+    max_per_domain: Option<usize>,
+    max_content_chars: Option<usize>,
+    include_domains: Option<&'a [String]>,
+    exclude_domains: Option<&'a [String]>,
+    required_terms: Option<&'a [String]>,
+    exclude_terms: Option<&'a [String]>,
+    page_concurrency: Option<usize>,
+    navigation_timeout_ms: Option<u64>,
+    overall_timeout_ms: Option<u64>,
+    search_delay_ms: Option<u64>,
+    retry_count: Option<usize>,
+    user_agent: Option<&'a str>,
+    fetch_pages: Option<bool>,
+    timeout_seconds: Option<u64>,
+    action_timeout: Option<Duration>,
+}
+
 fn call_web_fetch_tool(
     name: &str,
     input: &Value,
@@ -722,13 +1450,220 @@ fn call_web_fetch_tool(
     let (text, truncated, bytes) = bytes_to_limited_text(&body, config.max_bytes);
 
     Ok(json!({
-        "url": final_url,
+        "url": final_url.clone(),
         "status": status,
-        "content_type": content_type,
-        "text": text,
+        "content_type": content_type.clone(),
+        "text": text.clone(),
         "bytes": bytes,
         "truncated": truncated,
+        "artifacts": [{
+            "id": final_url.clone(),
+            "kind": "web_page",
+            "title": final_url.clone(),
+            "uri": final_url.clone(),
+            "content": text.clone(),
+            "metadata": {
+                "provider": "web_fetch",
+                "status": status,
+                "content_type": content_type.clone(),
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }],
     }))
+}
+
+fn call_playwright_search_tool(
+    name: &str,
+    input: &Value,
+    script_path: &Path,
+    config: PlaywrightSearchConfig<'_>,
+) -> Result<Value, RuntimeError> {
+    let query = required_input_string(name, input, "query")?;
+    let script = canonicalize_tool_path(name, "script_path", script_path)?;
+    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(120));
+    let request_timeout = config
+        .action_timeout
+        .map(|timeout| timeout.min(configured_timeout))
+        .unwrap_or(configured_timeout);
+    let mut request = Map::new();
+    request.insert("query".to_string(), Value::String(query.to_string()));
+    request.insert(
+        "max_results".to_string(),
+        input
+            .get("max_results")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.max_results.unwrap_or(5).into())),
+    );
+    request.insert(
+        "max_results_per_query".to_string(),
+        input
+            .get("max_results_per_query")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.max_results_per_query.unwrap_or(10).into())),
+    );
+    request.insert(
+        "max_per_domain".to_string(),
+        input
+            .get("max_per_domain")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.max_per_domain.unwrap_or(2).into())),
+    );
+    request.insert(
+        "max_content_chars".to_string(),
+        input
+            .get("max_content_chars")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.max_content_chars.unwrap_or(12_000).into())),
+    );
+    request.insert(
+        "page_concurrency".to_string(),
+        input
+            .get("page_concurrency")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.page_concurrency.unwrap_or(3).into())),
+    );
+    request.insert(
+        "navigation_timeout_ms".to_string(),
+        input
+            .get("navigation_timeout_ms")
+            .cloned()
+            .unwrap_or_else(|| {
+                Value::Number(config.navigation_timeout_ms.unwrap_or(20_000).into())
+            }),
+    );
+    request.insert(
+        "overall_timeout_ms".to_string(),
+        input.get("overall_timeout_ms").cloned().unwrap_or_else(|| {
+            let configured = config.overall_timeout_ms.unwrap_or_else(|| {
+                request_timeout
+                    .saturating_sub(Duration::from_millis(500))
+                    .as_millis()
+                    .try_into()
+                    .unwrap_or(u64::MAX)
+            });
+            Value::Number(configured.into())
+        }),
+    );
+    request.insert(
+        "retry_count".to_string(),
+        input
+            .get("retry_count")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.retry_count.unwrap_or(1).into())),
+    );
+    request.insert(
+        "search_delay_ms".to_string(),
+        input
+            .get("search_delay_ms")
+            .cloned()
+            .unwrap_or_else(|| Value::Number(config.search_delay_ms.unwrap_or(0).into())),
+    );
+    if let Some(value) = input.get("user_agent") {
+        request.insert("user_agent".to_string(), value.clone());
+    } else if let Some(user_agent) = config.user_agent {
+        request.insert(
+            "user_agent".to_string(),
+            Value::String(user_agent.to_string()),
+        );
+    }
+    if let Some(value) = input.get("fetch_pages") {
+        request.insert("fetch_pages".to_string(), value.clone());
+    } else if let Some(fetch_pages) = config.fetch_pages {
+        request.insert("fetch_pages".to_string(), Value::Bool(fetch_pages));
+    }
+    insert_input_or_config_array(&mut request, input, "query_variants", config.query_variants);
+    insert_input_or_config_array(
+        &mut request,
+        input,
+        "include_domains",
+        config.include_domains,
+    );
+    insert_input_or_config_array(
+        &mut request,
+        input,
+        "exclude_domains",
+        config.exclude_domains,
+    );
+    insert_input_or_config_array(&mut request, input, "required_terms", config.required_terms);
+    insert_input_or_config_array(&mut request, input, "exclude_terms", config.exclude_terms);
+
+    let mut child = Command::new("node")
+        .arg(&script)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} launch playwright search: {error}"))
+        })?;
+    {
+        let mut stdin = child.stdin.take().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} playwright search stdin unavailable"))
+        })?;
+        serde_json::to_writer(&mut stdin, &Value::Object(request)).map_err(|error| {
+            RuntimeError::Provider(format!(
+                "tool {name} write playwright search input: {error}"
+            ))
+        })?;
+    }
+
+    let started_at = std::time::Instant::now();
+    loop {
+        match child.try_wait().map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} playwright search wait: {error}"))
+        })? {
+            Some(status) => {
+                let output = child.wait_with_output().map_err(|error| {
+                    RuntimeError::Provider(format!(
+                        "tool {name} playwright search collect output: {error}"
+                    ))
+                })?;
+                if !status.success() {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} playwright search failed: {}",
+                        provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+                    )));
+                }
+                return serde_json::from_slice(&output.stdout).map_err(|error| {
+                    RuntimeError::Provider(format!(
+                        "tool {name} playwright search output was not valid JSON: {error}; body={}",
+                        provider_error_snippet(&String::from_utf8_lossy(&output.stdout))
+                    ))
+                });
+            }
+            None if started_at.elapsed() >= request_timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} playwright search exceeded timeout_seconds={}",
+                    request_timeout.as_secs()
+                )));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn insert_input_or_config_array(
+    request: &mut Map<String, Value>,
+    input: &Value,
+    key: &str,
+    configured: Option<&[String]>,
+) {
+    if let Some(value) = input.get(key) {
+        request.insert(key.to_string(), value.clone());
+    } else if let Some(values) = configured {
+        request.insert(
+            key.to_string(),
+            Value::Array(
+                values
+                    .iter()
+                    .map(|value| Value::String(render_json_template(value, input)))
+                    .collect(),
+            ),
+        );
+    }
 }
 
 fn call_file_read_tool(
@@ -752,13 +1687,589 @@ fn call_file_read_tool(
     }
     let body = fs::read(&path)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-    let (content, truncated, bytes) = bytes_to_limited_text(&body, max_bytes);
+    let full_content = String::from_utf8_lossy(&body).to_string();
+    let total_lines = full_content.lines().count();
+    let start_line = optional_positive_usize_input(name, input, "start_line")?;
+    let end_line = optional_positive_usize_input(name, input, "end_line")?;
+    if let (Some(start), Some(end)) = (start_line, end_line) {
+        if start > end {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.start_line must be less than or equal to input.end_line"
+            )));
+        }
+    }
+    let selected = select_line_range(&full_content, start_line, end_line);
+    let (content, truncated, bytes) = bytes_to_limited_text(selected.as_bytes(), max_bytes);
     Ok(json!({
         "path": path.display().to_string(),
-        "content": content,
+        "content": content.clone(),
         "bytes": bytes,
+        "source_bytes": body.len(),
+        "start_line": start_line,
+        "end_line": end_line,
+        "total_lines": total_lines,
         "truncated": truncated,
+        "artifacts": [{
+            "id": format!("file:{}", path.display()),
+            "kind": "file_span",
+            "title": path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| path.to_str().unwrap_or("file")),
+            "uri": path.display().to_string(),
+            "content": content.clone(),
+            "metadata": {
+                "provider": "file_read",
+                "path": path.display().to_string(),
+                "bytes": bytes,
+                "source_bytes": body.len(),
+                "start_line": start_line,
+                "end_line": end_line,
+                "total_lines": total_lines,
+                "truncated": truncated
+            }
+        }],
     }))
+}
+
+fn file_modified_time(name: &str, label: &str, path: &Path) -> Result<SystemTime, RuntimeError> {
+    fs::metadata(path)
+        .and_then(|metadata| metadata.modified())
+        .map_err(|error| {
+            RuntimeError::Provider(format!(
+                "tool {name} read modification time for {label}: {error}"
+            ))
+        })
+}
+
+fn require_fresh_read(
+    name: &str,
+    label: &str,
+    action: &str,
+    path: &Path,
+    read_snapshots: &BTreeMap<PathBuf, SystemTime>,
+) -> Result<(), RuntimeError> {
+    let Some(read_modified) = read_snapshots.get(path) else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} {label} must be read before {action} when require_read is true"
+        )));
+    };
+    let current_modified = file_modified_time(name, label, path)?;
+    if current_modified > *read_modified {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} {label} was modified after it was last read; read it again before {action}"
+        )));
+    }
+    Ok(())
+}
+
+struct FileWriteOptions<'a> {
+    base_dir: &'a Path,
+    max_bytes: usize,
+    create_dirs: bool,
+    allow_overwrite: bool,
+    require_read: bool,
+    read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
+}
+
+fn call_file_write_tool(
+    name: &str,
+    input: &Value,
+    options: FileWriteOptions<'_>,
+) -> Result<Value, RuntimeError> {
+    let input_path = required_input_string(name, input, "path")?;
+    validate_git_pathspec(name, input_path)?;
+    let content = required_input_string(name, input, "content")?;
+    let content_bytes = content.as_bytes();
+    if content_bytes.len() > options.max_bytes {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.content exceeds max_bytes={}",
+            options.max_bytes
+        )));
+    }
+    let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
+    let candidate = base.join(input_path);
+    let parent = candidate.parent().ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "tool {name} input.path must have a parent directory"
+        ))
+    })?;
+    if options.create_dirs {
+        fs::create_dir_all(parent).map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} create parent directories: {error}"))
+        })?;
+    }
+    let parent = canonicalize_tool_path(name, "input.path parent", parent)?;
+    if !parent.starts_with(&base) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.path is outside configured base_dir"
+        )));
+    }
+    let mut path = parent.join(candidate.file_name().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} input.path must include a file name"))
+    })?);
+    let existed = path.exists();
+    if existed {
+        let existing = canonicalize_tool_path(name, "input.path", &path)?;
+        if !existing.starts_with(&base) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.path is outside configured base_dir"
+            )));
+        }
+        if options.require_read {
+            require_fresh_read(
+                name,
+                "input.path",
+                "overwrite",
+                &existing,
+                options.read_snapshots,
+            )?;
+        }
+        if !options.allow_overwrite {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.path already exists and allow_overwrite is false"
+            )));
+        }
+        path = existing;
+    }
+    fs::write(&path, content_bytes)
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
+    Ok(json!({
+        "path": path.display().to_string(),
+        "bytes": content_bytes.len(),
+        "created": !existed,
+        "overwritten": existed,
+        "artifacts": [{
+            "id": format!("file-write:{}", path.display()),
+            "kind": "file_write",
+            "title": path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("file write"),
+            "uri": path.display().to_string(),
+            "content": format!("wrote {} bytes to {}", content_bytes.len(), path.display()),
+            "metadata": {
+                "provider": "file_write",
+                "path": path.display().to_string(),
+                "bytes": content_bytes.len(),
+                "created": !existed,
+                "overwritten": existed
+            }
+        }]
+    }))
+}
+
+fn call_file_edit_tool(
+    name: &str,
+    input: &Value,
+    base_dir: &Path,
+    max_bytes: usize,
+    require_read: bool,
+    allow_replace_all: bool,
+    read_snapshots: &BTreeMap<PathBuf, SystemTime>,
+) -> Result<Value, RuntimeError> {
+    let input_path = required_input_string(name, input, "path")?;
+    validate_git_pathspec(name, input_path)?;
+    let old_string = required_input_string(name, input, "old_string")?;
+    let new_string = required_input_string(name, input, "new_string")?;
+    if old_string.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.old_string must not be empty"
+        )));
+    }
+    let replace_all = optional_bool_input(name, input, "replace_all")?.unwrap_or(false);
+    if replace_all && !allow_replace_all {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.replace_all is true but allow_replace_all is false"
+        )));
+    }
+
+    let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
+    let candidate = base.join(input_path);
+    let path = canonicalize_tool_path(name, "input.path", &candidate)?;
+    if !path.starts_with(&base) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.path is outside configured base_dir"
+        )));
+    }
+    if require_read {
+        require_fresh_read(name, "input.path", "edit", &path, read_snapshots)?;
+    }
+
+    let content = fs::read_to_string(&path)
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
+    let matches = content.match_indices(old_string).count();
+    if matches == 0 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.old_string was not found"
+        )));
+    }
+    if matches > 1 && !replace_all {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.old_string matched {matches} times; set replace_all=true only when all matches should change"
+        )));
+    }
+
+    let updated = if replace_all {
+        content.replace(old_string, new_string)
+    } else {
+        content.replacen(old_string, new_string, 1)
+    };
+    let updated_bytes = updated.as_bytes();
+    if updated_bytes.len() > max_bytes {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} edited content exceeds max_bytes={max_bytes}"
+        )));
+    }
+    fs::write(&path, updated_bytes)
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
+
+    Ok(json!({
+        "path": path.display().to_string(),
+        "bytes": updated_bytes.len(),
+        "replacements": if replace_all { matches } else { 1 },
+        "artifacts": [{
+            "id": format!("file-edit:{}", path.display()),
+            "kind": "file_edit",
+            "title": path
+                .file_name()
+                .and_then(|value| value.to_str())
+                .unwrap_or("file edit"),
+            "uri": path.display().to_string(),
+            "content": format!(
+                "edited {} replacement(s) in {}",
+                if replace_all { matches } else { 1 },
+                path.display()
+            ),
+            "metadata": {
+                "provider": "file_edit",
+                "path": path.display().to_string(),
+                "bytes": updated_bytes.len(),
+                "replacements": if replace_all { matches } else { 1 }
+            }
+        }]
+    }))
+}
+
+struct FilePatchOptions<'a> {
+    repo_dir: &'a Path,
+    max_bytes: usize,
+    max_files: usize,
+    require_read: bool,
+    allow_new_files: bool,
+    allow_delete_files: bool,
+    read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PatchPathKind {
+    Existing,
+    New,
+    Delete,
+}
+
+fn call_file_patch_tool(
+    name: &str,
+    input: &Value,
+    options: FilePatchOptions<'_>,
+) -> Result<Value, RuntimeError> {
+    let patch = required_input_string(name, input, "patch")?;
+    let patch = patch.replace("\r\n", "\n").replace('\r', "\n");
+    let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
+    if patch.trim().is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.patch must not be empty"
+        )));
+    }
+    if patch.len() > options.max_bytes {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.patch exceeds max_bytes={}",
+            options.max_bytes
+        )));
+    }
+
+    let repo = canonicalize_tool_path(name, "repo_dir", options.repo_dir)?;
+    let changed = extract_patch_paths(name, &patch)?;
+    if changed.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.patch did not declare any changed files"
+        )));
+    }
+    if changed.len() > options.max_files {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.patch changes {} files, exceeding max_files={}",
+            changed.len(),
+            options.max_files
+        )));
+    }
+
+    for (path, kind) in &changed {
+        if *kind == PatchPathKind::New && !options.allow_new_files {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.patch creates {path}, but allow_new_files is false"
+            )));
+        }
+        if *kind == PatchPathKind::Delete && !options.allow_delete_files {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.patch deletes {path}, but allow_delete_files is false"
+            )));
+        }
+        validate_git_pathspec(name, path)?;
+        let candidate = repo.join(path);
+        if candidate.exists() {
+            let existing = canonicalize_tool_path(name, "input.patch path", &candidate)?;
+            if !existing.starts_with(&repo) {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.patch path is outside configured repo_dir"
+                )));
+            }
+            if options.require_read {
+                require_fresh_read(
+                    name,
+                    &format!("input.patch path {path}"),
+                    "patch",
+                    &existing,
+                    options.read_snapshots,
+                )?;
+            }
+        } else if *kind != PatchPathKind::New {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.patch references missing file {path}"
+            )));
+        }
+    }
+
+    let patch_file = write_temp_patch_file(name, &patch)?;
+    let check = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("apply")
+        .arg("--check")
+        .arg(&patch_file)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} git apply --check: {error}")));
+    let check = match check {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = fs::remove_file(&patch_file);
+            return Err(error);
+        }
+    };
+    if !check.status.success() {
+        let diagnostic = patch_diagnostic_from_stderr(&String::from_utf8_lossy(&check.stderr));
+        let _ = fs::remove_file(&patch_file);
+        if dry_run {
+            return Ok(file_patch_output(
+                &repo,
+                &changed,
+                patch,
+                false,
+                true,
+                false,
+                vec![diagnostic],
+            ));
+        }
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} git apply --check failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&check.stderr))
+        )));
+    }
+
+    if dry_run {
+        let _ = fs::remove_file(&patch_file);
+        return Ok(file_patch_output(
+            &repo,
+            &changed,
+            patch,
+            true,
+            true,
+            false,
+            Vec::new(),
+        ));
+    }
+
+    let apply = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .arg("apply")
+        .arg(&patch_file)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} git apply: {error}")));
+    let _ = fs::remove_file(&patch_file);
+    let apply = apply?;
+    if !apply.status.success() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} git apply failed after successful check: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&apply.stderr))
+        )));
+    }
+
+    Ok(file_patch_output(
+        &repo,
+        &changed,
+        patch,
+        true,
+        true,
+        true,
+        Vec::new(),
+    ))
+}
+
+fn file_patch_output(
+    repo: &Path,
+    changed: &BTreeMap<String, PatchPathKind>,
+    patch: String,
+    success: bool,
+    checked: bool,
+    applied: bool,
+    diagnostics: Vec<Value>,
+) -> Value {
+    let diagnostics_count = diagnostics.len();
+    let patch_bytes = patch.len();
+    let files = changed
+        .iter()
+        .map(|(path, kind)| {
+            json!({
+                "path": path,
+                "kind": match kind {
+                    PatchPathKind::Existing => "existing",
+                    PatchPathKind::New => "new",
+                    PatchPathKind::Delete => "delete",
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+    json!({
+        "repo": repo.display().to_string(),
+        "success": success,
+        "checked": checked,
+        "applied": applied,
+        "files": files,
+        "file_count": changed.len(),
+        "bytes": patch_bytes,
+        "diagnostics": diagnostics,
+        "artifacts": [{
+            "id": format!("file-patch:{}:{}", repo.display(), changed.keys().cloned().collect::<Vec<_>>().join(",")),
+            "kind": "file_patch",
+            "title": "file patch",
+            "uri": repo.display().to_string(),
+            "content": patch,
+            "metadata": {
+                "provider": "file_patch",
+                "repo": repo.display().to_string(),
+                "file_count": changed.len(),
+                "success": success,
+                "checked": checked,
+                "applied": applied,
+                "diagnostics_count": diagnostics_count
+            }
+        }]
+    })
+}
+
+fn patch_diagnostic_from_stderr(stderr: &str) -> Value {
+    let message = provider_error_snippet(stderr);
+    json!({
+        "source": "file_patch",
+        "severity": "error",
+        "message": message,
+        "raw": message
+    })
+}
+
+fn extract_patch_paths(
+    name: &str,
+    patch: &str,
+) -> Result<BTreeMap<String, PatchPathKind>, RuntimeError> {
+    let mut paths = BTreeMap::new();
+    let mut pending_old_is_null = false;
+    let mut pending_old_path = None;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("diff --git ") {
+            let parts = rest.split_whitespace().collect::<Vec<_>>();
+            if parts.len() != 2 {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.patch has unsupported diff --git header"
+                )));
+            }
+            let old_path = patch_path_from_token(name, parts[0], "a/")?;
+            let new_path = patch_path_from_token(name, parts[1], "b/")?;
+            if old_path != "/dev/null" {
+                paths.entry(old_path).or_insert(PatchPathKind::Existing);
+            }
+            if new_path != "/dev/null" {
+                paths.entry(new_path).or_insert(PatchPathKind::Existing);
+            }
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            pending_old_is_null = token == "/dev/null";
+            if !pending_old_is_null {
+                let path = patch_path_from_token(name, token, "a/")?;
+                pending_old_path = Some(path.clone());
+                paths.entry(path).or_insert(PatchPathKind::Existing);
+            } else {
+                pending_old_path = None;
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            let token = rest.split_whitespace().next().unwrap_or_default();
+            if token == "/dev/null" {
+                let Some(path) = pending_old_path.take() else {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} input.patch deletes a file without a path"
+                    )));
+                };
+                paths.insert(path, PatchPathKind::Delete);
+            } else {
+                let path = patch_path_from_token(name, token, "b/")?;
+                let kind = if pending_old_is_null {
+                    PatchPathKind::New
+                } else {
+                    PatchPathKind::Existing
+                };
+                paths.insert(path, kind);
+            }
+            pending_old_is_null = false;
+            pending_old_path = None;
+        }
+    }
+    Ok(paths)
+}
+
+fn patch_path_from_token(
+    name: &str,
+    token: &str,
+    expected_prefix: &str,
+) -> Result<String, RuntimeError> {
+    if token == "/dev/null" {
+        return Ok(token.to_string());
+    }
+    if token.starts_with('"') || token.contains('\\') {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.patch paths must be unquoted relative paths without escapes"
+        )));
+    }
+    let Some(path) = token.strip_prefix(expected_prefix) else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.patch paths must use {expected_prefix} prefixes"
+        )));
+    };
+    validate_git_pathspec(name, path)?;
+    Ok(path.to_string())
+}
+
+fn write_temp_patch_file(name: &str, patch: &str) -> Result<PathBuf, RuntimeError> {
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} system clock: {error}")))?
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "air-tool-patch-{}-{nonce}.patch",
+        std::process::id()
+    ));
+    fs::write(&path, patch).map_err(|error| {
+        RuntimeError::Provider(format!("tool {name} write temp patch: {error}"))
+    })?;
+    Ok(path)
 }
 
 fn call_git_diff_tool(
@@ -780,7 +2291,7 @@ fn call_git_diff_tool(
     let paths = git_diff_paths(name, input)?;
     if !paths.is_empty() {
         command.arg("--");
-        command.args(paths);
+        command.args(&paths);
     }
     let output = command
         .output()
@@ -792,12 +2303,649 @@ fn call_git_diff_tool(
         )));
     }
     let (diff, truncated, bytes) = bytes_to_limited_text(&output.stdout, max_bytes);
+    let artifact_id = format!(
+        "git-diff:{}:{}:{}",
+        repo.display(),
+        input
+            .get("staged")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        paths.join(",")
+    );
     Ok(json!({
         "repo": repo.display().to_string(),
-        "diff": diff,
+        "diff": diff.clone(),
         "bytes": bytes,
         "truncated": truncated,
+        "artifacts": [{
+            "id": artifact_id.clone(),
+            "kind": "git_diff",
+            "title": "git diff",
+            "uri": repo.display().to_string(),
+            "content": diff.clone(),
+            "metadata": {
+                "provider": "git_diff",
+                "repo": repo.display().to_string(),
+                "paths": paths.clone(),
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }],
     }))
+}
+
+fn call_git_status_tool(
+    name: &str,
+    repo_dir: &Path,
+    max_files: usize,
+) -> Result<Value, RuntimeError> {
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(&repo)
+        .args(["status", "--porcelain=v1", "--untracked-files=all"])
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} git status: {error}")))?;
+    if !output.status.success() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} git status failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout).to_string();
+    let mut entries = Vec::new();
+    for line in raw.lines().take(max_files) {
+        if let Some(entry) = parse_git_status_line(line) {
+            entries.push(entry);
+        }
+    }
+    let truncated = raw.lines().count() > entries.len();
+    let rendered = entries
+        .iter()
+        .map(|entry| {
+            format!(
+                "{}{} {}",
+                entry["index"].as_str().unwrap_or_default(),
+                entry["worktree"].as_str().unwrap_or_default(),
+                entry["path"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "clean": entries.is_empty(),
+        "entries": entries,
+        "file_count": entries.len(),
+        "truncated": truncated,
+        "artifacts": [{
+            "id": format!("git-status:{}", repo.display()),
+            "kind": "git_status",
+            "title": "git status",
+            "uri": repo.display().to_string(),
+            "content": rendered,
+            "metadata": {
+                "provider": "git_status",
+                "repo": repo.display().to_string(),
+                "file_count": entries.len(),
+                "truncated": truncated
+            }
+        }]
+    }))
+}
+
+fn parse_git_status_line(line: &str) -> Option<Value> {
+    if line.len() < 4 {
+        return None;
+    }
+    let index = line.chars().next()?.to_string();
+    let worktree = line.chars().nth(1)?.to_string();
+    let rest = line.get(3..)?;
+    let (path, original_path) = rest
+        .split_once(" -> ")
+        .map(|(from, to)| (to.to_string(), Some(from.to_string())))
+        .unwrap_or_else(|| (rest.to_string(), None));
+    Some(json!({
+        "index": index,
+        "worktree": worktree,
+        "path": path,
+        "original_path": original_path,
+        "status": git_status_label(line.get(..2).unwrap_or_default())
+    }))
+}
+
+fn git_status_label(code: &str) -> &'static str {
+    match code {
+        "??" => "untracked",
+        "!!" => "ignored",
+        " M" | "M " | "MM" => "modified",
+        " A" | "A " | "AM" => "added",
+        " D" | "D " => "deleted",
+        "R " | " R" => "renamed",
+        "C " | " C" => "copied",
+        "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD" => "unmerged",
+        _ => "changed",
+    }
+}
+
+fn call_repo_files_tool(
+    name: &str,
+    input: &Value,
+    repo_dir: &Path,
+    max_files: usize,
+) -> Result<Value, RuntimeError> {
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let query = input
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let paths = repo_tool_paths(name, input)?;
+    let mut command = Command::new("rg");
+    command.arg("--files");
+    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+        validate_git_pathspec(name, glob)?;
+        command.arg("-g").arg(glob);
+    }
+    if !paths.is_empty() {
+        command.args(&paths);
+    }
+    let output = command
+        .current_dir(&repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo files: {error}")))?;
+    if !output.status.success() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} repo files failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let mut files = Vec::new();
+    for line in String::from_utf8_lossy(&output.stdout).lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if !query.is_empty() && !path.to_lowercase().contains(&query) {
+            continue;
+        }
+        files.push(path.to_string());
+        if files.len() >= max_files {
+            break;
+        }
+    }
+    let content = files.join("\n");
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "query": query,
+        "files": files,
+        "truncated": files.len() >= max_files,
+        "artifacts": [{
+            "id": format!("repo-files:{}:{}", repo.display(), input.get("query").and_then(Value::as_str).unwrap_or_default()),
+            "kind": "repo_listing",
+            "title": "repo files",
+            "uri": repo.display().to_string(),
+            "content": content,
+            "metadata": {
+                "provider": "repo_files",
+                "repo": repo.display().to_string(),
+                "max_files": max_files
+            }
+        }]
+    }))
+}
+
+fn call_repo_search_tool(
+    name: &str,
+    input: &Value,
+    repo_dir: &Path,
+    max_matches: usize,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    let query = required_input_string(name, input, "query")?;
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let paths = repo_tool_paths(name, input)?;
+    let mut command = Command::new("rg");
+    command
+        .args([
+            "--line-number",
+            "--column",
+            "--with-filename",
+            "--no-heading",
+            "--color",
+            "never",
+        ])
+        .arg("--fixed-strings")
+        .arg(query);
+    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+        validate_git_pathspec(name, glob)?;
+        command.arg("-g").arg(glob);
+    }
+    if !paths.is_empty() {
+        command.args(&paths);
+    }
+    let output = command
+        .current_dir(&repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo search: {error}")))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} repo search failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut matches = Vec::new();
+    for line in raw.lines().take(max_matches) {
+        matches.push(parse_rg_vimgrep_line(line));
+    }
+    let rendered = matches
+        .iter()
+        .map(|item| {
+            format!(
+                "{}:{}:{}:{}",
+                item["path"].as_str().unwrap_or_default(),
+                item["line"].as_u64().unwrap_or_default(),
+                item["column"].as_u64().unwrap_or_default(),
+                item["text"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
+    let truncated = raw.lines().count() > matches.len() || truncated_bytes;
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "query": query,
+        "matches": matches,
+        "bytes": bytes,
+        "truncated": truncated,
+        "artifacts": [{
+            "id": format!("repo-search:{}:{}", repo.display(), query),
+            "kind": "repo_search",
+            "title": format!("repo search: {query}"),
+            "uri": repo.display().to_string(),
+            "content": content,
+            "metadata": {
+                "provider": "repo_search",
+                "repo": repo.display().to_string(),
+                "query": query,
+                "paths": paths,
+                "max_matches": max_matches,
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }]
+    }))
+}
+
+fn call_repo_context_tool(
+    name: &str,
+    input: &Value,
+    repo_dir: &Path,
+    max_matches: usize,
+    max_files: usize,
+    context_lines: usize,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    let query = required_input_string(name, input, "query")?;
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let paths = repo_tool_paths(name, input)?;
+    let effective_max_matches =
+        optional_bounded_usize_input(name, input, "max_matches", max_matches)?
+            .unwrap_or(max_matches);
+    let effective_max_files =
+        optional_bounded_usize_input(name, input, "max_files", max_files)?.unwrap_or(max_files);
+    let effective_context_lines =
+        optional_bounded_usize_input(name, input, "context_lines", context_lines)?
+            .unwrap_or(context_lines);
+
+    let mut command = Command::new("rg");
+    command
+        .args([
+            "--line-number",
+            "--column",
+            "--with-filename",
+            "--no-heading",
+            "--color",
+            "never",
+        ])
+        .arg("--fixed-strings")
+        .arg(query);
+    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+        validate_git_pathspec(name, glob)?;
+        command.arg("-g").arg(glob);
+    }
+    if !paths.is_empty() {
+        command.args(&paths);
+    }
+    let output = command
+        .current_dir(&repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo context: {error}")))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} repo context failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let raw_line_count = raw.lines().count();
+    let mut matches = Vec::new();
+    let mut match_lines_by_path: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+    let mut selected_paths = Vec::new();
+    for line in raw.lines().take(effective_max_matches) {
+        let item = parse_rg_vimgrep_line(line);
+        let path = item["path"].as_str().unwrap_or_default().to_string();
+        let line_number = item["line"].as_u64().unwrap_or_default() as usize;
+        matches.push(item);
+        if path.is_empty() || line_number == 0 {
+            continue;
+        }
+        if !match_lines_by_path.contains_key(&path) {
+            if selected_paths.len() >= effective_max_files {
+                continue;
+            }
+            selected_paths.push(path.clone());
+        }
+        match_lines_by_path
+            .entry(path)
+            .or_default()
+            .push(line_number);
+    }
+
+    let mut snippets = Vec::new();
+    let mut rendered = String::new();
+    for path in selected_paths {
+        let Some(lines) = match_lines_by_path.get(&path) else {
+            continue;
+        };
+        let candidate = repo.join(&path);
+        let file_path = canonicalize_tool_path(name, "repo context path", &candidate)?;
+        if !file_path.starts_with(&repo) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} repo context path is outside configured repo_dir"
+            )));
+        }
+        let body = fs::read(&file_path)
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
+        let full_content = String::from_utf8_lossy(&body).to_string();
+        let total_lines = full_content.lines().count();
+        let ranges = merge_line_ranges(lines, total_lines, effective_context_lines);
+        for (start_line, end_line) in ranges {
+            let content = numbered_line_range(&full_content, start_line, end_line);
+            if !rendered.is_empty() {
+                rendered.push('\n');
+            }
+            rendered.push_str(&format!("--- {path}:{start_line}-{end_line} ---\n"));
+            rendered.push_str(&content);
+            snippets.push(json!({
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "match_lines": lines
+                    .iter()
+                    .copied()
+                    .filter(|line| *line >= start_line && *line <= end_line)
+                    .collect::<Vec<_>>(),
+                "content": content,
+                "total_lines": total_lines,
+            }));
+        }
+    }
+
+    let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
+    let truncated = raw_line_count > matches.len() || truncated_bytes;
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "query": query,
+        "matches": matches,
+        "snippets": snippets,
+        "bytes": bytes,
+        "truncated": truncated,
+        "artifacts": [{
+            "id": format!("repo-context:{}:{}", repo.display(), query),
+            "kind": "code_context",
+            "title": format!("repo context: {query}"),
+            "uri": repo.display().to_string(),
+            "content": content,
+            "metadata": {
+                "provider": "repo_context",
+                "repo": repo.display().to_string(),
+                "query": query,
+                "paths": paths,
+                "max_matches": effective_max_matches,
+                "max_files": effective_max_files,
+                "context_lines": effective_context_lines,
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }]
+    }))
+}
+
+fn call_command_run_tool(
+    name: &str,
+    input: &Value,
+    cwd: &Path,
+    commands: &BTreeMap<String, Vec<String>>,
+    timeout_seconds: u64,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    let command_name = required_input_string(name, input, "command")?;
+    let Some(command) = commands.get(command_name) else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} command {command_name} is not configured"
+        )));
+    };
+    let cwd = canonicalize_tool_path(name, "cwd", cwd)?;
+    let (program, args) = command.split_first().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} command {command_name} is empty"))
+    })?;
+    let mut child = Command::new(program)
+        .args(args)
+        .current_dir(&cwd)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} command run: {error}")))?;
+    let timeout = Duration::from_secs(timeout_seconds);
+    let started_at = std::time::Instant::now();
+    loop {
+        match child
+            .try_wait()
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} command wait: {error}")))?
+        {
+            Some(status) => {
+                let output = child.wait_with_output().map_err(|error| {
+                    RuntimeError::Provider(format!("tool {name} command output: {error}"))
+                })?;
+                let mut combined = Vec::new();
+                combined.extend_from_slice(&output.stdout);
+                if !output.stderr.is_empty() {
+                    combined.extend_from_slice(b"\n[stderr]\n");
+                    combined.extend_from_slice(&output.stderr);
+                }
+                let combined_text = String::from_utf8_lossy(&combined).to_string();
+                let diagnostics = extract_command_diagnostics(&combined_text, 50);
+                let diagnostics_count = diagnostics.len();
+                let (log, truncated, bytes) = bytes_to_limited_text(&combined, max_bytes);
+                return Ok(json!({
+                    "command": command_name,
+                    "argv": command,
+                    "cwd": cwd.display().to_string(),
+                    "status": status.code(),
+                    "success": status.success(),
+                    "log": log.clone(),
+                    "diagnostics": diagnostics,
+                    "bytes": bytes,
+                    "truncated": truncated,
+                    "artifacts": [{
+                        "id": format!("command-run:{}:{}", cwd.display(), command_name),
+                        "kind": "test_log",
+                        "title": format!("command run: {command_name}"),
+                        "uri": cwd.display().to_string(),
+                        "content": log,
+                        "metadata": {
+                            "provider": "command_run",
+                            "command": command_name,
+                            "argv": command,
+                            "cwd": cwd.display().to_string(),
+                            "status": status.code(),
+                            "success": status.success(),
+                            "diagnostics_count": diagnostics_count,
+                            "bytes": bytes,
+                            "truncated": truncated
+                        }
+                    }]
+                }));
+            }
+            None if started_at.elapsed() >= timeout => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} command {command_name} exceeded timeout_seconds={timeout_seconds}"
+                )));
+            }
+            None => std::thread::sleep(Duration::from_millis(100)),
+        }
+    }
+}
+
+fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> {
+    let mut diagnostics = Vec::new();
+    let mut pending_rust = None;
+    for line in log.lines() {
+        let trimmed = line.trim_start();
+        if let Some((severity, message)) = parse_rust_severity_message(trimmed) {
+            pending_rust = Some((severity, message, trimmed.to_string()));
+            continue;
+        }
+        if let Some((path, line_number, column)) = parse_rust_location_line(trimmed) {
+            if let Some((severity, message, raw)) = pending_rust.take() {
+                diagnostics.push(json!({
+                    "source": "command_run",
+                    "severity": severity,
+                    "path": path,
+                    "line": line_number,
+                    "column": column,
+                    "message": message,
+                    "raw": raw
+                }));
+            }
+        } else if let Some(diagnostic) =
+            parse_typescript_diagnostic(trimmed).or_else(|| parse_colon_diagnostic(trimmed))
+        {
+            diagnostics.push(diagnostic);
+            pending_rust = None;
+        }
+        if diagnostics.len() >= max_diagnostics {
+            break;
+        }
+    }
+    diagnostics
+}
+
+fn parse_rust_severity_message(line: &str) -> Option<(String, String)> {
+    for severity in ["error", "warning"] {
+        if line == severity
+            || line.starts_with(&format!("{severity}:"))
+            || line.starts_with(&format!("{severity}["))
+        {
+            let message = line
+                .split_once(':')
+                .map(|(_, message)| message.trim())
+                .filter(|message| !message.is_empty())
+                .unwrap_or(line)
+                .to_string();
+            return Some((severity.to_string(), message));
+        }
+    }
+    None
+}
+
+fn parse_rust_location_line(line: &str) -> Option<(String, u64, u64)> {
+    let rest = line.strip_prefix("-->")?.trim();
+    parse_location(rest)
+}
+
+fn parse_typescript_diagnostic(line: &str) -> Option<Value> {
+    let open = line.find('(')?;
+    let close = line[open + 1..].find(')')? + open + 1;
+    let path = line[..open].trim();
+    let mut location = line[open + 1..close].split(',');
+    let line_number = location.next()?.trim().parse::<u64>().ok()?;
+    let column = location.next()?.trim().parse::<u64>().ok()?;
+    let rest = line[close + 1..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let (severity, message) = split_severity_message(rest)?;
+    Some(json!({
+        "source": "command_run",
+        "severity": severity,
+        "path": path,
+        "line": line_number,
+        "column": column,
+        "message": message,
+        "raw": line
+    }))
+}
+
+fn parse_colon_diagnostic(line: &str) -> Option<Value> {
+    let parts = line.split(':').collect::<Vec<_>>();
+    if parts.len() < 4 {
+        return None;
+    }
+    for index in 1..parts.len().saturating_sub(2) {
+        let Ok(line_number) = parts[index].trim().parse::<u64>() else {
+            continue;
+        };
+        let Ok(column) = parts[index + 1].trim().parse::<u64>() else {
+            continue;
+        };
+        let rest = parts[index + 2..].join(":");
+        let Some((severity, message)) = split_severity_message(rest.trim()) else {
+            continue;
+        };
+        let path = parts[..index].join(":");
+        return Some(json!({
+            "source": "command_run",
+            "severity": severity,
+            "path": path,
+            "line": line_number,
+            "column": column,
+            "message": message,
+            "raw": line
+        }));
+    }
+    None
+}
+
+fn split_severity_message(text: &str) -> Option<(String, String)> {
+    for severity in ["error", "warning"] {
+        if text == severity {
+            return Some((severity.to_string(), String::new()));
+        }
+        if let Some(message) = text.strip_prefix(&format!("{severity}:")) {
+            return Some((severity.to_string(), message.trim().to_string()));
+        }
+        if text.starts_with(&format!("{severity} ")) {
+            return Some((severity.to_string(), text.to_string()));
+        }
+    }
+    None
+}
+
+fn parse_location(text: &str) -> Option<(String, u64, u64)> {
+    let parts = text.split(':').collect::<Vec<_>>();
+    if parts.len() < 3 {
+        return None;
+    }
+    let column = parts.last()?.trim().parse::<u64>().ok()?;
+    let line_number = parts.get(parts.len() - 2)?.trim().parse::<u64>().ok()?;
+    let path = parts[..parts.len() - 2].join(":");
+    Some((path, line_number, column))
 }
 
 pub fn provider_error_snippet(body: &str) -> String {
@@ -819,6 +2967,106 @@ fn required_input_string<'a>(
     input.get(field).and_then(Value::as_str).ok_or_else(|| {
         RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
     })
+}
+
+fn optional_positive_usize_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+) -> Result<Option<usize>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must be a positive integer"
+        )));
+    };
+    if number == 0 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} must be greater than 0"
+        )));
+    }
+    usize::try_from(number)
+        .map(Some)
+        .map_err(|_| RuntimeError::Provider(format!("tool {tool_name} input.{field} is too large")))
+}
+
+fn optional_bounded_usize_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+    configured_max: usize,
+) -> Result<Option<usize>, RuntimeError> {
+    let Some(value) = optional_positive_usize_input(tool_name, input, field)? else {
+        return Ok(None);
+    };
+    Ok(Some(value.min(configured_max)))
+}
+
+fn optional_bool_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+) -> Result<Option<bool>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a boolean"))
+    })
+}
+
+fn select_line_range(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
+    if start_line.is_none() && end_line.is_none() {
+        return content.to_string();
+    }
+    let start = start_line.unwrap_or(1);
+    let end = end_line.unwrap_or(usize::MAX);
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_number = index + 1;
+            (line_number >= start && line_number <= end).then_some(line)
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn merge_line_ranges(
+    match_lines: &[usize],
+    total_lines: usize,
+    context_lines: usize,
+) -> Vec<(usize, usize)> {
+    let mut lines = match_lines.to_vec();
+    lines.sort_unstable();
+    lines.dedup();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for line in lines {
+        let start = line.saturating_sub(context_lines).max(1);
+        let end = line.saturating_add(context_lines).min(total_lines.max(1));
+        match ranges.last_mut() {
+            Some((_, previous_end)) if start <= previous_end.saturating_add(1) => {
+                *previous_end = (*previous_end).max(end);
+            }
+            _ => ranges.push((start, end)),
+        }
+    }
+    ranges
+}
+
+fn numbered_line_range(content: &str, start_line: usize, end_line: usize) -> String {
+    content
+        .lines()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let line_number = index + 1;
+            (line_number >= start_line && line_number <= end_line)
+                .then(|| format!("{line_number}: {line}"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 fn canonicalize_tool_path(
@@ -857,6 +3105,10 @@ fn resolve_config_path(config_dir: &Path, path: &Path) -> PathBuf {
 }
 
 fn git_diff_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {
+    repo_tool_paths(tool_name, input)
+}
+
+fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {
     let mut paths = Vec::new();
     if let Some(path) = input.get("path") {
         let path = path.as_str().ok_or_else(|| {
@@ -880,6 +3132,26 @@ fn git_diff_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, Runtime
         }
     }
     Ok(paths)
+}
+
+fn parse_rg_vimgrep_line(line: &str) -> Value {
+    let mut parts = line.splitn(4, ':');
+    let path = parts.next().unwrap_or_default();
+    let line_number = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let column = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_default();
+    let text = parts.next().unwrap_or_default();
+    json!({
+        "path": path,
+        "line": line_number,
+        "column": column,
+        "text": text,
+    })
 }
 
 fn validate_git_pathspec(tool_name: &str, path: &str) -> Result<(), RuntimeError> {
@@ -976,6 +3248,23 @@ pub fn search_docs(input: &Value, documents: &[LocalDoc], max_results: usize) ->
                 "id": doc.id,
                 "title": doc.title,
                 "content": doc.content,
+                "kind": "doc_chunk",
+                "uri": format!("local-doc://{}", doc.id),
+            })
+        })
+        .collect::<Vec<_>>();
+    let artifacts = docs
+        .iter()
+        .map(|doc| {
+            json!({
+                "id": doc["id"],
+                "kind": "doc_chunk",
+                "title": doc["title"],
+                "uri": doc["uri"],
+                "content": doc["content"],
+                "metadata": {
+                    "provider": "local_docs"
+                }
             })
         })
         .collect::<Vec<_>>();
@@ -983,6 +3272,7 @@ pub fn search_docs(input: &Value, documents: &[LocalDoc], max_results: usize) ->
     json!({
         "query": input.get("query").cloned().unwrap_or(Value::String(String::new())),
         "documents": docs,
+        "artifacts": artifacts,
     })
 }
 
@@ -1076,6 +3366,11 @@ mod tests {
 
         assert_eq!(output["content"], json!("hello fr"));
         assert_eq!(output["truncated"], json!(true));
+        assert_eq!(output["artifacts"][0]["kind"], json!("file_span"));
+        assert!(output["artifacts"][0]["id"]
+            .as_str()
+            .unwrap()
+            .starts_with("file:"));
         assert_eq!(tools.tool_capability("file.read"), Some("file.read"));
         let _ = fs::remove_dir_all(dir);
     }
@@ -1105,6 +3400,538 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("outside configured base_dir"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_write_writes_inside_configured_base_dir() {
+        let dir = temp_dir("air-tools-file-write");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.write": {
+                  "kind": "file_write",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "create_dirs": true,
+                  "allow_overwrite": true,
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.write",
+                &json!({"path": "site/index.html", "content": "<h1>AIR</h1>"}),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("site/index.html")).unwrap(),
+            "<h1>AIR</h1>"
+        );
+        assert_eq!(output["created"], json!(true));
+        assert_eq!(output["artifacts"][0]["kind"], json!("file_write"));
+        assert_eq!(tools.tool_capability("file.write"), Some("file.write"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_write_rejects_parent_path_escape() {
+        let dir = temp_dir("air-tools-file-write-boundary");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.write": {
+                  "kind": "file_write",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "create_dirs": true
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.write",
+                &json!({"path": "../escape.html", "content": "x"}),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("relative paths inside repo_dir"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_write_requires_read_before_overwrite_when_configured() {
+        let dir = temp_dir("air-tools-file-write-read-first");
+        fs::write(dir.join("note.txt"), "before").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.write": {
+                  "kind": "file_write",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "allow_overwrite": true,
+                  "require_read": true
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.write",
+                &json!({"path": "note.txt", "content": "after"}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("must be read before overwrite"));
+
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+        let output = tools
+            .call_tool(
+                "file.write",
+                &json!({"path": "note.txt", "content": "after"}),
+            )
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("note.txt")).unwrap(), "after");
+        assert_eq!(output["overwritten"], json!(true));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_write_rejects_stale_read_before_overwrite() {
+        let dir = temp_dir("air-tools-file-write-stale-read");
+        fs::write(dir.join("note.txt"), "before").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.write": {
+                  "kind": "file_write",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "allow_overwrite": true,
+                  "require_read": true
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(dir.join("note.txt"), "outside change").unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.write",
+                &json!({"path": "note.txt", "content": "agent change"}),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("modified after it was last read"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "outside change"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_replaces_unique_string_after_read() {
+        let dir = temp_dir("air-tools-file-edit");
+        fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.edit",
+                &json!({"path": "note.txt", "old_string": "AIR", "new_string": "agent IR"}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("must be read before edit"));
+
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+        let output = tools
+            .call_tool(
+                "file.edit",
+                &json!({"path": "note.txt", "old_string": "AIR", "new_string": "agent IR"}),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "hello agent IR\n"
+        );
+        assert_eq!(output["replacements"], json!(1));
+        assert_eq!(output["artifacts"][0]["kind"], json!("file_edit"));
+        assert_eq!(tools.tool_capability("file.edit"), Some("file.write"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_rejects_stale_read() {
+        let dir = temp_dir("air-tools-file-edit-stale-read");
+        fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(dir.join("note.txt"), "hello outside\n").unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.edit",
+                &json!({"path": "note.txt", "old_string": "outside", "new_string": "agent"}),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("modified after it was last read"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "hello outside\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_rejects_multiple_matches_without_replace_all() {
+        let dir = temp_dir("air-tools-file-edit-multiple");
+        fs::write(dir.join("note.txt"), "AIR AIR\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "allow_replace_all": true
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.edit",
+                &json!({"path": "note.txt", "old_string": "AIR", "new_string": "Agent"}),
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("matched 2 times"));
+
+        let output = tools
+            .call_tool(
+                "file.edit",
+                &json!({
+                    "path": "note.txt",
+                    "old_string": "AIR",
+                    "new_string": "Agent",
+                    "replace_all": true
+                }),
+            )
+            .unwrap();
+        assert_eq!(output["replacements"], json!(2));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "Agent Agent\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_patch_applies_unified_diff_after_read() {
+        let dir = temp_dir("air-tools-file-patch");
+        fs::write(dir.join("note.txt"), "before\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "require_read": true,
+                  "max_files": 3
+                }
+              }
+            }"#,
+        );
+        let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-before\n+after\n";
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("file.patch", &json!({"patch": patch}))
+            .unwrap_err();
+        assert!(error.to_string().contains("must be read before patch"));
+
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+        let output = tools
+            .call_tool("file.patch", &json!({"patch": patch}))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("note.txt")).unwrap(), "after\n");
+        assert_eq!(output["file_count"], json!(1));
+        assert_eq!(output["artifacts"][0]["kind"], json!("file_patch"));
+        assert_eq!(tools.tool_capability("file.patch"), Some("file.write"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_patch_rejects_stale_read() {
+        let dir = temp_dir("air-tools-file-patch-stale-read");
+        fs::write(dir.join("note.txt"), "before\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+        );
+        let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-outside\n+after\n";
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(20));
+        fs::write(dir.join("note.txt"), "outside\n").unwrap();
+
+        let error = tools
+            .call_tool("file.patch", &json!({"patch": patch}))
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("modified after it was last read"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "outside\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_patch_can_create_new_file_when_allowed() {
+        let dir = temp_dir("air-tools-file-patch-new");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "allow_new_files": true
+                }
+              }
+            }"#,
+        );
+        let patch = "diff --git a/new.txt b/new.txt\nnew file mode 100644\n--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+hello\n";
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("file.patch", &json!({"patch": patch}))
+            .unwrap();
+
+        assert_eq!(fs::read_to_string(dir.join("new.txt")).unwrap(), "hello\n");
+        assert_eq!(output["files"][0]["kind"], json!("new"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_patch_dry_run_returns_failed_check_without_applying() {
+        let dir = temp_dir("air-tools-file-patch-dry-run");
+        fs::write(dir.join("note.txt"), "before\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+        );
+        let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1 +1 @@\n-not-present\n+after\n";
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let output = tools
+            .call_tool("file.patch", &json!({"patch": patch, "dry_run": true}))
+            .unwrap();
+
+        assert_eq!(output["success"], json!(false));
+        assert_eq!(output["checked"], json!(true));
+        assert_eq!(output["applied"], json!(false));
+        assert_eq!(output["diagnostics"][0]["source"], json!("file_patch"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "before\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_patch_rejects_parent_path_escape() {
+        let dir = temp_dir("air-tools-file-patch-boundary");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "require_read": false
+                }
+              }
+            }"#,
+        );
+        let patch = "diff --git a/../escape.txt b/../escape.txt\n--- a/../escape.txt\n+++ b/../escape.txt\n@@ -1 +1 @@\n-before\n+after\n";
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("file.patch", &json!({"patch": patch}))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("relative paths inside repo_dir"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_can_return_line_ranges() {
+        let dir = temp_dir("air-tools-file-read-range");
+        fs::write(dir.join("note.txt"), "one\ntwo\nthree\nfour\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.read",
+                &json!({"path": "note.txt", "start_line": 2, "end_line": 3}),
+            )
+            .unwrap();
+
+        assert_eq!(output["content"], json!("two\nthree"));
+        assert_eq!(output["start_line"], json!(2));
+        assert_eq!(output["end_line"], json!(3));
+        assert_eq!(output["total_lines"], json!(4));
+        assert_eq!(output["artifacts"][0]["metadata"]["start_line"], json!(2));
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -1155,6 +3982,11 @@ mod tests {
 
         assert!(output["diff"].as_str().unwrap().contains("-before"));
         assert!(output["diff"].as_str().unwrap().contains("+after"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("git_diff"));
+        assert!(output["artifacts"][0]["id"]
+            .as_str()
+            .unwrap()
+            .contains("note.txt"));
         assert_eq!(tools.tool_capability("git.diff"), Some("code.read"));
         let _ = fs::remove_dir_all(dir);
     }
@@ -1187,6 +4019,376 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("relative paths inside repo_dir"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn git_status_returns_structured_workspace_entries() {
+        let dir = temp_dir("air-tools-git-status");
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .arg("init")
+            .output()
+            .unwrap();
+        fs::write(dir.join("tracked.txt"), "before\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["add", "tracked.txt"])
+            .output()
+            .unwrap();
+        fs::write(dir.join("tracked.txt"), "after\n").unwrap();
+        fs::write(dir.join("new.txt"), "new\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "git.status": {
+                  "kind": "git_status",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools.call_tool("git.status", &json!({})).unwrap();
+
+        assert_eq!(output["clean"], json!(false));
+        assert!(output["file_count"].as_u64().unwrap() >= 2);
+        assert!(output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["path"] == json!("tracked.txt")));
+        assert!(output["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(
+                |entry| entry["path"] == json!("new.txt") && entry["status"] == json!("untracked")
+            ));
+        assert_eq!(output["artifacts"][0]["kind"], json!("git_status"));
+        assert_eq!(tools.tool_capability("git.status"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_files_lists_and_filters_repo_paths() {
+        let dir = temp_dir("air-tools-repo-files");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+        fs::write(dir.join("README.md"), "alpha docs\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("repo.files", &json!({"query": "lib"}))
+            .unwrap();
+
+        assert_eq!(output["files"], json!(["src/lib.rs"]));
+        assert_eq!(output["artifacts"][0]["kind"], json!("repo_listing"));
+        assert_eq!(tools.tool_capability("repo.files"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_search_returns_structured_matches() {
+        let dir = temp_dir("air-tools-repo-search");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub fn alpha() {}\npub fn beta() { alpha(); }\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("repo.search", &json!({"query": "alpha", "path": "src"}))
+            .unwrap();
+
+        assert_eq!(output["matches"][0]["path"], json!("src/lib.rs"));
+        assert_eq!(output["matches"][0]["line"], json!(1));
+        assert!(output["artifacts"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("alpha"));
+        assert_eq!(tools.tool_capability("repo.search"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_context_returns_nearby_code_snippets() {
+        let dir = temp_dir("air-tools-repo-context");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "line 1\nline 2\nfn alpha() {}\nline 4\nline 5\nline 6\nfn beta() { alpha(); }\nline 8\n",
+        )
+        .unwrap();
+        fs::write(dir.join("src/other.rs"), "fn alpha_other() {}\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.context": {
+                  "kind": "repo_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 10,
+                  "max_files": 1,
+                  "context_lines": 1,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "repo.context",
+                &json!({"query": "alpha", "path": "src/lib.rs"}),
+            )
+            .unwrap();
+
+        assert_eq!(output["snippets"].as_array().unwrap().len(), 2);
+        assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
+        assert_eq!(output["snippets"][0]["start_line"], json!(2));
+        assert_eq!(output["snippets"][0]["end_line"], json!(4));
+        assert!(output["artifacts"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("--- src/lib.rs:2-4 ---"));
+        assert!(output["artifacts"][0]["content"]
+            .as_str()
+            .unwrap()
+            .contains("3: fn alpha() {}"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("code_context"));
+        assert_eq!(tools.tool_capability("repo.context"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn command_run_executes_allowlisted_command() {
+        let dir = temp_dir("air-tools-command-run");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "cargo_version": ["cargo", "--version"]
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("test.run", &json!({"command": "cargo_version"}))
+            .unwrap();
+
+        assert_eq!(output["success"], json!(true));
+        assert!(output["log"].as_str().unwrap().contains("cargo"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("test_log"));
+        assert_eq!(tools.tool_capability("test.run"), Some("code.test"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn command_run_extracts_structured_diagnostics() {
+        let dir = temp_dir("air-tools-command-run-diagnostics");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "tsc": [
+                      "node",
+                      "-e",
+                      "console.error('src/main.ts(4,9): error TS2304: Cannot find name x.'); process.exit(2)"
+                    ]
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("test.run", &json!({"command": "tsc"}))
+            .unwrap();
+
+        assert_eq!(output["success"], json!(false));
+        assert_eq!(output["diagnostics"][0]["path"], json!("src/main.ts"));
+        assert_eq!(output["diagnostics"][0]["line"], json!(4));
+        assert_eq!(output["diagnostics"][0]["column"], json!(9));
+        assert_eq!(output["diagnostics"][0]["severity"], json!("error"));
+        assert!(output["diagnostics"][0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("TS2304"));
+        assert_eq!(
+            output["artifacts"][0]["metadata"]["diagnostics_count"],
+            json!(1)
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn extract_command_diagnostics_parses_rustc_location_blocks() {
+        let diagnostics = extract_command_diagnostics(
+            "error[E0425]: cannot find value `missing` in this scope\n  --> src/lib.rs:12:5\n",
+            10,
+        );
+
+        assert_eq!(diagnostics[0]["severity"], json!("error"));
+        assert_eq!(diagnostics[0]["path"], json!("src/lib.rs"));
+        assert_eq!(diagnostics[0]["line"], json!(12));
+        assert_eq!(diagnostics[0]["column"], json!(5));
+        assert!(diagnostics[0]["message"]
+            .as_str()
+            .unwrap()
+            .contains("cannot find value"));
+    }
+
+    #[test]
+    fn local_docs_search_returns_artifacts_for_documents() {
+        let output = search_docs(
+            &json!({"query": "provenance"}),
+            &[LocalDoc {
+                id: "doc-1".to_string(),
+                title: "Provenance".to_string(),
+                content: "AIR provenance artifacts".to_string(),
+            }],
+            3,
+        );
+
+        assert_eq!(output["documents"][0]["id"], json!("doc-1"));
+        assert_eq!(output["artifacts"][0]["id"], json!("doc-1"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("doc_chunk"));
+        assert_eq!(output["artifacts"][0]["uri"], json!("local-doc://doc-1"));
+    }
+
+    #[test]
+    fn playwright_search_invokes_script_and_returns_artifacts() {
+        let dir = temp_dir("air-tools-playwright-search");
+        fs::write(
+            dir.join("search.cjs"),
+            r#"
+const chunks = [];
+process.stdin.on('data', chunk => chunks.push(chunk));
+process.stdin.on('end', () => {
+  const input = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+  process.stdout.write(JSON.stringify({
+    query: input.query,
+    received: input,
+    documents: [{ id: 'web:example', title: 'Example', url: 'https://example.com', content: 'Example content' }],
+    artifacts: [{ id: 'web:example', kind: 'web_page', title: 'Example', uri: 'https://example.com', content: 'Example content', metadata: { provider: 'playwright_search' } }]
+  }));
+});
+"#,
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "web.search": {
+                  "kind": "playwright_search",
+                  "capability": "network.search",
+                  "script_path": "search.cjs",
+                  "query_variants": ["{{query}} GitHub", "{{query}} docs"],
+                  "max_results": 2,
+                  "max_results_per_query": 4,
+                  "max_per_domain": 1,
+                  "max_content_chars": 1000,
+                  "include_domains": ["github.com", "openclaw.ai"],
+                  "exclude_domains": ["example-spam.test"],
+                  "required_terms": ["openclaw"],
+                  "exclude_terms": ["spam"],
+                  "page_concurrency": 2,
+                  "navigation_timeout_ms": 1000,
+                  "overall_timeout_ms": 4000,
+                  "search_delay_ms": 100,
+                  "retry_count": 1,
+                  "user_agent": "AIR test",
+                  "fetch_pages": false,
+                  "timeout_seconds": 5
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("web.search", &json!({"query": "openclaw"}))
+            .unwrap();
+
+        assert_eq!(output["query"], json!("openclaw"));
+        assert_eq!(
+            output["received"]["query_variants"],
+            json!(["openclaw GitHub", "openclaw docs"])
+        );
+        assert_eq!(output["received"]["max_results_per_query"], json!(4));
+        assert_eq!(output["received"]["max_per_domain"], json!(1));
+        assert_eq!(
+            output["received"]["include_domains"],
+            json!(["github.com", "openclaw.ai"])
+        );
+        assert_eq!(
+            output["received"]["exclude_domains"],
+            json!(["example-spam.test"])
+        );
+        assert_eq!(output["received"]["required_terms"], json!(["openclaw"]));
+        assert_eq!(output["received"]["exclude_terms"], json!(["spam"]));
+        assert_eq!(output["received"]["page_concurrency"], json!(2));
+        assert_eq!(output["received"]["overall_timeout_ms"], json!(4000));
+        assert_eq!(output["received"]["search_delay_ms"], json!(100));
+        assert_eq!(output["received"]["retry_count"], json!(1));
+        assert_eq!(output["received"]["user_agent"], json!("AIR test"));
+        assert_eq!(output["received"]["fetch_pages"], json!(false));
+        assert_eq!(output["artifacts"][0]["id"], json!("web:example"));
+        assert_eq!(tools.tool_capability("web.search"), Some("network.search"));
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -1,0 +1,27 @@
+{
+  "tools": {
+    "file.write": {
+      "kind": "file_write",
+      "capability": "file.write",
+      "base_dir": "../..",
+      "create_dirs": true,
+      "allow_overwrite": true,
+      "require_read": false,
+      "max_bytes": 262144
+    },
+    "test.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "apple_landing_smoke": [
+          "node",
+          "-e",
+          "const fs=require('fs'); const p='examples/apple-landing/index.html'; const s=fs.readFileSync(p,'utf8'); const trimmed=s.trim(); if (!trimmed.toLowerCase().startsWith('<!doctype html')) { console.error('html must start with doctype'); process.exit(1); } if (!trimmed.toLowerCase().endsWith('</html>')) { console.error('html must end with </html>'); process.exit(1); } const checks=['<canvas','Apple Nova','@media']; for (const c of checks) { if (!s.toLowerCase().includes(c.toLowerCase())) { console.error('missing '+c); process.exit(1); } } if (s.includes('```')) { console.error('markdown fence found'); process.exit(1); } if (s.length < 5000) { console.error('too short '+s.length); process.exit(1); } console.log('ok '+p+' '+s.length+' bytes');"
+        ]
+      },
+      "timeout_seconds": 30,
+      "max_bytes": 65536
+    }
+  }
+}

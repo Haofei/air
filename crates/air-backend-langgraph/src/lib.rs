@@ -109,17 +109,19 @@ pub fn lower_run_plan(
     output.push_str("import os\n");
     output.push_str("import sys\n");
     output.push_str("import time\n");
+    output.push_str("from concurrent.futures import ThreadPoolExecutor, as_completed\n");
     output.push_str("from typing import Any, TypedDict\n");
     output.push_str("from langgraph.graph import StateGraph, START, END\n\n");
-    output.push_str("class AirState(TypedDict, total=False):\n");
     let state_fields = run_plan_state_fields(plan);
     if state_fields.is_empty() {
+        output.push_str("class AirState(TypedDict, total=False):\n");
         output.push_str("    pass\n\n");
     } else {
+        output.push_str("AirState = TypedDict(\"AirState\", {\n");
         for field in state_fields {
-            output.push_str(&format!("    {}: Any\n", py_ident(&field)));
+            output.push_str(&format!("    {}: Any,\n", py_string(&field)?));
         }
-        output.push('\n');
+        output.push_str("}, total=False)\n\n");
     }
     output.push_str(&format!("RUN_PLAN = {}\n", py_literal(&plan_json)?));
     output.push_str(&format!("MODULES = {}\n\n", py_literal(&modules_json)?));
@@ -130,6 +132,9 @@ pub fn lower_run_plan(
 
 fn run_plan_state_fields(plan: &RunPlan) -> Vec<String> {
     let mut fields = BTreeMap::new();
+    fields.insert("__air_dynamic_materialized".to_string(), ());
+    fields.insert("__air_halted".to_string(), ());
+    fields.insert("__air_skipped".to_string(), ());
     for node in &plan.nodes {
         fields.insert(node.id.clone(), ());
     }
@@ -145,7 +150,66 @@ fn run_plan_state_fields(plan: &RunPlan) -> Vec<String> {
     for output in plan.outputs.keys() {
         fields.insert(output.clone(), ());
     }
+    for field in dynamic_run_plan_state_fields(plan) {
+        fields.insert(field, ());
+    }
     fields.into_keys().collect()
+}
+
+fn dynamic_run_plan_state_fields(plan: &RunPlan) -> Vec<String> {
+    let Some(dynamic) = &plan.dynamic else {
+        return Vec::new();
+    };
+    let static_nodes = plan
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let mut materialized: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut unresolved = dynamic.fanouts.iter().collect::<Vec<_>>();
+
+    while !unresolved.is_empty() {
+        let mut progressed = false;
+        let mut next = Vec::new();
+        for fanout in unresolved {
+            if static_nodes.contains(fanout.after.as_str()) {
+                let ids = (0..fanout.max_items)
+                    .map(|index| format!("{}_{}", fanout.id_prefix, index + 1))
+                    .collect::<Vec<_>>();
+                materialized.insert(fanout.id.clone(), ids);
+                progressed = true;
+            } else if let Some(parent_ids) = materialized.get(&fanout.after) {
+                let ids = parent_ids
+                    .iter()
+                    .enumerate()
+                    .flat_map(|(parent_index, _)| {
+                        (0..fanout.max_items).map(move |index| {
+                            format!("{}_{}_{}", fanout.id_prefix, parent_index + 1, index + 1)
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                materialized.insert(fanout.id.clone(), ids);
+                progressed = true;
+            } else {
+                next.push(fanout);
+            }
+        }
+        if !progressed {
+            for fanout in next {
+                let ids = (0..fanout.max_items)
+                    .map(|index| format!("{}_{}", fanout.id_prefix, index + 1))
+                    .collect::<Vec<_>>();
+                materialized.insert(fanout.id.clone(), ids);
+            }
+            break;
+        }
+        unresolved = next;
+    }
+
+    materialized
+        .into_values()
+        .flatten()
+        .collect::<Vec<String>>()
 }
 
 fn push_prelude(output: &mut String, module: &AirModule) {
@@ -447,9 +511,14 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
         StateAction::Set { values } => {
             for (key, value) in values {
                 output.push_str(&format!(
-                    "    updates[{}] = {}\n",
+                    "    updates[{}] = _air_resolve_set_value(working, {{}}, {})\n",
                     py_string(key)?,
                     py_literal(value)?
+                ));
+                output.push_str(&format!(
+                    "    _air_validate_output(AIR_MODULE, {}, updates[{}])\n",
+                    py_string(key)?,
+                    py_string(key)?
                 ));
                 output.push_str(&format!(
                     "    working[{}] = updates[{}]\n",
@@ -705,6 +774,20 @@ def _air_eval_expr(local_state: dict[str, Any], outputs: dict[str, Any], expr: A
             raw = value if isinstance(value, str) else json.dumps(value)
             return raw[:expr["max_chars"]]
     return expr
+
+
+def _air_looks_like_expr(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and len(value) == 1
+        and next(iter(value)) in {"ref", "path", "literal", "object", "array", "template", "truncate"}
+    )
+
+
+def _air_resolve_set_value(local_state: dict[str, Any], outputs: dict[str, Any], value: Any) -> Any:
+    if _air_looks_like_expr(value):
+        return _air_eval_expr(local_state, outputs, value)
+    return value
 
 
 def _air_read_path(local_state: dict[str, Any], outputs: dict[str, Any], path: str) -> Any:
@@ -1024,9 +1107,13 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
         for action in rule.get("actions", []):
             kind = action["kind"]
             if kind == "set":
+                resolved_values: dict[str, Any] = {}
                 for key, value in action.get("values", {}).items():
-                    local_state[key] = value
-                _air_emit_trace(module_id, step, rule_id, "set", "ok", output_value=action.get("values", {}))
+                    resolved = _air_resolve_set_value(local_state, outputs, value)
+                    _air_validate_output(module, key, resolved)
+                    local_state[key] = resolved
+                    resolved_values[key] = resolved
+                _air_emit_trace(module_id, step, rule_id, "set", "ok", output_value=resolved_values)
             elif kind == "append":
                 input_value = _air_eval_input(local_state, outputs, action["value"])
                 existing = list(local_state.get(action["target"], []))
@@ -1142,6 +1229,52 @@ def _air_empty_link_value(value: Any) -> bool:
     return value is None or value == "" or value == [] or value == {}
 
 
+def _air_source_modules_from_endpoint(endpoint: str | None) -> list[str]:
+    if not endpoint or endpoint.startswith("$"):
+        return []
+    return [endpoint.split(".", 1)[0]]
+
+
+def _air_source_modules_from_link_expr(expr: dict[str, Any] | None) -> list[str]:
+    if not expr:
+        return []
+    if "from" in expr:
+        return _air_source_modules_from_endpoint(expr["from"])
+    if "object" in expr:
+        modules: list[str] = []
+        for value in expr["object"].values():
+            modules.extend(_air_source_modules_from_link_expr(value))
+        return modules
+    if "array" in expr:
+        modules: list[str] = []
+        for value in expr["array"]:
+            modules.extend(_air_source_modules_from_link_expr(value))
+        return modules
+    if "count" in expr:
+        return _air_source_modules_from_link_expr(expr["count"])
+    if "coalesce" in expr:
+        modules: list[str] = []
+        for value in expr["coalesce"]:
+            modules.extend(_air_source_modules_from_link_expr(value))
+        return modules
+    return []
+
+
+def _air_connection_sources_skipped(state: dict[str, Any], connection: dict[str, Any]) -> bool:
+    skipped = set(state.get("__air_skipped", {}).keys())
+    modules = _air_source_modules_from_link_expr(connection.get("value"))
+    if not modules:
+        modules = _air_source_modules_from_endpoint(connection.get("from"))
+    return any(
+        module in skipped
+        or (
+            isinstance(state.get(module), dict)
+            and state[module].get("__air_skipped") is True
+        )
+        for module in modules
+    )
+
+
 def _air_link_expr_value(state: dict[str, Any], expr: dict[str, Any]) -> Any:
     if "from" in expr:
         return _air_dynamic_endpoint_value(state, expr["from"])
@@ -1240,6 +1373,8 @@ def _air_module_inputs(state: dict[str, Any], module_id: str) -> dict[str, Any]:
         to_module, to_field = connection["to"].split(".", 1)
         if to_module != module_id:
             continue
+        if to_field.endswith("[]") and _air_connection_sources_skipped(state, connection):
+            continue
         value = _air_link_expr_value(state, connection["value"]) if connection.get("value") is not None else _air_dynamic_endpoint_value(state, connection["from"])
         _air_assign_input(inputs, to_field, value)
     for fanout in (RUN_PLAN.get("dynamic") or {}).get("fanouts", []):
@@ -1336,12 +1471,25 @@ def _air_run_dynamic_fanout(state: dict[str, Any], fanout: dict[str, Any]) -> di
         output_value=created,
         meta={"module": fanout["module"], "count": len(created), "max_items": fanout["max_items"]},
     )
-    for node in created:
+    def run_created_node(node: dict[str, Any]) -> tuple[str, Any]:
         items = _air_dynamic_endpoint_value(state, node["source"])
         item = items[node["item_index"]]
-        output = _air_run_module(fanout["module"], _air_dynamic_inputs(state, fanout, item))
-        state[node["id"]] = output
-        updates[node["id"]] = output
+        return node["id"], _air_run_module(fanout["module"], _air_dynamic_inputs(state, fanout, item))
+
+    max_parallel = max(1, int(fanout.get("max_parallel") or len(created) or 1))
+    max_parallel = min(max_parallel, max(1, len(created)))
+    if max_parallel > 1 and len(created) > 1:
+        with ThreadPoolExecutor(max_workers=max_parallel) as executor:
+            futures = [executor.submit(run_created_node, node) for node in created]
+            for future in as_completed(futures):
+                node_id, output = future.result()
+                state[node_id] = output
+                updates[node_id] = output
+    else:
+        for node in created:
+            node_id, output = run_created_node(node)
+            state[node_id] = output
+            updates[node_id] = output
     child_updates = _air_run_dynamic_after(state, fanout["id"])
     updates.update(child_updates)
     return updates
@@ -1349,6 +1497,8 @@ def _air_run_dynamic_fanout(state: dict[str, Any], fanout: dict[str, Any]) -> di
 
 def _air_run_dynamic_after(state: dict[str, Any], after: str) -> dict[str, Any]:
     updates: dict[str, Any] = {}
+    if state.get("__air_halted"):
+        return updates
     for fanout in (RUN_PLAN.get("dynamic") or {}).get("fanouts", []):
         if fanout["after"] == after:
             child_updates = _air_run_dynamic_fanout(state, fanout)
@@ -1357,11 +1507,75 @@ def _air_run_dynamic_after(state: dict[str, Any], after: str) -> dict[str, Any]:
     return updates
 
 
-def _air_collect_outputs(state: dict[str, Any]) -> dict[str, Any]:
+def _air_collect_output_map(state: dict[str, Any], outputs: dict[str, str]) -> dict[str, Any]:
     updates: dict[str, Any] = {}
-    for name, endpoint in RUN_PLAN.get("outputs", {}).items():
+    for name, endpoint in outputs.items():
         updates[name] = _air_endpoint_value(state, endpoint)
     return updates
+
+
+def _air_collect_outputs(state: dict[str, Any]) -> dict[str, Any]:
+    if state.get("__air_halted"):
+        return dict(state["__air_halted"].get("outputs", {}))
+    return _air_collect_output_map(state, RUN_PLAN.get("outputs", {}))
+
+
+def _air_run_plan_node(node_id: str) -> dict[str, Any]:
+    for node in RUN_PLAN.get("nodes", []):
+        if node["id"] == node_id:
+            return node
+    raise RuntimeError(f"unknown RunPlan node {node_id}")
+
+
+def _air_run_plan_node_enabled(state: dict[str, Any], node_id: str) -> bool:
+    condition = _air_run_plan_node(node_id).get("when")
+    if condition is None:
+        return True
+    try:
+        return _air_condition_matches(state, {}, condition)
+    except Exception:
+        return False
+
+
+def _air_skip_run_plan_node(state: dict[str, Any], node_id: str) -> dict[str, Any]:
+    condition = _air_run_plan_node(node_id).get("when")
+    _air_emit_trace(
+        "$system",
+        0,
+        "node_condition",
+        "skip",
+        "ok",
+        input_value={"node": node_id, "when": condition},
+    )
+    return {node_id: {"__air_skipped": True, "when": condition}}
+
+
+def _air_trigger_halt_after(state: dict[str, Any], after: str) -> dict[str, Any]:
+    for halt in RUN_PLAN.get("halts", []):
+        if halt["after"] != after:
+            continue
+        condition = halt["when"]
+        actual = _air_dynamic_endpoint_value(state, condition["ref"])
+        if actual != condition["equals"]:
+            continue
+        outputs = _air_collect_output_map(state, halt.get("outputs", {}) or RUN_PLAN.get("outputs", {}))
+        halted = {
+            "after": after,
+            "ref": condition["ref"],
+            "equals": condition["equals"],
+            "outputs": outputs,
+        }
+        _air_emit_trace(
+            "$system",
+            0,
+            "halt",
+            "halt",
+            "ok",
+            input_value={"after": after, "ref": condition["ref"], "equals": condition["equals"]},
+            output_value=outputs,
+        )
+        return {"__air_halted": halted}
+    return {}
 
 
 def _air_validate_run_plan_capabilities() -> None:
@@ -1373,6 +1587,15 @@ def _air_validate_run_plan_capabilities() -> None:
                 raise RuntimeError(
                     f"RunPlan uses node {node['id']} requiring capability {capability}, "
                     "but it is missing from RUN_PLAN.requires.capabilities"
+                )
+    for fanout in (RUN_PLAN.get("dynamic") or {}).get("fanouts", []):
+        module = MODULES.get(fanout["module"], {})
+        for capability in module.get("requires", {}).get("capabilities", []):
+            if capability not in allowed:
+                raise RuntimeError(
+                    f"RunPlan uses dynamic fanout {fanout['id']} module {fanout['module']} "
+                    f"requiring capability {capability}, but it is missing from "
+                    "RUN_PLAN.requires.capabilities"
                 )
 
 
@@ -1390,7 +1613,10 @@ fn push_plan_graph_builder(
             "def {function_name}(state: AirState) -> dict[str, Any]:\n"
         ));
         output.push_str(&format!(
-            "    working: dict[str, Any] = dict(state)\n    updates: dict[str, Any] = {{{}: _air_run_module({}, _air_module_inputs(working, {}))}}\n    working.update(updates)\n    updates.update(_air_run_dynamic_after(working, {}))\n    return updates\n\n",
+            "    working: dict[str, Any] = dict(state)\n    if working.get(\"__air_halted\"):\n        return {{}}\n    if not _air_run_plan_node_enabled(working, {}):\n        return _air_skip_run_plan_node(working, {})\n    updates: dict[str, Any] = {{{}: _air_run_module({}, _air_module_inputs(working, {}))}}\n    working.update(updates)\n    halt_updates = _air_trigger_halt_after(working, {})\n    if halt_updates:\n        updates.update(halt_updates)\n        return updates\n    updates.update(_air_run_dynamic_after(working, {}))\n    return updates\n\n",
+            py_string(&node.id)?,
+            py_string(&node.id)?,
+            py_string(&node.id)?,
             py_string(&node.id)?,
             py_string(&node.id)?,
             py_string(&node.id)?,
@@ -1739,5 +1965,56 @@ mod tests {
         assert!(code.contains("def _air_run_dynamic_fanout"));
         assert!(code.contains("\"deep_research.research_topic@0.1.0\""));
         assert!(code.contains("updates.update(_air_run_dynamic_after(working, \"plan\"))"));
+        assert!(code.contains("ThreadPoolExecutor(max_workers=max_parallel)"));
+        assert!(
+            code.contains("for fanout in (RUN_PLAN.get(\"dynamic\") or {}).get(\"fanouts\", [])")
+        );
+        assert!(code.contains("RunPlan uses dynamic fanout"));
+        assert!(code.contains("requiring capability {capability}"));
+    }
+
+    #[test]
+    fn lowers_run_plan_node_when_guards_to_langgraph_runtime() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let store = air_linker::parse_module_store_file(
+            root.join("examples/deep-research/module-store.air-store.yaml"),
+        )
+        .unwrap();
+        let plan = air_linker::parse_run_plan_file(
+            root.join("examples/deep-research/deep-research-supervised-two-step.air-plan.yaml"),
+        )
+        .unwrap();
+
+        let code = lower_run_plan(&plan, &store, &root).unwrap();
+
+        assert!(code.contains("def _air_run_plan_node_enabled"));
+        assert!(code.contains("def _air_skip_run_plan_node"));
+        assert!(code.contains("if not _air_run_plan_node_enabled(working, \"topic_3\")"));
+        assert!(code.contains("return _air_skip_run_plan_node(working, \"topic_3\")"));
+        assert!(code.contains("node_condition"));
+        assert!(code.contains("isinstance(state.get(module), dict)"));
+        assert!(code.contains("state[module].get(\"__air_skipped\") is True"));
+    }
+
+    #[test]
+    fn lowers_run_plan_halts_to_langgraph_runtime() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let store = air_linker::parse_module_store_file(
+            root.join("examples/deep-research/module-store.air-store.yaml"),
+        )
+        .unwrap();
+        let plan = air_linker::parse_run_plan_file(
+            root.join("examples/deep-research/deep-research-clarified.air-plan.yaml"),
+        )
+        .unwrap();
+
+        let code = lower_run_plan(&plan, &store, &root).unwrap();
+
+        assert!(code.contains("def _air_trigger_halt_after"));
+        assert!(code.contains("if working.get(\"__air_halted\")"));
+        assert!(code.contains("halt_updates = _air_trigger_halt_after(working, \"clarify\")"));
+        assert!(code.contains("if state.get(\"__air_halted\")"));
+        assert!(code.contains("return dict(state[\"__air_halted\"].get(\"outputs\", {}))"));
+        assert!(code.contains("\"ref\": \"clarify.clarification.needs_clarification\""));
     }
 }

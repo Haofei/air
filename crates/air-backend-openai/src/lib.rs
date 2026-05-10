@@ -349,31 +349,36 @@ fn parse_chat_completion_content(response_text: &str) -> Result<Value, RuntimeEr
             RuntimeError::Provider("missing choices[0].message.content in response".to_string())
         })?;
 
-    let normalized = strip_markdown_json_fence(content);
+    let normalized = strip_markdown_code_fence(content).unwrap_or(content);
 
     match serde_json::from_str(normalized) {
         Ok(json) => Ok(json),
-        Err(_) => Ok(json!({ "content": content })),
+        Err(_) => Ok(json!({ "content": normalized })),
     }
 }
 
-fn strip_markdown_json_fence(content: &str) -> &str {
+fn strip_markdown_code_fence(content: &str) -> Option<&str> {
     let trimmed = content.trim();
-    let Some(after_open) = trimmed.strip_prefix("```") else {
-        return content;
-    };
-    let Some(close_index) = after_open.rfind("```") else {
-        return content;
-    };
+    let after_open = trimmed.strip_prefix("```")?;
+    let close_index = after_open.rfind("```")?;
 
     let inner = &after_open[..close_index];
     let inner = inner.trim_start();
-    let inner = inner
-        .strip_prefix("json")
-        .or_else(|| inner.strip_prefix("JSON"))
-        .unwrap_or(inner);
+    let inner = match inner.find('\n') {
+        Some(index) => {
+            let language = inner[..index].trim();
+            if language.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            }) {
+                &inner[index + 1..]
+            } else {
+                inner
+            }
+        }
+        None => inner,
+    };
 
-    inner.trim()
+    Some(inner.trim())
 }
 
 #[cfg(test)]
@@ -411,13 +416,13 @@ mod tests {
     }
 
     #[test]
-    fn leaves_non_json_fence_as_content_object() {
+    fn strips_non_json_fence_as_content_object() {
         let value = parse_chat_completion_content(
             r#"{"choices":[{"message":{"content":"```text\nnot json\n```"}}]}"#,
         )
         .unwrap();
 
-        assert_eq!(value, json!({"content": "```text\nnot json\n```"}));
+        assert_eq!(value, json!({"content": "not json"}));
     }
 
     #[test]

@@ -32,6 +32,8 @@ grep -q "condition  :=" docs/condition_dsl.md
 echo "[air-1.0] packaged examples"
 cargo run -q -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
+bash scripts/verify_code_agent.sh
 
 echo "[air-1.0] HTTP JSON tool provider smoke"
 cargo run -q -p air-cli -- validate tests/agents/http-json-tool-smoke.air.yaml

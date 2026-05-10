@@ -35,6 +35,39 @@ cargo run -p air-cli -- validate-plan examples/deep-research/deep-research-dynam
 echo "[air-verify] deep research profile"
 cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
 
+echo "[air-verify] deep research report quality contract"
+"$LANGGRAPH_PYTHON" - <<'PY'
+import json
+from pathlib import Path
+
+model_config = json.loads(Path("examples/bigmodel-openai-compatible.json").read_text(encoding="utf-8"))
+final_prompt = model_config["models"]["final_reporter"]["system_prompt"]
+compressor_prompt = model_config["models"]["research_compressor"]["system_prompt"]
+for needle in [
+    "executive_summary",
+    "comparison_matrix",
+    "recommendations",
+    "900-1600 words",
+]:
+    assert needle in final_prompt, needle
+for needle in ["key_findings", "evidence", "implications", "confidence"]:
+    assert needle in compressor_prompt, needle
+
+final_schema = Path("examples/deep-research/final-report.air.yaml").read_text(encoding="utf-8")
+topic_schema = Path("examples/deep-research/research-topic.air.yaml").read_text(encoding="utf-8")
+for needle in ["comparison_matrix", "recommendations", "open_questions"]:
+    assert needle in final_schema, needle
+for needle in ["key_findings", "evidence", "implications", "gaps", "confidence"]:
+    assert needle in topic_schema, needle
+
+tools = json.loads(Path("examples/deep-research/tools.json").read_text(encoding="utf-8"))
+search = tools["tools"]["web.search"]
+assert search["max_results"] >= 8
+assert len(search["documents"]) >= 8
+PY
+"$LANGGRAPH_PYTHON" scripts/evaluate_deep_research_report.py \
+  tests/fixtures/deep-research-rich-output.json
+
 echo "[air-verify] parallel CLI smoke"
 cargo run -p air-cli -- validate-plan tests/plans/parallel-smoke.air-plan.yaml --store tests/plans/parallel-smoke.air-store.yaml
 cargo run -p air-cli -- run-plan tests/plans/parallel-smoke.air-plan.yaml \
@@ -435,6 +468,15 @@ cargo test -p air-cli local_docs_search_dedupes_raw_content_before_limit
 if [[ "${AIR_DEEP_RESEARCH_REAL:-0}" == "1" ]]; then
   mkdir -p target/generated
 
+  echo "[air-verify] real final reporter quality smoke"
+  cargo run -p air-cli -- run examples/deep-research/final-report.air.yaml \
+    --input tests/fixtures/deep-research-final-input.json \
+    --model-config "$MODEL_CONFIG" \
+    --trace-out target/generated/deep_research_final_real.trace.jsonl \
+    > target/generated/deep_research_final_real.output.json
+  "$LANGGRAPH_PYTHON" scripts/evaluate_deep_research_report.py \
+    target/generated/deep_research_final_real.output.json
+
   echo "[air-verify] real planner"
   cargo run -p air-cli -- plan \
     --task "Compare the commercial readiness of 800V EV platforms, silicon carbide drives, solid-state batteries, and distributed drive systems for automakers planning 2026-2030 products. Build a deep research workflow with a planning step, multiple bounded researcher steps, and a final report." \
@@ -453,6 +495,8 @@ if [[ "${AIR_DEEP_RESEARCH_REAL:-0}" == "1" ]]; then
     --tool-config "$TOOLS" \
     --trace-out target/generated/deep_research_verify.trace.jsonl \
     > target/generated/deep_research_verify.output.json
+  "$LANGGRAPH_PYTHON" scripts/evaluate_deep_research_report.py \
+    target/generated/deep_research_verify.output.json
 
   echo "[air-verify] real dynamic AIR VM run"
   cargo run -p air-cli -- run-plan examples/deep-research/deep-research-dynamic.air-plan.yaml \
@@ -462,6 +506,8 @@ if [[ "${AIR_DEEP_RESEARCH_REAL:-0}" == "1" ]]; then
     --tool-config "$TOOLS" \
     --trace-out target/generated/deep_research_dynamic_verify.trace.jsonl \
     > target/generated/deep_research_dynamic_verify.output.json
+  "$LANGGRAPH_PYTHON" scripts/evaluate_deep_research_report.py \
+    target/generated/deep_research_dynamic_verify.output.json
 fi
 
 echo "[air-verify] deep research verification complete"

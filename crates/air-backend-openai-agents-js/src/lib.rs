@@ -568,6 +568,16 @@ function evalExpr(localState, outputs, expr) {
   return expr;
 }
 
+function looksLikeExpr(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  return keys.length === 1 && ['ref', 'path', 'literal', 'object', 'array', 'template', 'truncate'].includes(keys[0]);
+}
+
+function resolveSetValue(localState, outputs, value) {
+  return looksLikeExpr(value) ? evalExpr(localState, outputs, value) : value;
+}
+
 function parseConditionLiteral(raw) {
   raw = raw.trim();
   if (!raw) throw new Error('unsupported empty condition literal');
@@ -792,8 +802,14 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
     const ruleId = rule.id ?? '';
     for (const action of rule.actions ?? []) {
       if (action.kind === 'set') {
-        Object.assign(localState, action.values ?? {});
-        emitTrace({ agent: moduleId, step, rule: ruleId, action: 'set', status: 'ok', output: action.values ?? {} });
+        const resolvedValues = {};
+        for (const [key, value] of Object.entries(action.values ?? {})) {
+          const resolved = resolveSetValue(localState, outputs, value);
+          validateOutput(module, key, resolved);
+          localState[key] = resolved;
+          resolvedValues[key] = resolved;
+        }
+        emitTrace({ agent: moduleId, step, rule: ruleId, action: 'set', status: 'ok', output: resolvedValues });
       } else if (action.kind === 'append') {
         const inputValue = evalInput(localState, outputs, action.value);
         const existing = Array.isArray(localState[action.target]) ? [...localState[action.target]] : [];

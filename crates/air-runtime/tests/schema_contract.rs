@@ -113,6 +113,47 @@ impl ToolProvider for CapabilityTools {
     }
 }
 
+struct ArtifactTools;
+
+impl ToolProvider for ArtifactTools {
+    fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "docs.search");
+        Ok(json!({
+            "query": input["query"],
+            "documents": [{
+                "id": "doc-1",
+                "title": "AIR provenance",
+                "content": "AIR tools return artifacts with stable ids."
+            }],
+            "artifacts": [{
+                "id": "doc-1",
+                "kind": "doc_chunk",
+                "title": "AIR provenance",
+                "uri": "local-doc://doc-1",
+                "content": "AIR tools return artifacts with stable ids."
+            }]
+        }))
+    }
+
+    fn tool_capability(&self, name: &str) -> Option<&str> {
+        (name == "docs.search").then_some("retrieval.local")
+    }
+}
+
+struct CitationModels {
+    sources: Vec<&'static str>,
+}
+
+impl ModelProvider for CitationModels {
+    fn call_model(&mut self, name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "reporter");
+        Ok(json!({
+            "summary": "The answer is grounded in retrieved artifacts.",
+            "sources": self.sources,
+        }))
+    }
+}
+
 struct ApprovingTools;
 
 impl ToolProvider for ApprovingTools {
@@ -331,6 +372,48 @@ fn evaluates_composable_input_expressions() {
 }
 
 #[test]
+fn evaluates_set_action_expressions() {
+    let module = load_agent("tests/agents/set-expr.air.yaml");
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: CapturingModels { seen: None },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([
+                ("text".to_string(), json!("please fix billing")),
+                (
+                    "extracted".to_string(),
+                    json!({
+                        "customer_issue": "double charge",
+                        "product_area": "billing"
+                    }),
+                ),
+            ]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.outputs["build"],
+        json!({
+            "message": "double charge / please fix billing",
+            "tags": ["customer", "billing"]
+        })
+    );
+    let set_event = result
+        .trace
+        .iter()
+        .find(|event| event.rule == "init" && event.action == "set")
+        .expect("set event");
+    assert_eq!(
+        set_event.output.as_ref().unwrap()["build"]["tags"][1],
+        "billing"
+    );
+}
+
+#[test]
 fn evaluates_compound_state_machine_conditions() {
     let module = load_agent("tests/agents/conditional-loop.air.yaml");
     let mut vm = Vm {
@@ -468,6 +551,62 @@ fn rejects_provider_tool_capability_mismatch_at_runtime() {
         } if tool == "docs.search"
             && provider_capability == "network.search"
             && module_capability == "retrieval.local"
+    ));
+}
+
+#[test]
+fn accepts_model_citations_to_registered_tool_artifacts() {
+    let module = load_agent("tests/agents/citation-check.air.yaml");
+    let mut vm = Vm {
+        tools: ArtifactTools,
+        models: CitationModels {
+            sources: vec!["doc-1"],
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("query".to_string(), json!("AIR provenance"))]),
+        )
+        .unwrap();
+
+    assert_eq!(result.outputs["answer"]["sources"], json!(["doc-1"]));
+    let tool_event = result
+        .trace
+        .iter()
+        .find(|event| event.action == "tool_call" && event.status == TraceStatus::Ok)
+        .unwrap();
+    assert_eq!(
+        tool_event.meta.as_ref().unwrap()["artifact_ids"],
+        json!(["doc-1"])
+    );
+}
+
+#[test]
+fn rejects_model_citations_to_unknown_tool_artifacts() {
+    let module = load_agent("tests/agents/citation-check.air.yaml");
+    let mut vm = Vm {
+        tools: ArtifactTools,
+        models: CitationModels {
+            sources: vec!["missing-doc"],
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("query".to_string(), json!("AIR provenance"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::UnknownCitation {
+            ref path,
+            ref citation,
+            ..
+        } if path == "answer.sources[0]" && citation == "missing-doc"
     ));
 }
 

@@ -1,0 +1,88 @@
+agent:
+  name: citation-check-agent
+  version: 0.1.0
+  description: "Checks that model citations refer to tool artifacts."
+
+inputs:
+  query: string
+
+outputs:
+  answer:
+    type: object
+    required: [summary, sources]
+    properties:
+      summary: string
+      sources:
+        type: array
+        items: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, search, report, done, failed]
+  search_results: object
+  answer:
+    type: object
+    required: [summary, sources]
+    properties:
+      summary: string
+      sources:
+        type: array
+        items: string
+
+models:
+  - name: reporter
+
+tools:
+  - name: docs.search
+    capability: retrieval.local
+    timeout_ms: 1000
+
+requires:
+  capabilities: [retrieval.local]
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: search
+    - id: search
+      when: phase == "search"
+      actions:
+        - kind: tool_call
+          tool: docs.search
+          input:
+            object:
+              query:
+                ref: query
+          output: search_results
+          timeout_seconds: 5
+        - kind: set
+          values:
+            phase: report
+    - id: report
+      when: phase == "report"
+      actions:
+        - kind: model_call
+          model: reporter
+          input:
+            object:
+              search_results:
+                ref: search_results
+          output: answer
+          timeout_seconds: 10
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: answer

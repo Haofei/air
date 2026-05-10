@@ -1,0 +1,5 @@
+plan: code-repair.air-plan.yaml
+store: module-store.air-store.yaml
+input_file: repair.input.json
+model_config: ../bigmodel-openai-compatible.json
+tool_config: tools.repair.json

@@ -30,6 +30,18 @@ cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.a
 cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --log
 ```
 
+## `code-agent`
+
+A bounded coding-agent proof case. It includes a review agent that combines external search, repository file listing, repository text search, automatic `repo.context` snippets, `file.read`, `git.diff`, and an allowlisted test command, then returns grounded review guidance with source ids. It also includes a build-page agent that generates one static HTML file through constrained `file.write` and verifies it with an allowlisted smoke command. The default review tool config uses deterministic local search; `tools.playwright.json` switches the same review module to browser-backed search.
+
+Run:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
+cargo run -p air-cli -- run-plan --profile examples/code-agent/profile.air-profile.yaml --log
+cargo run -p air-cli -- run-plan --profile examples/code-agent/apple-build.air-profile.yaml --log
+```
+
 ## Shared Provider Config
 
 `bigmodel-openai-compatible.json` is a sample OpenAI-compatible model config. Set the referenced environment variable before running examples with real model calls:

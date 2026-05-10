@@ -1,0 +1,29 @@
+store:
+  name: code-agent-store
+  version: 0.1.0
+
+modules:
+  code.review@0.1.0:
+    path: examples/code-agent/code-review.air.yaml
+    kind: composite
+    visibility: public
+    description: "Grounded coding review agent using search, file context, and git diff evidence."
+    tags: [coding, review, search, provenance]
+    covers: [code_review, documentation_lookup, diff_review, grounded_recommendations]
+    priority: 100
+  code.build_page@0.1.0:
+    path: examples/code-agent/code-build-page.air.yaml
+    kind: composite
+    visibility: public
+    description: "Bounded static page builder using model generation, constrained file write, and smoke verification."
+    tags: [coding, build, static_site, file_write]
+    covers: [static_page_build, landing_page, bounded_file_write, smoke_test]
+    priority: 90
+  code.repair@0.1.0:
+    path: examples/code-agent/code-repair.air.yaml
+    kind: composite
+    visibility: public
+    description: "Bounded code repair agent using structured diagnostics, constrained file.patch, and retest."
+    tags: [coding, repair, diagnostics, patch, test]
+    covers: [code_fix, diagnostics_loop, bounded_patch, retest]
+    priority: 95

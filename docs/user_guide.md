@@ -260,17 +260,59 @@ AIR checks:
 - the tool capability is in `requires.capabilities`;
 - the provider-configured capability matches the module-declared capability;
 - `policy.max_tool_calls` is not exceeded.
+- when tool outputs register artifacts, later `sources`, `citations`, and `source_ids` in model or return outputs refer only to known artifact ids.
 
 Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
 
 | Tool kind | Typical AIR tool name | Input | Output | Notes |
 | --- | --- | --- | --- | --- |
-| `local_docs_search` | `docs.search` | `{ "query": "..." }` | `{ query, documents[] }` | In-memory docs for examples, tests, and local RAG. |
+| `local_docs_search` | `docs.search` | `{ "query": "..." }` | `{ query, documents[], artifacts[] }` | In-memory docs for examples, tests, and local RAG. |
 | `local_reflection` | `research.think` | `{ "reflection": "..." }` | `{ reflection }` | Deterministic reflection placeholder for bounded research loops. |
 | `http_json` | `web.search` / custom API | tool input object | JSON response body | Calls REST endpoints; response must be JSON. |
-| `web_fetch` | `web.fetch` | `{ "url": "https://..." }` | `{ url, status, content_type, text, bytes, truncated }` | GET only; supports headers, bearer token env, timeout, max bytes. |
-| `file_read` | `file.read` | `{ "path": "relative/file.txt" }` | `{ path, content, bytes, truncated }` | Read-only and constrained to configured `base_dir`. |
-| `git_diff` | `git.diff` | `{ "path": "...", "staged": false }` | `{ repo, diff, bytes, truncated }` | Read-only diff; path filters must stay inside `repo_dir`. |
+| `web_fetch` | `web.fetch` | `{ "url": "https://..." }` | `{ url, status, content_type, text, bytes, truncated, artifacts[] }` | GET only; supports headers, bearer token env, timeout, max bytes. |
+| `playwright_search` | `web.search` | `{ "query": "...", "query_variants": [...] }` | `{ query, queries, documents[], artifacts[], diagnostics }` | Browser-backed search for research and coding agents; supports query variants, domain filters, per-domain dedupe, concurrent page fetch, timeouts, and artifact output. |
+| `file_read` | `file.read` | `{ "path": "relative/file.txt", "start_line": 10, "end_line": 80 }` | `{ path, content, bytes, start_line, end_line, total_lines, truncated, artifacts[] }` | Read-only and constrained to configured `base_dir`; line range is optional. |
+| `file_write` | `file.write` | `{ "path": "relative/file.txt", "content": "..." }` | `{ path, bytes, created, overwritten, artifacts[] }` | Write tool constrained to configured `base_dir`; optional directory creation, overwrite policy, and read-before-overwrite policy are set in tool config. When `require_read` is enabled, overwrites are rejected if the file changed after the last `file.read`. |
+| `file_edit` | `file.edit` | `{ "path": "relative/file.txt", "old_string": "...", "new_string": "..." }` | `{ path, bytes, replacements, artifacts[] }` | Exact-string edit constrained to configured `base_dir`; requires a fresh prior `file.read` by default and rejects ambiguous multiple matches unless `replace_all` is explicitly allowed. |
+| `file_patch` | `file.patch` | `{ "patch": "diff --git ...", "dry_run": true }` | `{ repo, success, checked, applied, files[], file_count, diagnostics[], bytes, artifacts[] }` | Applies a unified diff through `git apply --check` then `git apply`; validates changed paths, max files, new/delete policy, and fresh read-before-patch for existing files. In `dry_run` mode failed patch checks return `success:false` with diagnostics instead of mutating files. |
+| `git_diff` | `git.diff` | `{ "path": "...", "staged": false }` | `{ repo, diff, bytes, truncated, artifacts[] }` | Read-only diff; path filters must stay inside `repo_dir`. |
+| `git_status` | `git.status` | `{}` | `{ repo, clean, entries[], file_count, truncated, artifacts[] }` | Read-only workspace status through `git status --porcelain=v1`; returns structured index/worktree entries for review, repair, and final summaries. |
+| `repo_files` | `repo.files` | `{ "query": "...", "path": "optional/dir" }` | `{ repo, query, files[], truncated, artifacts[] }` | Read-only repository file listing through `rg --files`; optional query/path/glob filtering. |
+| `repo_search` | `repo.search` | `{ "query": "...", "path": "optional/dir" }` | `{ repo, query, matches[], truncated, artifacts[] }` | Read-only fixed-string search through `rg`; returns path/line/column/text matches. |
+| `repo_context` | `repo.context` | `{ "query": "...", "context_lines": 8 }` | `{ repo, query, matches[], snippets[], truncated, artifacts[] }` | Read-only code context through `rg`; groups matches by file and returns nearby numbered snippets with a `code_context` artifact. |
+| `command_run` | `test.run` | `{ "command": "alias" }` | `{ command, success, status, log, diagnostics[], artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Extracts common Rust/TypeScript/file-line diagnostics for repair loops. |
+
+Artifact-producing tools return a common shape:
+
+```json
+{
+  "artifacts": [
+    {
+      "id": "doc-1",
+      "kind": "web_page | doc_chunk | file_span | file_write | file_edit | file_patch | repo_listing | repo_search | code_context | git_diff | git_status | test_log",
+      "title": "Readable title",
+      "uri": "file-or-web-location",
+      "content": "Evidence text",
+      "metadata": {
+        "provider": "local_docs"
+      }
+    }
+  ]
+}
+```
+
+The native AIR VM records artifact ids from `artifacts[]` and from compatible `documents[]`
+results. If the registry is non-empty, model outputs and return outputs that contain
+`sources`, `citations`, or `source_ids` arrays must cite those ids. This gives deep research a
+checked source list and gives coding agents checked references to file reads, diffs, fetches, or
+test logs. Existing modules without artifact-producing tools continue to run without citation
+enforcement.
+
+The `examples/code-agent` workflows show two coding-agent patterns: review agents search for
+external references, list repository files, search local code, gather automatic `repo.context`
+snippets, inspect a target file and diff, run one allowlisted verification command, and ask a model
+for review findings that cite exact artifact ids. Build agents can generate a bounded artifact,
+write it through `file.write`, and run an allowlisted smoke command.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 
@@ -294,6 +336,51 @@ For production-shaped adapters, AIR also supports an HTTP JSON tool provider in 
 
 `body`, `url`, and header values can use `{{field}}` templates from the tool input. The response must be JSON and must match the module state/output schema for the action target.
 
+For browser-backed research, use `playwright_search`. This is useful when a coding or research
+agent needs current documentation, GitHub pages, release notes, issues, or general web evidence
+without depending on a paid search API. `query_variants` can use the same `{{field}}` template
+syntax as HTTP tools. Install the browser runtime once with `npm install` and
+`npx playwright install chromium`.
+
+```json
+{
+  "tools": {
+    "web.search": {
+      "kind": "playwright_search",
+      "capability": "network.search",
+      "script_path": "../../scripts/playwright_search.cjs",
+      "query_variants": [
+        "{{query}} GitHub",
+        "{{query}} documentation",
+        "{{query}} issues releases"
+      ],
+      "max_results": 8,
+      "max_results_per_query": 6,
+      "max_per_domain": 2,
+      "max_content_chars": 12000,
+      "exclude_domains": ["facebook.com", "x.com", "twitter.com"],
+      "required_terms": [],
+      "exclude_terms": [],
+      "page_concurrency": 3,
+      "navigation_timeout_ms": 12000,
+      "overall_timeout_ms": 110000,
+      "search_delay_ms": 500,
+      "retry_count": 1,
+      "fetch_pages": true,
+      "timeout_seconds": 120
+    }
+  }
+}
+```
+
+The tool also accepts per-call overrides in its input, including `query_variants`,
+`include_domains`, `exclude_domains`, `max_results`, `max_results_per_query`,
+`max_per_domain`, `required_terms`, `exclude_terms`, `max_content_chars`,
+`page_concurrency`, `navigation_timeout_ms`, `overall_timeout_ms`, `search_delay_ms`, `retry_count`, `fetch_pages`, and
+`user_agent`. The output `diagnostics` field records search runs, fetch failures,
+domain filters, and result counts so the trace shows whether the agent actually found enough
+evidence.
+
 Example read-only file and git tools:
 
 ```json
@@ -305,10 +392,51 @@ Example read-only file and git tools:
       "base_dir": ".",
       "max_bytes": 262144
     },
+    "file.write": {
+      "kind": "file_write",
+      "capability": "file.write",
+      "base_dir": ".",
+      "create_dirs": true,
+      "allow_overwrite": false,
+      "require_read": true,
+      "max_bytes": 262144
+    },
+    "file.edit": {
+      "kind": "file_edit",
+      "capability": "file.write",
+      "base_dir": ".",
+      "allow_replace_all": false,
+      "max_bytes": 262144
+    },
+    "file.patch": {
+      "kind": "file_patch",
+      "capability": "file.write",
+      "repo_dir": ".",
+      "require_read": true,
+      "allow_new_files": true,
+      "allow_delete_files": false,
+      "max_files": 20,
+      "max_bytes": 262144
+    },
     "git.diff": {
       "kind": "git_diff",
       "capability": "code.read",
       "repo_dir": ".",
+      "max_bytes": 262144
+    },
+    "git.status": {
+      "kind": "git_status",
+      "capability": "code.read",
+      "repo_dir": ".",
+      "max_files": 200
+    },
+    "repo.context": {
+      "kind": "repo_context",
+      "capability": "code.read",
+      "repo_dir": ".",
+      "max_matches": 80,
+      "max_files": 8,
+      "context_lines": 8,
       "max_bytes": 262144
     }
   }

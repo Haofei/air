@@ -1,0 +1,33 @@
+plan:
+  name: code-review
+  version: 0.1.0
+  description: "Single bounded coding agent that combines search, file context, and git diff."
+
+requires:
+  capabilities: [network.search, file.read, code.read, code.test]
+
+nodes:
+  - id: review
+    module: code.review@0.1.0
+
+entry: review
+
+connect:
+  - from: $input.task
+    to: review.task
+  - from: $input.search_query
+    to: review.search_query
+  - from: $input.repo_query
+    to: review.repo_query
+  - from: $input.required_terms
+    to: review.required_terms
+  - from: $input.target_file
+    to: review.target_file
+
+outputs:
+  review: review.review
+
+decisions:
+  - id: choose-code-review-agent
+    rationale: "The task asks for grounded coding guidance, so use the bounded code review module with network search, file read, and git diff evidence."
+    selected: [review]

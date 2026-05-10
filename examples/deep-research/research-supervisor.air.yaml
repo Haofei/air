@@ -13,6 +13,29 @@ inputs:
       properties:
         topic: string
         summary: string
+        key_findings:
+          type: array
+          items: string
+        evidence:
+          type: array
+          items:
+            type: object
+            required: [claim, support, source_ids]
+            properties:
+              claim: string
+              support: string
+              source_ids:
+                type: array
+                items: string
+        implications:
+          type: array
+          items: string
+        gaps:
+          type: array
+          items: string
+        confidence:
+          type: enum
+          enum: [low, medium, high]
         sources:
           type: array
           items: string

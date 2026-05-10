@@ -1,0 +1,39 @@
+{
+  "tools": {
+    "file.read": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 65536
+    },
+    "file.patch": {
+      "kind": "file_patch",
+      "capability": "file.write",
+      "repo_dir": "../..",
+      "require_read": true,
+      "allow_new_files": false,
+      "allow_delete_files": false,
+      "max_files": 1,
+      "max_bytes": 65536
+    },
+    "git.status": {
+      "kind": "git_status",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 200
+    },
+    "test.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "repair_fixture_test": [
+          "node",
+          "examples/code-agent/repair-fixture/test.js"
+        ]
+      },
+      "timeout_seconds": 30,
+      "max_bytes": 65536
+    }
+  }
+}

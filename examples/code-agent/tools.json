@@ -1,0 +1,81 @@
+{
+  "tools": {
+    "web.search": {
+      "kind": "local_docs_search",
+      "capability": "network.search",
+      "max_results": 4,
+      "documents": [
+        {
+          "id": "docs-playwright-timeouts",
+          "title": "Playwright timeout and navigation guidance",
+          "content": "Playwright pages support default navigation and action timeouts. Browser automation code should set bounded timeouts for page.goto, selectors, and page evaluation. Tools that run inside larger agents should expose diagnostics when a page fails, times out, or returns empty content."
+        },
+        {
+          "id": "docs-search-relevance",
+          "title": "Search relevance for coding agents",
+          "content": "Coding agents need query diversification, required technical terms, domain deduplication, and source diagnostics. Broad queries can return unrelated products or tutorials; agents should preserve search queries and result metadata so poor retrieval can be audited."
+        },
+        {
+          "id": "docs-provenance",
+          "title": "Evidence provenance for code analysis",
+          "content": "A coding agent should cite stable artifact ids for web pages, file reads, and diffs. Findings should identify whether they are grounded in external documentation, local code, a diff, or missing evidence."
+        },
+        {
+          "id": "docs-browser-cost",
+          "title": "Browser-backed tool cost control",
+          "content": "Browser-backed search can be slower than API search. Practical controls include max results, max pages per query, max content characters, page concurrency limits, blocked resource types, and a hard process timeout from the host runtime."
+        }
+      ]
+    },
+    "file.read": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 65536
+    },
+    "repo.files": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 100
+    },
+    "repo.search": {
+      "kind": "repo_search",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 80,
+      "max_bytes": 65536
+    },
+    "repo.context": {
+      "kind": "repo_context",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 80,
+      "max_files": 8,
+      "context_lines": 8,
+      "max_bytes": 65536
+    },
+    "git.diff": {
+      "kind": "git_diff",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_bytes": 65536
+    },
+    "git.status": {
+      "kind": "git_status",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 200
+    },
+    "test.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "air_tools": ["cargo", "test", "-q", "-p", "air-tools"]
+      },
+      "timeout_seconds": 120,
+      "max_bytes": 65536
+    }
+  }
+}

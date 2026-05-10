@@ -1,0 +1,32 @@
+plan:
+  name: code-repair
+  version: 0.1.0
+
+requires:
+  capabilities: [file.read, file.write, code.read, code.test]
+
+nodes:
+  - id: repair
+    module: code.repair@0.1.0
+
+entry: repair
+
+connect:
+  - from: $input.task
+    to: repair.task
+  - from: $input.target_path
+    to: repair.target_path
+  - from: $input.test_command
+    to: repair.test_command
+
+outputs:
+  repair: repair.repair
+
+decisions:
+  - id: choose-bounded-repair
+    when:
+      contains:
+        field: task
+        value: fix
+    select: [repair]
+    rationale: "The task asks for a bounded code fix, so run the repair agent with diagnostics and a constrained patch tool."

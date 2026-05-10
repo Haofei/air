@@ -1,0 +1,623 @@
+agent:
+  name: code-repair-agent
+  version: 0.1.0
+  description: "Bounded coding repair agent: read one target file, run an allowlisted test, generate a unified diff from diagnostics, apply it through file.patch, retest, and optionally run one more bounded repair pass."
+
+inputs:
+  task: string
+  target_path: string
+  test_command: string
+
+outputs:
+  repair:
+    type: object
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files]
+    properties:
+      target_path: string
+      initial_success: boolean
+      final_success: boolean
+      patch_applied: boolean
+      rationale: string
+      diagnostics:
+        type: array
+        items: object
+      workspace_clean: boolean
+      changed_files:
+        type: array
+        items: object
+
+requires:
+  capabilities: [file.read, file.write, code.read, code.test]
+
+state:
+  phase:
+    type: enum
+    enum: [init, read, test, route, repair, patch_check, patch_check_route, patch, retest, evaluate, reread, repair_again, patch_check_again, patch_check_again_route, patch_again, retest_again, status, done, failed]
+  file_context:
+    type: object
+    required: [path, content, artifacts]
+    properties:
+      path: string
+      content: string
+      artifacts:
+        type: array
+        items: object
+  test_results:
+    type: object
+    required: [command, success, log, diagnostics, artifacts]
+    properties:
+      command: string
+      success: boolean
+      status: integer
+      log: string
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  repair_plan:
+    type: object
+    required: [patch, rationale]
+    properties:
+      patch: string
+      rationale: string
+  patch_result:
+    type: object
+    required: [repo, success, checked, applied, files, file_count, diagnostics, artifacts]
+    properties:
+      repo: string
+      success: boolean
+      checked: boolean
+      applied: boolean
+      files:
+        type: array
+        items: object
+      file_count: integer
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  patch_check_result:
+    type: object
+    required: [repo, success, checked, applied, files, file_count, diagnostics, artifacts]
+    properties:
+      repo: string
+      success: boolean
+      checked: boolean
+      applied: boolean
+      files:
+        type: array
+        items: object
+      file_count: integer
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  final_test_results:
+    type: object
+    required: [command, success, log, diagnostics, artifacts]
+    properties:
+      command: string
+      success: boolean
+      status: integer
+      log: string
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  file_context_retry:
+    type: object
+    required: [path, content, artifacts]
+    properties:
+      path: string
+      content: string
+      artifacts:
+        type: array
+        items: object
+  repair_plan_retry:
+    type: object
+    required: [patch, rationale]
+    properties:
+      patch: string
+      rationale: string
+  patch_result_retry:
+    type: object
+    required: [repo, success, checked, applied, files, file_count, diagnostics, artifacts]
+    properties:
+      repo: string
+      success: boolean
+      checked: boolean
+      applied: boolean
+      files:
+        type: array
+        items: object
+      file_count: integer
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  patch_check_result_retry:
+    type: object
+    required: [repo, success, checked, applied, files, file_count, diagnostics, artifacts]
+    properties:
+      repo: string
+      success: boolean
+      checked: boolean
+      applied: boolean
+      files:
+        type: array
+        items: object
+      file_count: integer
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  final_test_results_retry:
+    type: object
+    required: [command, success, log, diagnostics, artifacts]
+    properties:
+      command: string
+      success: boolean
+      status: integer
+      log: string
+      diagnostics:
+        type: array
+        items: object
+      artifacts:
+        type: array
+        items: object
+  workspace_status:
+    type: object
+    required: [repo, clean, entries, file_count, artifacts]
+    properties:
+      repo: string
+      clean: boolean
+      entries:
+        type: array
+        items: object
+      file_count: integer
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
+  repair_draft:
+    type: object
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics]
+    properties:
+      target_path: string
+      initial_success: boolean
+      final_success: boolean
+      patch_applied: boolean
+      rationale: string
+      diagnostics:
+        type: array
+        items: object
+  repair:
+    type: object
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files]
+    properties:
+      target_path: string
+      initial_success: boolean
+      final_success: boolean
+      patch_applied: boolean
+      rationale: string
+      diagnostics:
+        type: array
+        items: object
+      workspace_clean: boolean
+      changed_files:
+        type: array
+        items: object
+
+tools:
+  - name: file.read
+    capability: file.read
+    timeout_ms: 10000
+  - name: file.patch
+    capability: file.write
+    timeout_ms: 10000
+  - name: git.status
+    capability: code.read
+    timeout_ms: 10000
+  - name: test.run
+    capability: code.test
+    timeout_ms: 30000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 18
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: read
+
+    - id: read
+      when: phase == "read"
+      actions:
+        - kind: tool_call
+          tool: file.read
+          input:
+            object:
+              path:
+                ref: target_path
+          output: file_context
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: test
+
+    - id: test
+      when: phase == "test"
+      actions:
+        - kind: tool_call
+          tool: test.run
+          input:
+            object:
+              command:
+                ref: test_command
+          output: test_results
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: route
+
+    - id: already-passing
+      when: phase == "route" && test_results.success == true
+      actions:
+        - kind: set
+          values:
+            repair_draft:
+              object:
+                target_path:
+                  ref: target_path
+                initial_success:
+                  literal: true
+                final_success:
+                  literal: true
+                patch_applied:
+                  literal: false
+                rationale:
+                  literal: "The allowlisted test already passed, so no patch was applied."
+                diagnostics:
+                  ref: test_results.diagnostics
+            phase: status
+
+    - id: repair
+      when: phase == "route" && test_results.success == false
+      actions:
+        - kind: model_call
+          model: code_repairer
+          input:
+            object:
+              task:
+                ref: task
+              target_path:
+                ref: target_path
+              file_context:
+                ref: file_context
+              diagnostics:
+                ref: test_results.diagnostics
+              log:
+                ref: test_results.log
+          output: repair_plan
+          timeout_seconds: 120
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: patch_check
+
+    - id: patch-check
+      when: phase == "patch_check"
+      actions:
+        - kind: tool_call
+          tool: file.patch
+          input:
+            object:
+              patch:
+                ref: repair_plan.patch
+              dry_run:
+                literal: true
+          output: patch_check_result
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: patch_check_route
+
+    - id: patch-check-ok
+      when: phase == "patch_check_route" && patch_check_result.success == true
+      actions:
+        - kind: set
+          values:
+            phase: patch
+
+    - id: patch-check-failed
+      when: phase == "patch_check_route" && patch_check_result.success == false
+      actions:
+        - kind: set
+          values:
+            repair_draft:
+              object:
+                target_path:
+                  ref: target_path
+                initial_success:
+                  literal: false
+                final_success:
+                  literal: false
+                patch_applied:
+                  literal: false
+                rationale:
+                  template: "Patch validation failed before apply: {{repair_plan.rationale}}"
+                diagnostics:
+                  ref: patch_check_result.diagnostics
+            phase: status
+
+    - id: patch
+      when: phase == "patch"
+      actions:
+        - kind: tool_call
+          tool: file.patch
+          input:
+            object:
+              patch:
+                ref: repair_plan.patch
+          output: patch_result
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: retest
+
+    - id: retest
+      when: phase == "retest"
+      actions:
+        - kind: tool_call
+          tool: test.run
+          input:
+            object:
+              command:
+                ref: test_command
+          output: final_test_results
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            repair_draft:
+              object:
+                target_path:
+                  ref: target_path
+                initial_success:
+                  literal: false
+                final_success:
+                  ref: final_test_results.success
+                patch_applied:
+                  literal: true
+                rationale:
+                  ref: repair_plan.rationale
+                diagnostics:
+                  ref: final_test_results.diagnostics
+            phase: evaluate
+
+    - id: first-pass-success
+      when: phase == "evaluate" && final_test_results.success == true
+      actions:
+        - kind: set
+          values:
+            phase: status
+
+    - id: first-pass-failed
+      when: phase == "evaluate" && final_test_results.success == false
+      actions:
+        - kind: set
+          values:
+            phase: reread
+
+    - id: reread
+      when: phase == "reread"
+      actions:
+        - kind: tool_call
+          tool: file.read
+          input:
+            object:
+              path:
+                ref: target_path
+          output: file_context_retry
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: repair_again
+
+    - id: repair-again
+      when: phase == "repair_again"
+      actions:
+        - kind: model_call
+          model: code_repairer
+          input:
+            object:
+              task:
+                ref: task
+              target_path:
+                ref: target_path
+              file_context:
+                ref: file_context_retry
+              diagnostics:
+                ref: final_test_results.diagnostics
+              log:
+                ref: final_test_results.log
+              previous_rationale:
+                ref: repair_plan.rationale
+          output: repair_plan_retry
+          timeout_seconds: 120
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: patch_check_again
+
+    - id: patch-check-again
+      when: phase == "patch_check_again"
+      actions:
+        - kind: tool_call
+          tool: file.patch
+          input:
+            object:
+              patch:
+                ref: repair_plan_retry.patch
+              dry_run:
+                literal: true
+          output: patch_check_result_retry
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: patch_check_again_route
+
+    - id: patch-check-again-ok
+      when: phase == "patch_check_again_route" && patch_check_result_retry.success == true
+      actions:
+        - kind: set
+          values:
+            phase: patch_again
+
+    - id: patch-check-again-failed
+      when: phase == "patch_check_again_route" && patch_check_result_retry.success == false
+      actions:
+        - kind: set
+          values:
+            repair_draft:
+              object:
+                target_path:
+                  ref: target_path
+                initial_success:
+                  literal: false
+                final_success:
+                  literal: false
+                patch_applied:
+                  literal: true
+                rationale:
+                  template: "{{repair_plan.rationale}}\n\nSecond pass patch validation failed before apply: {{repair_plan_retry.rationale}}"
+                diagnostics:
+                  ref: patch_check_result_retry.diagnostics
+            phase: status
+
+    - id: patch-again
+      when: phase == "patch_again"
+      actions:
+        - kind: tool_call
+          tool: file.patch
+          input:
+            object:
+              patch:
+                ref: repair_plan_retry.patch
+          output: patch_result_retry
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: retest_again
+
+    - id: retest-again
+      when: phase == "retest_again"
+      actions:
+        - kind: tool_call
+          tool: test.run
+          input:
+            object:
+              command:
+                ref: test_command
+          output: final_test_results_retry
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            repair_draft:
+              object:
+                target_path:
+                  ref: target_path
+                initial_success:
+                  literal: false
+                final_success:
+                  ref: final_test_results_retry.success
+                patch_applied:
+                  literal: true
+                rationale:
+                  template: "{{repair_plan.rationale}}\n\nSecond pass: {{repair_plan_retry.rationale}}"
+                diagnostics:
+                  ref: final_test_results_retry.diagnostics
+            phase: status
+
+    - id: status
+      when: phase == "status"
+      actions:
+        - kind: tool_call
+          tool: git.status
+          input:
+            literal: {}
+          output: workspace_status
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            repair:
+              object:
+                target_path:
+                  ref: repair_draft.target_path
+                initial_success:
+                  ref: repair_draft.initial_success
+                final_success:
+                  ref: repair_draft.final_success
+                patch_applied:
+                  ref: repair_draft.patch_applied
+                rationale:
+                  ref: repair_draft.rationale
+                diagnostics:
+                  ref: repair_draft.diagnostics
+                workspace_clean:
+                  ref: workspace_status.clean
+                changed_files:
+                  ref: workspace_status.entries
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: repair
+
+policy:
+  max_tool_calls: 10
+  max_model_calls: 2
+  timeout_seconds: 360
+
+observability:
+  traces: true

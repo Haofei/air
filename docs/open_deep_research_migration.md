@@ -114,8 +114,12 @@ Implemented:
 - trace specialization API that extracts the resolved RunPlan from execution trace, preferring a materialized dynamic hot path when present, revalidates it against the current module store, and emits a cache identity containing module schemas, requirements, and policies;
 - `run-plan --jit-cache <dir>` hot-path cache, where AIR keys a specialized RunPlan by the original plan, module store, module contents, and input fingerprint, then reuses the verified static topology on later matching runs without caching model outputs;
 - bounded researcher loop modules that search, select a follow-up query, conditionally repeat, and compress findings;
+- richer per-topic research notes with key findings, evidence rows, implications, gaps, confidence, and source ids, so final synthesis has more structure than a short `summary`;
+- richer final report contract with title, executive summary, key findings, comparison matrix, recommendations, limitations, open questions, and cited source ids;
 - AIR state-machine `append` actions for typed state arrays, so repeated search results are accumulated as structured evidence before compression instead of being overwritten by the latest tool call;
 - local search tool normalization with raw-content deduplication and configurable `max_results`, so repeated documents do not consume downstream compression context;
+- artifact provenance in the native AIR VM: tool outputs can register `artifacts[]` or `documents[]`, and later model/return outputs with `sources`, `citations`, or `source_ids` must reference known artifact ids when evidence is available;
+- expanded local deep-research corpus for the EV readiness example, covering 800V platforms, SiC supply chain, charging infrastructure, solid-state battery risks, distributed-drive controls, and comparative 2026-2030 readiness;
 - native HTTP JSON tool provider for production-shaped tool adapters, with capability checks, templated request body/headers, JSON response parsing, and release-gate smoke coverage;
 - AIR input `truncate` expressions, so bounded modules can cap large accumulated evidence before model calls without hiding the truncation in prompt text;
 - explicit researcher reflection via the `research.think` tool, so deliberation appears in trace as a real AIR tool call instead of being hidden inside prompt text;
@@ -272,6 +276,8 @@ Missing or intentionally simplified:
 - provider-native search behavior for OpenAI and Anthropic web search beyond the generic HTTP JSON adapter;
 - Tavily/API-native summarization and provider-specific search ranking beyond generic HTTP JSON and local search normalization;
 - MCP server auth and tool discovery;
+- generated backend parity for artifact provenance checks; the native AIR VM is currently the conformance runtime for artifact registry and citation validation;
+- report-quality parity with `open_deep_research` remains unproven; AIR now has its own deep-research report quality gate and real BigModel samples that pass it, but it does not yet benchmark output quality against the upstream app or Deep Research Bench;
 - richer generated-backend approval integrations beyond the current explicit host hooks/config decisions, such as interactive human approval queues;
 - semantic summarization fallback for token-limit recovery beyond the current deterministic char-budget input compaction;
 - intra-module checkpointing and continuation for arbitrary long-running in-flight modules;
@@ -287,5 +293,12 @@ For the current AIR-only slice, AIR should be considered to have migrated this a
 - the generated plan runs on the AIR VM;
 - tool calls and model calls are real, not mocked, for at least one non-trivial research query;
 - the missing LangGraph dynamic features above are either implemented as explicit AIR primitives or documented as unsupported.
+
+Current report-quality evidence:
+
+- `scripts/verify_deep_research.sh` checks the richer final-report prompt, richer researcher note schema, expanded local corpus, and a 900+ word report fixture through `scripts/evaluate_deep_research_report.py`;
+- with `AIR_DEEP_RESEARCH_REAL=1`, the same verifier runs a real BigModel final-reporter smoke and evaluates the output with the same quality gate;
+- `target/generated/deep_research_dynamic_real.output.json` is a local real dynamic AIR VM sample from the OpenAI-compatible BigModel provider; it passed the quality evaluator with 1313 report words, 10 key findings, 6 comparison rows, 7 recommendations, 8 sources, and 12 limitations.
+- the checked-in upstream `open_deep_research/examples/*.md` examples are roughly 1257-1680 words, so the current AIR real dynamic sample is in the same report-length band rather than the earlier short-summary shape.
 
 Backend parity is a separate portability gate, not part of the current AIR-only slice.

@@ -1,0 +1,82 @@
+{
+  "tools": {
+    "web.search": {
+      "kind": "playwright_search",
+      "capability": "network.search",
+      "script_path": "../../scripts/playwright_search.cjs",
+      "query_variants": [
+        "{{query}} official docs",
+        "{{query}} GitHub issues",
+        "{{query}} examples"
+      ],
+      "max_results": 6,
+      "max_results_per_query": 5,
+      "max_per_domain": 1,
+      "max_content_chars": 12000,
+      "required_terms": [],
+      "exclude_domains": [
+        "pinterest.com",
+        "facebook.com",
+        "x.com",
+        "twitter.com"
+      ],
+      "page_concurrency": 3,
+      "navigation_timeout_ms": 12000,
+      "overall_timeout_ms": 110000,
+      "search_delay_ms": 500,
+      "retry_count": 1,
+      "fetch_pages": true,
+      "timeout_seconds": 120
+    },
+    "file.read": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 65536
+    },
+    "repo.files": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 100
+    },
+    "repo.search": {
+      "kind": "repo_search",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 80,
+      "max_bytes": 65536
+    },
+    "repo.context": {
+      "kind": "repo_context",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_matches": 80,
+      "max_files": 8,
+      "context_lines": 8,
+      "max_bytes": 65536
+    },
+    "git.diff": {
+      "kind": "git_diff",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_bytes": 65536
+    },
+    "git.status": {
+      "kind": "git_status",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 200
+    },
+    "test.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "air_tools": ["cargo", "test", "-q", "-p", "air-tools"]
+      },
+      "timeout_seconds": 120,
+      "max_bytes": 65536
+    }
+  }
+}

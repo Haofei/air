@@ -3,6 +3,7 @@ use air_core::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Write};
 use std::path::Path;
@@ -197,6 +198,13 @@ pub enum RuntimeError {
 
     #[error("trace does not contain replayable output")]
     TraceMissingOutput,
+
+    #[error("unknown citation id {citation} at {path}; known artifact ids: {known:?}")]
+    UnknownCitation {
+        path: String,
+        citation: String,
+        known: Vec<String>,
+    },
 }
 
 pub trait ToolProvider {
@@ -488,6 +496,7 @@ where
         let mut trace = Vec::new();
         let mut model_calls = 0u32;
         let mut tool_calls = 0u32;
+        let mut artifact_registry = collect_initial_artifact_ids(&Value::Object(state.clone()));
         let module_started_at = Instant::now();
 
         for step in 0..workflow.max_steps {
@@ -512,6 +521,7 @@ where
                             observer: &mut observer,
                             model_calls: &mut model_calls,
                             tool_calls: &mut tool_calls,
+                            artifact_registry: &mut artifact_registry,
                             module_started_at,
                             step,
                             rule: &rule.id,
@@ -535,6 +545,7 @@ where
                             observer: &mut observer,
                             model_calls: &mut model_calls,
                             tool_calls: &mut tool_calls,
+                            artifact_registry: &mut artifact_registry,
                             module_started_at,
                             step,
                             rule: &rule.id,
@@ -561,24 +572,22 @@ where
         check_module_timeout(context)?;
         match action {
             StateAction::Set { values } => {
+                let mut resolved_values = Map::new();
                 for (key, value) in values {
-                    if let Err(error) = validate_state_value(context.module, key, value) {
+                    let resolved = resolve_set_value(context.state, context.outputs, value)?;
+                    if let Err(error) = validate_state_value(context.module, key, &resolved) {
                         context.push_event(
                             "set",
                             None,
-                            Some(Value::Object(values.clone().into_iter().collect())),
+                            Some(Value::Object(resolved_values.clone())),
                             Err(error.to_string()),
                         );
                         return Err(error);
                     }
-                    context.state.insert(key.clone(), value.clone());
+                    resolved_values.insert(key.clone(), resolved.clone());
+                    context.state.insert(key.clone(), resolved);
                 }
-                context.push_event(
-                    "set",
-                    None,
-                    Some(Value::Object(values.clone().into_iter().collect())),
-                    Ok(()),
-                );
+                context.push_event("set", None, Some(Value::Object(resolved_values)), Ok(()));
             }
             StateAction::Append { target, value } => {
                 reject_control_field_write("append", target)?;
@@ -728,6 +737,34 @@ where
                         continue;
                     }
                     if let Err(error) = validate_output(context.module, output, &result) {
+                        let is_final_attempt = attempt == max_attempts;
+                        let error_message = error.to_string();
+                        context.push_event_with_meta(
+                            "model_call",
+                            Some(attempt_input),
+                            Some(result),
+                            Some(model_call_result_meta(
+                                model,
+                                attempt,
+                                max_attempts,
+                                output,
+                                *timeout_seconds,
+                                attempt_started_at.elapsed().as_millis(),
+                                !is_final_attempt,
+                            )),
+                            Err(error_message.clone()),
+                        );
+                        if is_final_attempt {
+                            return Err(error);
+                        }
+                        retry_error = Some(RetryError::Message(error_message));
+                        continue;
+                    }
+                    if let Err(error) = validate_citations_against_registry(
+                        output,
+                        &result,
+                        context.artifact_registry,
+                    ) {
                         let is_final_attempt = attempt == max_attempts;
                         let error_message = error.to_string();
                         context.push_event_with_meta(
@@ -908,20 +945,23 @@ where
                         }
                         continue;
                     }
+                    let artifact_ids = register_artifacts(context.artifact_registry, &result);
                     context.state.insert(output.clone(), result);
+                    let mut meta = tool_call_result_meta(
+                        tool,
+                        attempt,
+                        max_attempts,
+                        output,
+                        *timeout_seconds,
+                        attempt_started_at.elapsed().as_millis(),
+                        false,
+                    );
+                    insert_artifact_result_meta(&mut meta, &artifact_ids);
                     context.push_event_with_meta(
                         "tool_call",
                         Some(input),
                         context.state.get(output).cloned(),
-                        Some(tool_call_result_meta(
-                            tool,
-                            attempt,
-                            max_attempts,
-                            output,
-                            *timeout_seconds,
-                            attempt_started_at.elapsed().as_millis(),
-                            false,
-                        )),
+                        Some(meta),
                         Ok(()),
                     );
                     return Ok(());
@@ -999,6 +1039,12 @@ where
                     context.push_event("return", None, Some(value), Err(error.to_string()));
                     return Err(error);
                 }
+                if let Err(error) =
+                    validate_citations_against_registry(output, &value, context.artifact_registry)
+                {
+                    context.push_event("return", None, Some(value), Err(error.to_string()));
+                    return Err(error);
+                }
                 context.outputs.insert(output.clone(), value);
                 context.push_event("return", None, context.outputs.get(output).cloned(), Ok(()));
             }
@@ -1051,6 +1097,149 @@ fn validate_named_value(
     } else {
         Err(RuntimeError::SchemaViolation(errors.join("; ")))
     }
+}
+
+fn collect_initial_artifact_ids(value: &Value) -> BTreeSet<String> {
+    let mut ids = BTreeSet::new();
+    collect_explicit_artifact_ids(value, &mut ids);
+    collect_citation_ids(value, &mut ids);
+    ids
+}
+
+fn register_artifacts(registry: &mut BTreeSet<String>, value: &Value) -> Vec<String> {
+    let mut discovered = BTreeSet::new();
+    collect_explicit_artifact_ids(value, &mut discovered);
+    discovered
+        .into_iter()
+        .filter(|id| registry.insert(id.clone()))
+        .collect()
+}
+
+fn collect_explicit_artifact_ids(value: &Value, ids: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            collect_artifact_array_ids(object.get("artifacts"), ids);
+            collect_artifact_array_ids(object.get("documents"), ids);
+            for value in object.values() {
+                collect_explicit_artifact_ids(value, ids);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_explicit_artifact_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_artifact_array_ids(value: Option<&Value>, ids: &mut BTreeSet<String>) {
+    let Some(Value::Array(items)) = value else {
+        return;
+    };
+    for item in items {
+        if let Some(id) = item.get("id").and_then(Value::as_str) {
+            if !id.trim().is_empty() {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+}
+
+fn collect_citation_ids(value: &Value, ids: &mut BTreeSet<String>) {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                if is_citation_field(key) {
+                    collect_string_array_items(value, ids);
+                }
+                collect_citation_ids(value, ids);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_citation_ids(value, ids);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn validate_citations_against_registry(
+    root_path: &str,
+    value: &Value,
+    registry: &BTreeSet<String>,
+) -> Result<(), RuntimeError> {
+    if registry.is_empty() {
+        return Ok(());
+    }
+    validate_citations_at_path(root_path, value, registry)
+}
+
+fn validate_citations_at_path(
+    path: &str,
+    value: &Value,
+    registry: &BTreeSet<String>,
+) -> Result<(), RuntimeError> {
+    match value {
+        Value::Object(object) => {
+            for (key, value) in object {
+                let child_path = format!("{path}.{key}");
+                if is_citation_field(key) {
+                    validate_citation_value(&child_path, value, registry)?;
+                }
+                validate_citations_at_path(&child_path, value, registry)?;
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                validate_citations_at_path(&format!("{path}[{index}]"), value, registry)?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_citation_value(
+    path: &str,
+    value: &Value,
+    registry: &BTreeSet<String>,
+) -> Result<(), RuntimeError> {
+    let Value::Array(items) = value else {
+        return Ok(());
+    };
+    for (index, item) in items.iter().enumerate() {
+        let Some(citation) = item.as_str() else {
+            continue;
+        };
+        if citation.trim().is_empty() || registry.contains(citation) {
+            continue;
+        }
+        return Err(RuntimeError::UnknownCitation {
+            path: format!("{path}[{index}]"),
+            citation: citation.to_string(),
+            known: registry.iter().take(50).cloned().collect(),
+        });
+    }
+    Ok(())
+}
+
+fn collect_string_array_items(value: &Value, ids: &mut BTreeSet<String>) {
+    let Value::Array(items) = value else {
+        return;
+    };
+    for item in items {
+        if let Some(id) = item.as_str() {
+            if !id.trim().is_empty() {
+                ids.insert(id.to_string());
+            }
+        }
+    }
+}
+
+fn is_citation_field(field: &str) -> bool {
+    matches!(field, "sources" | "citations" | "source_ids")
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1287,6 +1476,7 @@ struct ExecutionContext<'a> {
     observer: &'a mut dyn FnMut(&TraceEvent),
     model_calls: &'a mut u32,
     tool_calls: &'a mut u32,
+    artifact_registry: &'a mut BTreeSet<String>,
     module_started_at: Instant,
     step: u32,
     rule: &'a str,
@@ -1451,6 +1641,19 @@ fn insert_result_meta(meta: &mut Value, elapsed_ms: u128, will_retry: bool) {
     }
 }
 
+fn insert_artifact_result_meta(meta: &mut Value, artifact_ids: &[String]) {
+    if artifact_ids.is_empty() {
+        return;
+    }
+    if let Value::Object(object) = meta {
+        object.insert("artifact_ids".to_string(), json!(artifact_ids));
+        object.insert(
+            "artifact_count".to_string(),
+            Value::Number(artifact_ids.len().into()),
+        );
+    }
+}
+
 fn read_field<'a>(
     state: &'a State,
     outputs: &'a State,
@@ -1474,6 +1677,32 @@ fn resolve_input(state: &State, outputs: &State, input: &InputSpec) -> Result<Va
         }
         InputSpec::Expr(expr) => eval_expr(state, outputs, expr),
     }
+}
+
+fn resolve_set_value(state: &State, outputs: &State, value: &Value) -> Result<Value, RuntimeError> {
+    if looks_like_expr(value) {
+        let expr = serde_json::from_value::<Expr>(value.clone()).map_err(|error| {
+            RuntimeError::SchemaViolation(format!("set expression is invalid: {error}"))
+        })?;
+        eval_expr(state, outputs, &expr)
+    } else {
+        Ok(value.clone())
+    }
+}
+
+fn looks_like_expr(value: &Value) -> bool {
+    let Value::Object(object) = value else {
+        return false;
+    };
+    if object.len() != 1 {
+        return false;
+    }
+    object.keys().next().is_some_and(|key| {
+        matches!(
+            key.as_str(),
+            "ref" | "path" | "literal" | "object" | "array" | "template" | "truncate"
+        )
+    })
 }
 
 fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, RuntimeError> {

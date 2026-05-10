@@ -1,0 +1,187 @@
+agent:
+  name: code-build-page-agent
+  version: 0.1.0
+  description: "Bounded coding builder: generate one static HTML page, write it inside an allowed directory, then run a configured smoke test."
+
+inputs:
+  task: string
+  output_path: string
+  brand: string
+  product: string
+  constraints:
+    type: array
+    items: string
+
+outputs:
+  build:
+    type: object
+    required: [path, bytes, created, overwritten, test_success, notes]
+    properties:
+      path: string
+      bytes: integer
+      created: boolean
+      overwritten: boolean
+      test_success: boolean
+      notes:
+        type: array
+        items: string
+
+requires:
+  capabilities: [file.write, code.test]
+
+state:
+  phase:
+    type: enum
+    enum: [init, generate, write, test, done, failed]
+  page:
+    type: object
+    required: [content]
+    properties:
+      content: string
+  write_result:
+    type: object
+    required: [path, bytes, created, overwritten, artifacts]
+    properties:
+      path: string
+      bytes: integer
+      created: boolean
+      overwritten: boolean
+      artifacts:
+        type: array
+        items: object
+  test_results:
+    type: object
+    required: [command, success, log, artifacts]
+    properties:
+      command: string
+      success: boolean
+      status: integer
+      log: string
+      bytes: integer
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
+  build:
+    type: object
+    required: [path, bytes, created, overwritten, test_success, notes]
+    properties:
+      path: string
+      bytes: integer
+      created: boolean
+      overwritten: boolean
+      test_success: boolean
+      notes:
+        type: array
+        items: string
+
+tools:
+  - name: file.write
+    capability: file.write
+    timeout_ms: 10000
+  - name: test.run
+    capability: code.test
+    timeout_ms: 30000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 6
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: generate
+
+    - id: generate
+      when: phase == "generate"
+      actions:
+        - kind: model_call
+          model: page_builder
+          input:
+            object:
+              task:
+                ref: task
+              output_path:
+                ref: output_path
+              brand:
+                ref: brand
+              product:
+                ref: product
+              constraints:
+                ref: constraints
+          output: page
+          timeout_seconds: 240
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: write
+
+    - id: write
+      when: phase == "write"
+      actions:
+        - kind: tool_call
+          tool: file.write
+          input:
+            object:
+              path:
+                ref: output_path
+              content:
+                ref: page.content
+          output: write_result
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: test
+
+    - id: test
+      when: phase == "test"
+      actions:
+        - kind: tool_call
+          tool: test.run
+          input:
+            object:
+              command:
+                literal: apple_landing_smoke
+          output: test_results
+          timeout_seconds: 30
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            build:
+              object:
+                path:
+                  ref: write_result.path
+                bytes:
+                  ref: write_result.bytes
+                created:
+                  ref: write_result.created
+                overwritten:
+                  ref: write_result.overwritten
+                test_success:
+                  ref: test_results.success
+                notes:
+                  array:
+                    - literal: "Generated as raw HTML content and written through constrained file.write."
+                    - literal: "Smoke test checked doctype, canvas, product name, media query, closing HTML, and minimum length."
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: build
+
+policy:
+  max_tool_calls: 2
+  timeout_seconds: 360
+
+observability:
+  traces: true

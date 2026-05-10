@@ -1,0 +1,17 @@
+{
+  "task": "Create a polished Apple-style landing page as a single self-contained static HTML file. It should look premium, calm, product-focused, responsive, and ready to inspect in a browser. Do not copy Apple's official page text or logo artwork.",
+  "output_path": "examples/apple-landing/index.html",
+  "brand": "Apple",
+  "product": "Apple Nova",
+  "constraints": [
+    "single HTML file with embedded CSS and JavaScript only",
+    "first viewport must clearly signal the brand and product",
+    "use a canvas or CSS-built product visual, not external images",
+    "include compact product navigation, hero, feature sections, comparison specs, and buying calls to action",
+    "keep total HTML between 5000 and 8000 characters",
+    "avoid visible instructions, keyboard shortcut text, and marketing-placeholder copy",
+    "no external network assets",
+    "responsive down to mobile width",
+    "buttons and text must not overlap"
+  ]
+}

@@ -3,22 +3,47 @@
     "web.search": {
       "kind": "local_docs_search",
       "capability": "network.search",
-      "max_results": 5,
+      "max_results": 8,
       "documents": [
         {
           "id": "ev-800v-readiness",
           "title": "800V EV platform readiness",
-          "content": "800V electric vehicle platforms are moving from premium models toward broader adoption. Readiness depends on high-voltage component supply, charging infrastructure, thermal design, and service readiness."
+          "content": "800V electric vehicle platforms are moving from premium models toward broader adoption in 2026-2030 product cycles. Commercial readiness depends on high-voltage component supply, charging infrastructure compatibility, thermal design, dealer service readiness, and safety validation. Benefits include faster DC charging and lower current for the same power level, which can reduce cable and heat-management burden. Constraints include higher-voltage battery packs, contactors, onboard chargers, DC-DC converters, service tooling, and validation across crash, isolation, and thermal events."
         },
         {
           "id": "sic-drive-readiness",
           "title": "Silicon carbide drive readiness",
-          "content": "Silicon carbide inverters improve efficiency and charging performance, but commercialization depends on wafer supply, module packaging, thermal reliability, and cost reduction."
+          "content": "Silicon carbide traction inverters improve high-voltage efficiency, thermal performance, and charging capability, especially for 800V architectures. Commercialization depends on wafer supply, module packaging, thermal cycling reliability, qualification of automotive-grade power modules, and cost reduction versus mature silicon IGBT systems. Automakers face a tradeoff between efficiency/range gains and supply-chain concentration. SiC is closer to broad deployment than solid-state batteries, but cost and manufacturing scale remain major gating items for mass-market trims."
         },
         {
           "id": "solid-state-distributed-drive",
           "title": "Solid-state batteries and distributed drive timelines",
-          "content": "Solid-state batteries remain less mature for mass-market 2026-2030 products, while distributed drive systems are more likely to appear first in premium, specialty, and autonomy-focused vehicles."
+          "content": "Solid-state batteries remain less mature for mass-market 2026-2030 products than 800V platforms or SiC inverters. Key blockers include scalable cell manufacturing, interface stability, cycle life, fast-charge durability, pack integration, safety validation, and cost. Limited demonstration fleets or premium launches are plausible before broad adoption. Distributed drive systems, including dual/tri/quad motor layouts and in-wheel concepts, are more likely to appear first in premium, specialty, performance, and autonomy-focused vehicles where control benefits justify added cost and complexity."
+        },
+        {
+          "id": "charging-infrastructure-800v",
+          "title": "Charging infrastructure and 800V deployment constraints",
+          "content": "800V vehicle readiness depends on public fast-charger power availability, charger voltage support, cable cooling, site power capacity, and software interoperability. Vehicles can often charge on 400V infrastructure through pack splitting or boost conversion, but peak charge rates require compatible high-voltage chargers. Infrastructure rollout varies by geography and corridor density. For automakers planning 2026-2030 launches, 800V creates the most value in regions with dense high-power DC networks and in segments where fast charging is a purchase driver."
+        },
+        {
+          "id": "automotive-sic-supply-chain",
+          "title": "Automotive SiC supply chain and qualification",
+          "content": "Automotive SiC adoption is constrained by substrate capacity, epitaxy quality, device yield, module packaging, and long qualification cycles. OEMs and tier suppliers often dual-source where possible, but qualified supply is less commoditized than silicon. Packaging choices affect thermal performance and reliability under vibration and cycling. SiC is commercially ready for premium and efficiency-sensitive EV platforms, but cost-down and supply resilience determine whether it reaches mainstream volume programs by 2030."
+        },
+        {
+          "id": "solid-state-commercialization-risk",
+          "title": "Solid-state battery commercialization risk",
+          "content": "Solid-state battery commercialization promises higher energy density, safety benefits, and faster charging, but technical claims often depend on cell format, electrolyte chemistry, pressure requirements, and test conditions. Production challenges include thin electrolyte manufacturing, dendrite suppression, cathode interface stability, scalable stacking, moisture control, and pack-level validation. For 2026-2030 planning, automakers should treat solid-state as a strategic option or limited halo technology rather than a base assumption for mainstream vehicle programs."
+        },
+        {
+          "id": "distributed-drive-controls",
+          "title": "Distributed drive systems and vehicle controls",
+          "content": "Distributed drive systems can improve torque vectoring, redundancy, packaging flexibility, and vehicle dynamics. The benefits are strongest in premium performance, off-road, commercial, and autonomy-focused platforms. Barriers include motor and inverter cost, unsprung mass for in-wheel motors, controls complexity, thermal management at each drive unit, diagnostics, reliability, and serviceability. The technology is commercially plausible in niches before 2030, but mainstream adoption requires clear value beyond conventional dual-motor architectures."
+        },
+        {
+          "id": "ev-platform-readiness-comparison",
+          "title": "Comparative readiness for 2026-2030 EV platform decisions",
+          "content": "For 2026-2030 automaker planning, 800V platforms and SiC inverters are the most commercially actionable among the compared technologies. They reinforce each other: 800V increases the value of efficient high-voltage power electronics, and SiC helps manage efficiency and heat. Distributed drive is situationally ready for premium or specialized platforms. Solid-state batteries have high upside but the largest manufacturing and validation uncertainty. Program decisions should separate high-confidence platform enablers from speculative battery-roadmap dependencies."
         }
       ]
     },

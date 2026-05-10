@@ -1,0 +1,7 @@
+{
+  "task": "Review the Playwright search tool for coding-agent use. Focus on result relevance, timeout behavior, provenance, and whether the tool gives enough diagnostics to debug poor searches.",
+  "search_query": "Playwright browser search result extraction timeout Node.js",
+  "repo_query": "playwright_search",
+  "required_terms": ["playwright"],
+  "target_file": "scripts/playwright_search.cjs"
+}

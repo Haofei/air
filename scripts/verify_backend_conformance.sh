@@ -169,6 +169,35 @@ module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
 print(json.dumps(module.graph.invoke({}), indent=2))
 PY
+PYTHONWARNINGS=ignore "$LANGGRAPH_PYTHON" - <<'PY'
+import importlib.util
+import threading
+import time
+
+spec = importlib.util.spec_from_file_location("dynamic_parallel_conformance", "target/generated/conformance/dynamic.langgraph.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+original_run_module = module._air_run_module
+lock = threading.Lock()
+active = {"count": 0, "max": 0}
+
+def run_module(module_id, inputs):
+    if module_id != "test.topic_note@0.1.0":
+        return original_run_module(module_id, inputs)
+    with lock:
+        active["count"] += 1
+        active["max"] = max(active["max"], active["count"])
+    try:
+        time.sleep(0.05)
+        return original_run_module(module_id, inputs)
+    finally:
+        with lock:
+            active["count"] -= 1
+
+module._air_run_module = run_module
+assert module.graph.invoke({})["report"] == "done"
+assert active["max"] >= 2, active
+PY
 "$LANGGRAPH_PYTHON" - <<'PY'
 import json
 
@@ -198,6 +227,101 @@ with open("target/generated/conformance/dynamic.openai.trace.jsonl", encoding="u
     openai_events = [json.loads(line) for line in handle if line.lstrip().startswith("{")]
 assert any(event["action"] == "dynamic_fanout" and event["meta"]["count"] == 2 for event in openai_events)
 assert any(event["agent"] == "final" and event["action"] == "return" and event["output"] == "done" for event in openai_events)
+PY
+
+echo "[air-conformance] langgraph run-plan condition and halt semantics"
+cargo run -q -p air-cli -- lower-plan examples/deep-research/deep-research-supervised-two-step.air-plan.yaml \
+  --store examples/deep-research/module-store.air-store.yaml \
+  --backend langgraph \
+  --output "$OUT/deep_supervised.langgraph.py"
+PYTHONWARNINGS=ignore "$LANGGRAPH_PYTHON" - <<'PY'
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("deep_supervised_conformance", "target/generated/conformance/deep_supervised.langgraph.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def model(name, input_value):
+    if name == "research_planner_array":
+        return {"research_brief": "brief", "topics": ["t1", "t2", "t3", "t4"]}
+    if name == "research_refiner":
+        return {"complete": True, "follow_up_query": "", "rationale": "enough"}
+    if name == "research_compressor":
+        return {"topic": input_value["topic"], "summary": f"summary {input_value['topic']}", "sources": [f"src-{input_value['topic']}"]}
+    if name == "research_supervisor":
+        return {"action": "research_complete", "needs_more": False, "follow_up_topics": ["skip-a", "skip-b"], "rationale": "done"}
+    if name == "final_reporter":
+        return {"report": f"notes={len(input_value['notes'])}", "sources": [], "limitations": []}
+    raise AssertionError(name)
+
+def tool(name, input_value):
+    if name == "web.search":
+        return {"query": input_value["query"], "documents": [{"id": "doc", "title": "Doc", "content": "Content"}]}
+    if name == "research.think":
+        return {"reflection": "ok"}
+    raise AssertionError(name)
+
+module.call_model = model
+module.AIR_TOOL_PROVIDER = lambda *, name, input_value: tool(name, input_value)
+module.AIR_TOOL_CAPABILITIES = {"web.search": "network.search", "research.think": "research.reflect"}
+result = module.graph.invoke({"question": "q"})
+assert result["result"]["report"] == "notes=2"
+for node in ["topic_3", "topic_4", "supervisor_2", "topic_5", "topic_6"]:
+    assert result[node]["__air_skipped"] is True, node
+PY
+
+cargo run -q -p air-cli -- lower-plan examples/deep-research/deep-research-clarified.air-plan.yaml \
+  --store examples/deep-research/module-store.air-store.yaml \
+  --backend langgraph \
+  --output "$OUT/deep_clarified.langgraph.py"
+PYTHONWARNINGS=ignore "$LANGGRAPH_PYTHON" - <<'PY'
+import importlib.util
+
+spec = importlib.util.spec_from_file_location("deep_clarified_conformance", "target/generated/conformance/deep_clarified.langgraph.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+
+def model(name, input_value):
+    assert name == "research_clarifier", name
+    return {
+        "needs_clarification": True,
+        "question": input_value["question"],
+        "verification": "Need scope",
+        "normalized_question": input_value["question"],
+        "assumptions": [],
+    }
+
+module.call_model = model
+result = module.graph.invoke({"question": "research AI"})
+assert result["clarification"]["needs_clarification"] is True
+assert result["__air_halted"]["after"] == "clarify"
+assert "result" not in result
+PY
+
+cargo run -q -p air-cli -- lower-plan examples/deep-research/deep-research-dynamic.air-plan.yaml \
+  --store examples/deep-research/module-store.air-store.yaml \
+  --backend langgraph \
+  --output "$OUT/deep_dynamic_capability.langgraph.py"
+PYTHONWARNINGS=ignore "$LANGGRAPH_PYTHON" - <<'PY'
+import importlib.util
+from pathlib import Path
+
+source = Path("target/generated/conformance/deep_dynamic_capability.langgraph.py")
+target = Path("target/generated/conformance/deep_dynamic_missing_capability.langgraph.py")
+text = source.read_text(encoding="utf-8")
+needle = '"requires": {"capabilities": ["network.search", "research.reflect"]}'
+assert needle in text
+target.write_text(text.replace(needle, '"requires": {"capabilities": []}', 1), encoding="utf-8")
+
+spec = importlib.util.spec_from_file_location("deep_dynamic_missing_capability", target)
+module = importlib.util.module_from_spec(spec)
+try:
+    spec.loader.exec_module(module)
+except RuntimeError as error:
+    assert "RunPlan uses dynamic fanout" in str(error)
+    assert "network.search" in str(error) or "research.reflect" in str(error)
+else:
+    raise AssertionError("expected generated LangGraph runtime to reject missing dynamic fanout capability")
 PY
 
 echo "[air-conformance] backend conformance complete"

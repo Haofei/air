@@ -14,6 +14,29 @@ outputs:
     properties:
       topic: string
       summary: string
+      key_findings:
+        type: array
+        items: string
+      evidence:
+        type: array
+        items:
+          type: object
+          required: [claim, support, source_ids]
+          properties:
+            claim: string
+            support: string
+            source_ids:
+              type: array
+              items: string
+      implications:
+        type: array
+        items: string
+      gaps:
+        type: array
+        items: string
+      confidence:
+        type: enum
+        enum: [low, medium, high]
       sources:
         type: array
         items: string
@@ -83,6 +106,29 @@ state:
     properties:
       topic: string
       summary: string
+      key_findings:
+        type: array
+        items: string
+      evidence:
+        type: array
+        items:
+          type: object
+          required: [claim, support, source_ids]
+          properties:
+            claim: string
+            support: string
+            source_ids:
+              type: array
+              items: string
+      implications:
+        type: array
+        items: string
+      gaps:
+        type: array
+        items: string
+      confidence:
+        type: enum
+        enum: [low, medium, high]
       sources:
         type: array
         items: string
@@ -120,7 +166,7 @@ workflow:
               query:
                 ref: topic
           output: latest_search_results
-          timeout_seconds: 20
+          timeout_seconds: 90
           retry:
             max_attempts: 3
         - kind: append
@@ -188,7 +234,7 @@ workflow:
               query:
                 ref: research_direction.follow_up_query
           output: latest_search_results
-          timeout_seconds: 20
+          timeout_seconds: 90
           retry:
             max_attempts: 3
         - kind: append
@@ -256,7 +302,7 @@ workflow:
               query:
                 ref: research_direction.follow_up_query
           output: latest_search_results
-          timeout_seconds: 20
+          timeout_seconds: 90
           retry:
             max_attempts: 3
         - kind: append
