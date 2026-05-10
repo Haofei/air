@@ -1,3 +1,4 @@
+use crate::code_pack::default_profile_for_recipe;
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -17,8 +18,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
-const CODE_AGENT_PACK_YAML: &str =
-    include_str!("../../../examples/code-agent/code-agent.air-pack.yaml");
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeRecipe {
@@ -88,17 +87,6 @@ pub(crate) struct CodeSessionOptions {
 struct CodeBudgetLimits {
     max_estimated_model_calls: Option<usize>,
     max_estimated_tool_calls: Option<usize>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodeAgentPack {
-    recipes: Vec<CodeAgentPackRecipe>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CodeAgentPackRecipe {
-    id: String,
-    default_profile: PathBuf,
 }
 
 pub(crate) fn code(options: CodeOptions) -> Result<()> {
@@ -3453,21 +3441,7 @@ fn required_string(value: Option<String>, flag: &str, recipe: CodeRecipe) -> Res
 }
 
 fn default_profile(recipe: CodeRecipe) -> PathBuf {
-    default_code_agent_pack()
-        .recipes
-        .into_iter()
-        .find(|pack_recipe| pack_recipe.id == recipe_name(recipe))
-        .map(|pack_recipe| pack_recipe.default_profile)
-        .unwrap_or_else(|| {
-            panic!(
-                "code-agent pack is missing recipe {}",
-                recipe_name(recipe)
-            )
-        })
-}
-
-fn default_code_agent_pack() -> CodeAgentPack {
-    serde_yaml::from_str(CODE_AGENT_PACK_YAML).expect("invalid code-agent AIR pack manifest")
+    default_profile_for_recipe(recipe_name(recipe)).unwrap_or_else(|error| panic!("{error:#}"))
 }
 
 fn recipe_name(recipe: CodeRecipe) -> &'static str {
@@ -3583,7 +3557,7 @@ mod tests {
 
     #[test]
     fn code_agent_pack_declares_all_default_profiles() {
-        let pack = default_code_agent_pack();
+        let pack = crate::code_pack::default_code_agent_pack().unwrap();
         let recipes = [
             CodeRecipe::Auto,
             CodeRecipe::Plan,
@@ -3607,8 +3581,7 @@ mod tests {
             );
             assert!(
                 pack.recipes.iter().any(|pack_recipe| {
-                    pack_recipe.id == recipe_name(recipe)
-                        && pack_recipe.default_profile == profile
+                    pack_recipe.id == recipe_name(recipe) && pack_recipe.default_profile == profile
                 }),
                 "pack is missing {} -> {}",
                 recipe_name(recipe),

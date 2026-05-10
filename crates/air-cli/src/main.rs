@@ -1,6 +1,7 @@
 use air_core::Severity;
 use air_runtime::{system_return_event, Vm};
 mod code_agent;
+mod code_pack;
 mod explain;
 mod models;
 mod planner;
