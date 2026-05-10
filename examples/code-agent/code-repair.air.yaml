@@ -134,7 +134,24 @@ state:
     properties:
       operations:
         type: array
-        items: object
+        min_items: 1
+        max_items: 20
+        items:
+          type: object
+          additional_properties: false
+          required: [kind, path]
+          properties:
+            kind:
+              type: enum
+              enum: [edit, write]
+            path: string
+            old_string: string
+            new_string: string
+            content: string
+            replace_all: boolean
+            match_strategy:
+              type: enum
+              enum: [auto, exact, line_trimmed, whitespace_normalized, indentation_flexible]
       rationale: string
   patch_result:
     type: object
@@ -236,7 +253,24 @@ state:
     properties:
       operations:
         type: array
-        items: object
+        min_items: 1
+        max_items: 20
+        items:
+          type: object
+          additional_properties: false
+          required: [kind, path]
+          properties:
+            kind:
+              type: enum
+              enum: [edit, write]
+            path: string
+            old_string: string
+            new_string: string
+            content: string
+            replace_all: boolean
+            match_strategy:
+              type: enum
+              enum: [auto, exact, line_trimmed, whitespace_normalized, indentation_flexible]
       rationale: string
   patch_result_retry:
     type: object
