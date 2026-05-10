@@ -96,6 +96,17 @@ tools = [
 ]
 assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
 assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
+assert any(
+    event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "error"
+    and event.get("meta", {}).get("tool") == "<invalid>"
+    for event in events
+), events
+assert any(
+    event.get("action") == "tool_batch_dispatch"
+    and event.get("meta", {}).get("error_count") == 1
+    for event in events
+), events
 models = [
     event.get("meta", {}).get("model")
     for event in events

@@ -290,6 +290,17 @@
           "complete": false,
           "tool_calls": [
             {
+              "input": {
+                "command": "edit_fixture_test"
+              }
+            }
+          ],
+          "rationale": "Intentionally malformed fixture item that omits the tool name so the edit loop exercises observed tool-call errors."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
               "tool": "test.run",
               "input": {
                 "command": "edit_fixture_test"
