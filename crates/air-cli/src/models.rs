@@ -389,6 +389,18 @@ mod tests {
             edit_prompt.contains("tool_schemas"),
             "code_edit_decider prompt must tell models to follow tool_schemas"
         );
+        assert!(
+            edit_prompt.contains("bare tool_calls object"),
+            "code_edit_decider prompt must forbid bare tool_calls wrappers"
+        );
+        assert!(
+            edit_prompt.contains("full extensions such as .json"),
+            "code_edit_decider prompt must preserve concrete path extensions"
+        );
+        assert!(
+            edit_prompt.contains("byte-for-byte"),
+            "code_edit_decider prompt must require exact path copying"
+        );
         let summarize_prompt = config
             .models
             .get("code_edit_summarizer")
