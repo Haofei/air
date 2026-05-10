@@ -307,6 +307,8 @@ workflow:
             object:
               query:
                 ref: query
+              mode:
+                literal: smart
               max_files:
                 literal: 60
           output: repo_files

@@ -187,6 +187,8 @@ workflow:
             object:
               query:
                 ref: query
+              mode:
+                literal: smart
               include_all:
                 literal: true
               max_files:

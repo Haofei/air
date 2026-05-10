@@ -2465,6 +2465,112 @@ fn repo_files_can_include_all_paths_for_open_ended_exploration() {
 }
 
 #[test]
+fn repo_files_supports_smart_natural_language_queries() {
+    let dir = temp_dir("air-tools-repo-files-smart");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/sum_math.js"), "function sum(values) {}\n").unwrap();
+    fs::write(dir.join("src/other.js"), "function unrelated() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.files",
+            &json!({"query": "refactor the sum fixture implementation", "mode": "smart"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["mode"], json!("smart"));
+    assert_eq!(output["effective_query"], json!("sum|fixture"));
+    assert_eq!(output["files"], json!(["src/sum_math.js"]));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["effective_query"],
+        json!("sum|fixture")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_files_include_all_smart_ranks_matching_paths_first_and_honors_max_files() {
+    let dir = temp_dir("air-tools-repo-files-smart-include-all");
+    fs::create_dir_all(dir.join("aaa")).unwrap();
+    fs::create_dir_all(dir.join("zzz")).unwrap();
+    fs::write(dir.join("aaa/unrelated.txt"), "nothing\n").unwrap();
+    fs::write(dir.join("zzz/sum_fixture.js"), "function sum(values) {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.files",
+            &json!({
+                "query": "refactor the sum fixture implementation",
+                "mode": "smart",
+                "include_all": true,
+                "max_files": 1
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["files"], json!(["zzz/sum_fixture.js"]));
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["artifacts"][0]["metadata"]["max_files"], json!(1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_files_rejects_unknown_mode() {
+    let dir = temp_dir("air-tools-repo-files-mode");
+    fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.files": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool("repo.files", &json!({"query": "alpha", "mode": "glob"}))
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("input.mode must be fixed or smart"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn candidate_validate_rejects_missing_target_file() {
     let dir = temp_dir("air-tools-candidate-missing");
     let config_path = write_config(

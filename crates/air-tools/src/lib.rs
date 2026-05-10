@@ -2863,12 +2863,30 @@ fn call_repo_files_tool(
     max_files: usize,
 ) -> Result<Value, RuntimeError> {
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let query = input
+    let raw_query = input
         .get("query")
         .and_then(Value::as_str)
         .unwrap_or_default()
-        .trim()
-        .to_lowercase();
+        .trim();
+    let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
+    if !matches!(mode, "fixed" | "smart") {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.mode must be fixed or smart"
+        )));
+    }
+    let query = raw_query.to_lowercase();
+    let smart_terms = if mode == "smart" {
+        repo_smart_search_terms(raw_query)
+    } else {
+        Vec::new()
+    };
+    let effective_query = if mode == "smart" {
+        smart_terms.join("|")
+    } else {
+        query.clone()
+    };
+    let effective_max_files =
+        optional_bounded_usize_input(name, input, "max_files", max_files)?.unwrap_or(max_files);
     let include_all = input
         .get("include_all")
         .and_then(Value::as_bool)
@@ -2893,29 +2911,46 @@ fn call_repo_files_tool(
             provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
         )));
     }
-    let mut files = Vec::new();
+    let mut candidates = Vec::new();
     for line in String::from_utf8_lossy(&output.stdout).lines() {
         let path = line.trim();
         if path.is_empty() {
             continue;
         }
-        if !include_all && !query.is_empty() && !path.to_lowercase().contains(&query) {
+        let score = if mode == "smart" {
+            repo_file_match_score(path, &smart_terms)
+        } else {
+            0
+        };
+        if mode == "smart" {
+            if !include_all && !smart_terms.is_empty() && score == 0 {
+                continue;
+            }
+        } else if !include_all && !query.is_empty() && !path.to_lowercase().contains(&query) {
             continue;
         }
-        files.push(path.to_string());
-        if files.len() >= max_files {
-            break;
-        }
+        candidates.push((score, path.to_string()));
     }
+    if mode == "smart" {
+        candidates.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    }
+    let truncated = candidates.len() > effective_max_files;
+    let files = candidates
+        .into_iter()
+        .take(effective_max_files)
+        .map(|(_, path)| path)
+        .collect::<Vec<_>>();
     let content = files.join("\n");
     Ok(json!({
         "repo": repo.display().to_string(),
-        "query": query,
+        "query": raw_query,
+        "effective_query": effective_query,
+        "mode": mode,
         "files": files,
         "include_all": include_all,
-        "truncated": files.len() >= max_files,
+        "truncated": truncated,
         "artifacts": [{
-            "id": format!("repo-files:{}:{}", repo.display(), input.get("query").and_then(Value::as_str).unwrap_or_default()),
+            "id": format!("repo-files:{}:{}", repo.display(), raw_query),
             "kind": "repo_listing",
             "title": "repo files",
             "uri": repo.display().to_string(),
@@ -2923,11 +2958,37 @@ fn call_repo_files_tool(
             "metadata": {
                 "provider": "repo_files",
                 "repo": repo.display().to_string(),
-                "max_files": max_files,
+                "query": raw_query,
+                "effective_query": effective_query,
+                "mode": mode,
+                "max_files": effective_max_files,
                 "include_all": include_all
             }
         }]
     }))
+}
+
+fn repo_file_match_score(path: &str, terms: &[String]) -> usize {
+    if terms.is_empty() {
+        return 0;
+    }
+    let lower = path.to_lowercase();
+    let components = lower
+        .split(['/', '.', '-', '_'])
+        .filter(|component| !component.is_empty())
+        .collect::<Vec<_>>();
+    terms
+        .iter()
+        .map(|term| {
+            let contains_score = usize::from(lower.contains(term));
+            let exact_score = components
+                .iter()
+                .filter(|component| **component == term)
+                .count()
+                * 2;
+            contains_score + exact_score
+        })
+        .sum()
 }
 
 fn call_repo_search_tool(
