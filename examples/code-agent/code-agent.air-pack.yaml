@@ -45,8 +45,8 @@ recipes:
     default_profile: explore.air-profile.yaml
     intent: "Read-only repository exploration."
     input:
-      required: [task, target]
-      optional: [query]
+      required: [task]
+      optional: [query, target]
     completion:
       any:
         - exists: /exploration

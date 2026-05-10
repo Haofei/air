@@ -76,13 +76,12 @@ pub(crate) fn build_input_with_pack(
             Ok(input)
         }
         CodeRecipe::Explore => {
-            let target = required_path(target, "--target", recipe)?;
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
             input.insert("query".to_string(), Value::String(query.unwrap_or(task)));
             input.insert(
                 "target_path".to_string(),
-                Value::String(path_to_input_string(target)),
+                Value::String(target.map(path_to_input_string).unwrap_or_default()),
             );
             Ok(input)
         }

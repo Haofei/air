@@ -11,6 +11,16 @@ The public recipes are:
 
 `edit` covers bug fixes, behavior-preserving changes, small feature edits, and bounded file creation. Those are task intents, not separate agent primitives.
 
+## Explore
+
+`explore` is read-only and can start without a known target file. When no `--target` is supplied, AIR passes an empty `target_path`; the module skips direct file read and relies on repository search, symbol lookup, and context snippets to find the relevant entry points.
+
+```bash
+cargo run -p air-cli -- code "explore the code-agent edit loop architecture" \
+  --recipe explore \
+  --query "code agent edit loop architecture"
+```
+
 ## Edit Loop
 
 The edit module is `code-edit-loop.air.yaml`, wired by `code-edit.air-plan.yaml` and `edit.air-profile.yaml`.

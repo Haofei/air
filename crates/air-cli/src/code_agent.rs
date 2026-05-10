@@ -2199,6 +2199,30 @@ mod tests {
     }
 
     #[test]
+    fn explicit_explore_can_start_without_known_target() {
+        let input = build_input(CodeInputOptions {
+            task: "explore the code-agent architecture".to_string(),
+            recipe: CodeRecipe::Explore,
+            target: None,
+            test: None,
+            query: Some("code agent edit loop architecture".to_string()),
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["query"],
+            Value::String("code agent edit loop architecture".to_string())
+        );
+        assert_eq!(input["target_path"], Value::String(String::new()));
+        assert!(input.get("test_command").is_none());
+    }
+
+    #[test]
     fn explain_payload_reports_requested_and_resolved_recipe() {
         let input = build_input(CodeInputOptions {
             task: "fix it".to_string(),
