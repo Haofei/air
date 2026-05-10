@@ -301,6 +301,8 @@ for index, turn in enumerate(session["turns"], start=1):
     assert turn["trace_files"], turn
     assert Path(turn["trace_files"][0]).exists(), turn
     assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn
+    assert turn["summary"]["model_call_count"] >= 1, turn
+    assert turn["summary"]["tool_call_count"] >= 1, turn
     assert any(part["kind"] == "model_call" for part in turn["parts"]), turn
     assert any(part["kind"] == "tool_call" for part in turn["parts"]), turn
 
@@ -465,6 +467,10 @@ assert any(
     and "file_patch" in part.get("artifact_kinds", [])
     for part in turn["parts"]
 ), turn["parts"]
+assert "file.patch" in turn["summary"]["tools"], turn["summary"]
+assert "file.write" in turn["summary"]["approvals"], turn["summary"]
+assert "examples/code-agent/repair-fixture/math.js" in turn["summary"]["files"], turn["summary"]
+assert "file_patch" in turn["summary"]["artifact_kinds"], turn["summary"]
 with open(turn["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 

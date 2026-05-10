@@ -215,6 +215,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         let trace_files =
             code_session_trace_files(effective_trace_out.as_ref(), loop_enabled, &outputs);
         let parts = code_session_parts(&trace_files)?;
+        let summary = code_session_turn_summary(&parts);
         state.append_turn(CodeSessionTurn {
             task: session_input
                 .get("task")
@@ -229,6 +230,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .iter()
                 .map(|path| path_ref_to_input_string(path))
                 .collect(),
+            summary,
             parts,
             outputs: outputs.clone(),
         });
@@ -257,8 +259,30 @@ struct CodeSessionTurn {
     #[serde(default)]
     trace_files: Vec<String>,
     #[serde(default)]
+    summary: CodeSessionTurnSummary,
+    #[serde(default)]
     parts: Vec<CodeSessionPart>,
     outputs: Value,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct CodeSessionTurnSummary {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    models: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    tools: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    approvals: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_kinds: Vec<String>,
+    model_call_count: usize,
+    tool_call_count: usize,
+    approval_count: usize,
+    error_count: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -389,6 +413,46 @@ fn code_session_parts(trace_files: &[PathBuf]) -> Result<Vec<CodeSessionPart>> {
         );
     }
     Ok(parts)
+}
+
+fn code_session_turn_summary(parts: &[CodeSessionPart]) -> CodeSessionTurnSummary {
+    let mut summary = CodeSessionTurnSummary::default();
+    for part in parts {
+        if part.kind == "model_call" {
+            summary.model_call_count += 1;
+        }
+        if part.kind == "tool_call" {
+            summary.tool_call_count += 1;
+        }
+        if part.kind == "approval" {
+            summary.approval_count += 1;
+        }
+        if part.status == "error" {
+            summary.error_count += 1;
+        }
+        if let Some(model) = &part.model {
+            summary.models.push(model.clone());
+        }
+        if let Some(tool) = &part.tool {
+            summary.tools.push(tool.clone());
+        }
+        summary.approvals.extend(part.approval_for.clone());
+        summary.files.extend(part.files.clone());
+        summary.artifact_ids.extend(part.artifact_ids.clone());
+        summary.artifact_kinds.extend(part.artifact_kinds.clone());
+    }
+    sort_dedup(&mut summary.models);
+    sort_dedup(&mut summary.tools);
+    sort_dedup(&mut summary.approvals);
+    sort_dedup(&mut summary.files);
+    sort_dedup(&mut summary.artifact_ids);
+    sort_dedup(&mut summary.artifact_kinds);
+    summary
+}
+
+fn sort_dedup(values: &mut Vec<String>) {
+    values.sort();
+    values.dedup();
 }
 
 fn code_session_part_from_event(trace_file: &str, event: &TraceEvent) -> Option<CodeSessionPart> {
@@ -1352,6 +1416,77 @@ mod tests {
     }
 
     #[test]
+    fn session_turn_summary_rolls_up_parts() {
+        let parts = vec![
+            CodeSessionPart {
+                kind: "model_call".to_string(),
+                trace_file: "trace.jsonl".to_string(),
+                agent: "agent".to_string(),
+                step: 1,
+                rule: "analyze".to_string(),
+                action: "model_call".to_string(),
+                status: "ok".to_string(),
+                model: Some("code_reviewer".to_string()),
+                tool: None,
+                approval_for: Vec::new(),
+                files: Vec::new(),
+                artifact_ids: Vec::new(),
+                artifact_kinds: Vec::new(),
+                input_keys: Vec::new(),
+                output_keys: Vec::new(),
+                error: None,
+            },
+            CodeSessionPart {
+                kind: "tool_call".to_string(),
+                trace_file: "trace.jsonl".to_string(),
+                agent: "agent".to_string(),
+                step: 2,
+                rule: "patch".to_string(),
+                action: "tool_call".to_string(),
+                status: "ok".to_string(),
+                model: None,
+                tool: Some("file.patch".to_string()),
+                approval_for: Vec::new(),
+                files: vec!["src/lib.rs".to_string()],
+                artifact_ids: vec!["artifact:1".to_string()],
+                artifact_kinds: vec!["file_patch".to_string()],
+                input_keys: Vec::new(),
+                output_keys: Vec::new(),
+                error: None,
+            },
+            CodeSessionPart {
+                kind: "approval".to_string(),
+                trace_file: "trace.jsonl".to_string(),
+                agent: "agent".to_string(),
+                step: 3,
+                rule: "approve".to_string(),
+                action: "approval".to_string(),
+                status: "ok".to_string(),
+                model: None,
+                tool: None,
+                approval_for: vec!["file.write".to_string()],
+                files: Vec::new(),
+                artifact_ids: Vec::new(),
+                artifact_kinds: Vec::new(),
+                input_keys: Vec::new(),
+                output_keys: Vec::new(),
+                error: None,
+            },
+        ];
+
+        let summary = code_session_turn_summary(&parts);
+
+        assert_eq!(summary.model_call_count, 1);
+        assert_eq!(summary.tool_call_count, 1);
+        assert_eq!(summary.approval_count, 1);
+        assert_eq!(summary.models, vec!["code_reviewer"]);
+        assert_eq!(summary.tools, vec!["file.patch"]);
+        assert_eq!(summary.approvals, vec!["file.write"]);
+        assert_eq!(summary.files, vec!["src/lib.rs"]);
+        assert_eq!(summary.artifact_kinds, vec!["file_patch"]);
+    }
+
+    #[test]
     fn loop_iteration_input_appends_previous_outputs_to_task() {
         let mut input = Map::new();
         input.insert("task".to_string(), Value::String("fix it".to_string()));
@@ -1397,6 +1532,7 @@ mod tests {
             input: json!({"task": "inspect repo"}),
             completed: true,
             trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
             outputs: json!({
                 "exploration": {
@@ -1426,6 +1562,7 @@ mod tests {
                 input: json!({"task": "old"}),
                 completed: true,
                 trace_files: Vec::new(),
+                summary: CodeSessionTurnSummary::default(),
                 parts: Vec::new(),
                 outputs: json!({"summary": "older turn"}),
             },
@@ -1436,6 +1573,7 @@ mod tests {
                 input: json!({"task": "new"}),
                 completed: false,
                 trace_files: Vec::new(),
+                summary: CodeSessionTurnSummary::default(),
                 parts: Vec::new(),
                 outputs: json!({"summary": large_output}),
             },
@@ -1481,6 +1619,7 @@ mod tests {
             input: json!({"task": "fix it"}),
             completed: false,
             trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
             outputs: json!({"repair": {"final_success": false}}),
         });
