@@ -33,6 +33,8 @@
         { "label": "desktop", "width": 1440, "height": 1000 },
         { "label": "mobile", "width": 390, "height": 844 }
       ],
+      "required_text": ["Apple Nova"],
+      "forbidden_text": ["```"],
       "navigation_timeout_ms": 10000,
       "max_text_chars": 2000,
       "timeout_seconds": 30

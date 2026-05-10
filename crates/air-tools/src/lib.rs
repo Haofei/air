@@ -232,6 +232,12 @@ enum ToolConfig {
         viewports: Option<Vec<Value>>,
 
         #[serde(default)]
+        required_text: Option<Vec<String>>,
+
+        #[serde(default)]
+        forbidden_text: Option<Vec<String>>,
+
+        #[serde(default)]
         navigation_timeout_ms: Option<u64>,
 
         #[serde(default)]
@@ -833,6 +839,8 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 base_dir,
                 screenshot_dir,
                 viewports,
+                required_text,
+                forbidden_text,
                 navigation_timeout_ms,
                 max_text_chars,
                 timeout_seconds,
@@ -867,6 +875,16 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         );
                     }
                 }
+                validate_non_empty_strings(
+                    path,
+                    &format!("tools.{name}.required_text"),
+                    required_text.as_deref(),
+                )?;
+                validate_non_empty_strings(
+                    path,
+                    &format!("tools.{name}.forbidden_text"),
+                    forbidden_text.as_deref(),
+                )?;
                 validate_positive_u64(
                     path,
                     &format!("tools.{name}.navigation_timeout_ms"),
@@ -1395,6 +1413,8 @@ impl ToolProvider for ConfigTools {
                 base_dir,
                 screenshot_dir,
                 viewports,
+                required_text,
+                forbidden_text,
                 navigation_timeout_ms,
                 max_text_chars,
                 timeout_seconds,
@@ -1408,6 +1428,8 @@ impl ToolProvider for ConfigTools {
                         .as_deref()
                         .map(|path| resolve_config_path(&self.config_dir, path)),
                     viewports: viewports.as_deref(),
+                    required_text: required_text.as_deref(),
+                    forbidden_text: forbidden_text.as_deref(),
                     navigation_timeout_ms,
                     max_text_chars,
                     timeout_seconds,
@@ -1869,6 +1891,8 @@ struct PlaywrightPageAuditConfig<'a> {
     base_dir: &'a Path,
     screenshot_dir: Option<PathBuf>,
     viewports: Option<&'a [Value]>,
+    required_text: Option<&'a [String]>,
+    forbidden_text: Option<&'a [String]>,
     navigation_timeout_ms: Option<u64>,
     max_text_chars: Option<usize>,
     timeout_seconds: Option<u64>,
@@ -2001,6 +2025,8 @@ fn call_playwright_page_audit_tool(
     } else if let Some(viewports) = config.viewports {
         request.insert("viewports".to_string(), Value::Array(viewports.to_vec()));
     }
+    insert_input_or_config_array(&mut request, input, "required_text", config.required_text);
+    insert_input_or_config_array(&mut request, input, "forbidden_text", config.forbidden_text);
     if let Some(value) = input.get("navigation_timeout_ms") {
         request.insert("navigation_timeout_ms".to_string(), value.clone());
     } else if let Some(navigation_timeout_ms) = config.navigation_timeout_ms {
@@ -7991,6 +8017,8 @@ process.stdin.on('end', () => {
                   "base_dir": ".",
                   "screenshot_dir": "screens",
                   "viewports": [{ "label": "desktop", "width": 1280, "height": 900 }],
+                  "required_text": ["{{term}}"],
+                  "forbidden_text": ["markdown fence"],
                   "navigation_timeout_ms": 1000,
                   "max_text_chars": 500,
                   "timeout_seconds": 5
@@ -8001,7 +8029,10 @@ process.stdin.on('end', () => {
         let mut tools = ConfigTools::from_file(config_path).unwrap();
 
         let output = tools
-            .call_tool("browser.audit", &json!({"path": "index.html"}))
+            .call_tool(
+                "browser.audit",
+                &json!({"path": "index.html", "term": "ok"}),
+            )
             .unwrap();
 
         assert_eq!(output["success"], json!(true));
@@ -8011,6 +8042,11 @@ process.stdin.on('end', () => {
             .unwrap()
             .ends_with("index.html"));
         assert_eq!(output["received"]["viewports"][0]["width"], json!(1280));
+        assert_eq!(output["received"]["required_text"], json!(["ok"]));
+        assert_eq!(
+            output["received"]["forbidden_text"],
+            json!(["markdown fence"])
+        );
         assert!(output["received"]["screenshot_dir"]
             .as_str()
             .unwrap()

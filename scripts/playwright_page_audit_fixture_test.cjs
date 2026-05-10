@@ -54,6 +54,8 @@ const child = childProcess.spawnSync(
         { label: 'desktop', width: 1024, height: 768 },
         { label: 'mobile', width: 390, height: 844 },
       ],
+      required_text: ['Rendered layout'],
+      forbidden_text: ['markdown fence'],
       navigation_timeout_ms: 10000,
     }),
     encoding: 'utf8',
@@ -69,6 +71,8 @@ if (child.status !== 0) {
 const output = JSON.parse(child.stdout);
 assert.equal(output.success, true);
 assert.equal(output.viewport_count, 2);
+assert.deepEqual(output.missing_required_text, []);
+assert.deepEqual(output.present_forbidden_text, []);
 assert.equal(output.screenshot_paths.length, 2);
 for (const screenshotPath of output.screenshot_paths) {
   assert.equal(fs.existsSync(screenshotPath), true, `missing screenshot ${screenshotPath}`);

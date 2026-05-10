@@ -26,6 +26,8 @@ async function run(input) {
   const screenshotDir = path.resolve(String(input.screenshot_dir || 'target/generated/page-audit'));
   const navigationTimeoutMs = positiveInt(input.navigation_timeout_ms, 10000);
   const maxTextChars = positiveInt(input.max_text_chars, 2000);
+  const requiredText = stringArray(input.required_text);
+  const forbiddenText = stringArray(input.forbidden_text);
   await fs.mkdir(screenshotDir, { recursive: true });
 
   const browser = await chromium.launch({ headless: true });
@@ -164,6 +166,9 @@ async function run(input) {
     await browser.close();
   }
 
+  const combinedText = viewportResults.map((viewport) => viewport.text_preview).join('\n').toLowerCase();
+  const missingRequiredText = requiredText.filter((term) => !combinedText.includes(term.toLowerCase()));
+  const presentForbiddenText = forbiddenText.filter((term) => combinedText.includes(term.toLowerCase()));
   const diagnostics = viewportResults.map((viewport) => ({
     width: viewport.width,
     height: viewport.height,
@@ -171,6 +176,8 @@ async function run(input) {
     overlap_count: viewport.overlap_count,
     console_error_count: viewport.console_errors.length,
     page_error_count: viewport.page_errors.length,
+    missing_required_text: missingRequiredText,
+    present_forbidden_text: presentForbiddenText,
     screenshot_path: viewport.screenshot_path,
   }));
   const success = viewportResults.every(
@@ -179,7 +186,7 @@ async function run(input) {
       viewport.overlap_count === 0 &&
       viewport.console_errors.length === 0 &&
       viewport.page_errors.length === 0
-  );
+  ) && missingRequiredText.length === 0 && presentForbiddenText.length === 0;
 
   return {
     target: target.input,
@@ -187,6 +194,8 @@ async function run(input) {
     success,
     viewport_count: viewportResults.length,
     screenshot_paths: viewportResults.map((viewport) => viewport.screenshot_path),
+    missing_required_text: missingRequiredText,
+    present_forbidden_text: presentForbiddenText,
     viewports: viewportResults,
     diagnostics,
     elapsed_ms: Date.now() - startedAt,
@@ -215,6 +224,12 @@ function parseViewports(value) {
     width: positiveInt(viewport.width, index === 0 ? 1440 : 390),
     height: positiveInt(viewport.height, index === 0 ? 1000 : 844),
   }));
+}
+
+function stringArray(value) {
+  return Array.isArray(value)
+    ? value.map((item) => String(item || '').trim()).filter(Boolean).slice(0, 20)
+    : [];
 }
 
 function positiveInt(value, fallback) {
