@@ -6,7 +6,7 @@ pub(crate) struct CodeBudgetLimits {
     pub(crate) max_estimated_tool_calls: Option<usize>,
 }
 
-fn build_budget_map(
+fn build_budget_status_map(
     max_estimated_model_calls: usize,
     max_estimated_tool_calls: usize,
     budget_limits: CodeBudgetLimits,
@@ -49,7 +49,7 @@ pub(crate) fn code_budget_limit_status(
         .map(|limit| max_estimated_tool_calls > limit)
         .unwrap_or(false);
     let exceeded = model_exceeded || tool_exceeded;
-    let mut map = build_budget_map(
+    let mut map = build_budget_status_map(
         max_estimated_model_calls,
         max_estimated_tool_calls,
         budget_limits,
@@ -76,7 +76,7 @@ pub(crate) fn code_budget_limit_violation(
     if !model_exceeded && !tool_exceeded {
         return None;
     }
-    Some(Value::Object(build_budget_map(
+    Some(Value::Object(build_budget_status_map(
         max_estimated_model_calls,
         max_estimated_tool_calls,
         budget_limits,
