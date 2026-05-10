@@ -245,3 +245,7 @@ AIR_1_0_REAL=1 scripts/verify_1_0.sh
 - [AIR User Guide](docs/user_guide.md)
 - [Open Deep Research Migration Notes](docs/open_deep_research_migration.md)
 - [AIR 1.0 Audit](docs/air_1_0_audit.md)
+
+## Roadmap
+
+- [ ] **Whole-program compilation (merge + flatten).** The linker currently composes modules into a plan but preserves module boundaries at runtime. A merge compiler would flatten a multi-module plan into a single state machine with a unified state schema, resolved field names, and merged policies. This simplifies backend lowering—each backend becomes a pure syntax translation instead of needing to understand AIR's module dispatch semantics. Analogous to LLVM LTO or TensorFlow XLA: separate compilation for development, whole-program compilation for output.
