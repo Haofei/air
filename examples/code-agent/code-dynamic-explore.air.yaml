@@ -261,6 +261,7 @@ workflow:
                             files: "array: repo-relative file paths or objects with path"
                           optional:
                             line_numbers: "boolean: include numbered_content per file"
+                            max_bytes_per_file: "integer: optional per-file byte limit capped by tool config"
                   - object:
                       tool:
                         literal: file.search

@@ -1154,6 +1154,12 @@ file_search_output = file_search_events[0]["output"]
 assert file_search_output["max_matches"] == 3, file_search_output
 assert file_search_output["max_line_chars"] == 160, file_search_output
 assert file_search_output["returned_match_count"] <= 3, file_search_output
+file_read_many_events = [
+    event for event in dispatches
+    if event.get("meta", {}).get("tool") == "file.read_many"
+]
+assert file_read_many_events, seen_tools
+assert file_read_many_events[0]["output"]["max_bytes_per_file"] == 20000, file_read_many_events[0]["output"]
 batch_done = [
     event for event in events
     if event.get("action") == "tool_batch_dispatch"

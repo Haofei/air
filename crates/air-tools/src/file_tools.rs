@@ -160,13 +160,16 @@ pub(super) fn call_file_read_many_tool(
             "tool {name} input.files must contain at most {max_files} files"
         )));
     }
+    let effective_max_bytes =
+        optional_bounded_usize_input(name, input, "max_bytes_per_file", max_bytes)?
+            .unwrap_or(max_bytes);
 
     let mut files = Vec::with_capacity(entries.len());
     let mut artifacts = Vec::new();
     let mut total_bytes = 0usize;
     let mut any_truncated = false;
     for entry in entries {
-        let output = call_file_read_tool(name, &entry, base_dir, max_bytes)?;
+        let output = call_file_read_tool(name, &entry, base_dir, effective_max_bytes)?;
         total_bytes += output.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize;
         any_truncated |= output
             .get("truncated")
@@ -183,6 +186,7 @@ pub(super) fn call_file_read_many_tool(
         "files": files,
         "file_count": file_count,
         "bytes": total_bytes,
+        "max_bytes_per_file": effective_max_bytes,
         "truncated": any_truncated,
         "artifacts": artifacts
     }))

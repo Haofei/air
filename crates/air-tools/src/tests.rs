@@ -448,6 +448,7 @@ fn file_read_many_reads_multiple_files_with_artifacts() {
 
     assert_eq!(output["file_count"], json!(2));
     assert_eq!(output["files"][0]["content"], json!("alpha\nbeta\n"));
+    assert_eq!(output["max_bytes_per_file"], json!(1024));
     assert_eq!(output["files"][1]["match_line"], json!(2));
     assert_eq!(
         output["files"][1]["numbered_content"],
@@ -455,6 +456,47 @@ fn file_read_many_reads_multiple_files_with_artifacts() {
     );
     assert_eq!(output["artifacts"].as_array().unwrap().len(), 2);
     assert_eq!(tools.tool_capability("file.read_many"), Some("file.read"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_many_supports_bounded_per_call_max_bytes() {
+    let dir = temp_dir("air-tools-file-read-many-max-bytes");
+    fs::write(dir.join("one.txt"), "abcdefghijklmnopqrstuvwxyz\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read_many": {
+                  "kind": "file_read_many",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_files": 3,
+                  "max_bytes": 12
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.read_many",
+            &json!({"files": ["one.txt"], "max_bytes_per_file": 5}),
+        )
+        .unwrap();
+    assert_eq!(output["max_bytes_per_file"], json!(5));
+    assert_eq!(output["files"][0]["content"], json!("abcde"));
+    assert_eq!(output["files"][0]["truncated"], json!(true));
+
+    let capped = tools
+        .call_tool(
+            "file.read_many",
+            &json!({"files": ["one.txt"], "max_bytes_per_file": 99}),
+        )
+        .unwrap();
+    assert_eq!(capped["max_bytes_per_file"], json!(12));
+    assert_eq!(capped["files"][0]["content"], json!("abcdefghijkl"));
     let _ = fs::remove_dir_all(dir);
 }
 
