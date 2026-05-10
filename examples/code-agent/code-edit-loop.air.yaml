@@ -1,7 +1,7 @@
 agent:
   name: code-edit-loop-agent
   version: 0.1.0
-  description: "Bounded opencode-style code edit loop: model chooses one declared tool per turn, AIR executes it, and every observation is traced."
+  description: "Bounded opencode-style code edit loop: model chooses declared tool calls, AIR executes them under policy, and every observation is traced."
 
 inputs:
   task: string
@@ -120,6 +120,9 @@ tools:
   - name: file.ops
     capability: file.write
     timeout_ms: 10000
+  - name: file.patch
+    capability: file.write
+    timeout_ms: 10000
   - name: diagnostic.context
     capability: code.read
     timeout_ms: 10000
@@ -185,6 +188,7 @@ workflow:
                   - literal: file.read_many
                   - literal: file.search
                   - literal: file.ops
+                  - literal: file.patch
                   - literal: diagnostic.context
                   - literal: git.status
                   - literal: git.diff
@@ -193,9 +197,9 @@ workflow:
                 literal:
                   plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
                   discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
-                  read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
+                  read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
                   small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files."
-                  edits: "Use file.ops with kind=edit or kind=replace_lines for existing files. Use write only for new files. If a turn includes file.ops, keep that batch to one write-focused call."
+                  edits: "Use file.ops with kind=edit or kind=replace_lines for localized edits. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call."
                   tests: "Use test.run with the supplied allowlisted test_command only."
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."

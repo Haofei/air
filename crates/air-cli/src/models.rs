@@ -381,6 +381,10 @@ mod tests {
             !edit_prompt.contains("patch must be"),
             "code_edit_decider prompt must not describe the old patch-only schema"
         );
+        assert!(
+            edit_prompt.contains("file.patch"),
+            "code_edit_decider prompt must describe the unified diff patch tool"
+        );
     }
 
     fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {

@@ -30,6 +30,7 @@ node scripts/playwright_page_audit_fixture_test.cjs
 cargo test -q -p air-tools file_read
 cargo test -q -p air-tools file_search
 cargo test -q -p air-tools file_ops
+cargo test -q -p air-tools file_patch
 cargo test -q -p air-tools git_status
 cargo test -q -p air-tools command_run
 cargo test -q -p air-tools repo_search

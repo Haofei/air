@@ -2320,6 +2320,7 @@ mod tests {
             "file.read",
             "file.search",
             "file.ops",
+            "file.patch",
             "test.run",
             "git.diff",
         ] {
