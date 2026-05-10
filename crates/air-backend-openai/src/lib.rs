@@ -33,6 +33,12 @@ pub struct OpenAiModelConfig {
 
     #[serde(default)]
     pub system_prompt: Option<String>,
+
+    #[serde(default)]
+    pub json_mode: Option<bool>,
+
+    #[serde(default)]
+    pub response_format: Option<Value>,
 }
 
 #[derive(Debug, Error)]
@@ -134,6 +140,20 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
                 format!("models.{alias}.request_timeout_seconds must be at least 1"),
             ));
         }
+        if model.json_mode == Some(true) && model.response_format.is_some() {
+            return Err(invalid_config(
+                path,
+                format!("models.{alias} must not declare both json_mode and response_format"),
+            ));
+        }
+        if let Some(response_format) = &model.response_format {
+            if !response_format.is_object() {
+                return Err(invalid_config(
+                    path,
+                    format!("models.{alias}.response_format must be a JSON object"),
+                ));
+            }
+        }
     }
 
     Ok(())
@@ -216,6 +236,9 @@ impl OpenAiCompatibleModelProvider {
 
         if let Some(temperature) = model_config.temperature {
             body["temperature"] = json!(temperature);
+        }
+        if let Some(response_format) = resolved_response_format(model_config) {
+            body["response_format"] = response_format;
         }
 
         let request_timeout =
@@ -331,6 +354,16 @@ fn resolve_model_name(model_config: &OpenAiModelConfig) -> Result<String, Runtim
 
 fn chat_completions_url(base_url: &str) -> String {
     format!("{}/chat/completions", base_url.trim_end_matches('/'))
+}
+
+fn resolved_response_format(model_config: &OpenAiModelConfig) -> Option<Value> {
+    if let Some(response_format) = &model_config.response_format {
+        return Some(response_format.clone());
+    }
+    if model_config.json_mode == Some(true) {
+        return Some(json!({"type": "json_object"}));
+    }
+    None
 }
 
 fn input_to_content(input: &Value) -> Result<String, RuntimeError> {
@@ -556,6 +589,108 @@ mod tests {
     }
 
     #[test]
+    fn json_mode_resolves_to_openai_json_object_response_format() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            model: "gpt-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: Some(true),
+            response_format: None,
+        };
+
+        assert_eq!(
+            resolved_response_format(&config),
+            Some(json!({"type": "json_object"}))
+        );
+    }
+
+    #[test]
+    fn custom_response_format_takes_effect() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            model: "gpt-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: Some(json!({
+                "type": "json_schema",
+                "json_schema": {"name": "decision", "schema": {"type": "object"}}
+            })),
+        };
+
+        assert_eq!(
+            resolved_response_format(&config),
+            Some(json!({
+                "type": "json_schema",
+                "json_schema": {"name": "decision", "schema": {"type": "object"}}
+            }))
+        );
+    }
+
+    #[test]
+    fn parse_config_file_rejects_ambiguous_response_format_config() {
+        let path = temp_file_path("air-model-config-response-format-ambiguous", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1",
+                  "json_mode": true,
+                  "response_format": {"type": "json_object"}
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let error = parse_config_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        let message = error.to_string();
+
+        assert!(message.contains("models.planner"));
+        assert!(message.contains("json_mode"));
+        assert!(message.contains("response_format"));
+    }
+
+    #[test]
+    fn parse_config_file_rejects_non_object_response_format() {
+        let path = temp_file_path("air-model-config-response-format-invalid", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1",
+                  "response_format": "json"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let error = parse_config_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+        let message = error.to_string();
+
+        assert!(message.contains("models.planner.response_format"));
+        assert!(message.contains("JSON object"));
+    }
+
+    #[test]
     fn effective_request_timeout_uses_smaller_action_deadline() {
         assert_eq!(
             effective_request_timeout(Some(30), Some(Duration::from_secs(5))),
@@ -609,6 +744,8 @@ mod tests {
             temperature: None,
             request_timeout_seconds: None,
             system_prompt: None,
+            json_mode: None,
+            response_format: None,
         };
 
         assert_eq!(
@@ -632,6 +769,8 @@ mod tests {
             temperature: None,
             request_timeout_seconds: None,
             system_prompt: None,
+            json_mode: None,
+            response_format: None,
         };
 
         assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");
