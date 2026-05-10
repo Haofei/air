@@ -328,6 +328,18 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    RepoSymbols {
+        #[serde(default)]
+        capability: Option<String>,
+
+        repo_dir: PathBuf,
+
+        #[serde(default)]
+        max_symbols: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
     DiagnosticContext {
         #[serde(default)]
         capability: Option<String>,
@@ -386,6 +398,7 @@ impl ToolConfig {
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::RepoSymbols { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
@@ -832,6 +845,21 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.context_lines"),
                     *context_lines,
                 )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::RepoSymbols {
+                repo_dir,
+                max_symbols,
+                max_bytes,
+                ..
+            } => {
+                if repo_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_symbols"), *max_symbols)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
             ToolConfig::DiagnosticContext {
@@ -1282,6 +1310,18 @@ impl ToolProvider for ConfigTools {
                 context_lines.unwrap_or(6),
                 max_bytes.unwrap_or(256 * 1024),
             ),
+            ToolConfig::RepoSymbols {
+                capability: _,
+                repo_dir,
+                max_symbols,
+                max_bytes,
+            } => call_repo_symbols_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &repo_dir),
+                max_symbols.unwrap_or(200),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
             ToolConfig::DiagnosticContext {
                 capability: _,
                 repo_dir,
@@ -1339,6 +1379,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
+            | ToolConfig::RepoSymbols { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
@@ -3110,6 +3151,154 @@ fn call_repo_context_tool(
             }
         }]
     }))
+}
+
+fn call_repo_symbols_tool(
+    name: &str,
+    input: &Value,
+    repo_dir: &Path,
+    max_symbols: usize,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    let query = input
+        .get("query")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .trim()
+        .to_lowercase();
+    let effective_max_symbols =
+        optional_bounded_usize_input(name, input, "max_symbols", max_symbols)?
+            .unwrap_or(max_symbols);
+    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let paths = repo_tool_paths(name, input)?;
+    let pattern = r"^\s*(pub\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+)*(fn|function|def|class|struct|enum|trait|interface|type|const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*";
+    let mut command = Command::new("rg");
+    command.args([
+        "--line-number",
+        "--column",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+        pattern,
+    ]);
+    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+        validate_git_pathspec(name, glob)?;
+        command.arg("-g").arg(glob);
+    }
+    if !paths.is_empty() {
+        command.args(&paths);
+    }
+    let output = command
+        .current_dir(&repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo symbols: {error}")))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} repo symbols failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let mut symbols = Vec::new();
+    for line in raw.lines() {
+        let item = parse_rg_vimgrep_line(line);
+        let text = item["text"].as_str().unwrap_or_default();
+        let Some((kind, symbol_name)) = parse_symbol_declaration(text) else {
+            continue;
+        };
+        if !query.is_empty()
+            && !symbol_name.to_lowercase().contains(&query)
+            && !item["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(&query)
+        {
+            continue;
+        }
+        symbols.push(json!({
+            "path": item["path"],
+            "line": item["line"],
+            "column": item["column"],
+            "kind": kind,
+            "name": symbol_name,
+            "text": text.trim()
+        }));
+        if symbols.len() >= effective_max_symbols {
+            break;
+        }
+    }
+    let rendered = symbols
+        .iter()
+        .map(|symbol| {
+            format!(
+                "{}:{}:{} {} {}",
+                symbol["path"].as_str().unwrap_or_default(),
+                symbol["line"].as_u64().unwrap_or_default(),
+                symbol["column"].as_u64().unwrap_or_default(),
+                symbol["kind"].as_str().unwrap_or_default(),
+                symbol["name"].as_str().unwrap_or_default()
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
+    let truncated = raw.lines().count() > symbols.len() || truncated_bytes;
+    Ok(json!({
+        "repo": repo.display().to_string(),
+        "query": query,
+        "symbols": symbols,
+        "bytes": bytes,
+        "truncated": truncated,
+        "artifacts": [{
+            "id": format!("repo-symbols:{}:{}", repo.display(), query),
+            "kind": "repo_symbols",
+            "title": "repo symbols",
+            "uri": repo.display().to_string(),
+            "content": content,
+            "metadata": {
+                "provider": "repo_symbols",
+                "repo": repo.display().to_string(),
+                "query": query,
+                "paths": paths,
+                "max_symbols": effective_max_symbols,
+                "bytes": bytes,
+                "truncated": truncated
+            }
+        }]
+    }))
+}
+
+fn parse_symbol_declaration(line: &str) -> Option<(&'static str, String)> {
+    let mut tokens = line
+        .trim_start()
+        .split(|character: char| character.is_whitespace() || character == '(' || character == '<')
+        .filter(|token| !token.is_empty());
+    let mut token = tokens.next()?;
+    while matches!(
+        token,
+        "pub" | "export" | "async" | "static" | "final" | "private" | "protected" | "public"
+    ) {
+        token = tokens.next()?;
+    }
+    let kind = match token {
+        "fn" | "function" | "def" => "function",
+        "class" => "class",
+        "struct" => "struct",
+        "enum" => "enum",
+        "trait" | "interface" => "interface",
+        "type" => "type",
+        "const" | "let" | "var" => "variable",
+        _ => return None,
+    };
+    let raw_name = tokens.next()?;
+    let name = raw_name
+        .trim_matches(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '$')
+        })
+        .to_string();
+    (!name.is_empty()).then_some((kind, name))
 }
 
 fn call_diagnostic_context_tool(
@@ -5623,6 +5812,82 @@ mod tests {
         assert!(error
             .to_string()
             .contains("input.mode must be fixed or regex"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_symbols_returns_lightweight_symbol_map() {
+        let dir = temp_dir("air-tools-repo-symbols");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "pub struct Alpha {}\nfn beta_value() {}\nlet gamma = 1;\n",
+        )
+        .unwrap();
+        fs::write(
+            dir.join("src/app.ts"),
+            "export function renderView() {}\nclass Panel {}\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("repo.symbols", &json!({"query": "alpha"}))
+            .unwrap();
+
+        assert_eq!(output["query"], json!("alpha"));
+        assert_eq!(output["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(output["symbols"][0]["kind"], json!("struct"));
+        assert_eq!(output["symbols"][0]["name"], json!("Alpha"));
+        assert_eq!(output["artifacts"][0]["kind"], json!("repo_symbols"));
+        assert_eq!(tools.tool_capability("repo.symbols"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_symbols_supports_path_and_glob_filters() {
+        let dir = temp_dir("air-tools-repo-symbols-filters");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(dir.join("src/lib.rs"), "pub struct Alpha {}\n").unwrap();
+        fs::write(dir.join("src/app.ts"), "export function renderView() {}\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "repo.symbols",
+                &json!({"path": "src", "glob": "*.ts", "max_symbols": 2}),
+            )
+            .unwrap();
+
+        assert_eq!(output["symbols"].as_array().unwrap().len(), 1);
+        assert_eq!(output["symbols"][0]["path"], json!("src/app.ts"));
         let _ = fs::remove_dir_all(dir);
     }
 

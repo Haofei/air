@@ -54,7 +54,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, plan, search, list_files, search_repo, read_context, read_file, read_diff, read_status, run_tests, analyze, done, failed]
+    enum: [init, plan, search, list_files, inspect_symbols, search_repo, read_context, read_file, read_diff, read_status, run_tests, analyze, done, failed]
   plan_status:
     type: object
     required: [todos, total, open_count, artifacts]
@@ -111,6 +111,20 @@ state:
       matches:
         type: array
         items: object
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
+  repo_symbols:
+    type: object
+    required: [repo, symbols, artifacts]
+    properties:
+      repo: string
+      query: string
+      symbols:
+        type: array
+        items: object
+      bytes: integer
       truncated: boolean
       artifacts:
         type: array
@@ -232,6 +246,9 @@ tools:
   - name: repo.search
     capability: code.read
     timeout_ms: 10000
+  - name: repo.symbols
+    capability: code.read
+    timeout_ms: 10000
   - name: repo.context
     capability: code.read
     timeout_ms: 10000
@@ -248,7 +265,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 12
+  max_steps: 13
   terminal: [done, failed]
   rules:
     - id: init
@@ -342,6 +359,25 @@ workflow:
               query:
                 ref: repo_query
           output: repo_files
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: inspect_symbols
+
+    - id: inspect_symbols
+      when: phase == "inspect_symbols"
+      actions:
+        - kind: tool_call
+          tool: repo.symbols
+          input:
+            object:
+              query:
+                ref: repo_query
+              max_symbols:
+                literal: 80
+          output: repo_symbols
           timeout_seconds: 10
           retry:
             max_attempts: 1
@@ -474,6 +510,8 @@ workflow:
                 ref: repo_files
               repo_search:
                 ref: repo_search
+              repo_symbols:
+                ref: repo_symbols
               repo_context:
                 ref: repo_context
               file_context:
@@ -501,7 +539,7 @@ workflow:
           output: review
 
 policy:
-  max_tool_calls: 11
+  max_tool_calls: 12
   timeout_seconds: 300
 
 observability:

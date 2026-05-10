@@ -46,6 +46,13 @@
       "max_matches": 80,
       "max_bytes": 65536
     },
+    "repo.symbols": {
+      "kind": "repo_symbols",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_symbols": 120,
+      "max_bytes": 65536
+    },
     "repo.context": {
       "kind": "repo_context",
       "capability": "code.read",
