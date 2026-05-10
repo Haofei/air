@@ -349,6 +349,29 @@ assert any(
     and event.get("status") == "ok"
     for event in trace
 ), trace
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "todo.write"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "todo.read"
+    and event.get("status") == "ok"
+    for event in trace
+), trace
+repair_calls = [
+    event for event in trace
+    if event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_repairer"
+]
+assert repair_calls, trace
+assert repair_calls[0]["input"]["progress"]["in_progress_count"] == 1, repair_calls[0]["input"]
+assert any(
+    todo["id"] == "repair" and todo["status"] == "in_progress"
+    for todo in repair_calls[0]["input"]["progress"]["todos"]
+), repair_calls[0]["input"]
 PY
 
 echo "[code-agent] user-facing code command offline run"

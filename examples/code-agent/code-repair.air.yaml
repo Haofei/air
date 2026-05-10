@@ -48,7 +48,7 @@ outputs:
             items: object
 
 requires:
-  capabilities: [file.read, file.write, code.read, code.test]
+  capabilities: [task.progress, file.read, file.write, code.read, code.test]
 
 state:
   phase:
@@ -333,8 +333,30 @@ state:
           artifacts:
             type: array
             items: object
+  progress:
+    type: object
+    required: [todos, total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts]
+    properties:
+      todos:
+        type: array
+        items: object
+      total: integer
+      open_count: integer
+      pending_count: integer
+      in_progress_count: integer
+      completed_count: integer
+      cancelled_count: integer
+      artifacts:
+        type: array
+        items: object
 
 tools:
+  - name: todo.write
+    capability: task.progress
+    timeout_ms: 10000
+  - name: todo.read
+    capability: task.progress
+    timeout_ms: 10000
   - name: file.read
     capability: file.read
     timeout_ms: 10000
@@ -366,6 +388,52 @@ workflow:
     - id: init
       when: phase == "init"
       actions:
+        - kind: tool_call
+          tool: todo.write
+          input:
+            object:
+              todos:
+                array:
+                  - object:
+                      id:
+                        literal: inspect
+                      content:
+                        literal: "Inspect target and related files"
+                      status:
+                        literal: in_progress
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: test
+                      content:
+                        literal: "Run allowlisted failing test"
+                      status:
+                        literal: pending
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: repair
+                      content:
+                        literal: "Patch the failing behavior"
+                      status:
+                        literal: pending
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: verify
+                      content:
+                        literal: "Retest and collect workspace diff"
+                      status:
+                        literal: pending
+                      priority:
+                        literal: high
+          output: progress
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: tool_call
           tool: git.status
           input:
@@ -464,6 +532,60 @@ workflow:
     - id: repair
       when: phase == "route" && test_results.success == false
       actions:
+        - kind: tool_call
+          tool: todo.write
+          input:
+            object:
+              todos:
+                array:
+                  - object:
+                      id:
+                        literal: inspect
+                      content:
+                        literal: "Inspect target and related files"
+                      status:
+                        literal: completed
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: test
+                      content:
+                        literal: "Run allowlisted failing test"
+                      status:
+                        literal: completed
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: repair
+                      content:
+                        literal: "Patch the failing behavior"
+                      status:
+                        literal: in_progress
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: verify
+                      content:
+                        literal: "Retest and collect workspace diff"
+                      status:
+                        literal: pending
+                      priority:
+                        literal: high
+          output: progress
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: tool_call
+          tool: todo.read
+          input:
+            literal: {}
+          output: progress
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: model_call
           model: code_repairer
           input:
@@ -482,6 +604,8 @@ workflow:
                 ref: diagnostic_context
               log:
                 ref: test_results.log
+              progress:
+                ref: progress
           output: repair_plan
           timeout_seconds: 120
           retry:
@@ -637,6 +761,60 @@ workflow:
     - id: repair-again
       when: phase == "repair_again"
       actions:
+        - kind: tool_call
+          tool: todo.write
+          input:
+            object:
+              todos:
+                array:
+                  - object:
+                      id:
+                        literal: inspect
+                      content:
+                        literal: "Inspect target and related files"
+                      status:
+                        literal: completed
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: test
+                      content:
+                        literal: "Run allowlisted failing test"
+                      status:
+                        literal: completed
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: repair
+                      content:
+                        literal: "Patch the failing behavior"
+                      status:
+                        literal: completed
+                      priority:
+                        literal: high
+                  - object:
+                      id:
+                        literal: verify
+                      content:
+                        literal: "Retest and collect workspace diff"
+                      status:
+                        literal: in_progress
+                      priority:
+                        literal: high
+          output: progress
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: tool_call
+          tool: todo.read
+          input:
+            literal: {}
+          output: progress
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: model_call
           model: code_repairer
           input:
@@ -657,6 +835,8 @@ workflow:
                 ref: final_test_results.log
               previous_rationale:
                 ref: repair_plan.rationale
+              progress:
+                ref: progress
           output: repair_plan_retry
           timeout_seconds: 120
           retry:
@@ -822,7 +1002,7 @@ workflow:
           output: repair
 
 policy:
-  max_tool_calls: 15
+  max_tool_calls: 21
   max_model_calls: 2
   timeout_seconds: 360
 

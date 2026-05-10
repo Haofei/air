@@ -1,5 +1,15 @@
 {
   "tools": {
+    "todo.write": {
+      "kind": "todo_write",
+      "capability": "task.progress",
+      "max_items": 8,
+      "max_content_chars": 120
+    },
+    "todo.read": {
+      "kind": "todo_read",
+      "capability": "task.progress"
+    },
     "file.read": {
       "kind": "file_read",
       "capability": "file.read",

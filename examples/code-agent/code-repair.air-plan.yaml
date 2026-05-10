@@ -3,7 +3,7 @@ plan:
   version: 0.1.0
 
 requires:
-  capabilities: [file.read, file.write, code.read, code.test]
+  capabilities: [task.progress, file.read, file.write, code.read, code.test]
 
 nodes:
   - id: repair

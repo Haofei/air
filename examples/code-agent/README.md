@@ -28,7 +28,7 @@ This example contains bounded AIR coding agents and one preferred composed revie
   `smoke_log`, `audit_diagnostics`, `screenshots`, and `revised` so callers can judge a failed build
   without digging through the raw trace.
 
-The explore/review agents use:
+The explore/review/repair agents use:
 
 - `todo.write` for a structured progress artifact before evidence gathering;
 - `todo.read` for re-reading the current task-progress artifact before analysis;
@@ -44,6 +44,11 @@ The explore/review agents use:
 - `git.diff` for local changes to that file.
 - `git.status` for structured workspace change awareness.
 - `test.run` for an allowlisted verification command.
+
+The repair module writes a todo artifact before reading files, updates it before invoking the
+repair model, re-reads it into the model input, and records those progress events in the trace. That
+mirrors opencode's explicit task tracking while keeping progress state inside AIR's typed tool and
+capability boundary.
 
 Before final analysis, the preferred composed review plan sends the evidence bundle through the
 shared `modules/std/context/compact.air.yaml` module. That module first runs deterministic
