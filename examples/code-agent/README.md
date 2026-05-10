@@ -230,6 +230,26 @@ the recipe's completion signal passes, such as `repair.final_success == true` or
 `build.test_success` and `build.audit_success` are true. Iteration trace paths are suffixed with
 `.iterN` so each pass remains auditable.
 
+For multi-turn coding work, use `--session` to persist a small AIR session file across separate
+`air code` invocations:
+
+```bash
+cargo run -p air-cli -- code "explore command_run safety" \
+  --target crates/air-tools/src/lib.rs \
+  --query command_run \
+  --session target/generated/code_session.json
+
+cargo run -p air-cli -- code "continue from the previous AIR turn" \
+  --target crates/air-tools/src/lib.rs \
+  --query command_run \
+  --session target/generated/code_session.json
+```
+
+This is intentionally a thin shell over verified AIR turns, not an unrestricted chat runtime. The
+session file records each turn's recipe, profile, typed input, completion flag, and outputs. On the
+next invocation, a bounded summary of previous turn outputs is appended to the new task, so the
+following `model_call` trace shows exactly what session context the model received.
+
 The same command can select the other public coding-agent recipes:
 
 ```bash

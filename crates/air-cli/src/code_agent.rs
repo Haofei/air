@@ -4,7 +4,9 @@ use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::run_plan::{run_plan, run_plan_capture, RunPlanOptions};
 use anyhow::{bail, Result};
 use clap::ValueEnum;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
+use std::fs;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -43,6 +45,7 @@ pub(crate) struct CodeOptions {
     pub(crate) state_out: Option<PathBuf>,
     pub(crate) checkpoint_out: Option<PathBuf>,
     pub(crate) jit_cache: Option<PathBuf>,
+    pub(crate) session: Option<PathBuf>,
     pub(crate) parallel: bool,
     pub(crate) log: bool,
     pub(crate) explain: bool,
@@ -74,6 +77,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         state_out,
         checkpoint_out,
         jit_cache,
+        session,
         parallel,
         log,
         explain,
@@ -96,7 +100,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         &constraints,
     );
     let profile = profile.unwrap_or_else(|| default_profile(recipe));
-    let input = build_input(CodeInputOptions {
+    let mut input = build_input(CodeInputOptions {
         task,
         recipe,
         target,
@@ -111,6 +115,13 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         product,
         constraints,
     })?;
+    let mut session_state = match session.as_ref() {
+        Some(path) => Some(CodeSessionState::read(path)?),
+        None => None,
+    };
+    if let Some(state) = session_state.as_ref() {
+        input = code_session_turn_input(&input, &state.turns);
+    }
 
     if explain {
         print_explain(
@@ -124,11 +135,50 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         return Ok(());
     }
 
-    if loop_enabled {
-        return run_code_loop(CodeLoopOptions {
+    let session_input = input.clone();
+    let outputs = if loop_enabled {
+        run_code_loop(CodeLoopOptions {
             recipe,
-            profile,
+            profile: profile.clone(),
             input,
+            model_config: model_config.clone(),
+            trace_out: trace_out.clone(),
+            trace_redact,
+            trace_raw,
+            state_out: state_out.clone(),
+            checkpoint_out: checkpoint_out.clone(),
+            jit_cache: jit_cache.clone(),
+            parallel,
+            log,
+            tool_config: tool_config.clone(),
+            max_iterations,
+        })?
+    } else if session.is_some() {
+        run_plan_capture(RunPlanOptions {
+            plan: None,
+            profile: Some(profile.clone()),
+            store: None,
+            input: None,
+            input_values: Some(input.clone()),
+            model_config: model_config.clone(),
+            trace_out: trace_out.clone(),
+            trace_redact,
+            trace_raw,
+            state_out: state_out.clone(),
+            checkpoint_out: checkpoint_out.clone(),
+            jit_cache: jit_cache.clone(),
+            parallel,
+            log,
+            example_tools: false,
+            tool_config: tool_config.clone(),
+        })?
+    } else {
+        return run_plan(RunPlanOptions {
+            plan: None,
+            profile: Some(profile),
+            store: None,
+            input: None,
+            input_values: Some(input),
             model_config,
             trace_out,
             trace_redact,
@@ -138,29 +188,88 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             jit_cache,
             parallel,
             log,
+            example_tools: false,
             tool_config,
-            max_iterations,
         });
+    };
+
+    if let Some(path) = session.as_ref() {
+        let state = session_state.get_or_insert_with(CodeSessionState::default);
+        state.append_turn(CodeSessionTurn {
+            task: session_input
+                .get("task")
+                .and_then(Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            recipe: recipe_name(recipe).to_string(),
+            profile: path_ref_to_input_string(&profile),
+            input: Value::Object(session_input),
+            completed: code_outputs_complete(recipe, &outputs),
+            outputs: outputs.clone(),
+        });
+        state.write(path)?;
+    }
+    serde_json::to_writer_pretty(std::io::stdout(), &outputs)?;
+    println!();
+    Ok(())
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+struct CodeSessionState {
+    #[serde(default = "code_session_version")]
+    version: u32,
+    #[serde(default)]
+    turns: Vec<CodeSessionTurn>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CodeSessionTurn {
+    task: String,
+    recipe: String,
+    profile: String,
+    input: Value,
+    completed: bool,
+    outputs: Value,
+}
+
+fn code_session_version() -> u32 {
+    1
+}
+
+impl CodeSessionState {
+    fn read(path: &Path) -> Result<Self> {
+        if !path.exists() {
+            return Ok(Self {
+                version: code_session_version(),
+                turns: Vec::new(),
+            });
+        }
+        let state: Self = serde_json::from_str(&fs::read_to_string(path)?)?;
+        if state.version != code_session_version() {
+            bail!(
+                "unsupported AIR code session version {}; expected {}",
+                state.version,
+                code_session_version()
+            );
+        }
+        Ok(state)
     }
 
-    run_plan(RunPlanOptions {
-        plan: None,
-        profile: Some(profile),
-        store: None,
-        input: None,
-        input_values: Some(input),
-        model_config,
-        trace_out,
-        trace_redact,
-        trace_raw,
-        state_out,
-        checkpoint_out,
-        jit_cache,
-        parallel,
-        log,
-        example_tools: false,
-        tool_config,
-    })
+    fn write(&self, path: &Path) -> Result<()> {
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(path, serde_json::to_string_pretty(self)?)?;
+        Ok(())
+    }
+
+    fn append_turn(&mut self, turn: CodeSessionTurn) {
+        self.version = code_session_version();
+        self.turns.push(turn);
+    }
 }
 
 fn print_explain(
@@ -263,7 +372,7 @@ struct CodeLoopOptions {
     max_iterations: usize,
 }
 
-fn run_code_loop(options: CodeLoopOptions) -> Result<()> {
+fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
     if options.max_iterations == 0 {
         bail!("air code --loop requires --max-iterations to be greater than 0");
     }
@@ -332,9 +441,50 @@ fn run_code_loop(options: CodeLoopOptions) -> Result<()> {
         "iterations": iterations,
         "final_outputs": final_outputs,
     });
-    serde_json::to_writer_pretty(std::io::stdout(), &summary)?;
-    println!();
-    Ok(())
+    Ok(summary)
+}
+
+fn code_session_turn_input(
+    base_input: &Map<String, Value>,
+    previous_turns: &[CodeSessionTurn],
+) -> Map<String, Value> {
+    if previous_turns.is_empty() {
+        return base_input.clone();
+    }
+
+    let mut input = base_input.clone();
+    let Some(task) = input.get("task").and_then(Value::as_str) else {
+        return input;
+    };
+    let feedback = code_session_feedback(previous_turns);
+    input.insert(
+        "task".to_string(),
+        Value::String(format!(
+            "{task}\n\nAIR session context from previous turns:\n{feedback}"
+        )),
+    );
+    input
+}
+
+fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
+    let mut lines = Vec::new();
+    for (index, turn) in previous_turns.iter().enumerate() {
+        let turn_number = index + 1;
+        let mut output_summary = serde_json::to_string(&turn.outputs).unwrap_or_default();
+        const MAX_OUTPUT_SUMMARY_CHARS: usize = 200_000;
+        if output_summary.chars().count() > MAX_OUTPUT_SUMMARY_CHARS {
+            output_summary = output_summary
+                .chars()
+                .take(MAX_OUTPUT_SUMMARY_CHARS)
+                .collect::<String>();
+            output_summary.push_str(" [AIR_TRUNCATED]");
+        }
+        lines.push(format!(
+            "- turn {turn_number}: recipe={}; completed={}; outputs={output_summary}",
+            turn.recipe, turn.completed
+        ));
+    }
+    lines.join("\n")
 }
 
 fn code_loop_iteration_input(
@@ -897,6 +1047,70 @@ mod tests {
         assert!(task.starts_with("fix it"));
         assert!(task.contains("AIR loop context from previous iterations"));
         assert!(task.contains("final_success"));
+    }
+
+    #[test]
+    fn session_turn_input_appends_previous_outputs_to_task() {
+        let mut input = Map::new();
+        input.insert(
+            "task".to_string(),
+            Value::String("continue investigation".to_string()),
+        );
+        input.insert(
+            "target_path".to_string(),
+            Value::String("src/lib.rs".to_string()),
+        );
+        let turns = vec![CodeSessionTurn {
+            task: "inspect repo".to_string(),
+            recipe: "explore".to_string(),
+            profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
+            input: json!({"task": "inspect repo"}),
+            completed: true,
+            outputs: json!({
+                "exploration": {
+                    "summary": "Found the dispatch implementation",
+                    "source_ids": ["repo:lib"]
+                }
+            }),
+        }];
+
+        let next = code_session_turn_input(&input, &turns);
+
+        assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
+        let task = next["task"].as_str().unwrap();
+        assert!(task.starts_with("continue investigation"));
+        assert!(task.contains("AIR session context from previous turns"));
+        assert!(task.contains("Found the dispatch implementation"));
+    }
+
+    #[test]
+    fn session_state_roundtrips_turns() {
+        let path = std::env::temp_dir().join(format!(
+            "air-code-session-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let mut state = CodeSessionState::default();
+        state.append_turn(CodeSessionTurn {
+            task: "fix it".to_string(),
+            recipe: "repair".to_string(),
+            profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
+            input: json!({"task": "fix it"}),
+            completed: false,
+            outputs: json!({"repair": {"final_success": false}}),
+        });
+
+        state.write(&path).unwrap();
+        let roundtrip = CodeSessionState::read(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(roundtrip.version, 1);
+        assert_eq!(roundtrip.turns.len(), 1);
+        assert_eq!(roundtrip.turns[0].recipe, "repair");
+        assert!(!roundtrip.turns[0].completed);
     }
 
     #[test]

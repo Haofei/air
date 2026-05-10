@@ -274,6 +274,43 @@ assert any(item["path"] == "crates/air-tools/src/lib.rs" for item in exploration
 assert exploration["next_steps"], exploration
 PY
 
+echo "[code-agent] persistent session carries turn context"
+rm -f target/generated/code_agent_session.json
+cargo run -q -p air-cli -- code "explore command_run safety" \
+  --target crates/air-tools/src/lib.rs \
+  --query command_run \
+  --session target/generated/code_agent_session.json \
+  --trace-out target/generated/code_agent_session_turn1.trace.jsonl \
+  > target/generated/code_agent_session_turn1.output.json
+cargo run -q -p air-cli -- code "continue from the previous AIR code-agent turn" \
+  --target crates/air-tools/src/lib.rs \
+  --query command_run \
+  --session target/generated/code_agent_session.json \
+  --trace-out target/generated/code_agent_session_turn2.trace.jsonl \
+  > target/generated/code_agent_session_turn2.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
+assert session["version"] == 1, session
+assert len(session["turns"]) == 2, session
+assert session["turns"][0]["recipe"] == "explore", session
+assert session["turns"][1]["completed"] is True, session
+
+with open("target/generated/code_agent_session_turn2.trace.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+model_calls = [
+    event for event in trace
+    if event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_explorer"
+]
+assert model_calls, trace
+task = model_calls[0]["input"]["task"]
+assert "AIR session context from previous turns" in task, task
+assert "Fixture exploration completed" in task, task
+PY
+
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"
 if node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_repair_fixture.log 2>&1; then
   echo "repair fixture unexpectedly passed; it should start from a failing implementation" >&2

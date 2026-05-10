@@ -122,6 +122,10 @@ enum Command {
         #[arg(long)]
         jit_cache: Option<PathBuf>,
 
+        /// Persist and reuse bounded AIR code-agent turn context from this JSON session file.
+        #[arg(long)]
+        session: Option<PathBuf>,
+
         /// Execute eligible schedule groups and dynamic fan-out modules in parallel.
         #[arg(long)]
         parallel: bool,
@@ -500,6 +504,7 @@ fn main() -> Result<()> {
             state_out,
             checkpoint_out,
             jit_cache,
+            session,
             parallel,
             log,
             explain,
@@ -528,6 +533,7 @@ fn main() -> Result<()> {
             state_out,
             checkpoint_out,
             jit_cache,
+            session,
             parallel,
             log,
             explain,
