@@ -56,7 +56,7 @@ impl CodeAgentPackContext {
     }
 
     pub(crate) fn recipe_for_id(&self, recipe: &str) -> Result<CodeAgentPackRecipe> {
-        let Some(pack_recipe) = self
+        let Some(mut pack_recipe) = self
             .pack
             .recipes
             .iter()
@@ -68,6 +68,18 @@ impl CodeAgentPackContext {
                 self.path.display()
             );
         };
+        pack_recipe.default_profile = self.resolve_profile_path(&pack_recipe.default_profile);
         Ok(pack_recipe)
+    }
+
+    fn resolve_profile_path(&self, profile: &Path) -> PathBuf {
+        if profile.is_absolute() || profile.exists() {
+            return profile.to_path_buf();
+        }
+        self.path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| parent.join(profile))
+            .unwrap_or_else(|| profile.to_path_buf())
     }
 }

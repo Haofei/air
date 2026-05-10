@@ -3661,9 +3661,10 @@ mod tests {
                 profile.display()
             );
             assert!(
-                pack.pack.recipes.iter().any(|pack_recipe| {
-                    pack_recipe.id == recipe_name(recipe) && pack_recipe.default_profile == profile
-                }),
+                pack.recipe_for_id(recipe_name(recipe))
+                    .unwrap()
+                    .default_profile
+                    == profile,
                 "pack is missing {} -> {}",
                 recipe_name(recipe),
                 profile.display()

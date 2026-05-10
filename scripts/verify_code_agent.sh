@@ -22,9 +22,12 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-mu
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refactor.air-profile.yaml
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
-cp examples/code-agent/code-agent.air-pack.yaml target/generated/code-agent.air-pack.yaml
+rm -rf target/generated/examples/code-agent target/generated/modules
+mkdir -p target/generated/examples
+cp -R examples/code-agent target/generated/examples/code-agent
+cp -R modules target/generated/modules
 cargo run -q -p air-cli -- code "explain explicit code-agent pack" \
-  --pack target/generated/code-agent.air-pack.yaml \
+  --pack target/generated/examples/code-agent/code-agent.air-pack.yaml \
   --recipe plan \
   --query "code agent pack" \
   --explain \
@@ -34,9 +37,10 @@ import json
 
 with open("target/generated/code_agent_pack_explain.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
-assert output["pack"]["path"] == "target/generated/code-agent.air-pack.yaml", output
+assert output["pack"]["path"] == "target/generated/examples/code-agent/code-agent.air-pack.yaml", output
 assert output["pack"]["recipe"] == "plan", output
-assert output["pack"]["default_profile"] == "examples/code-agent/project-plan.air-profile.yaml", output
+assert output["pack"]["default_profile"] == "target/generated/examples/code-agent/project-plan.air-profile.yaml", output
+assert output["profile"] == "target/generated/examples/code-agent/project-plan.air-profile.yaml", output
 assert output["pack"]["profile_override"] is False, output
 PY
 
