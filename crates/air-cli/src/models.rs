@@ -385,6 +385,10 @@ mod tests {
             edit_prompt.contains("file.patch"),
             "code_edit_decider prompt must describe the unified diff patch tool"
         );
+        assert!(
+            edit_prompt.contains("tool_schemas"),
+            "code_edit_decider prompt must tell models to follow tool_schemas"
+        );
         let summarize_prompt = config
             .models
             .get("code_edit_summarizer")

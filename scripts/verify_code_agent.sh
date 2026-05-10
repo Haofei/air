@@ -114,6 +114,16 @@ models = [
 ]
 assert "code_edit_decider" in models, models
 assert "code_edit_summarizer" in models, models
+decider_start = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+)
+tool_schemas = decider_start["input"]["tool_schemas"]
+assert "repo.files" in tool_schemas, tool_schemas
+assert "file.ops" in tool_schemas, tool_schemas
+assert "test.run" in tool_schemas, tool_schemas
+assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
 PY
 
 echo "[code-agent] targetless edit loop offline run"

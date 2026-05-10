@@ -199,6 +199,95 @@ workflow:
                   - literal: git.status
                   - literal: git.diff
                   - literal: test.run
+              tool_schemas:
+                literal:
+                  todo.write:
+                    required: {items: "array of short todo items"}
+                    optional: {merge: "boolean"}
+                  todo.read:
+                    required: {}
+                    optional: {}
+                  repo.files:
+                    required: {}
+                    optional:
+                      query: "substring filter"
+                      pattern: "query alias, or glob/path pattern when it contains /, *, ?, or ["
+                      glob: "path glob such as examples/code-agent/**"
+                      max_files: "bounded result limit"
+                      include_all: "boolean"
+                  repo.search:
+                    required: {query: "search text; pattern is accepted as an alias"}
+                    optional:
+                      mode: "fixed, regex, or smart"
+                      file_glob: "path glob alias"
+                      path: "repo-relative scope"
+                      max_matches: "bounded result limit"
+                  repo.context:
+                    required: {query: "search text"}
+                    optional:
+                      mode: "fixed, regex, or smart"
+                      path: "repo-relative scope"
+                      context_lines: "bounded context lines"
+                      max_matches: "bounded result limit"
+                  repo.symbols:
+                    required: {}
+                    optional:
+                      query: "symbol/name filter"
+                      path: "repo-relative scope"
+                      max_symbols: "bounded result limit"
+                  repo.references:
+                    required: {symbol: "exact identifier"}
+                    optional:
+                      path: "repo-relative scope"
+                      context_lines: "bounded context lines"
+                      max_matches: "bounded result limit"
+                  file.read:
+                    required: {path: "repo-relative file path"}
+                    optional:
+                      start_line: "1-based start line"
+                      end_line: "1-based end line"
+                      lines: "single line or start-end range"
+                      line_numbers: "boolean"
+                      max_bytes: "bounded byte limit"
+                  file.read_many:
+                    required: {files: "array of paths or objects with path"}
+                    optional:
+                      max_bytes_per_file: "bounded byte limit"
+                      line_numbers: "boolean"
+                  file.search:
+                    required:
+                      path: "repo-relative file or directory"
+                      pattern: "regular expression; query is accepted as an alias"
+                    optional:
+                      context_lines: "bounded context lines"
+                      max_matches: "bounded result limit"
+                  file.ops:
+                    required: {operations: "array of edit/write/replace_lines operations"}
+                    optional:
+                      path: "default repo-relative path for all operations"
+                      kind: "default operation kind"
+                      edits: "operations alias"
+                      dry_run: "boolean"
+                  file.patch:
+                    required: {patch: "unified diff"}
+                    optional: {dry_run: "boolean"}
+                  diagnostic.context:
+                    required: {}
+                    optional:
+                      diagnostics: "array of diagnostic objects"
+                      path: "repo-relative scope"
+                  git.status:
+                    required: {}
+                    optional: {}
+                  git.diff:
+                    required: {}
+                    optional:
+                      paths: "array of repo-relative paths"
+                      include_untracked: "boolean"
+                  test.run:
+                    required: {command: "the supplied allowlisted test_command"}
+                    optional:
+                      args: "optional structured parameters allowed by tool config"
               tool_policy:
                 literal:
                   plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
