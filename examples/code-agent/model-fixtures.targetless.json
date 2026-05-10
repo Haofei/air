@@ -68,18 +68,6 @@
           "rationale": "Replace the incorrect subtraction line with addition."
         },
         {
-          "complete": false,
-          "tool_calls": [
-            {
-              "tool": "test.run",
-              "input": {
-                "test_command": "edit_fixture_test"
-              }
-            }
-          ],
-          "rationale": "Verify the fix with the allowlisted test command."
-        },
-        {
           "complete": true,
           "tool_calls": [],
           "rationale": "The target was discovered, edited, and verified without a user-supplied target path."

@@ -50,6 +50,24 @@ fn accepts_disjunctive_state_machine_conditions() {
 }
 
 #[test]
+fn accepts_array_index_paths_in_conditions() {
+    let mut module = parse_air_file("../../tests/agents/tool-batch-dispatch.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    workflow.rules[3].when =
+        r#"phase == "done" && observations[0].tool == "docs.search""#.to_string();
+
+    let report = verify(&module);
+
+    assert!(
+        report.is_success(),
+        "expected success, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_append_actions_to_state_arrays() {
     let module = parse_air_file("../../tests/agents/append-evidence.air.yaml").unwrap();
     let report = verify(&module);

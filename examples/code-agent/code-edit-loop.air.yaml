@@ -44,7 +44,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, choose, act, summarize, done, failed]
+    enum: [init, choose, act, post_act, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -66,6 +66,10 @@ state:
             arguments: object
       rationale: string
   observation:
+    type: array
+    items:
+      type: object
+  auto_verify_result:
     type: array
     items:
       type: object
@@ -145,7 +149,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 18
+  max_steps: 28
   terminal: [done, failed]
   rules:
     - id: init
@@ -338,6 +342,93 @@ workflow:
                 path: decision.tool_calls
               result:
                 ref: observation
+        - kind: set
+          values:
+            phase: post_act
+
+    - id: auto-verify-file-ops
+      when: phase == "post_act" && observation[0].tool == "file.ops" && observation[0].status == "ok" && observation[0].output.applied == true
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: test.run
+                  input:
+                    object:
+                      command:
+                        ref: test_command
+          output: auto_verify_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify
+              rationale:
+                literal: Automatically ran the allowlisted validation after file.ops changed the workspace.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: test.run
+                      input:
+                        object:
+                          command:
+                            ref: test_command
+              result:
+                ref: auto_verify_result
+        - kind: set
+          values:
+            phase: choose
+
+    - id: auto-verify-file-patch
+      when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "ok" && observation[0].output.applied == true
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: test.run
+                  input:
+                    object:
+                      command:
+                        ref: test_command
+          output: auto_verify_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify
+              rationale:
+                literal: Automatically ran the allowlisted validation after file.patch changed the workspace.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: test.run
+                      input:
+                        object:
+                          command:
+                            ref: test_command
+              result:
+                ref: auto_verify_result
+        - kind: set
+          values:
+            phase: choose
+
+    - id: continue-after-act
+      when: phase == "post_act"
+      actions:
         - kind: set
           values:
             phase: choose

@@ -347,18 +347,6 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "test.run",
-              "input": {
-                "command": "edit_fixture_test"
-              }
-            }
-          ],
-          "rationale": "Verify the edited implementation with the allowlisted test."
-        },
-        {
-          "complete": false,
-          "tool_calls": [
-            {
               "tool": "git.diff",
               "input": {}
             }

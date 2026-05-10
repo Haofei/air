@@ -2533,23 +2533,68 @@ fn read_path<'a>(
     outputs: &'a State,
     path: &str,
 ) -> Result<&'a Value, RuntimeError> {
-    let normalized = normalize_path(path);
-    let mut segments = normalized.split('.');
-    let Some(first) = segments.next().filter(|segment| !segment.is_empty()) else {
+    let segments = path_segments(path);
+    let Some(first) = segments.first().filter(|segment| !segment.is_empty()) else {
         return Err(RuntimeError::MissingField(path.to_string()));
     };
 
     let mut value = read_field(state, outputs, first)?;
-    for segment in segments {
-        let Some(object) = value.as_object() else {
-            return Err(RuntimeError::MissingField(path.to_string()));
+    for segment in segments.iter().skip(1) {
+        value = match value {
+            Value::Object(object) => object
+                .get(segment)
+                .ok_or_else(|| RuntimeError::MissingField(path.to_string()))?,
+            Value::Array(array) => {
+                let index = segment
+                    .parse::<usize>()
+                    .map_err(|_| RuntimeError::MissingField(path.to_string()))?;
+                array
+                    .get(index)
+                    .ok_or_else(|| RuntimeError::MissingField(path.to_string()))?
+            }
+            _ => return Err(RuntimeError::MissingField(path.to_string())),
         };
-        value = object
-            .get(segment)
-            .ok_or_else(|| RuntimeError::MissingField(path.to_string()))?;
     }
 
     Ok(value)
+}
+
+fn path_segments(path: &str) -> Vec<String> {
+    let normalized = normalize_path(path);
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = normalized.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                segments.push(std::mem::take(&mut current));
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+                let mut index = String::new();
+                for nested in chars.by_ref() {
+                    if nested == ']' {
+                        break;
+                    }
+                    index.push(nested);
+                }
+                segments.push(index);
+                if matches!(chars.peek(), Some('.')) {
+                    chars.next();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() || normalized.ends_with('.') {
+        segments.push(current);
+    }
+
+    segments
 }
 
 fn normalize_path(path: &str) -> &str {
@@ -2709,6 +2754,25 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0]["patch"], json!("diff"));
+    }
+
+    #[test]
+    fn read_path_supports_array_index_segments() {
+        let mut state = State::new();
+        state.insert(
+            "observation".to_string(),
+            json!([{"tool": "file.ops", "status": "ok"}]),
+        );
+        let outputs = State::new();
+
+        assert_eq!(
+            read_path(&state, &outputs, "observation[0].tool").unwrap(),
+            &json!("file.ops")
+        );
+        assert_eq!(
+            read_path(&state, &outputs, "observation.0.status").unwrap(),
+            &json!("ok")
+        );
     }
 
     #[test]

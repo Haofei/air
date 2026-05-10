@@ -896,9 +896,11 @@ impl Verifier {
     }
 
     fn verify_path_ref(&mut self, rule_id: &str, label: &str, path: &str, module: &AirModule) {
-        let normalized = normalize_path(path);
-        let mut segments = normalized.split('.');
-        let Some(root) = segments.next().filter(|segment| !segment.trim().is_empty()) else {
+        let segments = path_segments(path);
+        let Some(root) = segments
+            .first()
+            .filter(|segment| !segment.trim().is_empty())
+        else {
             self.error(
                 "AIR085",
                 format!("{label} in rule {rule_id} has an empty expression path"),
@@ -910,7 +912,7 @@ impl Verifier {
             return;
         };
         let mut checked_path = root.to_string();
-        for segment in segments {
+        for segment in segments.iter().skip(1) {
             if segment.trim().is_empty() {
                 self.error(
                     "AIR085",
@@ -1132,11 +1134,16 @@ fn nested_property_type<'a>(spec: &'a TypeSpec, segment: &str) -> Option<&'a Typ
 }
 
 fn type_has_known_properties(spec: &TypeSpec) -> bool {
-    matches!(
-        spec,
-        TypeSpec::Detailed(detailed)
-            if matches!(detailed.kind, DetailedTypeKind::Object | DetailedTypeKind::Array)
-    )
+    match spec {
+        TypeSpec::Detailed(detailed) => match detailed.kind {
+            DetailedTypeKind::Object => {
+                !detailed.properties.is_empty() || !detailed.additional_properties
+            }
+            DetailedTypeKind::Array => detailed.items.is_some(),
+            _ => false,
+        },
+        TypeSpec::Shorthand(_) => false,
+    }
 }
 
 fn is_array_type(spec: Option<&TypeSpec>) -> bool {
@@ -1145,6 +1152,44 @@ fn is_array_type(spec: Option<&TypeSpec>) -> bool {
         Some(TypeSpec::Detailed(detailed))
             if detailed.kind == air_core::DetailedTypeKind::Array
     )
+}
+
+fn path_segments(path: &str) -> Vec<String> {
+    let normalized = normalize_path(path);
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = normalized.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                segments.push(std::mem::take(&mut current));
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+                let mut index = String::new();
+                for nested in chars.by_ref() {
+                    if nested == ']' {
+                        break;
+                    }
+                    index.push(nested);
+                }
+                segments.push(index);
+                if matches!(chars.peek(), Some('.')) {
+                    chars.next();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() || normalized.ends_with('.') {
+        segments.push(current);
+    }
+
+    segments
 }
 
 fn normalize_path(path: &str) -> &str {
