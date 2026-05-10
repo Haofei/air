@@ -8065,6 +8065,31 @@ process.stdin.on('end', () => {
     }
 
     #[test]
+    fn playwright_page_audit_rejects_empty_text_assertions() {
+        let dir = temp_dir("air-tools-playwright-page-audit-invalid-text");
+        fs::write(dir.join("audit.cjs"), "").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "browser.audit": {
+                  "kind": "playwright_page_audit",
+                  "script_path": "audit.cjs",
+                  "base_dir": ".",
+                  "required_text": ["ok", ""]
+                }
+              }
+            }"#,
+        );
+
+        let error = ConfigTools::from_file(config_path).unwrap_err();
+
+        assert!(error.to_string().contains("required_text"));
+        assert!(error.to_string().contains("must not be empty"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn web_fetch_config_validates_limits() {
         let dir = temp_dir("air-tools-web-fetch-config");
         let config_path = write_config(

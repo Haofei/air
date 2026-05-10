@@ -81,4 +81,33 @@ for (const screenshotPath of output.screenshot_paths) {
 assert.equal(output.viewports[0].horizontal_overflow, false);
 assert.equal(output.viewports[0].overlap_count, 0);
 assert(output.viewports[0].text_preview.includes('Rendered layout'));
+
+const failingChild = childProcess.spawnSync(
+  'node',
+  [path.join(root, 'scripts', 'playwright_page_audit.cjs')],
+  {
+    input: JSON.stringify({
+      path: pagePath,
+      screenshot_dir: screenshotDir,
+      viewports: [{ label: 'desktop', width: 1024, height: 768 }],
+      required_text: ['Missing product name'],
+      forbidden_text: ['Rendered layout'],
+      navigation_timeout_ms: 10000,
+    }),
+    encoding: 'utf8',
+    maxBuffer: 1024 * 1024,
+  }
+);
+
+if (failingChild.status !== 0) {
+  process.stderr.write(failingChild.stderr);
+  process.exit(failingChild.status || 1);
+}
+
+const failingOutput = JSON.parse(failingChild.stdout);
+assert.equal(failingOutput.success, false);
+assert.deepEqual(failingOutput.missing_required_text, ['Missing product name']);
+assert.deepEqual(failingOutput.present_forbidden_text, ['Rendered layout']);
+assert.deepEqual(failingOutput.diagnostics[0].missing_required_text, ['Missing product name']);
+assert.deepEqual(failingOutput.diagnostics[0].present_forbidden_text, ['Rendered layout']);
 console.log('[playwright-page-audit-fixture] ok');
