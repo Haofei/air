@@ -748,7 +748,9 @@ workflow:
         - kind: tool_call
           tool: git.diff
           input:
-            literal: {}
+            object:
+              files:
+                ref: repair_draft.changed_files
           output: workspace_diff
           timeout_seconds: 10
           retry:

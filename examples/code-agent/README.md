@@ -228,8 +228,9 @@ cargo run -p air-cli -- code "build a premium product landing page" \
 
 The wrapper only assembles the same typed input and runs the selected AIR recipe. The AIR module
 still owns permissions, bounded tool calls, trace, retry, and output schema. Repair outputs include
-both changed-file metadata and a bounded `workspace_diff` artifact so the actual patch is visible
-without replaying the trace. Use `--profile` to
+both changed-file metadata and a bounded `workspace_diff` artifact filtered to the files patched by
+the agent, so the actual patch is visible without replaying the trace or mixing in unrelated dirty
+workspace changes. Use `--profile` to
 select another coding recipe, and `--model-config` / `--tool-config` to override the profile's
 providers.
 

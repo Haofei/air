@@ -3577,6 +3577,17 @@ fn call_git_diff_tool(
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let (paths, has_filter) = git_diff_paths(name, input)?;
+    if has_filter && paths.is_empty() {
+        return Ok(git_diff_output(
+            &repo,
+            input,
+            &paths,
+            String::new(),
+            false,
+            0,
+        ));
+    }
     let mut command = Command::new("git");
     command.arg("-C").arg(&repo).arg("diff");
     if input
@@ -3586,7 +3597,6 @@ fn call_git_diff_tool(
     {
         command.arg("--staged");
     }
-    let paths = git_diff_paths(name, input)?;
     if !paths.is_empty() {
         command.arg("--");
         command.args(&paths);
@@ -3601,6 +3611,19 @@ fn call_git_diff_tool(
         )));
     }
     let (diff, truncated, bytes) = bytes_to_limited_text(&output.stdout, max_bytes);
+    Ok(git_diff_output(
+        &repo, input, &paths, diff, truncated, bytes,
+    ))
+}
+
+fn git_diff_output(
+    repo: &Path,
+    input: &Value,
+    paths: &[String],
+    diff: String,
+    truncated: bool,
+    bytes: usize,
+) -> Value {
     let artifact_id = format!(
         "git-diff:{}:{}:{}",
         repo.display(),
@@ -3610,7 +3633,7 @@ fn call_git_diff_tool(
             .unwrap_or(false),
         paths.join(",")
     );
-    Ok(json!({
+    json!({
         "repo": repo.display().to_string(),
         "diff": diff.clone(),
         "bytes": bytes,
@@ -3624,12 +3647,12 @@ fn call_git_diff_tool(
             "metadata": {
                 "provider": "git_diff",
                 "repo": repo.display().to_string(),
-                "paths": paths.clone(),
+                "paths": paths,
                 "bytes": bytes,
                 "truncated": truncated
             }
         }],
-    }))
+    })
 }
 
 fn call_git_status_tool(
@@ -5341,8 +5364,34 @@ fn resolve_config_path(config_dir: &Path, path: &Path) -> PathBuf {
     }
 }
 
-fn git_diff_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {
-    repo_tool_paths(tool_name, input)
+fn git_diff_paths(tool_name: &str, input: &Value) -> Result<(Vec<String>, bool), RuntimeError> {
+    let mut paths = repo_tool_paths(tool_name, input)?;
+    let mut has_filter = input.get("path").is_some() || input.get("paths").is_some();
+    if let Some(raw_files) = input.get("files") {
+        has_filter = true;
+        let raw_files = raw_files.as_array().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.files must be an array"))
+        })?;
+        for (index, file) in raw_files.iter().enumerate() {
+            let path = if let Some(path) = file.as_str() {
+                path
+            } else {
+                file.as_object()
+                    .and_then(|object| object.get("path"))
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| {
+                        RuntimeError::Provider(format!(
+                            "tool {tool_name} input.files[{index}] must be a string or object with path"
+                        ))
+                    })?
+            };
+            validate_git_pathspec(tool_name, path)?;
+            paths.push(path.to_string());
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    Ok((paths, has_filter))
 }
 
 fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {
@@ -7647,6 +7696,66 @@ mod tests {
             .unwrap()
             .contains("note.txt"));
         assert_eq!(tools.tool_capability("git.diff"), Some("code.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn git_diff_accepts_patch_file_objects_and_empty_filters() {
+        let dir = temp_dir("air-tools-git-diff-files");
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .arg("init")
+            .output()
+            .unwrap();
+        fs::write(dir.join("agent.txt"), "before\n").unwrap();
+        fs::write(dir.join("user.txt"), "keep\n").unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["add", "agent.txt", "user.txt"])
+            .output()
+            .unwrap();
+        Command::new("git")
+            .arg("-C")
+            .arg(&dir)
+            .args(["commit", "-m", "init"])
+            .env("GIT_AUTHOR_NAME", "AIR")
+            .env("GIT_AUTHOR_EMAIL", "air@example.com")
+            .env("GIT_COMMITTER_NAME", "AIR")
+            .env("GIT_COMMITTER_EMAIL", "air@example.com")
+            .output()
+            .unwrap();
+        fs::write(dir.join("agent.txt"), "after\n").unwrap();
+        fs::write(dir.join("user.txt"), "dirty user change\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "git.diff": {
+                  "kind": "git_diff",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "git.diff",
+                &json!({"files": [{"path": "agent.txt", "kind": "modify"}]}),
+            )
+            .unwrap();
+
+        let diff = output["diff"].as_str().unwrap();
+        assert!(diff.contains("agent.txt"));
+        assert!(diff.contains("+after"));
+        assert!(!diff.contains("user.txt"));
+
+        let empty = tools.call_tool("git.diff", &json!({"files": []})).unwrap();
+        assert_eq!(empty["diff"], json!(""));
+        assert_eq!(empty["bytes"], json!(0));
         let _ = fs::remove_dir_all(dir);
     }
 

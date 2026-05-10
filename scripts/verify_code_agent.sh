@@ -219,12 +219,16 @@ grep -q "examples/code-agent/repair-multifile/math.js:4:10: error:" \
 
 echo "[code-agent] core explore-repair offline run"
 repair_fixture_backup="$(mktemp)"
+repair_fixture_user_dirty_backup="$(mktemp)"
 cp examples/code-agent/repair-fixture/math.js "$repair_fixture_backup"
+cp examples/code-agent/repair-fixture/test.js "$repair_fixture_user_dirty_backup"
 restore_core_repair_fixture() {
   cp "$repair_fixture_backup" examples/code-agent/repair-fixture/math.js
-  rm -f "$repair_fixture_backup"
+  cp "$repair_fixture_user_dirty_backup" examples/code-agent/repair-fixture/test.js
+  rm -f "$repair_fixture_backup" "$repair_fixture_user_dirty_backup"
 }
 trap restore_core_repair_fixture EXIT
+printf "\n// pre-existing user dirty change that repair diff must not include\n" >> examples/code-agent/repair-fixture/test.js
 cargo run -q -p air-cli -- run-plan --profile examples/code-agent/repair-core.air-profile.yaml \
   --trace-out target/generated/code_agent_repair_core.trace.jsonl \
   > target/generated/code_agent_repair_core.output.json
@@ -248,6 +252,7 @@ assert repair["patch_applied"] is True, repair
 assert repair["changed_files"], repair
 assert repair["workspace_changed_files"], repair
 assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
+assert "examples/code-agent/repair-fixture/test.js" not in repair["workspace_diff"]["diff"], repair
 assert any(
     event.get("action") == "model_call"
     and event.get("meta", {}).get("model") == "code_explorer"
