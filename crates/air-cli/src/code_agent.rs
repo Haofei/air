@@ -1416,6 +1416,12 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "max_tasks": options.max_tasks,
                     "executed_tasks": 0,
                     "remaining_task_ids": code_project_task_ids(&tasks),
+                    "budget": {
+                        "task_count": 0,
+                        "max_estimated_model_calls": 0,
+                        "max_estimated_tool_calls": 0,
+                        "tasks": [],
+                    },
                     "acceptance": [],
                     "executions": [{
                         "completed": false,
@@ -1430,6 +1436,22 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .iter()
         .map(|task| Value::String(task.id.clone()))
         .collect::<Vec<_>>();
+    let project_budget = code_project_budget_summary(&scheduled_tasks);
+    let task_budget_by_id = project_budget
+        .get("tasks")
+        .and_then(Value::as_array)
+        .map(|tasks| {
+            tasks
+                .iter()
+                .filter_map(|budget| {
+                    budget
+                        .get("task_id")
+                        .and_then(Value::as_str)
+                        .map(|id| (id.to_string(), budget.clone()))
+                })
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
 
     let mut acceptance_events = Vec::new();
     let mut acceptance_step = 0u32;
@@ -1469,6 +1491,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "task_id": task_id,
                     "title": title,
                     "completed": false,
+                    "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
                     "error": error.to_string(),
                 }));
                 break;
@@ -1481,6 +1504,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 "task_id": task_id,
                 "title": title,
                 "recipe": recipe_name(recipe),
+                "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
                 "completed": false,
                 "error": "planned task is missing input object",
             }));
@@ -1546,6 +1570,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "title": title,
                     "recipe": recipe_name(recipe),
                     "depends_on": task.depends_on.clone(),
+                    "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
                     "completed": task_completed,
                     "acceptance": acceptance,
                     "outputs": outputs,
@@ -1565,6 +1590,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                     "title": title,
                     "recipe": recipe_name(recipe),
                     "depends_on": task.depends_on.clone(),
+                    "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
                     "completed": false,
                     "error": error.to_string(),
                 });
@@ -1636,6 +1662,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "resumed_from_turn": resumed_from_turn,
             "scheduled_task_ids": scheduled_task_ids,
             "remaining_task_ids": remaining_task_ids,
+            "budget": project_budget,
             "acceptance": project_acceptance,
             "executions": executions,
         },
@@ -1748,6 +1775,81 @@ fn code_project_task_schedule(tasks: &[Value]) -> Result<Vec<CodeProjectSchedule
     }
 
     Ok(scheduled)
+}
+
+fn code_project_budget_summary(tasks: &[CodeProjectScheduledTask]) -> Value {
+    let task_budgets = tasks
+        .iter()
+        .map(code_project_task_budget)
+        .collect::<Vec<_>>();
+    let max_estimated_model_calls = task_budgets
+        .iter()
+        .filter_map(|budget| budget.get("max_estimated_model_calls"))
+        .filter_map(Value::as_u64)
+        .sum::<u64>();
+    let max_estimated_tool_calls = task_budgets
+        .iter()
+        .filter_map(|budget| budget.get("max_estimated_tool_calls"))
+        .filter_map(Value::as_u64)
+        .sum::<u64>();
+
+    json!({
+        "task_count": tasks.len(),
+        "max_estimated_model_calls": max_estimated_model_calls,
+        "max_estimated_tool_calls": max_estimated_tool_calls,
+        "tasks": task_budgets,
+    })
+}
+
+fn code_project_task_budget(task: &CodeProjectScheduledTask) -> Value {
+    let recipe = match task_recipe(&task.definition) {
+        Ok(recipe) => recipe,
+        Err(error) => {
+            return json!({
+                "task_id": task.id.clone(),
+                "depends_on": task.depends_on.clone(),
+                "error": error.to_string(),
+            });
+        }
+    };
+    let profile = default_profile(recipe);
+    let metadata_profile = code_profile_metadata_path(&profile);
+    match explain_metadata_for_profile(&metadata_profile) {
+        Ok(metadata) => json!({
+            "task_id": task.id.clone(),
+            "recipe": recipe_name(recipe),
+            "profile": path_ref_to_input_string(&profile),
+            "plan": path_ref_to_input_string(&metadata.plan),
+            "store": path_ref_to_input_string(&metadata.store),
+            "depends_on": task.depends_on.clone(),
+            "capabilities": metadata.capabilities,
+            "read_only": metadata.read_only,
+            "writes_workspace": metadata.writes_workspace,
+            "max_estimated_model_calls": metadata.max_estimated_model_calls,
+            "max_estimated_tool_calls": metadata.max_estimated_tool_calls,
+        }),
+        Err(error) => json!({
+            "task_id": task.id.clone(),
+            "recipe": recipe_name(recipe),
+            "profile": path_ref_to_input_string(&profile),
+            "depends_on": task.depends_on.clone(),
+            "error": error.to_string(),
+        }),
+    }
+}
+
+fn code_profile_metadata_path(profile: &Path) -> PathBuf {
+    if profile.is_absolute() || profile.exists() {
+        return profile.to_path_buf();
+    }
+    let workspace_profile = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join(profile);
+    if workspace_profile.exists() {
+        workspace_profile
+    } else {
+        profile.to_path_buf()
+    }
 }
 
 fn prior_executions_completed(executions: &[Value]) -> bool {
@@ -3244,6 +3346,64 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(ids, vec!["plan", "build", "package"]);
+    }
+
+    #[test]
+    fn project_budget_summary_reports_task_profiles_and_totals() {
+        let tasks = vec![
+            json!({
+                "id": "inspect",
+                "depends_on": [],
+                "recipe": "explore",
+                "input": {}
+            }),
+            json!({
+                "id": "fix",
+                "depends_on": ["inspect"],
+                "recipe": "repair",
+                "input": {}
+            }),
+        ];
+        let schedule = code_project_task_schedule(&tasks).unwrap();
+
+        let budget = code_project_budget_summary(&schedule);
+        let task_budgets = budget["tasks"].as_array().unwrap();
+        let model_total = task_budgets
+            .iter()
+            .map(|item| item["max_estimated_model_calls"].as_u64().unwrap())
+            .sum::<u64>();
+        let tool_total = task_budgets
+            .iter()
+            .map(|item| item["max_estimated_tool_calls"].as_u64().unwrap())
+            .sum::<u64>();
+
+        assert_eq!(budget["task_count"], Value::from(2));
+        assert_eq!(
+            budget["max_estimated_model_calls"],
+            Value::from(model_total)
+        );
+        assert_eq!(budget["max_estimated_tool_calls"], Value::from(tool_total));
+        assert_eq!(
+            task_budgets[0]["task_id"],
+            Value::String("inspect".to_string())
+        );
+        assert_eq!(
+            task_budgets[0]["recipe"],
+            Value::String("explore".to_string())
+        );
+        assert_eq!(task_budgets[1]["task_id"], Value::String("fix".to_string()));
+        assert_eq!(
+            task_budgets[1]["recipe"],
+            Value::String("repair".to_string())
+        );
+        assert_eq!(
+            task_budgets[1]["depends_on"],
+            Value::Array(vec![Value::String("inspect".to_string())])
+        );
+        assert!(task_budgets[0]["read_only"].as_bool().unwrap());
+        assert!(task_budgets[1]["writes_workspace"].as_bool().unwrap());
+        assert!(model_total > 0);
+        assert!(tool_total > 0);
     }
 
     #[test]

@@ -177,6 +177,14 @@ assert [item["recipe"] for item in project["executions"]] == ["explore", "explor
 assert all(item["completed"] for item in project["executions"]), project
 assert all(item["acceptance"] for item in project["executions"]), project
 assert all(item["acceptance"][0]["success"] for item in project["executions"]), project
+budget = project["budget"]
+assert budget["task_count"] == len(project["scheduled_task_ids"]), budget
+assert budget["max_estimated_model_calls"] > 0, budget
+assert budget["max_estimated_tool_calls"] > 0, budget
+assert len(budget["tasks"]) == len(project["scheduled_task_ids"]), budget
+assert [item["task_id"] for item in budget["tasks"]] == project["scheduled_task_ids"], budget
+assert all(item["budget"]["max_estimated_model_calls"] > 0 for item in project["executions"]), project
+assert all(item["budget"]["max_estimated_tool_calls"] > 0 for item in project["executions"]), project
 trace_files = [Path(path) for path in output["trace_files"]]
 assert len(trace_files) == 4, trace_files
 assert any(path.name.endswith(".acceptance.jsonl") for path in trace_files), trace_files
@@ -226,6 +234,7 @@ with open("target/generated/code_project_resume.first.output.json", encoding="ut
 assert first["project"]["status"] == "max_tasks_exhausted", first["project"]
 assert first["project"]["executed_tasks"] == 2, first["project"]
 assert first["project"]["executed_this_run"] == 2, first["project"]
+assert first["project"]["budget"]["task_count"] == len(first["project"]["scheduled_task_ids"]), first["project"]
 
 with open("target/generated/code_project_resume.second.output.json", encoding="utf-8") as handle:
     second = json.load(handle)
@@ -237,6 +246,8 @@ assert project["executed_tasks"] == 4, project
 assert project["executed_this_run"] == 2, project
 assert [item["task_id"] for item in project["executions"]] == ["t1", "t2", "t3", "t4"], project
 assert project["remaining_task_ids"] == [], project
+assert project["budget"]["task_count"] == len(project["scheduled_task_ids"]), project
+assert project["budget"]["max_estimated_model_calls"] > 0, project
 trace_files = [Path(path) for path in second["trace_files"]]
 assert trace_files, second
 assert all(".plan." not in path.name for path in trace_files), trace_files
@@ -356,6 +367,8 @@ assert project["scheduled_task_ids"] == ["t1", "t2"], project
 assert [item["task_id"] for item in project["executions"]] == ["t1", "t2"], project
 assert project["executions"][1]["depends_on"] == ["t1"], project
 assert project["remaining_task_ids"] == [], project
+assert [item["task_id"] for item in project["budget"]["tasks"]] == ["t1", "t2"], project
+assert project["executions"][1]["budget"]["depends_on"] == ["t1"], project
 trace_files = [Path(path) for path in output["trace_files"]]
 assert len(trace_files) == 3, trace_files
 assert all(path.exists() for path in trace_files), trace_files
@@ -459,6 +472,8 @@ assert project["completed"] is False, project
 assert project["executions"][0]["task_id"] == "t1", project
 assert project["executions"][0]["completed"] is False, project
 assert project["executions"][0]["acceptance"][0]["success"] is False, project
+assert project["budget"]["task_count"] == 1, project
+assert project["executions"][0]["budget"]["task_id"] == "t1", project
 recovery = output["recovery"]
 assert recovery["status"] == "stopped", recovery
 assert recovery["failed_task_id"] == "t1", recovery

@@ -409,6 +409,10 @@ assert project_recovery["status"] == "completed", project_recovery
 assert project_recovery["completed"] is True, project_recovery
 assert project_recovery["executed_this_run"] == 1, project_recovery
 assert [item["task_id"] for item in project_recovery["executions"]] == ["fix-t1"], project_recovery
+assert project_recovery["budget"]["task_count"] == 1, project_recovery
+assert project_recovery["budget"]["max_estimated_model_calls"] > 0, project_recovery
+assert project_recovery["budget"]["max_estimated_tool_calls"] > 0, project_recovery
+assert project_recovery["executions"][0]["budget"]["recipe"] == "repair", project_recovery
 project_repair = project_recovery["executions"][0]["outputs"]["repair"]
 assert project_repair["final_success"] is True, project_repair
 assert project_repair["patch_applied"] is True, project_repair
@@ -503,6 +507,12 @@ cases = route_cases + [
             "recovery_context_injected": "AIR project recovery context"
             in project_session["turns"][1]["input"]["task"],
             "executed_this_run": project_recovery["executed_this_run"],
+            "max_estimated_model_calls": project_recovery["budget"][
+                "max_estimated_model_calls"
+            ],
+            "max_estimated_tool_calls": project_recovery["budget"][
+                "max_estimated_tool_calls"
+            ],
             "repair_final_success": project_repair["final_success"],
             "repair_patch_applied": project_repair["patch_applied"],
             "workspace_diff_bytes": project_repair["workspace_diff"]["bytes"],
@@ -560,6 +570,12 @@ summary = {
         in project_session["turns"][1]["input"]["task"],
         "repair_final_success": project_repair["final_success"],
         "repair_patch_applied": project_repair["patch_applied"],
+        "max_estimated_model_calls": project_recovery["budget"][
+            "max_estimated_model_calls"
+        ],
+        "max_estimated_tool_calls": project_recovery["budget"][
+            "max_estimated_tool_calls"
+        ],
     },
 }
 
