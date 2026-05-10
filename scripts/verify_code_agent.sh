@@ -502,6 +502,135 @@ assert "missing-alias" in task, task
 assert "target/generated/code_project_fail.session.forks/turn1.failed.json" in task, task
 PY
 
+cat > target/generated/code_project_recover_model_fixtures.json <<'JSON'
+{
+  "fixtures": {
+    "project_planner": {
+      "summary": "Fixture recovery project plan: use the prior failed execution context to run a bounded repair task.",
+      "scope": {
+        "goal": "Recover from the stopped project execution by repairing the failing fixture and verifying it.",
+        "non_goals": [],
+        "assumptions": ["The previous stopped turn identified t1 and its failing acceptance context."]
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "title": "Recovery repair",
+          "objective": "Run the repair recipe against the failed fixture.",
+          "task_ids": ["fix-t1"]
+        }
+      ],
+      "tasks": [
+        {
+          "id": "fix-t1",
+          "title": "Repair failed project task",
+          "description": "Use recovery context to repair the failing math fixture and retest it.",
+          "kind": "repair",
+          "recipe": "repair",
+          "input": {
+            "task": "Repair the failing add implementation from the prior project recovery context.",
+            "query": "repair fixture add function",
+            "target_path": "examples/code-agent/repair-fixture/math.js",
+            "related_files": ["examples/code-agent/repair-fixture/test.js"],
+            "test_command": "repair_fixture_test"
+          },
+          "depends_on": [],
+          "files": ["examples/code-agent/repair-fixture/math.js"],
+          "acceptance": []
+        }
+      ],
+      "files": [
+        {
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "purpose": "Fix the failed project task.",
+          "change_type": "modify"
+        }
+      ],
+      "acceptance": [],
+      "risks": [],
+      "source_ids": ["docs-code-agent-loop"],
+      "next_steps": ["Verify the repair output and continue remaining project tasks if any."]
+    },
+    "code_explorer": {
+      "summary": "Fixture exploration completed for recovery repair.",
+      "relevant_files": [
+        {
+          "path": "examples/code-agent/repair-fixture/math.js",
+          "reason": "The failed implementation under repair."
+        },
+        {
+          "path": "examples/code-agent/repair-fixture/test.js",
+          "reason": "The allowlisted test documents expected add behavior."
+        }
+      ],
+      "findings": [
+        {
+          "title": "add should sum its operands",
+          "evidence": "The repair fixture test expects add(2, 3) to equal 5.",
+          "source_ids": ["docs-repair-safety"]
+        }
+      ],
+      "source_ids": ["docs-repair-safety"],
+      "next_steps": ["Patch math.js and rerun repair_fixture_test."]
+    },
+    "code_repair_context_selector": {
+      "target_path": "examples/code-agent/repair-fixture/math.js",
+      "related_files": ["examples/code-agent/repair-fixture/test.js"],
+      "rationale": "The test file is the minimal related context needed to repair add."
+    },
+    "code_repairer": {
+      "patch": "diff --git a/examples/code-agent/repair-fixture/math.js b/examples/code-agent/repair-fixture/math.js\n--- a/examples/code-agent/repair-fixture/math.js\n+++ b/examples/code-agent/repair-fixture/math.js\n@@ -1,5 +1,5 @@\n function add(a, b) {\n-  return a - b;\n+  return a + b;\n }\n \n module.exports = { add };\n",
+      "rationale": "The failed diagnostic shows add subtracts instead of summing; replace subtraction with addition."
+    }
+  }
+}
+JSON
+echo "[code-agent] project recovery replans and executes repair"
+recovery_repair_backup="$(mktemp)"
+cp examples/code-agent/repair-fixture/math.js "$recovery_repair_backup"
+restore_recovery_repair_fixture() {
+  cp "$recovery_repair_backup" examples/code-agent/repair-fixture/math.js
+  rm -f "$recovery_repair_backup"
+}
+trap restore_recovery_repair_fixture EXIT
+cargo run -q -p air-cli -- code "recover and repair the failed project execution" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 1 \
+  --query "code agent project failure recovery" \
+  --model-config target/generated/code_project_recover_model_fixtures.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --session target/generated/code_project_fail.session.json \
+  > target/generated/code_project_recover.output.json
+node examples/code-agent/repair-fixture/test.js > target/generated/code_project_recover.post_test.log
+restore_recovery_repair_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_recover.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+project = output["project"]
+assert project["status"] == "completed", project
+assert project["completed"] is True, project
+assert project["executed_this_run"] == 1, project
+assert project["resumed_from_turn"] is None, project
+assert [item["task_id"] for item in project["executions"]] == ["fix-t1"], project
+repair = project["executions"][0]["outputs"]["repair"]
+assert repair["final_success"] is True, repair
+assert repair["patch_applied"] is True, repair
+assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
+
+with open("target/generated/code_project_fail.session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
+assert len(session["turns"]) == 2, session
+assert session["turns"][0]["outputs"]["project"]["status"] == "stopped", session
+assert session["turns"][1]["outputs"]["project"]["status"] == "completed", session
+task = session["turns"][1]["input"]["task"]
+assert "AIR project recovery context from previous failed execution" in task, task
+PY
+
 echo "[code-agent] user-facing code command explain"
 cargo run -q -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \
