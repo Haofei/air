@@ -910,6 +910,7 @@ pub(super) fn call_file_edit_tool(
     let input_path = required_input_string(name, input, "path")?;
     validate_git_pathspec(name, input_path)?;
     let operations = parse_file_edit_operations(name, input, allow_replace_all)?;
+    let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
 
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
     let candidate = base.join(input_path);
@@ -966,11 +967,23 @@ pub(super) fn call_file_edit_tool(
     }
     let (diff_content, diff_truncated, diff_bytes) =
         bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
-    fs::write(&path, updated_bytes)
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
+    if !dry_run {
+        fs::write(&path, updated_bytes)
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
+    }
 
     Ok(json!({
+        "repo": base.display().to_string(),
         "path": path.display().to_string(),
+        "success": true,
+        "checked": true,
+        "applied": !dry_run,
+        "files": [{
+            "path": input_path,
+            "kind": "existing"
+        }],
+        "file_count": 1,
+        "diagnostics": [],
         "bytes": updated_bytes.len(),
         "replacements": total_replacements,
         "edit_count": operations.len(),
@@ -990,6 +1003,11 @@ pub(super) fn call_file_edit_tool(
             "metadata": {
                 "provider": "file_edit",
                 "path": path.display().to_string(),
+                "repo": base.display().to_string(),
+                "success": true,
+                "checked": true,
+                "applied": !dry_run,
+                "dry_run": dry_run,
                 "bytes": updated_bytes.len(),
                 "replacements": total_replacements,
                 "edit_count": operations.len(),

@@ -922,6 +922,61 @@ fn file_edit_replaces_unique_string_after_read() {
 }
 
 #[test]
+fn file_edit_dry_run_checks_without_writing() {
+    let dir = temp_dir("air-tools-file-edit-dry-run");
+    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.edit",
+            &json!({
+                "path": "note.txt",
+                "old_string": "AIR",
+                "new_string": "agent IR",
+                "dry_run": true
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "hello AIR\n"
+    );
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["checked"], json!(true));
+    assert_eq!(output["applied"], json!(false));
+    assert_eq!(output["file_count"], json!(1));
+    assert_eq!(output["diagnostics"], json!([]));
+    assert_eq!(output["files"][0]["path"], json!("note.txt"));
+    assert_eq!(output["artifacts"][0]["metadata"]["dry_run"], json!(true));
+    assert!(output["diff"].as_str().unwrap().contains("-AIR"));
+    assert!(output["diff"].as_str().unwrap().contains("+agent IR"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_edit_applies_multiple_edits_after_read() {
     let dir = temp_dir("air-tools-file-edit-multiple-ops");
     fs::write(

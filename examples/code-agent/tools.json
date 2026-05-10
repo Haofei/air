@@ -63,6 +63,14 @@
       "max_context_lines": 8,
       "max_bytes": 32768
     },
+    "file.edit": {
+      "kind": "file_edit",
+      "capability": "file.write",
+      "base_dir": "../..",
+      "require_read": true,
+      "allow_replace_all": false,
+      "max_bytes": 65536
+    },
     "repo.files": {
       "kind": "repo_files",
       "capability": "code.read",
