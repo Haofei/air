@@ -462,6 +462,9 @@ fn estimate_module_call_budget(module: &air_core::AirModule) -> CallBudget {
                 .map(|action| match action {
                     StateAction::ToolCall { retry, .. } => retry_attempts(retry),
                     StateAction::ToolDispatch { retry, .. } => retry_attempts(retry),
+                    StateAction::ToolBatchDispatch {
+                        retry, max_calls, ..
+                    } => retry_attempts(retry).saturating_mul(*max_calls as usize),
                     _ => 0,
                 })
                 .sum::<usize>()

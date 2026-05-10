@@ -1,0 +1,16 @@
+{
+  "choices": [
+    {
+      "tool": "docs.search",
+      "input": {
+        "query": "alpha"
+      }
+    },
+    {
+      "tool": "docs.search",
+      "input": {
+        "query": "beta"
+      }
+    }
+  ]
+}

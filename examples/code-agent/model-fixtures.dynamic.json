@@ -4,48 +4,60 @@
       "$sequence": [
         {
           "complete": false,
-          "tool": "repo.search",
-          "input": {
-            "query": "tool_dispatch",
-            "mode": "fixed",
-            "max_matches": 20
-          },
-          "rationale": "Search for the new governed dispatch action before summarizing how the kernel handles it."
+          "tool_calls": [
+            {
+              "tool": "repo.search",
+              "input": {
+                "query": "tool_batch_dispatch",
+                "mode": "fixed",
+                "max_matches": 20
+              }
+            },
+            {
+              "tool": "repo.context",
+              "input": {
+                "query": "ToolBatchDispatch",
+                "mode": "fixed",
+                "context_lines": 3,
+                "max_matches": 5
+              }
+            }
+          ],
+          "rationale": "Search for the governed batch dispatch action and gather nearby implementation context before summarizing how the kernel handles it."
         },
         {
           "complete": true,
-          "tool": "repo.search",
-          "input": {},
-          "rationale": "The first observation is enough for the fixture run; summarize the bounded dispatch behavior."
+          "tool_calls": [],
+          "rationale": "The first batch observation is enough for the fixture run; summarize the bounded dispatch behavior."
         }
       ]
     },
     "code_dynamic_summarizer": {
-      "summary": "Fixture dynamic exploration completed: the model selected repo.search through tool_dispatch, and AIR executed only the declared read-only tool under capability and budget checks.",
+      "summary": "Fixture dynamic exploration completed: the model selected a bounded read-only tool batch, and AIR executed only declared tools under capability, budget, and repeated-call checks.",
       "relevant_files": [
         {
           "path": "crates/air-core/src/lib.rs",
-          "reason": "Defines the tool_dispatch state action as part of the AIR IR."
+          "reason": "Defines governed dynamic dispatch actions as part of the AIR IR."
         },
         {
           "path": "crates/air-runtime/src/lib.rs",
-          "reason": "Executes model-selected tool dispatch through the same governed path as static tool_call."
+          "reason": "Executes model-selected tool batches through the same governed path as static tool_call."
         },
         {
           "path": "crates/air-verify/src/lib.rs",
-          "reason": "Verifies tool_dispatch inputs, outputs, timeouts, retries, and approval-path requirements."
+          "reason": "Verifies dynamic dispatch inputs, outputs, timeouts, retries, bounds, and approval-path requirements."
         }
       ],
       "findings": [
         {
-          "title": "Dynamic tool choice stays inside AIR contracts",
-          "evidence": "tool_dispatch accepts a typed {tool, input} choice, but runtime still rejects undeclared tools, mismatched capabilities, over-budget calls, schema-invalid outputs, and unsafe phase writes.",
+          "title": "Dynamic tool batches stay inside AIR contracts",
+          "evidence": "tool_batch_dispatch accepts typed {tool, input} choices, but runtime still rejects undeclared tools, mismatched capabilities, over-budget calls, repeated identical calls, schema-invalid outputs, and unsafe phase writes.",
           "source_ids": []
         }
       ],
       "source_ids": [],
       "next_steps": [
-        "Use this pattern to replace fixed read-only gathering stages with a bounded plan-act-observe loop.",
+        "Use this pattern to replace fixed read-only gathering stages with a bounded plan-act-observe batch loop.",
         "Keep write tools out of dynamic dispatch until a module has an explicit approval path and narrow patch policy."
       ]
     }

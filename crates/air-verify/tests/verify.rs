@@ -74,6 +74,42 @@ fn accepts_tool_dispatch_actions() {
 }
 
 #[test]
+fn accepts_tool_batch_dispatch_actions() {
+    let module = parse_air_file("../../tests/agents/tool-batch-dispatch.air.yaml").unwrap();
+    let report = verify(&module);
+
+    assert!(
+        report.is_success(),
+        "expected success, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn rejects_zero_tool_batch_dispatch_bound() {
+    let mut module = parse_air_file("../../tests/agents/tool-batch-dispatch.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    for action in workflow.rules.iter_mut().flat_map(|rule| &mut rule.actions) {
+        if let air_core::StateAction::ToolBatchDispatch { max_calls, .. } = action {
+            *max_calls = 0;
+        }
+    }
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR097"),
+        "expected AIR097, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_repeated_tool_call_policy() {
     let module = parse_air_file("../../tests/agents/repeated-tool-call.air.yaml").unwrap();
     let report = verify(&module);

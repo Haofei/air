@@ -136,6 +136,9 @@ pub enum RuntimeError {
     #[error("policy.max_tool_calls exceeded: limit={limit} attempted={attempted}")]
     ToolCallLimitExceeded { limit: u32, attempted: u32 },
 
+    #[error("tool_batch_dispatch max_calls exceeded: limit={limit} attempted={attempted}")]
+    ToolBatchDispatchLimitExceeded { limit: u32, attempted: u32 },
+
     #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
     ModelCallLimitExceeded { limit: u32, attempted: u32 },
 
@@ -859,6 +862,25 @@ where
                     },
                 )?;
             }
+            StateAction::ToolBatchDispatch {
+                input,
+                output,
+                timeout_seconds,
+                max_calls,
+                retry,
+            } => {
+                let batch = resolve_input(context.state, context.outputs, input)?;
+                self.execute_tool_batch_dispatch(
+                    context,
+                    ToolBatchExecution {
+                        input: batch,
+                        output,
+                        timeout_seconds: *timeout_seconds,
+                        max_calls: *max_calls,
+                        retry,
+                    },
+                )?;
+            }
             StateAction::Approval { approval_for } => {
                 if let Err(error) = validate_approval_capabilities(context.module, approval_for) {
                     context.push_event_with_meta(
@@ -1109,6 +1131,205 @@ where
             );
             return Ok(());
         }
+        Ok(())
+    }
+
+    fn execute_tool_batch_dispatch(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        batch: ToolBatchExecution<'_>,
+    ) -> Result<(), RuntimeError> {
+        let ToolBatchExecution {
+            input,
+            output,
+            timeout_seconds,
+            max_calls,
+            retry,
+        } = batch;
+        reject_control_field_write("tool_batch_dispatch", output)?;
+        let dispatches = resolve_tool_batch_dispatch(&input)?;
+        let attempted = dispatches.len() as u32;
+        if attempted > max_calls {
+            let error = RuntimeError::ToolBatchDispatchLimitExceeded {
+                limit: max_calls,
+                attempted,
+            };
+            context.push_event_with_meta(
+                "tool_batch_dispatch",
+                Some(input),
+                None,
+                Some(json!({"max_calls": max_calls, "attempted": attempted})),
+                Err(error.to_string()),
+            );
+            return Err(error);
+        }
+
+        let max_attempts = retry
+            .as_ref()
+            .map(|retry| retry.max_attempts)
+            .unwrap_or(1)
+            .max(1);
+        let mut results = Vec::new();
+        for (index, (tool, tool_input)) in dispatches.into_iter().enumerate() {
+            if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
+                context.push_event_with_meta(
+                    "tool_batch_dispatch_item",
+                    None,
+                    None,
+                    Some(json!({"tool": tool, "index": index})),
+                    Err(error.to_string()),
+                );
+                return Err(error);
+            }
+            enforce_repeated_tool_policy(context, "tool_batch_dispatch_item", &tool, &tool_input)?;
+            let mut item_output = None;
+            for attempt in 1..=max_attempts {
+                if let Some(limit) = context.module.policy.max_tool_calls {
+                    let attempted = *context.tool_calls + 1;
+                    if attempted > limit {
+                        let error = RuntimeError::ToolCallLimitExceeded { limit, attempted };
+                        let mut meta = tool_call_result_meta(
+                            &tool,
+                            attempt,
+                            max_attempts,
+                            output,
+                            timeout_seconds,
+                            0,
+                            false,
+                        );
+                        insert_batch_item_meta(&mut meta, index);
+                        context.push_event_with_meta(
+                            "tool_batch_dispatch_item",
+                            Some(tool_input.clone()),
+                            None,
+                            Some(meta),
+                            Err(error.to_string()),
+                        );
+                        return Err(error);
+                    }
+                }
+                *context.tool_calls += 1;
+                let mut start_meta =
+                    tool_call_meta(&tool, attempt, max_attempts, output, timeout_seconds);
+                insert_batch_item_meta(&mut start_meta, index);
+                context.push_event_with_meta(
+                    "tool_batch_dispatch_item_start",
+                    Some(tool_input.clone()),
+                    None,
+                    Some(start_meta),
+                    Ok(()),
+                );
+                let attempt_started_at = Instant::now();
+                let result = match self.tools.call_tool_with_timeout(
+                    &tool,
+                    &tool_input,
+                    Duration::from_secs(timeout_seconds),
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        let is_final_attempt = attempt == max_attempts;
+                        let mut meta = tool_call_result_meta(
+                            &tool,
+                            attempt,
+                            max_attempts,
+                            output,
+                            timeout_seconds,
+                            attempt_started_at.elapsed().as_millis(),
+                            !is_final_attempt,
+                        );
+                        insert_batch_item_meta(&mut meta, index);
+                        context.push_event_with_meta(
+                            "tool_batch_dispatch_item",
+                            Some(tool_input.clone()),
+                            None,
+                            Some(meta),
+                            Err(error.to_string()),
+                        );
+                        if is_final_attempt {
+                            return Err(error);
+                        }
+                        continue;
+                    }
+                };
+                if let Some(error) = action_timeout_error(
+                    "tool_batch_dispatch_item",
+                    timeout_seconds,
+                    attempt_started_at,
+                ) {
+                    let is_final_attempt = attempt == max_attempts;
+                    let mut meta = tool_call_result_meta(
+                        &tool,
+                        attempt,
+                        max_attempts,
+                        output,
+                        timeout_seconds,
+                        attempt_started_at.elapsed().as_millis(),
+                        !is_final_attempt,
+                    );
+                    insert_batch_item_meta(&mut meta, index);
+                    context.push_event_with_meta(
+                        "tool_batch_dispatch_item",
+                        Some(tool_input.clone()),
+                        Some(result),
+                        Some(meta),
+                        Err(error.to_string()),
+                    );
+                    if is_final_attempt {
+                        return Err(error);
+                    }
+                    continue;
+                }
+
+                let artifact_ids = register_artifacts(context.artifact_registry, &result);
+                let mut meta = tool_call_result_meta(
+                    &tool,
+                    attempt,
+                    max_attempts,
+                    output,
+                    timeout_seconds,
+                    attempt_started_at.elapsed().as_millis(),
+                    false,
+                );
+                insert_batch_item_meta(&mut meta, index);
+                insert_artifact_result_meta(&mut meta, &artifact_ids);
+                context.push_event_with_meta(
+                    "tool_batch_dispatch_item",
+                    Some(tool_input.clone()),
+                    Some(result.clone()),
+                    Some(meta),
+                    Ok(()),
+                );
+                item_output = Some(json!({
+                    "tool": tool,
+                    "input": tool_input,
+                    "output": result,
+                }));
+                break;
+            }
+            if let Some(item_output) = item_output {
+                results.push(item_output);
+            }
+        }
+
+        let output_value = Value::Array(results);
+        if let Err(error) = validate_output(context.module, output, &output_value) {
+            context.push_event_with_meta(
+                "tool_batch_dispatch",
+                Some(input),
+                Some(output_value),
+                Some(json!({"count": attempted, "max_calls": max_calls})),
+                Err(error.to_string()),
+            );
+            return Err(error);
+        }
+        context.state.insert(output.to_string(), output_value);
+        context.push_event_with_meta(
+            "tool_batch_dispatch",
+            Some(input),
+            context.state.get(output).cloned(),
+            Some(json!({"count": attempted, "max_calls": max_calls})),
+            Ok(()),
+        );
         Ok(())
     }
 }
@@ -1530,6 +1751,27 @@ fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeErr
     Ok((tool.to_string(), input))
 }
 
+fn resolve_tool_batch_dispatch(batch: &Value) -> Result<Vec<(String, Value)>, RuntimeError> {
+    let Some(items) = batch.as_array() else {
+        return Err(RuntimeError::SchemaViolation(
+            "tool_batch_dispatch input must be an array of objects with fields tool and input"
+                .to_string(),
+        ));
+    };
+    items
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            resolve_tool_dispatch(item).map_err(|error| match error {
+                RuntimeError::SchemaViolation(message) => RuntimeError::SchemaViolation(format!(
+                    "tool_batch_dispatch input[{index}] invalid: {message}"
+                )),
+                other => other,
+            })
+        })
+        .collect()
+}
+
 fn validate_approval_capabilities(
     module: &AirModule,
     approval_for: &[String],
@@ -1616,6 +1858,14 @@ struct ToolExecution<'a> {
     input: Value,
     output: &'a str,
     timeout_seconds: u64,
+    retry: &'a Option<RetryPolicy>,
+}
+
+struct ToolBatchExecution<'a> {
+    input: Value,
+    output: &'a str,
+    timeout_seconds: u64,
+    max_calls: u32,
     retry: &'a Option<RetryPolicy>,
 }
 
@@ -1775,6 +2025,12 @@ fn insert_result_meta(meta: &mut Value, elapsed_ms: u128, will_retry: bool) {
             serde_json::to_value(elapsed_ms).unwrap_or(Value::Null),
         );
         object.insert("will_retry".to_string(), Value::Bool(will_retry));
+    }
+}
+
+fn insert_batch_item_meta(meta: &mut Value, index: usize) {
+    if let Value::Object(object) = meta {
+        object.insert("index".to_string(), Value::Number(index.into()));
     }
 }
 

@@ -52,13 +52,27 @@ state:
     items: object
   decision:
     type: object
-    required: [complete, tool, input, rationale]
+    required: [complete, tool_calls, rationale]
     properties:
       complete: boolean
-      tool: string
-      input: object
+      tool_calls:
+        type: array
+        items:
+          type: object
+          required: [tool, input]
+          properties:
+            tool: string
+            input: object
       rationale: string
-  observation: object
+  observation:
+    type: array
+    items:
+      type: object
+      required: [tool, input, output]
+      properties:
+        tool: string
+        input: object
+        output: object
   exploration:
     type: object
     required: [summary, relevant_files, findings, source_ids, next_steps]
@@ -144,23 +158,20 @@ workflow:
     - id: act
       when: phase == "route" && decision.complete == false
       actions:
-        - kind: tool_dispatch
+        - kind: tool_batch_dispatch
           input:
-            object:
-              tool:
-                path: decision.tool
-              input:
-                path: decision.input
+            path: decision.tool_calls
           output: observation
+          max_calls: 3
           timeout_seconds: 10
         - kind: append
           target: observations
           value:
             object:
               tool:
-                path: decision.tool
+                literal: batch
               input:
-                path: decision.input
+                path: decision.tool_calls
               rationale:
                 path: decision.rationale
               result:

@@ -1,0 +1,96 @@
+agent:
+  name: tool-batch-dispatch-agent
+  version: 0.1.0
+
+inputs:
+  text: string
+
+outputs:
+  observations:
+    type: array
+    items:
+      type: object
+      required: [tool, input, output]
+      properties:
+        tool: string
+        input: object
+        output: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, choose, dispatch, done]
+  choices:
+    type: array
+    items:
+      type: object
+      required: [tool, input]
+      properties:
+        tool: string
+        input: object
+  observations:
+    type: array
+    items:
+      type: object
+      required: [tool, input, output]
+      properties:
+        tool: string
+        input: object
+        output: object
+
+tools:
+  - name: docs.search
+    capability: retrieval.local
+    timeout_ms: 1000
+
+requires:
+  capabilities: [retrieval.local]
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 6
+  terminal: [done]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: choose
+    - id: choose
+      when: phase == "choose"
+      actions:
+        - kind: model_call
+          model: batch_planner
+          input:
+            object:
+              text:
+                ref: text
+          output: choices
+          timeout_seconds: 5
+        - kind: set
+          values:
+            phase: dispatch
+    - id: dispatch
+      when: phase == "dispatch"
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            ref: choices
+          output: observations
+          max_calls: 2
+          timeout_seconds: 5
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: observations
+
+policy:
+  max_model_calls: 1
+  max_tool_calls: 4
+  max_repeated_tool_calls: 1

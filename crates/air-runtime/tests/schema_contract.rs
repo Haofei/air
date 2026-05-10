@@ -89,6 +89,17 @@ impl ModelProvider for MalformedDispatchModels {
     }
 }
 
+struct BatchDispatchModels {
+    choices: Value,
+}
+
+impl ModelProvider for BatchDispatchModels {
+    fn call_model(&mut self, name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "batch_planner");
+        Ok(self.choices.clone())
+    }
+}
+
 struct TimeoutRecordingModels {
     seen: Rc<RefCell<Option<Duration>>>,
 }
@@ -654,6 +665,108 @@ fn rejects_repeated_identical_tool_calls_when_policy_is_set() {
         .run(
             &module,
             State::from_iter([("text".to_string(), json!("same query"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::RepeatedToolCallLimitExceeded {
+            tool,
+            limit: 1,
+            attempted: 2
+        } if tool == "docs.search"
+    ));
+    assert_eq!(vm.tools.calls, 1);
+}
+
+#[test]
+fn dispatches_bounded_model_selected_tool_batch() {
+    let module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "docs.search", "input": {"query": "alpha"}},
+                {"tool": "docs.search", "input": {"query": "beta"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.outputs["observations"][0]["tool"],
+        json!("docs.search")
+    );
+    assert_eq!(
+        result.outputs["observations"][0]["output"]["query"],
+        json!("alpha")
+    );
+    assert_eq!(
+        result.outputs["observations"][1]["output"]["query"],
+        json!("beta")
+    );
+    assert_eq!(vm.tools.calls, 2);
+    assert!(result
+        .trace
+        .iter()
+        .any(|event| event.action == "tool_batch_dispatch"
+            && event.meta.as_ref().is_some_and(|meta| meta["count"] == 2)));
+}
+
+#[test]
+fn rejects_tool_batch_dispatch_over_action_bound_before_provider_calls() {
+    let module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "docs.search", "input": {"query": "alpha"}},
+                {"tool": "docs.search", "input": {"query": "beta"}},
+                {"tool": "docs.search", "input": {"query": "gamma"}}
+            ]),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::ToolBatchDispatchLimitExceeded {
+            limit: 2,
+            attempted: 3
+        }
+    ));
+    assert_eq!(vm.tools.calls, 0);
+}
+
+#[test]
+fn rejects_repeated_identical_tool_batch_items_when_policy_is_set() {
+    let module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "docs.search", "input": {"query": "same"}},
+                {"tool": "docs.search", "input": {"query": "same"}}
+            ]),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
         )
         .unwrap_err();
 

@@ -573,6 +573,35 @@ impl Verifier {
                 self.verify_timeout(rule_id, "tool_dispatch", *timeout_seconds);
                 self.verify_retry(rule_id, retry);
             }
+            StateAction::ToolBatchDispatch {
+                input,
+                output,
+                timeout_seconds,
+                max_calls,
+                retry,
+            } => {
+                if tools_by_name.is_empty() {
+                    self.error(
+                        "AIR096",
+                        format!(
+                            "tool_batch_dispatch action in rule {rule_id} requires at least one declared tool"
+                        ),
+                    );
+                }
+                if *max_calls == 0 {
+                    self.error(
+                        "AIR097",
+                        format!(
+                            "tool_batch_dispatch action in rule {rule_id} max_calls must be at least 1"
+                        ),
+                    );
+                }
+                self.verify_input_spec(rule_id, "tool_batch_dispatch input", input, module);
+                self.verify_control_field_write(rule_id, "tool_batch_dispatch output", output);
+                self.verify_state_ref(rule_id, "tool_batch_dispatch output", output, module);
+                self.verify_timeout(rule_id, "tool_batch_dispatch", *timeout_seconds);
+                self.verify_retry(rule_id, retry);
+            }
             StateAction::Approval { approval_for } => {
                 if approval_for.is_empty() {
                     self.error(
@@ -680,7 +709,8 @@ impl Verifier {
                                 }
                             }
                         }
-                        StateAction::ToolDispatch { .. } => {
+                        StateAction::ToolDispatch { .. }
+                        | StateAction::ToolBatchDispatch { .. } => {
                             for capability in tools_by_name
                                 .values()
                                 .filter_map(|tool_spec| tool_spec.capability.as_ref())
@@ -692,7 +722,7 @@ impl Verifier {
                                     self.error(
                                         "AIR073",
                                         format!(
-                                            "tool_dispatch action in rule {} can call capability {}, but not every reachable state_machine path includes approval first",
+                                            "dynamic tool action in rule {} can call capability {}, but not every reachable state_machine path includes approval first",
                                             rule.id, capability
                                         ),
                                     );

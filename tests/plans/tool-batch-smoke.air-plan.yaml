@@ -1,0 +1,26 @@
+plan:
+  name: tool-batch-smoke
+  version: 0.1.0
+  description: "Smoke test for bounded tool_batch_dispatch semantics."
+
+requires:
+  capabilities: [retrieval.local]
+
+nodes:
+  - id: batch
+    module: test.tool_batch_smoke@0.1.0
+
+entry: batch
+
+connect:
+  - from: $input.choices
+    to: batch.choices
+
+outputs:
+  observations: batch.observations
+
+recipes:
+  - id: tool-batch-smoke
+    description: "Run a bounded model-selected tool batch."
+    selected: [test.tool_batch_smoke@0.1.0]
+    rationale: "Used by backend conformance tests for tool_batch_dispatch."

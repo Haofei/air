@@ -622,6 +622,46 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
                 py_string(output_field)?
             ));
         }
+        StateAction::ToolBatchDispatch {
+            input,
+            output: output_field,
+            max_calls,
+            ..
+        } => {
+            output.push_str(&format!("    batch_value = {}\n", input_expr(input)?));
+            output.push_str("    if not isinstance(batch_value, list):\n");
+            output.push_str(
+                "        raise ValueError(\"tool_batch_dispatch input must be an array\")\n",
+            );
+            output.push_str(&format!("    if len(batch_value) > {}:\n", max_calls));
+            output.push_str(&format!(
+                "        raise RuntimeError(\"tool_batch_dispatch max_calls exceeded: limit={} attempted={{}}\".format(len(batch_value)))\n",
+                max_calls
+            ));
+            output.push_str("    batch_outputs = []\n");
+            output.push_str("    for index, dispatch_value in enumerate(batch_value):\n");
+            output.push_str("        tool_name = dispatch_value.get(\"tool\") if isinstance(dispatch_value, dict) else None\n");
+            output.push_str("        if not isinstance(tool_name, str):\n");
+            output.push_str(
+                "            raise ValueError(f\"tool_batch_dispatch input[{index}].tool must be a string\")\n",
+            );
+            output.push_str("        tool_input = dispatch_value.get(\"input\", {})\n");
+            output.push_str("        result_value = call_tool(tool_name, tool_input)\n");
+            output.push_str("        batch_outputs.append({\"tool\": tool_name, \"input\": tool_input, \"output\": result_value})\n");
+            output.push_str(&format!(
+                "    _air_validate_output(AIR_MODULE, {}, batch_outputs)\n",
+                py_string(output_field)?
+            ));
+            output.push_str(&format!(
+                "    updates[{}] = batch_outputs\n",
+                py_string(output_field)?
+            ));
+            output.push_str(&format!(
+                "    working[{}] = updates[{}]\n",
+                py_string(output_field)?,
+                py_string(output_field)?
+            ));
+        }
         StateAction::Approval { approval_for } => {
             output.push_str(&format!(
                 "    request_approval({}, AIR_MODULE, working)\n",
@@ -1288,6 +1328,72 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
                     _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "ok", input_value=input_value, output_value=result_value, meta=_air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=False))
                     break
+            elif kind == "tool_batch_dispatch":
+                batch_value = _air_eval_input(local_state, outputs, action["input"])
+                if not isinstance(batch_value, list):
+                    raise ValueError("tool_batch_dispatch input must be an array")
+                max_calls = int(action["max_calls"])
+                if len(batch_value) > max_calls:
+                    error = RuntimeError(f"tool_batch_dispatch max_calls exceeded: limit={max_calls} attempted={len(batch_value)}")
+                    _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "error", input_value=batch_value, meta={"max_calls": max_calls, "attempted": len(batch_value)}, error=str(error))
+                    raise error
+                batch_outputs = []
+                retry_policy = action.get("retry") or {}
+                max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
+                for index, dispatch_value in enumerate(batch_value):
+                    if not isinstance(dispatch_value, dict) or not isinstance(dispatch_value.get("tool"), str):
+                        raise ValueError(f"tool_batch_dispatch input[{index}].tool must be a string")
+                    dispatched_action = dict(action)
+                    dispatched_action["tool"] = dispatch_value["tool"]
+                    try:
+                        _air_validate_tool_capability(module, dispatched_action)
+                    except Exception as error:
+                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", meta={"tool": dispatch_value["tool"], "index": index}, error=str(error))
+                        raise
+                    input_value = dispatch_value.get("input", {})
+                    try:
+                        _air_enforce_repeated_tool_policy(module, tool_history, dispatch_value["tool"], input_value)
+                    except Exception as error:
+                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, meta={"tool": dispatch_value["tool"], "index": index}, error=str(error))
+                        raise
+                    for attempt in range(1, max_attempts + 1):
+                        limit = module.get("policy", {}).get("max_tool_calls")
+                        if limit is not None and tool_calls + 1 > int(limit):
+                            error = RuntimeError(f"policy.max_tool_calls exceeded: limit={limit} attempted={tool_calls + 1}")
+                            meta = _air_action_meta(dispatched_action, attempt=attempt, max_attempts=max_attempts, will_retry=False)
+                            meta["index"] = index
+                            _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, meta=meta, error=str(error))
+                            raise error
+                        tool_calls += 1
+                        action_started_at = time.monotonic()
+                        meta = _air_action_meta(dispatched_action, attempt=attempt, max_attempts=max_attempts)
+                        meta["index"] = index
+                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item_start", "ok", input_value=input_value, meta=meta)
+                        result_value = None
+                        try:
+                            result_value = call_tool(dispatch_value["tool"], input_value)
+                            _air_check_action_timeout("tool_batch_dispatch_item", action["timeout_seconds"], action_started_at)
+                        except Exception as error:
+                            elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
+                            meta = _air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=attempt != max_attempts)
+                            meta["index"] = index
+                            _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, output_value=locals().get("result_value"), meta=meta, error=str(error))
+                            if attempt == max_attempts:
+                                raise
+                            continue
+                        elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
+                        meta = _air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=False)
+                        meta["index"] = index
+                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "ok", input_value=input_value, output_value=result_value, meta=meta)
+                        batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "output": result_value})
+                        break
+                try:
+                    _air_validate_output(module, action["output"], batch_outputs)
+                except Exception as error:
+                    _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "error", input_value=batch_value, output_value=batch_outputs, meta={"count": len(batch_outputs), "max_calls": max_calls}, error=str(error))
+                    raise
+                local_state[action["output"]] = batch_outputs
+                _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "ok", input_value=batch_value, output_value=batch_outputs, meta={"count": len(batch_outputs), "max_calls": max_calls})
             elif kind == "approval":
                 try:
                     decision = request_approval(action.get("approval_for", []), module, local_state)
@@ -2015,6 +2121,21 @@ mod tests {
         assert!(code.contains("tool_name = dispatch_value.get(\"tool\")"));
         assert!(code.contains("result_value = call_tool(tool_name, tool_input)"));
         assert!(code.contains("tool_dispatch input.tool must be a string"));
+    }
+
+    #[test]
+    fn lowers_tool_batch_dispatch_to_langgraph_runtime() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let module =
+            air_parser::parse_air_file(root.join("tests/agents/tool-batch-dispatch.air.yaml"))
+                .unwrap();
+
+        let code = lower_module(&module).unwrap();
+
+        assert!(code.contains("tool_batch_dispatch input must be an array"));
+        assert!(code.contains("tool_batch_dispatch max_calls exceeded"));
+        assert!(code.contains("call_tool(tool_name, tool_input)"));
+        assert!(code.contains("\"output\": result_value"));
     }
 
     #[test]

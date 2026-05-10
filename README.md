@@ -42,7 +42,7 @@ AIR is usable as a local compiler/runtime prototype with bounded production-orie
 | --- | --- |
 | Typed state-machine AIR modules | Supported |
 | Module schema validation | Supported, including opt-in strict object fields with `additional_properties: false` |
-| Model/tool providers and capability checks | Supported; common native tools live in `air-tools`; `tool_dispatch` lets a model select among declared tools without bypassing AIR capability/budget checks |
+| Model/tool providers and capability checks | Supported; common native tools live in `air-tools`; `tool_dispatch` and bounded `tool_batch_dispatch` let a model select declared tools without bypassing AIR capability/budget checks |
 | Reusable standard modules | Supported; `modules/std` includes generic context compaction |
 | Approval gates, retry, budgets, repeated-tool guards, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
 | RunPlan module composition | Supported |

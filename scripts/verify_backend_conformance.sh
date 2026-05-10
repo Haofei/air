@@ -139,6 +139,69 @@ else:
     raise AssertionError("expected provider capability mismatch")
 PY
 
+echo "[air-conformance] tool batch dispatch matrix"
+cargo run -q -p air-cli -- validate-plan tests/plans/tool-batch-smoke.air-plan.yaml \
+  --store tests/plans/tool-batch-smoke.air-store.yaml
+cargo run -q -p air-cli -- run-plan tests/plans/tool-batch-smoke.air-plan.yaml \
+  --store tests/plans/tool-batch-smoke.air-store.yaml \
+  --input tests/plans/tool-batch-smoke.input.json \
+  --tool-config tests/plans/tool-batch-smoke.tools.json \
+  --trace-out "$OUT/tool_batch.native.trace.jsonl" \
+  > "$OUT/tool_batch.native.output.json"
+cargo run -q -p air-cli -- lower-plan tests/plans/tool-batch-smoke.air-plan.yaml \
+  --store tests/plans/tool-batch-smoke.air-store.yaml \
+  --backend openai-js-strict \
+  --output "$OUT/tool_batch.openai.mjs"
+AIR_TRACE=1 node "$OUT/tool_batch.openai.mjs" \
+  --input tests/plans/tool-batch-smoke.input.json \
+  --model-config "$MODEL_CONFIG" \
+  --tool-config tests/plans/tool-batch-smoke.tools.json \
+  > "$OUT/tool_batch.openai.output.json" \
+  2> "$OUT/tool_batch.openai.trace.jsonl"
+cargo run -q -p air-cli -- lower-plan tests/plans/tool-batch-smoke.air-plan.yaml \
+  --store tests/plans/tool-batch-smoke.air-store.yaml \
+  --backend langgraph \
+  --output "$OUT/tool_batch.langgraph.py"
+PYTHONWARNINGS=ignore "$LANGGRAPH_PYTHON" - <<'PY' > target/generated/conformance/tool_batch.langgraph.output.json
+import importlib.util
+import json
+
+spec = importlib.util.spec_from_file_location("tool_batch_conformance", "target/generated/conformance/tool_batch.langgraph.py")
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+module.AIR_TOOL_CAPABILITIES = {"docs.search": "retrieval.local"}
+module.AIR_TOOL_PROVIDER = lambda *, name, input_value: {
+    "query": input_value["query"],
+    "documents": [{"id": input_value["query"], "title": input_value["query"].title(), "content": "fixture"}],
+}
+inputs = json.load(open("tests/plans/tool-batch-smoke.input.json", encoding="utf-8"))
+print(json.dumps(module.graph.invoke(inputs), indent=2))
+PY
+PYTHONWARNINGS=ignore "$LANGGRAPH_PYTHON" - <<'PY'
+import json
+
+def load(path):
+    with open(path, encoding="utf-8") as handle:
+        return json.load(handle)
+
+native = load("target/generated/conformance/tool_batch.native.output.json")["observations"]
+openai = load("target/generated/conformance/tool_batch.openai.output.json")["observations"]
+langgraph = load("target/generated/conformance/tool_batch.langgraph.output.json")["observations"]
+for observations in [native, openai, langgraph]:
+    assert len(observations) == 2, observations
+    assert [item["tool"] for item in observations] == ["docs.search", "docs.search"], observations
+    assert [item["input"]["query"] for item in observations] == ["alpha", "beta"], observations
+
+with open("target/generated/conformance/tool_batch.native.trace.jsonl", encoding="utf-8") as handle:
+    native_events = [json.loads(line) for line in handle if line.lstrip().startswith("{")]
+assert any(event["action"] == "tool_batch_dispatch" and event["status"] == "ok" for event in native_events)
+
+with open("target/generated/conformance/tool_batch.openai.trace.jsonl", encoding="utf-8") as handle:
+    openai_events = [json.loads(line) for line in handle if line.lstrip().startswith("{")]
+assert any(event["action"] == "tool_batch_dispatch" and event["status"] == "ok" for event in openai_events)
+assert any(event["action"] == "tool_batch_dispatch_item" and event["meta"]["tool"] == "docs.search" for event in openai_events)
+PY
+
 echo "[air-conformance] dynamic fan-out matrix"
 cargo run -q -p air-cli -- validate-plan tests/plans/dynamic-smoke.air-plan.yaml \
   --store tests/plans/dynamic-smoke.air-store.yaml

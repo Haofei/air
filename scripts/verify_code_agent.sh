@@ -231,10 +231,16 @@ with open("target/generated/code_dynamic_explore_fixture.trace.jsonl", encoding=
     events = [json.loads(line) for line in handle if line.strip()]
 dispatches = [
     event for event in events
-    if event.get("action") == "tool_dispatch"
+    if event.get("action") == "tool_batch_dispatch_item"
     and event.get("meta", {}).get("tool") == "repo.search"
 ]
-assert dispatches, "expected governed repo.search tool_dispatch trace event"
+assert dispatches, "expected governed repo.search tool_batch_dispatch_item trace event"
+batch_done = [
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch"
+    and event.get("meta", {}).get("count") == 2
+]
+assert batch_done, "expected bounded tool_batch_dispatch completion trace event"
 PY
 
 echo "[code-agent] user-facing explore command offline run"

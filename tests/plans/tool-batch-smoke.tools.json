@@ -1,0 +1,21 @@
+{
+  "tools": {
+    "docs.search": {
+      "kind": "local_docs_search",
+      "capability": "retrieval.local",
+      "max_results": 2,
+      "documents": [
+        {
+          "id": "alpha",
+          "title": "Alpha",
+          "content": "Alpha document"
+        },
+        {
+          "id": "beta",
+          "title": "Beta",
+          "content": "Beta document"
+        }
+      ]
+    }
+  }
+}
