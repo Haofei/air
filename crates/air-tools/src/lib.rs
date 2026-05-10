@@ -594,6 +594,28 @@ impl ConfigTools {
         self.read_snapshots.insert(path, modified);
         Ok(())
     }
+
+    fn remember_repo_output_paths(
+        &mut self,
+        repo_dir: &Path,
+        output: &Value,
+    ) -> Result<(), RuntimeError> {
+        for field in ["matches", "snippets", "references", "definitions"] {
+            for path in output
+                .get(field)
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .filter_map(|item| item.get("path").and_then(Value::as_str))
+            {
+                if path.is_empty() {
+                    continue;
+                }
+                self.remember_read_snapshot(&repo_dir.join(path))?;
+            }
+        }
+        Ok(())
+    }
 }
 
 fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
@@ -1583,14 +1605,18 @@ impl ToolProvider for ConfigTools {
                 max_context_lines,
             } => {
                 let base_dir = resolve_config_path(&self.config_dir, &base_dir);
-                call_file_search_tool(
+                let output = call_file_search_tool(
                     name,
                     input,
                     &base_dir,
                     max_bytes.unwrap_or(64 * 1024),
                     max_matches.unwrap_or(100),
                     max_context_lines.unwrap_or(8),
-                )
+                )?;
+                if let Some(path) = output.get("path").and_then(Value::as_str) {
+                    self.remember_read_snapshot(Path::new(path))?;
+                }
+                Ok(output)
             }
             ToolConfig::FileWrite {
                 capability: _,
@@ -1754,13 +1780,18 @@ impl ToolProvider for ConfigTools {
                 repo_dir,
                 max_matches,
                 max_bytes,
-            } => call_repo_search_tool(
-                name,
-                input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
-                max_matches.unwrap_or(80),
-                max_bytes.unwrap_or(256 * 1024),
-            ),
+            } => {
+                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let output = call_repo_search_tool(
+                    name,
+                    input,
+                    &repo_dir,
+                    max_matches.unwrap_or(80),
+                    max_bytes.unwrap_or(256 * 1024),
+                )?;
+                self.remember_repo_output_paths(&repo_dir, &output)?;
+                Ok(output)
+            }
             ToolConfig::RepoContext {
                 capability: _,
                 repo_dir,
@@ -1768,15 +1799,20 @@ impl ToolProvider for ConfigTools {
                 max_files,
                 context_lines,
                 max_bytes,
-            } => call_repo_context_tool(
-                name,
-                input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
-                max_matches.unwrap_or(40),
-                max_files.unwrap_or(8),
-                context_lines.unwrap_or(6),
-                max_bytes.unwrap_or(256 * 1024),
-            ),
+            } => {
+                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let output = call_repo_context_tool(
+                    name,
+                    input,
+                    &repo_dir,
+                    max_matches.unwrap_or(40),
+                    max_files.unwrap_or(8),
+                    context_lines.unwrap_or(6),
+                    max_bytes.unwrap_or(256 * 1024),
+                )?;
+                self.remember_repo_output_paths(&repo_dir, &output)?;
+                Ok(output)
+            }
             ToolConfig::RepoSymbols {
                 capability: _,
                 repo_dir,
@@ -1796,15 +1832,20 @@ impl ToolProvider for ConfigTools {
                 max_files,
                 context_lines,
                 max_bytes,
-            } => call_repo_references_tool(
-                name,
-                input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
-                max_matches.unwrap_or(120),
-                max_files.unwrap_or(12),
-                context_lines.unwrap_or(4),
-                max_bytes.unwrap_or(256 * 1024),
-            ),
+            } => {
+                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let output = call_repo_references_tool(
+                    name,
+                    input,
+                    &repo_dir,
+                    max_matches.unwrap_or(120),
+                    max_files.unwrap_or(12),
+                    context_lines.unwrap_or(4),
+                    max_bytes.unwrap_or(256 * 1024),
+                )?;
+                self.remember_repo_output_paths(&repo_dir, &output)?;
+                Ok(output)
+            }
             ToolConfig::DiagnosticContext {
                 capability: _,
                 repo_dir,

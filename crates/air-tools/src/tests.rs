@@ -587,6 +587,114 @@ fn file_search_rejects_invalid_regex() {
 }
 
 #[test]
+fn file_search_satisfies_read_before_file_ops_edit() {
+    let dir = temp_dir("air-tools-file-search-read-before-edit");
+    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    tools
+        .call_tool(
+            "file.search",
+            &json!({"path": "note.txt", "pattern": "AIR"}),
+        )
+        .unwrap();
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "edit",
+                    "path": "note.txt",
+                    "old_string": "AIR",
+                    "new_string": "agent IR"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["applied"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "hello agent IR\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_search_read_snapshot_rejects_stale_file_ops_edit() {
+    let dir = temp_dir("air-tools-file-search-stale-edit");
+    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool(
+            "file.search",
+            &json!({"path": "note.txt", "pattern": "AIR"}),
+        )
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    fs::write(dir.join("note.txt"), "outside AIR change\n").unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "edit",
+                    "path": "note.txt",
+                    "old_string": "AIR",
+                    "new_string": "agent IR"
+                }]
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("modified after it was last read"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "outside AIR change\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_read_rejects_path_outside_base_dir() {
     let dir = temp_dir("air-tools-file-read-boundary");
     let docs = dir.join("docs");
@@ -2470,6 +2578,61 @@ fn repo_context_returns_nearby_code_snippets() {
         .contains("3: fn alpha() {}"));
     assert_eq!(output["artifacts"][0]["kind"], json!("code_context"));
     assert_eq!(tools.tool_capability("repo.context"), Some("code.read"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_context_satisfies_read_before_file_ops_edit() {
+    let dir = temp_dir("air-tools-repo-context-read-before-edit");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.context": {
+                  "kind": "repo_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5,
+                  "max_files": 2
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    tools
+        .call_tool(
+            "repo.context",
+            &json!({"query": "alpha", "path": "src/lib.rs"}),
+        )
+        .unwrap();
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "edit",
+                    "path": "src/lib.rs",
+                    "old_string": "alpha",
+                    "new_string": "beta"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["applied"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "pub fn beta() {}\n"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
