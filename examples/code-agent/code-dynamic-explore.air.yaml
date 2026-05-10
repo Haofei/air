@@ -57,6 +57,7 @@ state:
       complete: boolean
       tool_calls:
         type: array
+        max_items: 4
         items:
           type: object
           required: [tool, input]
@@ -105,13 +106,25 @@ state:
         items: string
 
 tools:
+  - name: repo.files
+    capability: code.read
+    timeout_ms: 10000
   - name: repo.search
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.symbols
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.references
     capability: code.read
     timeout_ms: 10000
   - name: repo.context
     capability: code.read
     timeout_ms: 10000
   - name: file.read
+    capability: file.read
+    timeout_ms: 10000
+  - name: file.read_many
     capability: file.read
     timeout_ms: 10000
 
@@ -146,9 +159,13 @@ workflow:
                 ref: observations
               allowed_tools:
                 array:
+                  - literal: repo.files
                   - literal: repo.search
+                  - literal: repo.symbols
+                  - literal: repo.references
                   - literal: repo.context
                   - literal: file.read
+                  - literal: file.read_many
           output: decision
           timeout_seconds: 30
         - kind: set
@@ -162,7 +179,7 @@ workflow:
           input:
             path: decision.tool_calls
           output: observation
-          max_calls: 3
+          max_calls: 4
           timeout_seconds: 10
         - kind: append
           target: observations
@@ -211,5 +228,5 @@ workflow:
 
 policy:
   max_model_calls: 4
-  max_tool_calls: 3
+  max_tool_calls: 8
   max_repeated_tool_calls: 2

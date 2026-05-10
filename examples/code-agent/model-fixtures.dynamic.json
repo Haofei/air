@@ -6,6 +6,13 @@
           "complete": false,
           "tool_calls": [
             {
+              "tool": "repo.files",
+              "input": {
+                "query": "air-runtime",
+                "path": "crates/air-runtime/src"
+              }
+            },
+            {
               "tool": "repo.search",
               "input": {
                 "query": "tool_batch_dispatch",
@@ -14,6 +21,27 @@
               }
             },
             {
+              "tool": "repo.symbols",
+              "input": {
+                "query": "ToolBatch",
+                "path": "crates/air-runtime/src",
+                "glob": "*.rs"
+              }
+            },
+            {
+              "tool": "repo.references",
+              "input": {
+                "symbol": "ToolBatchDispatch",
+                "path": "crates"
+              }
+            }
+          ],
+          "rationale": "List likely runtime files, search for the governed batch dispatch action, inspect symbols, and find references before narrowing into source context."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
               "tool": "repo.context",
               "input": {
                 "query": "ToolBatchDispatch",
@@ -21,14 +49,24 @@
                 "context_lines": 3,
                 "max_matches": 5
               }
+            },
+            {
+              "tool": "file.read_many",
+              "input": {
+                "paths": [
+                  "crates/air-core/src/lib.rs",
+                  "crates/air-runtime/src/lib.rs"
+                ],
+                "max_bytes_per_file": 20000
+              }
             }
           ],
-          "rationale": "Search for the governed batch dispatch action and gather nearby implementation context before summarizing how the kernel handles it."
+          "rationale": "Use the first batch to narrow into nearby implementation context and bounded file reads before summarizing."
         },
         {
           "complete": true,
           "tool_calls": [],
-          "rationale": "The first batch observation is enough for the fixture run; summarize the bounded dispatch behavior."
+          "rationale": "The broad and narrow exploration batches are enough for the fixture run; summarize the bounded dispatch behavior."
         }
       ]
     },
@@ -58,6 +96,7 @@
       "source_ids": [],
       "next_steps": [
         "Use this pattern to replace fixed read-only gathering stages with a bounded plan-act-observe batch loop.",
+        "Let the model start with repo.files/repo.search/repo.symbols before narrowing into repo.context or file.read_many.",
         "Keep write tools out of dynamic dispatch until a module has an explicit approval path and narrow patch policy."
       ]
     }

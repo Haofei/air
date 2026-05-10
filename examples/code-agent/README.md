@@ -158,8 +158,10 @@ cargo run -p air-cli -- run-plan --profile examples/code-agent/dynamic-explore.a
 
 This is the AIR kernel version of opencode's next-action loop: the model can choose the next
 declared read-only tools as a bounded batch, but the AIR module remains typed, bounded, and
-auditable. The module also sets `policy.max_repeated_tool_calls`, so repeated identical tool/input
-choices fail closed instead of spinning until `max_steps`.
+auditable. Its declared tool set now mirrors the core opencode exploration path: list files,
+search text, inspect lightweight symbols/references, read bounded files, then gather nearby context.
+The module also sets `policy.max_repeated_tool_calls`, so repeated identical tool/input choices fail
+closed instead of spinning until `max_steps`.
 
 ## User input shape
 

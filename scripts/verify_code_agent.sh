@@ -232,15 +232,30 @@ with open("target/generated/code_dynamic_explore_fixture.trace.jsonl", encoding=
 dispatches = [
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "repo.search"
+    and event.get("meta", {}).get("tool") in {
+        "repo.files",
+        "repo.search",
+        "repo.symbols",
+        "repo.references",
+        "repo.context",
+        "file.read_many",
+    }
 ]
-assert dispatches, "expected governed repo.search tool_batch_dispatch_item trace event"
+seen_tools = {event.get("meta", {}).get("tool") for event in dispatches}
+assert {
+    "repo.files",
+    "repo.search",
+    "repo.symbols",
+    "repo.references",
+    "repo.context",
+    "file.read_many",
+} <= seen_tools, seen_tools
 batch_done = [
     event for event in events
     if event.get("action") == "tool_batch_dispatch"
-    and event.get("meta", {}).get("count") == 2
 ]
-assert batch_done, "expected bounded tool_batch_dispatch completion trace event"
+batch_counts = [event.get("meta", {}).get("count") for event in batch_done]
+assert batch_counts == [4, 2], batch_counts
 PY
 
 echo "[code-agent] user-facing explore command offline run"
