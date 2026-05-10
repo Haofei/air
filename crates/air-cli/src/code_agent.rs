@@ -2547,6 +2547,20 @@ mod tests {
             file_patch_failed < continue_after_act,
             "file.patch validation failures must be observed before the generic post_act transition"
         );
+        let file_ops_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("record-file-ops-validation-failed"))
+            .unwrap();
+        let file_ops_rationale = file_ops_rule["actions"][0]["value"]["object"]["rationale"]
+            ["literal"]
+            .as_str()
+            .unwrap();
+        assert!(
+            file_ops_rationale.contains("prefer kind=replace_lines"),
+            "file.ops validation failures should steer recovery toward line-bounded edits"
+        );
     }
 
     #[test]

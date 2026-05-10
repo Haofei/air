@@ -321,6 +321,7 @@ assert any(
     event.get("rule") == "record-file-ops-validation-failed"
     and event.get("action") == "append"
     and event.get("output", [{}])[-1].get("action") == "edit_validation_failed"
+    and "prefer kind=replace_lines" in event.get("output", [{}])[-1].get("rationale", "")
     for event in events
 ), events
 failed_file_ops = next(
@@ -331,6 +332,15 @@ failed_file_ops = next(
     and event.get("output", {}).get("applied") is False
 )
 assert failed_file_ops["output"]["diagnostics"][0]["field"] == "old_string", failed_file_ops
+successful_file_ops = [
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("status") == "ok"
+    and event.get("output", {}).get("applied") is True
+]
+assert successful_file_ops, events
+assert successful_file_ops[0]["input"]["operations"][0]["kind"] == "replace_lines", successful_file_ops[0]
 tools = [
     event.get("meta", {}).get("tool")
     for event in events

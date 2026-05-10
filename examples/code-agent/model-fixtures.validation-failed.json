@@ -29,16 +29,17 @@
               "input": {
                 "operations": [
                   {
-                    "kind": "edit",
+                    "kind": "replace_lines",
                     "path": "examples/code-agent/edit-fixture/math.js",
-                    "old_string": "return a - b;",
+                    "start_line": 2,
+                    "end_line": 2,
                     "new_string": "return a + b;"
                   }
                 ]
               }
             }
           ],
-          "rationale": "Use the exact old_string after receiving edit_validation_failed diagnostics."
+          "rationale": "Use replace_lines with exact line bounds after receiving edit_validation_failed diagnostics."
         }
       ]
     },
@@ -56,7 +57,7 @@
       "workspace_diff": {
         "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
       },
-      "rationale": "AIR recorded edit_validation_failed for a non-matching old_string, then the loop retried with the exact old_string, revalidated, and inspected the diff.",
+      "rationale": "AIR recorded edit_validation_failed for a non-matching old_string, then the loop retried with exact replace_lines bounds, revalidated, and inspected the diff.",
       "observations": []
     }
   }

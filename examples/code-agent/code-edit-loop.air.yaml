@@ -727,7 +727,7 @@ workflow:
               action:
                 literal: edit_validation_failed
               rationale:
-                literal: A file.ops edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid operation.
+                literal: A file.ops edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid operation. If old_string did not match after a line-numbered read, prefer kind=replace_lines with the latest start_line/end_line.
               requested:
                 ref: decision.tool_calls
               result:
@@ -746,7 +746,7 @@ workflow:
               action:
                 literal: edit_validation_failed
               rationale:
-                literal: A file.patch edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid patch.
+                literal: A file.patch edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid patch. If a small line-bounded edit is enough, prefer file.ops kind=replace_lines with the latest start_line/end_line.
               requested:
                 ref: decision.tool_calls
               result:
