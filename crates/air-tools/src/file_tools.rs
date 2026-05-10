@@ -1063,9 +1063,19 @@ pub(super) struct FileOpsOptions<'a> {
     pub(super) base_dir: &'a Path,
     pub(super) max_bytes: usize,
     pub(super) max_files: usize,
+    pub(super) max_changed_lines: Option<usize>,
     pub(super) require_read: bool,
     pub(super) allow_new_files: bool,
     pub(super) allow_overwrite: bool,
+    pub(super) allow_replace_all: bool,
+    pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
+}
+
+pub(super) struct FileEditOptions<'a> {
+    pub(super) base_dir: &'a Path,
+    pub(super) max_bytes: usize,
+    pub(super) max_changed_lines: Option<usize>,
+    pub(super) require_read: bool,
     pub(super) allow_replace_all: bool,
     pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
 }
@@ -1359,6 +1369,47 @@ fn enforce_allowed_path(
     )))
 }
 
+fn effective_max_changed_lines(
+    tool_name: &str,
+    input: &Value,
+    configured_max: Option<usize>,
+) -> Result<Option<usize>, RuntimeError> {
+    let Some(configured_max) = configured_max else {
+        return optional_positive_usize_input(tool_name, input, "max_changed_lines");
+    };
+    Ok(
+        optional_bounded_usize_input(tool_name, input, "max_changed_lines", configured_max)?
+            .or(Some(configured_max)),
+    )
+}
+
+fn enforce_max_changed_lines(
+    tool_name: &str,
+    label: &str,
+    diff: &str,
+    max_changed_lines: Option<usize>,
+) -> Result<(), RuntimeError> {
+    let Some(max_changed_lines) = max_changed_lines else {
+        return Ok(());
+    };
+    let changed_lines = count_changed_diff_lines(diff);
+    if changed_lines <= max_changed_lines {
+        return Ok(());
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} {label} changes {changed_lines} diff lines, exceeding max_changed_lines={max_changed_lines}"
+    )))
+}
+
+fn count_changed_diff_lines(diff: &str) -> usize {
+    diff.lines()
+        .filter(|line| {
+            (line.starts_with('+') && !line.starts_with("+++"))
+                || (line.starts_with('-') && !line.starts_with("---"))
+        })
+        .count()
+}
+
 fn normalize_file_ops_operation_aliases(operation: &mut serde_json::Map<String, Value>) {
     if operation.get("kind").is_none()
         && operation.get("start_line").is_some()
@@ -1436,6 +1487,7 @@ pub(super) fn call_file_ops_tool(
     let normalized_input = normalize_file_ops_input(input)?;
     let input = &normalized_input;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
+    let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
     let operations = input
         .get("operations")
         .and_then(Value::as_array)
@@ -1791,6 +1843,7 @@ pub(super) fn call_file_ops_tool(
             options.max_files
         )));
     }
+    enforce_max_changed_lines(name, "input.operations", &diff, max_changed_lines)?;
 
     if !dry_run {
         for file in pending.values() {
@@ -2186,20 +2239,17 @@ fn validate_file_edit_operation(
 pub(super) fn call_file_edit_tool(
     name: &str,
     input: &Value,
-    base_dir: &Path,
-    max_bytes: usize,
-    require_read: bool,
-    allow_replace_all: bool,
-    read_snapshots: &BTreeMap<PathBuf, SystemTime>,
+    options: FileEditOptions<'_>,
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
     validate_git_pathspec(name, input_path)?;
     let allowed_paths = allowed_paths_input(name, input)?;
     enforce_allowed_path(name, "input.path", input_path, &allowed_paths)?;
-    let operations = parse_file_edit_operations(name, input, allow_replace_all)?;
+    let operations = parse_file_edit_operations(name, input, options.allow_replace_all)?;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
+    let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
 
-    let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
+    let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
     let candidate = base.join(input_path);
     let path = canonicalize_tool_path(name, "input.path", &candidate)?;
     if !path.starts_with(&base) {
@@ -2207,8 +2257,8 @@ pub(super) fn call_file_edit_tool(
             "tool {name} input.path is outside configured base_dir"
         )));
     }
-    if require_read {
-        require_fresh_read(name, "input.path", "edit", &path, read_snapshots)?;
+    if options.require_read {
+        require_fresh_read(name, "input.path", "edit", &path, options.read_snapshots)?;
     }
 
     let content = fs::read_to_string(&path)
@@ -2248,13 +2298,15 @@ pub(super) fn call_file_edit_tool(
     }
 
     let updated_bytes = updated.as_bytes();
-    if updated_bytes.len() > max_bytes {
+    if updated_bytes.len() > options.max_bytes {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} edited content exceeds max_bytes={max_bytes}"
+            "tool {name} edited content exceeds max_bytes={}",
+            options.max_bytes
         )));
     }
     let (diff_content, diff_truncated, diff_bytes) =
         bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
+    enforce_max_changed_lines(name, "input", &diff, max_changed_lines)?;
     if !dry_run {
         fs::write(&path, updated_bytes)
             .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
@@ -2317,6 +2369,7 @@ pub(super) struct FilePatchOptions<'a> {
     pub(super) repo_dir: &'a Path,
     pub(super) max_bytes: usize,
     pub(super) max_files: usize,
+    pub(super) max_changed_lines: Option<usize>,
     pub(super) require_read: bool,
     pub(super) allow_new_files: bool,
     pub(super) allow_delete_files: bool,
@@ -2349,6 +2402,8 @@ pub(super) fn call_file_patch_tool(
             options.max_bytes
         )));
     }
+    let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
+    enforce_max_changed_lines(name, "input.patch", &patch, max_changed_lines)?;
 
     let repo = canonicalize_tool_path(name, "repo_dir", options.repo_dir)?;
     let changed = extract_patch_paths(name, &patch)?;

@@ -130,6 +130,8 @@ assert "repo.files" in tool_schemas, tool_schemas
 assert "file.ops" in tool_schemas, tool_schemas
 assert "test.run" in tool_schemas, tool_schemas
 assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
+assert "max_changed_lines" in tool_schemas["file.ops"]["optional"], tool_schemas["file.ops"]
+assert "max_changed_lines" in tool_schemas["file.patch"]["optional"], tool_schemas["file.patch"]
 assert "package" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
 assert "test_filter" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
 PY

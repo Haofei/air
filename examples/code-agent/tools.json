@@ -70,7 +70,8 @@
       "base_dir": "../..",
       "require_read": true,
       "allow_replace_all": false,
-      "max_bytes": 65536
+      "max_bytes": 65536,
+      "max_changed_lines": 80
     },
     "file.ops": {
       "kind": "file_ops",
@@ -81,7 +82,8 @@
       "allow_overwrite": false,
       "allow_replace_all": false,
       "max_files": 6,
-      "max_bytes": 65536
+      "max_bytes": 65536,
+      "max_changed_lines": 80
     },
     "repo.files": {
       "kind": "repo_files",
@@ -129,7 +131,8 @@
       "allow_new_files": true,
       "allow_delete_files": false,
       "max_files": 6,
-      "max_bytes": 65536
+      "max_bytes": 65536,
+      "max_changed_lines": 80
     },
     "diagnostic.context": {
       "kind": "diagnostic_context",

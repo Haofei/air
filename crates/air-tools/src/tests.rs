@@ -1370,6 +1370,52 @@ fn file_edit_replaces_unique_string_after_read() {
 }
 
 #[test]
+fn file_edit_rejects_diff_that_exceeds_max_changed_lines() {
+    let dir = temp_dir("air-tools-file-edit-max-changed-lines");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_changed_lines": 2
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.edit",
+            &json!({
+                "path": "note.txt",
+                "old_string": "one\ntwo\nthree\n",
+                "new_string": "four\nfive\nsix\n"
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("max_changed_lines=2"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_edit_dry_run_checks_without_writing() {
     let dir = temp_dir("air-tools-file-edit-dry-run");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
@@ -1722,6 +1768,57 @@ fn file_ops_rejects_paths_outside_allowed_paths() {
     assert_eq!(
         fs::read_to_string(dir.join("other.txt")).unwrap(),
         "other\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_rejects_diff_that_exceeds_max_changed_lines() {
+    let dir = temp_dir("air-tools-file-ops-max-changed-lines");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true,
+                  "max_changed_lines": 2
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "replace_lines",
+                    "path": "note.txt",
+                    "start_line": 1,
+                    "end_line": 3,
+                    "lines": ["four", "five", "six"]
+                }]
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("max_changed_lines=2"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\ntwo\nthree\n"
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -2730,6 +2827,47 @@ fn file_patch_rejects_paths_outside_allowed_paths() {
     assert_eq!(
         fs::read_to_string(dir.join("other.txt")).unwrap(),
         "other\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_patch_rejects_diff_that_exceeds_max_changed_lines() {
+    let dir = temp_dir("air-tools-file-patch-max-changed-lines");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.patch": {
+                  "kind": "file_patch",
+                  "capability": "file.write",
+                  "repo_dir": ".",
+                  "require_read": true,
+                  "max_changed_lines": 2
+                }
+              }
+            }"#,
+    );
+    let patch = "diff --git a/note.txt b/note.txt\n--- a/note.txt\n+++ b/note.txt\n@@ -1,3 +1,3 @@\n-one\n-two\n-three\n+four\n+five\n+six\n";
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let error = tools
+        .call_tool("file.patch", &json!({"patch": patch}))
+        .unwrap_err();
+
+    assert!(error.to_string().contains("max_changed_lines=2"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\ntwo\nthree\n"
     );
     let _ = fs::remove_dir_all(dir);
 }

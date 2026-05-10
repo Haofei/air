@@ -269,11 +269,13 @@ workflow:
                       edits: "operations alias"
                       dry_run: "boolean"
                       allowed_paths: "automatically injected write scope; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                   file.patch:
                     required: {patch: "unified diff"}
                     optional:
                       dry_run: "boolean"
                       allowed_paths: "automatically injected write scope; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                   diagnostic.context:
                     required: {}
                     optional:

@@ -14,7 +14,7 @@ mod file_tools;
 use file_tools::{
     call_file_edit_tool, call_file_ops_tool, call_file_patch_tool, call_file_read_many_tool,
     call_file_read_tool, call_file_search_tool, call_file_write_tool, file_modified_time,
-    is_likely_binary, FileOpsOptions, FilePatchOptions, FileWriteOptions,
+    is_likely_binary, FileEditOptions, FileOpsOptions, FilePatchOptions, FileWriteOptions,
 };
 mod helpdesk;
 use helpdesk::helpdesk_docs;
@@ -252,6 +252,9 @@ enum ToolConfig {
         max_bytes: Option<usize>,
 
         #[serde(default)]
+        max_changed_lines: Option<usize>,
+
+        #[serde(default)]
         require_read: Option<bool>,
 
         #[serde(default)]
@@ -268,6 +271,9 @@ enum ToolConfig {
 
         #[serde(default)]
         max_files: Option<usize>,
+
+        #[serde(default)]
+        max_changed_lines: Option<usize>,
 
         #[serde(default)]
         require_read: Option<bool>,
@@ -292,6 +298,9 @@ enum ToolConfig {
 
         #[serde(default)]
         max_files: Option<usize>,
+
+        #[serde(default)]
+        max_changed_lines: Option<usize>,
 
         #[serde(default)]
         require_read: Option<bool>,
@@ -1022,6 +1031,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
             ToolConfig::FileEdit {
                 base_dir,
                 max_bytes,
+                max_changed_lines,
                 ..
             } => {
                 if base_dir.as_os_str().is_empty() {
@@ -1031,11 +1041,17 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_changed_lines"),
+                    *max_changed_lines,
+                )?;
             }
             ToolConfig::FileOps {
                 base_dir,
                 max_bytes,
                 max_files,
+                max_changed_lines,
                 ..
             } => {
                 if base_dir.as_os_str().is_empty() {
@@ -1046,11 +1062,17 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_changed_lines"),
+                    *max_changed_lines,
+                )?;
             }
             ToolConfig::FilePatch {
                 repo_dir,
                 max_bytes,
                 max_files,
+                max_changed_lines,
                 ..
             } => {
                 if repo_dir.as_os_str().is_empty() {
@@ -1061,6 +1083,11 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_changed_lines"),
+                    *max_changed_lines,
+                )?;
             }
             ToolConfig::GitDiff {
                 repo_dir,
@@ -1685,17 +1712,21 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 base_dir,
                 max_bytes,
+                max_changed_lines,
                 require_read,
                 allow_replace_all,
             } => {
                 let output = call_file_edit_tool(
                     name,
                     input,
-                    &resolve_config_path(&self.config_dir, &base_dir),
-                    max_bytes.unwrap_or(256 * 1024),
-                    require_read.unwrap_or(true),
-                    allow_replace_all.unwrap_or(false),
-                    &self.read_snapshots,
+                    FileEditOptions {
+                        base_dir: &resolve_config_path(&self.config_dir, &base_dir),
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                        max_changed_lines,
+                        require_read: require_read.unwrap_or(true),
+                        allow_replace_all: allow_replace_all.unwrap_or(false),
+                        read_snapshots: &self.read_snapshots,
+                    },
                 )?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
                     self.remember_read_snapshot(Path::new(path))?;
@@ -1707,6 +1738,7 @@ impl ToolProvider for ConfigTools {
                 base_dir,
                 max_bytes,
                 max_files,
+                max_changed_lines,
                 require_read,
                 allow_new_files,
                 allow_overwrite,
@@ -1720,6 +1752,7 @@ impl ToolProvider for ConfigTools {
                         base_dir: &base_dir,
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         max_files: max_files.unwrap_or(8),
+                        max_changed_lines,
                         require_read: require_read.unwrap_or(true),
                         allow_new_files: allow_new_files.unwrap_or(false),
                         allow_overwrite: allow_overwrite.unwrap_or(false),
@@ -1747,6 +1780,7 @@ impl ToolProvider for ConfigTools {
                 repo_dir,
                 max_bytes,
                 max_files,
+                max_changed_lines,
                 require_read,
                 allow_new_files,
                 allow_delete_files,
@@ -1759,6 +1793,7 @@ impl ToolProvider for ConfigTools {
                         repo_dir: &repo_dir,
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         max_files: max_files.unwrap_or(20),
+                        max_changed_lines,
                         require_read: require_read.unwrap_or(true),
                         allow_new_files: allow_new_files.unwrap_or(true),
                         allow_delete_files: allow_delete_files.unwrap_or(false),
