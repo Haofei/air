@@ -11,6 +11,9 @@ inputs:
   related_files:
     type: array
     items: string
+  write_paths:
+    type: array
+    items: string
   test_command: string
   force_patch: boolean
 
@@ -179,6 +182,8 @@ workflow:
                 ref: target_search_pattern
               related_files:
                 ref: related_files
+              write_paths:
+                ref: write_paths
               test_command:
                 ref: test_command
               force_patch:
@@ -272,13 +277,13 @@ workflow:
                       kind: "default operation kind"
                       edits: "operations alias"
                       dry_run: "boolean"
-                      allowed_paths: "automatically injected write scope; do not override"
+                      allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                   file.patch:
                     required: {patch: "unified diff"}
                     optional:
                       dry_run: "boolean"
-                      allowed_paths: "automatically injected write scope; do not override"
+                      allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                   diagnostic.context:
                     required: {}
@@ -324,8 +329,7 @@ workflow:
           input:
             path: decision.tool_calls
           write_scope:
-            array:
-              - ref: target_path
+            ref: write_paths
           output: observation
           max_calls: 4
           timeout_seconds: 120
@@ -444,6 +448,8 @@ workflow:
                 ref: task
               target_path:
                 ref: target_path
+              write_paths:
+                ref: write_paths
               test_command:
                 ref: test_command
               force_patch:

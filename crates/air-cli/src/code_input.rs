@@ -24,6 +24,7 @@ pub(crate) struct CodeInputOptions {
     pub(crate) task: String,
     pub(crate) recipe: CodeRecipe,
     pub(crate) target: Option<PathBuf>,
+    pub(crate) write: Vec<PathBuf>,
     pub(crate) test: Option<String>,
     pub(crate) query: Option<String>,
     pub(crate) related: Vec<PathBuf>,
@@ -47,6 +48,7 @@ pub(crate) fn build_input_with_pack(
         task,
         recipe,
         target,
+        write,
         test,
         query,
         related,
@@ -110,6 +112,7 @@ pub(crate) fn build_input_with_pack(
             let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
             let target_search_pattern = code_search_pattern(&query);
+            let write_paths = edit_write_paths(target.as_ref(), &write);
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
             input.insert("query".to_string(), Value::String(query));
@@ -122,11 +125,27 @@ pub(crate) fn build_input_with_pack(
                 Value::String(optional_path_to_input_string(target)),
             );
             input.insert("related_files".to_string(), path_array(related));
+            input.insert("write_paths".to_string(), path_array(write_paths));
             input.insert("test_command".to_string(), Value::String(test));
             input.insert("force_patch".to_string(), Value::Bool(force_patch));
             Ok(input)
         }
     }
+}
+
+fn edit_write_paths(target: Option<&PathBuf>, write: &[PathBuf]) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    if let Some(target) = target {
+        if !target.as_os_str().is_empty() {
+            paths.push(target.clone());
+        }
+    }
+    for path in write {
+        if !path.as_os_str().is_empty() && !paths.iter().any(|existing| existing == path) {
+            paths.push(path.clone());
+        }
+    }
+    paths
 }
 
 fn required_path(value: Option<PathBuf>, flag: &str, recipe: CodeRecipe) -> Result<PathBuf> {

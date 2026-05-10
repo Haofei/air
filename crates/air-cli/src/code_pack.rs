@@ -65,6 +65,7 @@ pub(crate) struct CodeAgentRouteDecision {
 pub(crate) struct CodeAgentInputFacts {
     pub(crate) task: bool,
     pub(crate) target: bool,
+    pub(crate) write: bool,
     pub(crate) test: bool,
     pub(crate) query: bool,
     pub(crate) related: bool,
@@ -658,6 +659,7 @@ fn is_known_recipe_input_field(field: &str) -> bool {
         field,
         "task"
             | "target"
+            | "write"
             | "test"
             | "query"
             | "related"
@@ -933,6 +935,7 @@ impl CodeAgentInputFacts {
         match field {
             "task" => self.task,
             "target" => self.target,
+            "write" => self.write,
             "test" => self.test,
             "query" => self.query,
             "related" => self.related,

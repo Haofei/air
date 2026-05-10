@@ -59,6 +59,10 @@ enum Command {
         #[arg(long)]
         target: Option<PathBuf>,
 
+        /// Extra file the edit loop is allowed to modify. May be repeated.
+        #[arg(long)]
+        write: Vec<PathBuf>,
+
         /// Allowlisted test command alias from the selected tool config.
         #[arg(long)]
         test: Option<String>,
@@ -525,6 +529,7 @@ fn main() -> Result<()> {
             task,
             recipe,
             target,
+            write,
             test,
             query,
             related,
@@ -555,6 +560,7 @@ fn main() -> Result<()> {
             task,
             recipe,
             target,
+            write,
             test,
             query,
             related,

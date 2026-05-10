@@ -4,6 +4,7 @@
   "target_path": "",
   "target_search_pattern": "edit|fixture|add|function|test",
   "related_files": [],
+  "write_paths": [],
   "test_command": "edit_fixture_test",
   "force_patch": false
 }

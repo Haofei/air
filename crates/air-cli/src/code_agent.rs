@@ -49,6 +49,7 @@ pub(crate) struct CodeOptions {
     pub(crate) task: String,
     pub(crate) recipe: CodeRecipe,
     pub(crate) target: Option<PathBuf>,
+    pub(crate) write: Vec<PathBuf>,
     pub(crate) test: Option<String>,
     pub(crate) query: Option<String>,
     pub(crate) related: Vec<PathBuf>,
@@ -91,6 +92,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         task,
         recipe,
         target,
+        write,
         test,
         query,
         related,
@@ -141,6 +143,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         &CodeAgentInputFacts {
             task: !task.trim().is_empty(),
             target: target.is_some(),
+            write: !write.is_empty(),
             test: test.as_ref().is_some_and(|value| !value.trim().is_empty()),
             query: query.as_ref().is_some_and(|value| !value.trim().is_empty()),
             related: !related.is_empty(),
@@ -164,6 +167,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             task,
             recipe,
             target,
+            write,
             test,
             query,
             related,
@@ -2001,6 +2005,7 @@ mod tests {
             task: "fix it".to_string(),
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: Some("unit".to_string()),
             query: None,
             related: vec![PathBuf::from("src/test.rs")],
@@ -2026,6 +2031,39 @@ mod tests {
             input["related_files"],
             Value::Array(vec![Value::String("src/test.rs".to_string())])
         );
+        assert_eq!(
+            input["write_paths"],
+            Value::Array(vec![Value::String("src/lib.rs".to_string())])
+        );
+    }
+
+    #[test]
+    fn edit_input_accepts_explicit_extra_write_paths() {
+        let input = build_input(CodeInputOptions {
+            task: "move shared helper".to_string(),
+            recipe: CodeRecipe::Edit,
+            target: Some(PathBuf::from("src/runtime.rs")),
+            write: vec![
+                PathBuf::from("src/core.rs"),
+                PathBuf::from("src/runtime.rs"),
+            ],
+            test: Some("unit".to_string()),
+            query: None,
+            related: vec![PathBuf::from("src/core.rs")],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["write_paths"],
+            Value::Array(vec![
+                Value::String("src/runtime.rs".to_string()),
+                Value::String("src/core.rs".to_string())
+            ])
+        );
     }
 
     #[test]
@@ -2034,6 +2072,7 @@ mod tests {
             task: "fix it".to_string(),
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: Some("unit".to_string()),
             query: None,
             related: vec![],
@@ -2057,6 +2096,7 @@ mod tests {
             task: "Refactor provider".to_string(),
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: Some("unit".to_string()),
             query: Some("EchoTools ToolProviderChoice provider module air-tools".to_string()),
             related: vec![],
@@ -2080,6 +2120,7 @@ mod tests {
             task: "change provider".to_string(),
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: Some("unit".to_string()),
             query: None,
             related: vec![PathBuf::from("src/lib_test.rs")],
@@ -2107,6 +2148,7 @@ mod tests {
             task: "fix the failing add function".to_string(),
             recipe: CodeRecipe::Edit,
             target: None,
+            write: vec![],
             test: Some("edit_fixture_test".to_string()),
             query: Some("edit fixture add function test".to_string()),
             related: vec![],
@@ -2138,6 +2180,7 @@ mod tests {
             task: "change the provider and keep tests passing".to_string(),
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: Some("unit".to_string()),
             query: None,
             related: vec![],
@@ -2158,6 +2201,7 @@ mod tests {
             task: "review it".to_string(),
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: None,
             query: None,
             related: vec![],
@@ -2184,6 +2228,7 @@ mod tests {
             task: "plan the next code-agent milestone".to_string(),
             recipe: CodeRecipe::Auto,
             target: None,
+            write: vec![],
             test: None,
             query: Some("code agent project planning".to_string()),
             related: vec![],
@@ -2211,6 +2256,7 @@ mod tests {
             task: "understand this".to_string(),
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: None,
             query: None,
             related: vec![],
@@ -2235,6 +2281,7 @@ mod tests {
             task: "explore the code-agent architecture".to_string(),
             recipe: CodeRecipe::Explore,
             target: None,
+            write: vec![],
             test: None,
             query: Some("code agent edit loop architecture".to_string()),
             related: vec![],
@@ -2259,6 +2306,7 @@ mod tests {
             task: "fix it".to_string(),
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
+            write: vec![],
             test: Some("unit".to_string()),
             query: None,
             related: vec![],
@@ -3585,6 +3633,7 @@ mod tests {
             task: "review search".to_string(),
             recipe: CodeRecipe::Review,
             target: Some(PathBuf::from("scripts/search.cjs")),
+            write: vec![],
             test: None,
             query: Some("search".to_string()),
             related: vec![PathBuf::from("scripts/search.test.cjs")],
@@ -3620,6 +3669,7 @@ mod tests {
             task: "review search".to_string(),
             recipe: CodeRecipe::Review,
             target: Some(PathBuf::from("scripts/search.cjs")),
+            write: vec![],
             test: None,
             query: None,
             related: vec![],

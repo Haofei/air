@@ -23,7 +23,7 @@ recipes:
     intent: "Fallback read-only exploration profile used before CLI recipe inference."
     input:
       required: [task]
-      optional: [target, test, query, related, search_query, repo_query, required_terms, force_patch]
+      optional: [target, write, test, query, related, search_query, repo_query, required_terms, force_patch]
     completion:
       any:
         - exists: /exploration
@@ -69,7 +69,7 @@ recipes:
     intent: "Run the unified bounded code edit loop over an allowlisted test; target may be known or discovered before writing."
     input:
       required: [task, test]
-      optional: [query, target, related, force_patch]
+      optional: [query, target, write, related, force_patch]
     completion:
       any:
         - equals:
