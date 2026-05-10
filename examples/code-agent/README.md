@@ -198,8 +198,10 @@ cargo run -p air-cli -- code "fix the failing add function until tests pass" \
   --trace-out target/generated/code_loop.trace.jsonl
 ```
 
-Each iteration runs the same checked AIR recipe with the same capability contract. The wrapper stops
-when the recipe's completion signal passes, such as `repair.final_success == true` or both
+Each iteration runs the same checked AIR recipe with the same capability contract. If a pass does
+not complete, the wrapper appends a bounded summary of prior AIR outputs to the next iteration's
+`task`, making the loop state explicit in the following `model_call` trace. The wrapper stops when
+the recipe's completion signal passes, such as `repair.final_success == true` or both
 `build.test_success` and `build.audit_success` are true. Iteration trace paths are suffixed with
 `.iterN` so each pass remains auditable.
 

@@ -259,12 +259,13 @@ fn run_code_loop(options: CodeLoopOptions) -> Result<()> {
                 recipe_name(options.recipe)
             );
         }
+        let iteration_input = code_loop_iteration_input(&options.input, &iterations);
         let outputs = run_plan_capture(RunPlanOptions {
             plan: None,
             profile: Some(options.profile.clone()),
             store: None,
             input: None,
-            input_values: Some(options.input.clone()),
+            input_values: Some(iteration_input),
             model_config: options.model_config.clone(),
             trace_out: options
                 .trace_out
@@ -313,6 +314,56 @@ fn run_code_loop(options: CodeLoopOptions) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), &summary)?;
     println!();
     Ok(())
+}
+
+fn code_loop_iteration_input(
+    base_input: &Map<String, Value>,
+    previous_iterations: &[Value],
+) -> Map<String, Value> {
+    if previous_iterations.is_empty() {
+        return base_input.clone();
+    }
+
+    let mut input = base_input.clone();
+    let Some(task) = input.get("task").and_then(Value::as_str) else {
+        return input;
+    };
+    let feedback = code_loop_feedback(previous_iterations);
+    input.insert(
+        "task".to_string(),
+        Value::String(format!(
+            "{task}\n\nAIR loop context from previous iterations:\n{feedback}"
+        )),
+    );
+    input
+}
+
+fn code_loop_feedback(previous_iterations: &[Value]) -> String {
+    let mut lines = Vec::new();
+    for iteration in previous_iterations {
+        let iteration_number = iteration
+            .get("iteration")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let completed = iteration
+            .get("completed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let outputs = iteration.get("outputs").cloned().unwrap_or(Value::Null);
+        let mut output_summary = serde_json::to_string(&outputs).unwrap_or_default();
+        const MAX_OUTPUT_SUMMARY_CHARS: usize = 2400;
+        if output_summary.chars().count() > MAX_OUTPUT_SUMMARY_CHARS {
+            output_summary = output_summary
+                .chars()
+                .take(MAX_OUTPUT_SUMMARY_CHARS)
+                .collect::<String>();
+            output_summary.push_str(" [AIR_TRUNCATED]");
+        }
+        lines.push(format!(
+            "- iteration {iteration_number}: completed={completed}; outputs={output_summary}"
+        ));
+    }
+    lines.join("\n")
 }
 
 fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
@@ -795,6 +846,34 @@ mod tests {
             iteration_path(Path::new("target/generated/code.trace.jsonl"), 2),
             PathBuf::from("target/generated/code.trace.iter2.jsonl")
         );
+    }
+
+    #[test]
+    fn loop_iteration_input_appends_previous_outputs_to_task() {
+        let mut input = Map::new();
+        input.insert("task".to_string(), Value::String("fix it".to_string()));
+        input.insert(
+            "target_path".to_string(),
+            Value::String("src/lib.rs".to_string()),
+        );
+        let iterations = vec![json!({
+            "iteration": 1,
+            "completed": false,
+            "outputs": {
+                "repair": {
+                    "final_success": false,
+                    "diagnostics": [{"path": "src/lib.rs", "line": 3}]
+                }
+            }
+        })];
+
+        let next = code_loop_iteration_input(&input, &iterations);
+
+        assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
+        let task = next["task"].as_str().unwrap();
+        assert!(task.starts_with("fix it"));
+        assert!(task.contains("AIR loop context from previous iterations"));
+        assert!(task.contains("final_success"));
     }
 
     #[test]
