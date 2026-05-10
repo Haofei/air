@@ -168,6 +168,14 @@ enum Command {
         #[arg(long)]
         revert_to: Option<String>,
 
+        /// Validate or apply reverse patches from this turn's indexed patch_sets.
+        #[arg(long)]
+        revert_workspace_turn: Option<String>,
+
+        /// Apply --revert-workspace-turn after a successful reverse-patch check.
+        #[arg(long, requires = "revert_workspace_turn")]
+        apply_workspace: bool,
+
         /// Allow writing the reverted session back to the source file.
         #[arg(long, conflicts_with = "fork")]
         in_place: bool,
@@ -569,11 +577,15 @@ fn main() -> Result<()> {
             session,
             fork,
             revert_to,
+            revert_workspace_turn,
+            apply_workspace,
             in_place,
         } => code_session(CodeSessionOptions {
             session,
             fork,
             revert_to,
+            revert_workspace_turn,
+            apply_workspace,
             in_place,
         }),
         Command::Validate { file } => validate(file),
@@ -1872,6 +1884,8 @@ mod tests {
             session,
             fork,
             revert_to,
+            revert_workspace_turn,
+            apply_workspace,
             in_place,
         } = cli.command
         else {
@@ -1884,7 +1898,33 @@ mod tests {
             Some(PathBuf::from("target/generated/session-fork.json"))
         );
         assert_eq!(revert_to, Some("turn-000001".to_string()));
+        assert_eq!(revert_workspace_turn, None);
+        assert!(!apply_workspace);
         assert!(!in_place);
+    }
+
+    #[test]
+    fn hidden_code_session_command_accepts_workspace_revert_dry_run() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code-session",
+            "target/generated/session.json",
+            "--revert-workspace-turn",
+            "turn-000001",
+        ])
+        .unwrap();
+
+        let Command::CodeSession {
+            revert_workspace_turn,
+            apply_workspace,
+            ..
+        } = cli.command
+        else {
+            panic!("expected code-session command");
+        };
+
+        assert_eq!(revert_workspace_turn, Some("turn-000001".to_string()));
+        assert!(!apply_workspace);
     }
 
     #[test]

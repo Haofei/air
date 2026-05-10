@@ -9,7 +9,9 @@ use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
@@ -67,6 +69,8 @@ pub(crate) struct CodeSessionOptions {
     pub(crate) session: PathBuf,
     pub(crate) fork: Option<PathBuf>,
     pub(crate) revert_to: Option<String>,
+    pub(crate) revert_workspace_turn: Option<String>,
+    pub(crate) apply_workspace: bool,
     pub(crate) in_place: bool,
 }
 
@@ -285,10 +289,21 @@ pub(crate) fn code_session(options: CodeSessionOptions) -> Result<()> {
         session,
         fork,
         revert_to,
+        revert_workspace_turn,
+        apply_workspace,
         in_place,
     } = options;
     let mut state = CodeSessionState::read(&session)?;
     let original_turn_count = state.turns.len();
+    let workspace_revert = if let Some(target) = revert_workspace_turn.as_deref() {
+        Some(code_session_workspace_revert(
+            &state,
+            target,
+            apply_workspace,
+        )?)
+    } else {
+        None
+    };
     let mut reverted_to = None;
     if let Some(target) = revert_to.as_deref() {
         let index = code_session_turn_index(&state, target)?;
@@ -328,8 +343,15 @@ pub(crate) fn code_session(options: CodeSessionOptions) -> Result<()> {
         "reverted_to": reverted_to,
         "trace_file_count": trace_file_count,
         "patch_set_count": patch_set_count,
-        "workspace_reverted": false,
-        "note": "AIR code-session only forks or truncates session history; it does not modify workspace files."
+        "workspace_reverted": workspace_revert
+            .as_ref()
+            .is_some_and(|summary| summary.applied && summary.success),
+        "workspace_revert": workspace_revert,
+        "note": if apply_workspace {
+            "AIR code-session applied reverse patches from indexed patch_sets after dry-run checks."
+        } else {
+            "AIR code-session forks/truncates session history and only dry-runs workspace reverse patches unless --apply-workspace is set."
+        }
     });
     serde_json::to_writer_pretty(std::io::stdout(), &summary)?;
     println!();
@@ -406,6 +428,8 @@ struct CodeSessionTurnSummary {
 struct CodeSessionPatchSet {
     source: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace_clean_before: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     workspace_clean_after: Option<bool>,
@@ -472,6 +496,133 @@ fn code_session_turn_index(state: &CodeSessionState, target: &str) -> Result<usi
         }
     }
     bail!("AIR code session does not contain turn {target:?}");
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CodeSessionWorkspaceRevertSummary {
+    turn_id: String,
+    applied: bool,
+    success: bool,
+    patch_set_count: usize,
+    results: Vec<CodeSessionWorkspaceRevertResult>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct CodeSessionWorkspaceRevertResult {
+    source: String,
+    repo: Option<String>,
+    checked: bool,
+    applied: bool,
+    success: bool,
+    status: Option<i32>,
+    log: String,
+}
+
+fn code_session_workspace_revert(
+    state: &CodeSessionState,
+    target: &str,
+    apply_workspace: bool,
+) -> Result<CodeSessionWorkspaceRevertSummary> {
+    let index = code_session_turn_index(state, target)?;
+    let turn = &state.turns[index];
+    let mut patch_sets = turn.patch_sets.clone();
+    patch_sets.reverse();
+    let mut results = Vec::new();
+    let mut success = true;
+
+    for patch_set in &patch_sets {
+        let Some(diff) = patch_set
+            .diff
+            .as_deref()
+            .filter(|diff| !diff.trim().is_empty())
+        else {
+            continue;
+        };
+        let result = run_git_apply_reverse_check(patch_set, diff)?;
+        success &= result.success;
+        results.push(result);
+    }
+
+    if apply_workspace && success {
+        let mut apply_results = Vec::new();
+        for patch_set in &patch_sets {
+            let Some(diff) = patch_set
+                .diff
+                .as_deref()
+                .filter(|diff| !diff.trim().is_empty())
+            else {
+                continue;
+            };
+            let result = run_git_apply_reverse(patch_set, diff, true)?;
+            success &= result.success;
+            apply_results.push(result);
+        }
+        results.extend(apply_results);
+    }
+
+    Ok(CodeSessionWorkspaceRevertSummary {
+        turn_id: turn.id.clone(),
+        applied: apply_workspace && success,
+        success,
+        patch_set_count: patch_sets.len(),
+        results,
+    })
+}
+
+fn run_git_apply_reverse_check(
+    patch_set: &CodeSessionPatchSet,
+    diff: &str,
+) -> Result<CodeSessionWorkspaceRevertResult> {
+    run_git_apply_reverse(patch_set, diff, false)
+}
+
+fn run_git_apply_reverse(
+    patch_set: &CodeSessionPatchSet,
+    diff: &str,
+    apply: bool,
+) -> Result<CodeSessionWorkspaceRevertResult> {
+    let repo = patch_set.repo.as_deref().unwrap_or(".");
+    let mut command = Command::new("git");
+    command.current_dir(repo);
+    command.arg("apply").arg("--reverse");
+    if !apply {
+        command.arg("--check");
+    }
+    command.stdin(Stdio::piped());
+    command.stdout(Stdio::piped());
+    command.stderr(Stdio::piped());
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn git apply in {repo}"))?;
+    {
+        let stdin = child
+            .stdin
+            .as_mut()
+            .context("failed to open git apply stdin")?;
+        stdin
+            .write_all(diff.as_bytes())
+            .context("failed to write reverse patch to git apply")?;
+    }
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for git apply")?;
+    let mut log = String::new();
+    log.push_str(&String::from_utf8_lossy(&output.stdout));
+    if !output.stderr.is_empty() {
+        if !log.is_empty() {
+            log.push('\n');
+        }
+        log.push_str(&String::from_utf8_lossy(&output.stderr));
+    }
+    Ok(CodeSessionWorkspaceRevertResult {
+        source: patch_set.source.clone(),
+        repo: patch_set.repo.clone(),
+        checked: !apply,
+        applied: apply && output.status.success(),
+        success: output.status.success(),
+        status: output.status.code(),
+        log,
+    })
 }
 
 fn unix_millis() -> u64 {
@@ -644,6 +795,10 @@ fn collect_code_session_patch_sets(
                     .collect::<Vec<_>>();
                 patch_sets.push(CodeSessionPatchSet {
                     source: path.to_string(),
+                    repo: workspace_diff
+                        .get("repo")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
                     workspace_clean_before: object
                         .get("workspace_clean_before")
                         .and_then(Value::as_bool),
@@ -2231,6 +2386,7 @@ mod tests {
                 "workspace_changed_files": [{"path": "src/lib.rs"}, {"path": "README.md"}],
                 "preexisting_changed_files": [{"path": "README.md"}],
                 "workspace_diff": {
+                    "repo": "/tmp/repo",
                     "diff": "diff --git a/src/lib.rs b/src/lib.rs",
                     "bytes": 42,
                     "truncated": false,
@@ -2241,6 +2397,7 @@ mod tests {
 
         assert_eq!(patch_sets.len(), 1);
         assert_eq!(patch_sets[0].source, "$.repair");
+        assert_eq!(patch_sets[0].repo, Some("/tmp/repo".to_string()));
         assert_eq!(patch_sets[0].workspace_clean_before, Some(false));
         assert_eq!(patch_sets[0].workspace_clean_after, Some(false));
         assert_eq!(
@@ -2626,6 +2783,33 @@ mod tests {
         assert_eq!(code_session_turn_index(&state, "turn-000002").unwrap(), 1);
         assert_eq!(code_session_turn_index(&state, "1").unwrap(), 0);
         assert!(code_session_turn_index(&state, "3").is_err());
+    }
+
+    #[test]
+    fn session_workspace_revert_reports_empty_patch_sets_without_mutation() {
+        let mut state = CodeSessionState::default();
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000001".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "inspect".to_string(),
+            recipe: "explore".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: true,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            patch_sets: Vec::new(),
+            outputs: json!({}),
+        });
+
+        let summary = code_session_workspace_revert(&state, "turn-000001", false).unwrap();
+
+        assert_eq!(summary.turn_id, "turn-000001");
+        assert!(summary.success);
+        assert!(!summary.applied);
+        assert_eq!(summary.patch_set_count, 0);
+        assert!(summary.results.is_empty());
     }
 
     #[test]

@@ -278,8 +278,18 @@ cargo run -p air-cli -- code-session target/generated/code_session.json \
   --revert-to turn-000001
 ```
 
-`code-session` is a low-level session-history tool. It preserves trace references and never reverts
-files in the working tree; workspace rollback belongs to patch snapshots.
+`code-session` is a low-level session-history tool. It preserves trace references; session fork and
+history truncation do not touch files in the working tree.
+
+Patch-set revert checks are also available from the same session index:
+
+```bash
+cargo run -p air-cli -- code-session target/generated/code_session.json \
+  --revert-workspace-turn turn-000001
+```
+
+This runs `git apply --reverse --check` against the indexed `patch_sets[]` without mutating files.
+Use `--apply-workspace` only when you want to apply the reverse patches after the checks pass.
 
 The same command can select the other public coding-agent recipes:
 

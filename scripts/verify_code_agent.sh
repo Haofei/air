@@ -582,6 +582,9 @@ cargo run -q -p air-cli -- code "fix the failing add function and retest" \
   --session target/generated/code_agent_code_command.session.json \
   > target/generated/code_agent_code_command.output.json
 node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_code_command.post_test.log
+cargo run -q -p air-cli -- code-session target/generated/code_agent_code_command.session.json \
+  --revert-workspace-turn turn-000001 \
+  > target/generated/code_agent_code_command.revert_check.json
 restore_code_command_fixture
 trap - EXIT
 "${PYTHON:-python3}" - <<'PY'
@@ -592,6 +595,8 @@ with open("target/generated/code_agent_code_command.output.json", encoding="utf-
     output = json.load(handle)
 with open("target/generated/code_agent_code_command.session.json", encoding="utf-8") as handle:
     session = json.load(handle)
+with open("target/generated/code_agent_code_command.revert_check.json", encoding="utf-8") as handle:
+    revert_check = json.load(handle)
 assert len(session["turns"]) == 1, session
 turn = session["turns"][0]
 assert turn["trace_files"], turn
@@ -616,6 +621,14 @@ assert any(
     for entry in patch_set["changed_files"]
 ), patch_set
 assert "examples/code-agent/repair-fixture/math.js" in patch_set["diff"], patch_set
+assert revert_check["workspace_reverted"] is False, revert_check
+workspace_revert = revert_check["workspace_revert"]
+assert workspace_revert["turn_id"] == "turn-000001", workspace_revert
+assert workspace_revert["success"] is True, workspace_revert
+assert workspace_revert["applied"] is False, workspace_revert
+assert workspace_revert["results"], workspace_revert
+assert workspace_revert["results"][0]["checked"] is True, workspace_revert
+assert workspace_revert["results"][0]["success"] is True, workspace_revert
 with open(turn["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 
