@@ -452,6 +452,24 @@ function validateToolCapability(module, action, toolConfigRoot) {
   }
 }
 
+function enforceApprovalRequiredBatchIsolation(module, batchValue) {
+  if (batchValue.length <= 1) {
+    return;
+  }
+  const required = module.policy?.require_approval ?? [];
+  if (required.length === 0) {
+    return;
+  }
+  for (const dispatchValue of batchValue) {
+    const toolName = dispatchValue && typeof dispatchValue === 'object' && !Array.isArray(dispatchValue) ? dispatchValue.tool : undefined;
+    const toolSpec = (module.tools ?? []).find((tool) => tool.name === toolName);
+    const capability = toolSpec?.capability;
+    if (capability && required.includes(capability)) {
+      throw new Error(`tool_batch_dispatch containing approval-required capability ${capability} must be isolated: attempted ${batchValue.length} calls`);
+    }
+  }
+}
+
 function enforceRepeatedToolPolicy(module, toolHistory, toolName, inputValue) {
   const limit = module.policy?.max_repeated_tool_calls;
   if (limit == null) {
@@ -965,6 +983,12 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         if (batchValue.length > maxCalls) {
           const error = new Error(`tool_batch_dispatch max_calls exceeded: limit=${maxCalls} attempted=${batchValue.length}`);
           emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch', status: 'error', input: batchValue, meta: { max_calls: maxCalls, attempted: batchValue.length }, error: error.message });
+          throw error;
+        }
+        try {
+          enforceApprovalRequiredBatchIsolation(module, batchValue);
+        } catch (error) {
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch', status: 'error', input: batchValue, meta: { attempted: batchValue.length }, error: String(error?.message ?? error) });
           throw error;
         }
         const batchOutputs = [];
@@ -1635,6 +1659,8 @@ mod tests {
         assert!(code.contains("action.kind === 'tool_batch_dispatch'"));
         assert!(code.contains("tool_batch_dispatch input must be an array"));
         assert!(code.contains("tool_batch_dispatch max_calls exceeded"));
+        assert!(code.contains("function enforceApprovalRequiredBatchIsolation"));
+        assert!(code.contains("approval-required capability"));
         assert!(code.contains("tool_batch_dispatch_item_start"));
         assert!(code.contains("batchOutputs.push"));
     }

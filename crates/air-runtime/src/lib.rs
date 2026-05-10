@@ -139,6 +139,9 @@ pub enum RuntimeError {
     #[error("tool_batch_dispatch max_calls exceeded: limit={limit} attempted={attempted}")]
     ToolBatchDispatchLimitExceeded { limit: u32, attempted: u32 },
 
+    #[error("tool_batch_dispatch containing approval-required capability {capability} must be isolated: attempted {attempted} calls")]
+    ToolBatchDispatchApprovalIsolation { capability: String, attempted: u32 },
+
     #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
     ModelCallLimitExceeded { limit: u32, attempted: u32 },
 
@@ -1209,6 +1212,18 @@ where
             );
             return Err(error);
         }
+        if let Err(error) =
+            enforce_approval_required_batch_isolation(context.module, &dispatches, attempted)
+        {
+            context.push_event_with_meta(
+                "tool_batch_dispatch",
+                Some(input),
+                None,
+                Some(json!({"attempted": attempted})),
+                Err(error.to_string()),
+            );
+            return Err(error);
+        }
 
         let max_attempts = retry
             .as_ref()
@@ -1899,6 +1914,40 @@ fn validate_tool_capability<T: ToolProvider>(
                     capability: provider_capability.to_string(),
                 });
             }
+        }
+    }
+    Ok(())
+}
+
+fn enforce_approval_required_batch_isolation(
+    module: &AirModule,
+    dispatches: &[(String, Value)],
+    attempted: u32,
+) -> Result<(), RuntimeError> {
+    if attempted <= 1 {
+        return Ok(());
+    }
+    for (tool, _) in dispatches {
+        let Some(tool_spec) = module
+            .tools
+            .iter()
+            .find(|candidate| candidate.name == *tool)
+        else {
+            continue;
+        };
+        let Some(capability) = tool_spec.capability.as_ref() else {
+            continue;
+        };
+        if module
+            .policy
+            .require_approval
+            .iter()
+            .any(|required| required == capability)
+        {
+            return Err(RuntimeError::ToolBatchDispatchApprovalIsolation {
+                capability: capability.clone(),
+                attempted,
+            });
         }
     }
     Ok(())

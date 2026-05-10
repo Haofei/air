@@ -422,6 +422,23 @@ def _air_value_kind(value: Any) -> str:
     return type(value).__name__
 
 
+def _air_enforce_approval_required_batch_isolation(module: dict[str, Any], batch_value: list[Any]) -> None:
+    if len(batch_value) <= 1:
+        return
+    required = set(module.get("policy", {}).get("require_approval") or [])
+    if not required:
+        return
+    for dispatch_value in batch_value:
+        tool_name = dispatch_value.get("tool") if isinstance(dispatch_value, dict) else None
+        tool_spec = next((tool for tool in module.get("tools", []) if tool.get("name") == tool_name), None)
+        capability = tool_spec.get("capability") if tool_spec is not None else None
+        if capability in required:
+            raise RuntimeError(
+                f"tool_batch_dispatch containing approval-required capability {capability} "
+                f"must be isolated: attempted {len(batch_value)} calls"
+            )
+
+
 "#,
     );
 }
@@ -638,6 +655,9 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
                 "        raise RuntimeError(\"tool_batch_dispatch max_calls exceeded: limit={} attempted={{}}\".format(len(batch_value)))\n",
                 max_calls
             ));
+            output.push_str(
+                "    _air_enforce_approval_required_batch_isolation(AIR_MODULE, batch_value)\n",
+            );
             output.push_str("    batch_outputs = []\n");
             output.push_str("    for index, dispatch_value in enumerate(batch_value):\n");
             output.push_str("        tool_name = dispatch_value.get(\"tool\") if isinstance(dispatch_value, dict) else None\n");
@@ -1154,6 +1174,23 @@ def _air_validate_tool_capability(module: dict[str, Any], action: dict[str, Any]
         )
 
 
+def _air_enforce_approval_required_batch_isolation(module: dict[str, Any], batch_value: list[Any]) -> None:
+    if len(batch_value) <= 1:
+        return
+    required = set(module.get("policy", {}).get("require_approval") or [])
+    if not required:
+        return
+    for dispatch_value in batch_value:
+        tool_name = dispatch_value.get("tool") if isinstance(dispatch_value, dict) else None
+        tool_spec = next((tool for tool in module.get("tools", []) if tool.get("name") == tool_name), None)
+        capability = tool_spec.get("capability") if tool_spec is not None else None
+        if capability in required:
+            raise RuntimeError(
+                f"tool_batch_dispatch containing approval-required capability {capability} "
+                f"must be isolated: attempted {len(batch_value)} calls"
+            )
+
+
 def _air_enforce_repeated_tool_policy(
     module: dict[str, Any],
     tool_history: list[dict[str, Any]],
@@ -1337,6 +1374,11 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     error = RuntimeError(f"tool_batch_dispatch max_calls exceeded: limit={max_calls} attempted={len(batch_value)}")
                     _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "error", input_value=batch_value, meta={"max_calls": max_calls, "attempted": len(batch_value)}, error=str(error))
                     raise error
+                try:
+                    _air_enforce_approval_required_batch_isolation(module, batch_value)
+                except Exception as error:
+                    _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch", "error", input_value=batch_value, meta={"attempted": len(batch_value)}, error=str(error))
+                    raise
                 batch_outputs = []
                 retry_policy = action.get("retry") or {}
                 max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
@@ -2134,6 +2176,8 @@ mod tests {
 
         assert!(code.contains("tool_batch_dispatch input must be an array"));
         assert!(code.contains("tool_batch_dispatch max_calls exceeded"));
+        assert!(code.contains("approval-required capability"));
+        assert!(code.contains("_air_enforce_approval_required_batch_isolation"));
         assert!(code.contains("call_tool(tool_name, tool_input)"));
         assert!(code.contains("\"output\": result_value"));
     }
@@ -2168,6 +2212,7 @@ mod tests {
         assert!(code.contains("policy.max_repeated_tool_calls exceeded"));
         assert!(code.contains("action exceeded timeout_seconds"));
         assert!(code.contains("def _air_validate_tool_capability"));
+        assert!(code.contains("def _air_enforce_approval_required_batch_isolation"));
         assert!(code.contains("def _air_enforce_repeated_tool_policy"));
         assert!(code.contains("is not declared by module"));
         assert!(code.contains("AIR_TOOL_PROVIDER"));

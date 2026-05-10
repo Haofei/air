@@ -49,6 +49,40 @@ impl ToolProvider for CountingTools {
     }
 }
 
+struct BatchApprovalTools {
+    calls: usize,
+}
+
+impl ToolProvider for BatchApprovalTools {
+    fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        self.calls += 1;
+        match name {
+            "docs.search" => Ok(json!({
+                "query": input["query"],
+            })),
+            "file.ops" => Ok(json!({
+                "applied": true,
+                "path": input["path"],
+            })),
+            other => panic!("unexpected tool {other}"),
+        }
+    }
+
+    fn request_approval(
+        &mut self,
+        module: &air_core::AirModule,
+        approval_for: &[String],
+        _state: &Value,
+    ) -> Result<ApprovalDecision, RuntimeError> {
+        assert_eq!(module.agent.name, "tool-batch-dispatch-approval-agent");
+        assert_eq!(approval_for, &["file.write".to_string()]);
+        Ok(ApprovalDecision::approved(
+            "test-approver",
+            "fixture approval",
+        ))
+    }
+}
+
 struct DispatchModels;
 
 impl ModelProvider for DispatchModels {
@@ -889,6 +923,45 @@ fn rejects_repeated_identical_tool_batch_items_when_policy_is_set() {
         } if tool == "docs.search"
     ));
     assert_eq!(vm.tools.calls, 1);
+}
+
+#[test]
+fn rejects_mixed_approval_required_tool_batch_before_provider_calls() {
+    let module = load_agent("tests/agents/tool-batch-dispatch-approval.air.yaml");
+    let mut vm = Vm {
+        tools: BatchApprovalTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {
+                    "tool": "file.ops",
+                    "input": {
+                        "path": "example.txt",
+                        "kind": "replace_lines",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "content": "patched"
+                    }
+                },
+                {"tool": "docs.search", "input": {"query": "alpha"}}
+            ]),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("mixed write and search"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::ToolBatchDispatchApprovalIsolation {
+            capability,
+            attempted: 2
+        } if capability == "file.write"
+    ));
+    assert_eq!(vm.tools.calls, 0);
 }
 
 #[test]

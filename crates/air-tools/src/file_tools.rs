@@ -1,4 +1,5 @@
 use super::*;
+use std::io::Write;
 
 pub(super) fn call_file_read_tool(
     name: &str,
@@ -2253,16 +2254,36 @@ fn patch_path_from_token(
 }
 
 fn write_temp_patch_file(name: &str, patch: &str) -> Result<PathBuf, RuntimeError> {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} system clock: {error}")))?
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "air-tool-patch-{}-{nonce}.patch",
-        std::process::id()
-    ));
-    fs::write(&path, patch).map_err(|error| {
-        RuntimeError::Provider(format!("tool {name} write temp patch: {error}"))
-    })?;
-    Ok(path)
+    let temp_dir = std::env::temp_dir();
+    let process_id = std::process::id();
+    for attempt in 0..1024u16 {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} system clock: {error}")))?
+            .as_nanos();
+        let path = temp_dir.join(format!(
+            "air-tool-patch-{process_id}-{nonce}-{attempt}.patch"
+        ));
+        let mut file = match fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+        {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(error) => {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} write temp patch: {error}"
+                )));
+            }
+        };
+        file.write_all(patch.as_bytes()).map_err(|error| {
+            let _ = fs::remove_file(&path);
+            RuntimeError::Provider(format!("tool {name} write temp patch: {error}"))
+        })?;
+        return Ok(path);
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {name} failed to allocate a unique temp patch file"
+    )))
 }
