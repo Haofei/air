@@ -66,10 +66,10 @@ recipes:
             - exists: /review
   - id: edit
     default_profile: edit.air-profile.yaml
-    intent: "Run the unified bounded code edit loop over one known target and allowlisted test."
+    intent: "Run the unified bounded code edit loop over an allowlisted test; target may be known or discovered before writing."
     input:
-      required: [task, target, test]
-      optional: [query, related, force_patch]
+      required: [task, test]
+      optional: [query, target, related, force_patch]
     completion:
       any:
         - equals:

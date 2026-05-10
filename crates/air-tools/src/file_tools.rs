@@ -263,18 +263,6 @@ pub(super) fn call_file_search_tool(
             "tool {name} input.path is outside configured base_dir"
         )));
     }
-    let body = fs::read(&path)
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-    if is_likely_binary(&body) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.path appears to be binary; file_search only supports UTF-8 text"
-        )));
-    }
-    let content = std::str::from_utf8(&body).map_err(|_| {
-        RuntimeError::Provider(format!(
-            "tool {name} input.path is not valid UTF-8; file_search only supports UTF-8 text"
-        ))
-    })?;
     let context_lines = optional_bounded_zero_or_positive_usize_input(
         name,
         input,
@@ -288,53 +276,38 @@ pub(super) fn call_file_search_tool(
     let effective_max_line_chars =
         optional_bounded_usize_input(name, input, "max_line_chars", max_line_chars)?
             .unwrap_or(max_line_chars);
-    let lines = content.lines().collect::<Vec<_>>();
-    let total_lines = lines.len();
-    let mut total_match_count = 0usize;
-    let mut any_line_truncated = false;
-    let mut matches = Vec::new();
-    for (index, line) in lines.iter().enumerate() {
-        if !regex.is_match(line) {
-            continue;
+    let directory = path.is_dir();
+    let mut result = FileSearchResult::default();
+    if directory {
+        for file in file_search_directory_files(name, &base, &path)? {
+            let relative_path = file
+                .strip_prefix(&base)
+                .unwrap_or(file.as_path())
+                .to_string_lossy()
+                .replace('\\', "/");
+            search_file_path(
+                &file,
+                Some(&relative_path),
+                &regex,
+                context_lines,
+                effective_max_matches,
+                effective_max_line_chars,
+                &mut result,
+            )?;
         }
-        total_match_count += 1;
-        if matches.len() >= effective_max_matches {
-            continue;
-        }
-        let line_number = index + 1;
-        let before_start = line_number.saturating_sub(context_lines).max(1);
-        let before = (before_start..line_number)
-            .filter_map(|number| line_json(&lines, number, effective_max_line_chars))
-            .inspect(|line| {
-                any_line_truncated |= line
-                    .get("line_truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-            })
-            .collect::<Vec<_>>();
-        let after_end = (line_number + context_lines).min(total_lines);
-        let after = ((line_number + 1)..=after_end)
-            .filter_map(|number| line_json(&lines, number, effective_max_line_chars))
-            .inspect(|line| {
-                any_line_truncated |= line
-                    .get("line_truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-            })
-            .collect::<Vec<_>>();
-        let (line, line_truncated) = truncate_line_text(line, effective_max_line_chars);
-        any_line_truncated |= line_truncated;
-        matches.push(json!({
-            "line_number": line_number,
-            "line": line,
-            "line_truncated": line_truncated,
-            "before": before,
-            "after": after,
-        }));
+    } else {
+        search_file_path(
+            &path,
+            None,
+            &regex,
+            context_lines,
+            effective_max_matches,
+            effective_max_line_chars,
+            &mut result,
+        )?;
     }
-
     let mut rendered = String::new();
-    for item in &matches {
+    for item in &result.matches {
         for context in item
             .get("before")
             .and_then(Value::as_array)
@@ -355,52 +328,192 @@ pub(super) fn call_file_search_tool(
     }
     let (artifact_content, content_truncated, bytes) =
         bytes_to_limited_text(rendered.as_bytes(), max_bytes);
-    let match_truncated = total_match_count > matches.len();
-    let truncated = match_truncated || content_truncated || any_line_truncated;
+    let match_truncated = result.total_match_count > result.matches.len();
+    let truncated = match_truncated || content_truncated || result.any_line_truncated;
     Ok(json!({
         "path": path.display().to_string(),
+        "directory": directory,
         "pattern": pattern,
-        "matches": matches,
-        "match_count": total_match_count,
-        "returned_match_count": matches.len(),
-        "total_lines": total_lines,
+        "matches": result.matches,
+        "match_count": result.total_match_count,
+        "returned_match_count": result.matches.len(),
+        "total_lines": result.total_lines,
+        "searched_file_count": result.searched_file_count,
+        "skipped_file_count": result.skipped_file_count,
         "context_lines": context_lines,
         "max_matches": effective_max_matches,
         "max_line_chars": effective_max_line_chars,
-        "line_truncated": any_line_truncated,
+        "line_truncated": result.any_line_truncated,
         "truncated": truncated,
         "bytes": bytes,
         "artifacts": [{
             "id": format!("file-search:{}:{}", path.display(), stable_pattern_id(pattern)),
             "kind": "file_search",
-            "title": format!("{} matches in {}", total_match_count, path.file_name().and_then(|name| name.to_str()).unwrap_or("file")),
+            "title": format!("{} matches in {}", result.total_match_count, path.file_name().and_then(|name| name.to_str()).unwrap_or("file")),
             "uri": path.display().to_string(),
             "content": artifact_content,
             "metadata": {
                 "provider": "file_search",
                 "path": path.display().to_string(),
+                "directory": directory,
                 "pattern": pattern,
-                "match_count": total_match_count,
-                "returned_match_count": matches.len(),
-                "total_lines": total_lines,
+                "match_count": result.total_match_count,
+                "returned_match_count": result.matches.len(),
+                "total_lines": result.total_lines,
+                "searched_file_count": result.searched_file_count,
+                "skipped_file_count": result.skipped_file_count,
                 "context_lines": context_lines,
                 "max_matches": effective_max_matches,
                 "max_line_chars": effective_max_line_chars,
-                "line_truncated": any_line_truncated,
+                "line_truncated": result.any_line_truncated,
                 "truncated": truncated
             }
         }]
     }))
 }
 
-fn line_json(lines: &[&str], line_number: usize, max_line_chars: usize) -> Option<Value> {
-    lines.get(line_number.checked_sub(1)?).map(|line| {
-        let (line, line_truncated) = truncate_line_text(line, max_line_chars);
-        json!({
+#[derive(Default)]
+struct FileSearchResult {
+    matches: Vec<Value>,
+    total_match_count: usize,
+    total_lines: usize,
+    searched_file_count: usize,
+    skipped_file_count: usize,
+    any_line_truncated: bool,
+}
+
+fn search_file_path(
+    path: &Path,
+    relative_path: Option<&str>,
+    regex: &regex::Regex,
+    context_lines: usize,
+    effective_max_matches: usize,
+    effective_max_line_chars: usize,
+    result: &mut FileSearchResult,
+) -> Result<(), RuntimeError> {
+    let body = fs::read(path)
+        .map_err(|error| RuntimeError::Provider(format!("tool file.search read file: {error}")))?;
+    if is_likely_binary(&body) {
+        result.skipped_file_count += 1;
+        return Ok(());
+    }
+    let Ok(content) = std::str::from_utf8(&body) else {
+        result.skipped_file_count += 1;
+        return Ok(());
+    };
+    result.searched_file_count += 1;
+    let lines = content.lines().collect::<Vec<_>>();
+    result.total_lines += lines.len();
+    let total_lines = lines.len();
+    for (index, line) in lines.iter().enumerate() {
+        if !regex.is_match(line) {
+            continue;
+        }
+        result.total_match_count += 1;
+        if result.matches.len() >= effective_max_matches {
+            continue;
+        }
+        let line_number = index + 1;
+        let before_start = line_number.saturating_sub(context_lines).max(1);
+        let before = (before_start..line_number)
+            .filter_map(|number| {
+                line_json_for_path(&lines, number, effective_max_line_chars, relative_path)
+            })
+            .inspect(|line| {
+                result.any_line_truncated |= line
+                    .get("line_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            })
+            .collect::<Vec<_>>();
+        let after_end = (line_number + context_lines).min(total_lines);
+        let after = ((line_number + 1)..=after_end)
+            .filter_map(|number| {
+                line_json_for_path(&lines, number, effective_max_line_chars, relative_path)
+            })
+            .inspect(|line| {
+                result.any_line_truncated |= line
+                    .get("line_truncated")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+            })
+            .collect::<Vec<_>>();
+        let (line, line_truncated) = truncate_line_text(line, effective_max_line_chars);
+        result.any_line_truncated |= line_truncated;
+        let mut item = json!({
             "line_number": line_number,
             "line": line,
             "line_truncated": line_truncated,
-        })
+            "before": before,
+            "after": after,
+        });
+        if let Some(path) = relative_path {
+            item["path"] = Value::String(path.to_string());
+        }
+        result.matches.push(item);
+    }
+    Ok(())
+}
+
+fn file_search_directory_files(
+    tool_name: &str,
+    base: &Path,
+    root: &Path,
+) -> Result<Vec<PathBuf>, RuntimeError> {
+    let mut pending = vec![root.to_path_buf()];
+    let mut files = Vec::new();
+    while let Some(path) = pending.pop() {
+        let entries = fs::read_dir(&path).map_err(|error| {
+            RuntimeError::Provider(format!("tool {tool_name} read directory: {error}"))
+        })?;
+        let mut entries = entries.collect::<Result<Vec<_>, _>>().map_err(|error| {
+            RuntimeError::Provider(format!("tool {tool_name} read directory entry: {error}"))
+        })?;
+        entries.sort_by_key(|entry| entry.path());
+        for entry in entries.into_iter().rev() {
+            let path = entry.path();
+            let path = canonicalize_tool_path(tool_name, "input.path", &path)?;
+            if !path.starts_with(base) {
+                continue;
+            }
+            if path.is_dir() {
+                if should_skip_file_search_dir(&path) {
+                    continue;
+                }
+                pending.push(path);
+            } else if path.is_file() {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
+fn should_skip_file_search_dir(path: &Path) -> bool {
+    matches!(
+        path.file_name().and_then(|name| name.to_str()),
+        Some(".git" | "target" | "node_modules" | "dist" | "build" | "__pycache__")
+    )
+}
+
+fn line_json_for_path(
+    lines: &[&str],
+    line_number: usize,
+    max_line_chars: usize,
+    path: Option<&str>,
+) -> Option<Value> {
+    lines.get(line_number.checked_sub(1)?).map(|line| {
+        let (line, line_truncated) = truncate_line_text(line, max_line_chars);
+        let mut value = json!({
+            "line_number": line_number,
+            "line": line,
+            "line_truncated": line_truncated,
+        });
+        if let Some(path) = path {
+            value["path"] = Value::String(path.to_string());
+        }
+        value
     })
 }
 
@@ -420,7 +533,11 @@ fn render_search_line(value: &Value) -> String {
         .get("line")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    format!("{number}: {line}\n")
+    if let Some(path) = value.get("path").and_then(Value::as_str) {
+        format!("{path}:{number}: {line}\n")
+    } else {
+        format!("{number}: {line}\n")
+    }
 }
 
 fn stable_pattern_id(pattern: &str) -> String {
@@ -921,7 +1038,10 @@ fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
         let mut normalized = serde_json::Map::new();
         normalized.insert(
             "operations".to_string(),
-            normalize_file_ops_operations(ops)?,
+            normalize_file_ops_operations_with_default_path(
+                ops,
+                input.get("path").and_then(Value::as_str),
+            )?,
         );
         if let Some(dry_run) = input.get("dry_run") {
             normalized.insert("dry_run".to_string(), dry_run.clone());
@@ -973,13 +1093,19 @@ fn normalize_file_ops_array_input(input: &Value, field: &str) -> Result<Value, R
     if let Some(object) = normalized.as_object_mut() {
         object.insert(
             "operations".to_string(),
-            normalize_file_ops_operations(operations)?,
+            normalize_file_ops_operations_with_default_path(
+                operations,
+                input.get("path").and_then(Value::as_str),
+            )?,
         );
     }
     Ok(normalized)
 }
 
-fn normalize_file_ops_operations(operations: &Value) -> Result<Value, RuntimeError> {
+fn normalize_file_ops_operations_with_default_path(
+    operations: &Value,
+    default_path: Option<&str>,
+) -> Result<Value, RuntimeError> {
     let Some(items) = operations.as_array() else {
         return Ok(operations.clone());
     };
@@ -996,6 +1122,11 @@ fn normalize_file_ops_operations(operations: &Value) -> Result<Value, RuntimeErr
             .and_then(Value::as_object)
         {
             merge_file_ops_args(&mut operation, args);
+        }
+        if let Some(path) = default_path {
+            operation
+                .entry("path".to_string())
+                .or_insert_with(|| Value::String(path.to_string()));
         }
         normalize_file_ops_operation_aliases(&mut operation);
         normalized_items.push(Value::Object(operation));

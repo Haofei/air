@@ -107,7 +107,6 @@ pub(crate) fn build_input_with_pack(
             Ok(input)
         }
         CodeRecipe::Edit => {
-            let target = required_path(target, "--target", recipe)?;
             let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
             let target_search_pattern = code_search_pattern(&query);
@@ -120,7 +119,7 @@ pub(crate) fn build_input_with_pack(
             );
             input.insert(
                 "target_path".to_string(),
-                Value::String(path_to_input_string(target)),
+                Value::String(target.map(path_to_input_string).unwrap_or_default()),
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("test_command".to_string(), Value::String(test));

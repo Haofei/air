@@ -1,7 +1,7 @@
 plan:
   name: code-edit
   version: 0.1.0
-  description: "Unified coding-agent edit loop for one known target and one allowlisted validation command."
+  description: "Unified coding-agent edit loop for a bounded task and one allowlisted validation command."
 
 requires:
   capabilities: [task.progress, file.read, file.write, code.read, code.test]
@@ -33,5 +33,5 @@ outputs:
 
 decisions:
   - id: choose-code-edit-loop
-    rationale: "The target file and validation command are known, so run the unified AIR edit loop."
+    rationale: "A validation command is known, so run the unified AIR edit loop. If target_path is empty, the loop must discover and read the target before writing."
     selected: [edit]

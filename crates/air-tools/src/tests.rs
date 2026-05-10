@@ -638,6 +638,57 @@ fn file_search_returns_regex_matches_with_context() {
 }
 
 #[test]
+fn file_search_recurses_within_directory_paths() {
+    let dir = temp_dir("air-tools-file-search-directory");
+    fs::create_dir_all(dir.join("src/nested")).unwrap();
+    fs::write(
+        dir.join("src/math.js"),
+        "function add(a, b) {\n  return a - b;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/nested/other.js"),
+        "function subtract(a, b) {}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("README.md"), "add documentation\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 4096,
+                  "max_matches": 8,
+                  "max_context_lines": 2
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.search",
+            &json!({"path": "src", "pattern": "add", "context_lines": 1}),
+        )
+        .unwrap();
+
+    assert_eq!(output["directory"], json!(true));
+    assert_eq!(output["match_count"], json!(1));
+    assert_eq!(output["matches"][0]["path"], json!("src/math.js"));
+    assert_eq!(output["matches"][0]["line_number"], json!(1));
+    assert_eq!(output["searched_file_count"], json!(2));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["searched_file_count"],
+        json!(2)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_rejects_invalid_regex() {
     let dir = temp_dir("air-tools-file-search-invalid-regex");
     fs::write(dir.join("note.txt"), "alpha\n").unwrap();
@@ -1671,6 +1722,57 @@ fn file_ops_accepts_ops_array_alias() {
                 "ops": [{
                     "kind": "replace_lines",
                     "path": "note.txt",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "content": "TWO"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\nTWO\nthree\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_ops_applies_top_level_path_to_ops_alias_items() {
+    let dir = temp_dir("air-tools-file-ops-top-level-path");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 2,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "path": "note.txt",
+                "ops": [{
+                    "kind": "replace_lines",
                     "start_line": 2,
                     "end_line": 2,
                     "content": "TWO"
@@ -3236,6 +3338,35 @@ fn repo_search_returns_structured_matches() {
 }
 
 #[test]
+fn repo_search_treats_empty_path_as_unfiltered_repo_search() {
+    let dir = temp_dir("air-tools-repo-search-empty-path");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.search", &json!({"query": "alpha", "path": ""}))
+        .unwrap();
+
+    assert_eq!(output["matches"][0]["path"], json!("src/lib.rs"));
+    assert_eq!(output["artifacts"][0]["metadata"]["paths"], json!([]));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_search_supports_explicit_regex_mode() {
     let dir = temp_dir("air-tools-repo-search-regex");
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -3273,6 +3404,55 @@ fn repo_search_supports_explicit_regex_mode() {
         .unwrap()
         .contains("beta_value"));
     assert_eq!(output["artifacts"][0]["metadata"]["mode"], json!("regex"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_search_accepts_common_llm_pattern_and_file_glob_aliases() {
+    let dir = temp_dir("air-tools-repo-search-llm-aliases");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join("tests")).unwrap();
+    fs::write(
+        dir.join("src/math.js"),
+        "function add(a, b) {\n  return a - b;\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("tests/math.test.js"), "assert(add(2, 3) === 5);\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.search",
+            &json!({"pattern": "add", "file_glob": "src/*.js"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["query"], json!("add"));
+    assert_eq!(output["query_source"], json!("pattern"));
+    assert_eq!(output["glob"], json!("src/*.js"));
+    assert_eq!(output["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(output["matches"][0]["path"], json!("src/math.js"));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["query_source"],
+        json!("pattern")
+    );
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["glob"],
+        json!("src/*.js")
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -3891,6 +4071,35 @@ fn diagnostic_context_returns_source_snippets_for_command_diagnostics() {
     assert_eq!(
         tools.tool_capability("diagnostic.context"),
         Some("code.read")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn diagnostic_context_accepts_missing_diagnostics_as_empty_observation() {
+    let dir = temp_dir("air-tools-diagnostic-context-empty");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "diagnostic.context": {
+                  "kind": "diagnostic_context",
+                  "capability": "code.read",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools.call_tool("diagnostic.context", &json!({})).unwrap();
+
+    assert_eq!(output["diagnostic_count"], json!(0));
+    assert!(output["snippets"].as_array().unwrap().is_empty());
+    assert!(output["unreadable"].as_array().unwrap().is_empty());
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["diagnostic_count"],
+        json!(0)
     );
     let _ = fs::remove_dir_all(dir);
 }

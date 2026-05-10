@@ -371,22 +371,32 @@ all:
     fn pack_input_contract_rejects_missing_required_fields() {
         let pack = load_code_agent_pack(None).unwrap();
 
+        pack.validate_recipe_input_facts(
+            "edit",
+            &CodeAgentInputFacts {
+                task: true,
+                test: true,
+                ..CodeAgentInputFacts::default()
+            },
+        )
+        .expect("targetless edit should be accepted when test is present");
+
         let error = pack
             .validate_recipe_input_facts(
                 "edit",
                 &CodeAgentInputFacts {
                     task: true,
-                    test: true,
+                    target: true,
                     ..CodeAgentInputFacts::default()
                 },
             )
-            .expect_err("missing target should be rejected by pack input contract");
+            .expect_err("missing test should be rejected by pack input contract");
 
         assert!(
             error.to_string().contains("missing required input"),
             "{error}"
         );
-        assert!(error.to_string().contains("target"), "{error}");
+        assert!(error.to_string().contains("test"), "{error}");
     }
 
     #[test]

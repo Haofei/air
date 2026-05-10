@@ -1,0 +1,106 @@
+{
+  "fixtures": {
+    "code_edit_decider": {
+      "$sequence": [
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "test.run",
+              "input": {
+                "test_command": "edit_fixture_test"
+              }
+            },
+            {
+              "tool": "repo.search",
+              "input": {
+                "pattern": "add",
+                "file_glob": "examples/code-agent/edit-fixture/*.js"
+              }
+            },
+            {
+              "tool": "diagnostic.context",
+              "input": {}
+            },
+            {
+              "tool": "file.search",
+              "input": {
+                "path": "examples/code-agent/edit-fixture",
+                "pattern": "add"
+              }
+            }
+          ],
+          "rationale": "Start without a known target by running the allowlisted test and searching the fixture directory."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.read_many",
+              "input": {
+                "paths": [
+                  "examples/code-agent/edit-fixture/math.js",
+                  "examples/code-agent/edit-fixture/test.js"
+                ]
+              }
+            }
+          ],
+          "rationale": "Read the discovered source and test files before writing."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "path": "examples/code-agent/edit-fixture/math.js",
+                "ops": [
+                  {
+                    "kind": "replace_lines",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "content": "  return a + b;\n"
+                  }
+                ]
+              }
+            }
+          ],
+          "rationale": "Replace the incorrect subtraction line with addition."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "test.run",
+              "input": {
+                "test_command": "edit_fixture_test"
+              }
+            }
+          ],
+          "rationale": "Verify the fix with the allowlisted test command."
+        },
+        {
+          "complete": true,
+          "tool_calls": [],
+          "rationale": "The target was discovered, edited, and verified without a user-supplied target path."
+        }
+      ]
+    },
+    "code_edit_summarizer": {
+      "initial_success": false,
+      "final_success": true,
+      "patch_applied": true,
+      "changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "workspace_changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "preexisting_changed_files": [],
+      "workspace_diff": {
+        "examples/code-agent/edit-fixture/math.js": "--- a/examples/code-agent/edit-fixture/math.js\n+++ b/examples/code-agent/edit-fixture/math.js\n@@ -2,1 +2,1 @@\n-  return a - b;\n+  return a + b;\n"
+      },
+      "rationale": "The targetless edit loop found the fixture files, fixed the add function, and verified the allowlisted test."
+    }
+  }
+}

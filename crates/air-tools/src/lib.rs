@@ -3003,7 +3003,7 @@ fn call_repo_search_tool(
     max_matches: usize,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let query = required_input_string(name, input, "query")?;
+    let (query, query_source) = repo_search_query_input(name, input)?;
     let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
     if !matches!(mode, "fixed" | "regex" | "smart") {
         return Err(RuntimeError::Provider(format!(
@@ -3032,7 +3032,8 @@ fn call_repo_search_tool(
         command.arg("--ignore-case");
     }
     command.arg(&effective_query);
-    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+    let glob = repo_glob_input(name, input)?;
+    if let Some(glob) = glob {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
     }
@@ -3072,7 +3073,9 @@ fn call_repo_search_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
+        "query_source": query_source,
         "effective_query": effective_query,
+        "glob": glob,
         "mode": mode,
         "matches": matches,
         "bytes": bytes,
@@ -3087,7 +3090,9 @@ fn call_repo_search_tool(
                 "provider": "repo_search",
                 "repo": repo.display().to_string(),
                 "query": query,
+                "query_source": query_source,
                 "effective_query": effective_query,
+                "glob": glob,
                 "mode": mode,
                 "paths": paths,
                 "max_matches": effective_max_matches,
@@ -3715,15 +3720,13 @@ fn call_diagnostic_context_tool(
     context_lines: usize,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let diagnostics = input
-        .get("diagnostics")
-        .ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {name} input.diagnostics is required"))
-        })?
-        .as_array()
-        .ok_or_else(|| {
+    let empty_diagnostics = Vec::new();
+    let diagnostics = match input.get("diagnostics") {
+        Some(diagnostics) => diagnostics.as_array().ok_or_else(|| {
             RuntimeError::Provider(format!("tool {name} input.diagnostics must be an array"))
-        })?;
+        })?,
+        None => &empty_diagnostics,
+    };
     let effective_max_diagnostics =
         optional_bounded_usize_input(name, input, "max_diagnostics", max_diagnostics)?
             .unwrap_or(max_diagnostics);
@@ -4456,6 +4459,42 @@ fn required_input_string<'a>(
     })
 }
 
+fn repo_search_query_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+) -> Result<(&'a str, &'static str), RuntimeError> {
+    if let Some(query) = input.get("query") {
+        return query.as_str().map(|query| (query, "query")).ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
+        });
+    }
+    if let Some(pattern) = input.get("pattern") {
+        return pattern
+            .as_str()
+            .map(|pattern| (pattern, "pattern"))
+            .ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {tool_name} input.pattern must be a string"))
+            });
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} input.query must be a string"
+    )))
+}
+
+fn repo_glob_input<'a>(tool_name: &str, input: &'a Value) -> Result<Option<&'a str>, RuntimeError> {
+    if let Some(glob) = input.get("glob") {
+        return glob.as_str().map(Some).ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.glob must be a string"))
+        });
+    }
+    if let Some(glob) = input.get("file_glob") {
+        return glob.as_str().map(Some).ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.file_glob must be a string"))
+        });
+    }
+    Ok(None)
+}
+
 fn required_labeled_string_input<'a>(
     tool_name: &str,
     input: &'a Value,
@@ -4702,8 +4741,10 @@ fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, Runtim
         let path = path.as_str().ok_or_else(|| {
             RuntimeError::Provider(format!("tool {tool_name} input.path must be a string"))
         })?;
-        validate_git_pathspec(tool_name, path)?;
-        paths.push(path.to_string());
+        if !path.trim().is_empty() {
+            validate_git_pathspec(tool_name, path)?;
+            paths.push(path.to_string());
+        }
     }
     if let Some(raw_paths) = input.get("paths") {
         let raw_paths = raw_paths.as_array().ok_or_else(|| {
@@ -4715,8 +4756,10 @@ fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, Runtim
                     "tool {tool_name} input.paths entries must be strings"
                 ))
             })?;
-            validate_git_pathspec(tool_name, path)?;
-            paths.push(path.to_string());
+            if !path.trim().is_empty() {
+                validate_git_pathspec(tool_name, path)?;
+                paths.push(path.to_string());
+            }
         }
     }
     Ok(paths)

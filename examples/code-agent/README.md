@@ -9,7 +9,7 @@ The public recipes are:
 - `review`: grounded review over repository, diff, test, and optional search evidence.
 - `edit`: the only workspace-writing primitive. The model chooses one declared tool per turn; AIR executes it, appends the observation, enforces capability/budget policy, and records the trace.
 
-`edit` covers bug fixes, behavior-preserving changes, small feature edits, and bounded file creation. Those are task intents, not separate agent primitives.
+`edit` covers bug fixes, behavior-preserving changes, small feature edits, and bounded file creation. Those are task intents, not separate agent primitives. A target file is useful but optional for explicit edit runs; when omitted, the loop must discover and read the file before any write.
 
 ## Explore
 
@@ -43,6 +43,15 @@ cargo run -p air-cli -- code "update the AIR code-agent docs and run the code-ag
   --profile examples/code-agent/edit.self.air-profile.yaml \
   --target examples/code-agent/README.md \
   --test verify_code_agent
+```
+
+For targetless edit, keep the validation command explicit and let the loop discover the file:
+
+```bash
+cargo run -p air-cli -- code "fix the failing add function" \
+  --recipe edit \
+  --test edit_fixture_test \
+  --query "edit fixture add function test"
 ```
 
 Run the deterministic fixture:

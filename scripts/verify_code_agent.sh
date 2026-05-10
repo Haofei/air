@@ -105,6 +105,74 @@ assert "code_edit_decider" in models, models
 assert "code_edit_summarizer" in models, models
 PY
 
+echo "[code-agent] targetless edit loop offline run"
+edit_targetless_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_targetless_backup"
+restore_edit_targetless_fixture() {
+  cp "$edit_targetless_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_targetless_backup"
+}
+trap restore_edit_targetless_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.targetless.input.json \
+  --model-config examples/code-agent/model-fixtures.targetless.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_targetless.trace.jsonl \
+  > target/generated/code_agent_edit_targetless.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_targetless.post_test.log
+restore_edit_targetless_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_targetless.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["initial_success"] is False, edit
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+assert "examples/code-agent/edit-fixture/math.js" in edit["workspace_diff"], edit
+
+with open("target/generated/code_agent_edit_targetless.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == [
+    "test.run",
+    "repo.search",
+    "diagnostic.context",
+    "file.search",
+    "file.read_many",
+    "file.ops",
+    "test.run",
+], tools
+repo_search = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "repo.search"
+)
+assert repo_search["output"]["query_source"] == "pattern", repo_search
+assert repo_search["output"]["glob"] == "examples/code-agent/edit-fixture/*.js", repo_search
+diagnostics = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "diagnostic.context"
+)
+assert diagnostics["output"]["diagnostic_count"] == 0, diagnostics
+file_search = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.search"
+)
+assert file_search["output"]["directory"] is True, file_search
+PY
+
 echo "[code-agent] user-facing edit command explain"
 cargo run -q -p air-cli -- code "edit the failing add function and retest" \
   --recipe edit \

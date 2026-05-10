@@ -2102,6 +2102,37 @@ mod tests {
     }
 
     #[test]
+    fn explicit_edit_can_start_without_known_target() {
+        let input = build_input(CodeInputOptions {
+            task: "fix the failing add function".to_string(),
+            recipe: CodeRecipe::Edit,
+            target: None,
+            test: Some("edit_fixture_test".to_string()),
+            query: Some("edit fixture add function test".to_string()),
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["query"],
+            Value::String("edit fixture add function test".to_string())
+        );
+        assert_eq!(input["target_path"], Value::String(String::new()));
+        assert_eq!(
+            input["target_search_pattern"],
+            Value::String("edit|fixture|add|function|test".to_string())
+        );
+        assert_eq!(
+            input["test_command"],
+            Value::String("edit_fixture_test".to_string())
+        );
+    }
+
+    #[test]
     fn auto_recipe_selects_edit_for_any_targeted_write_task() {
         let input = build_input(CodeInputOptions {
             task: "change the provider and keep tests passing".to_string(),
