@@ -3127,11 +3127,23 @@ fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> 
     let mut diagnostics = Vec::new();
     let mut pending_rust = None;
     let mut pending_python_frames: Vec<(String, u64, String)> = Vec::new();
+    let mut pending_diagnostic_file: Option<String> = None;
     for line in log.lines() {
         let trimmed = line.trim_start();
         if let Some((severity, message)) = parse_rust_severity_message(trimmed) {
             pending_rust = Some((severity, message, trimmed.to_string()));
             continue;
+        }
+        if let Some(path) = parse_diagnostic_file_context(line) {
+            pending_diagnostic_file = Some(path);
+            continue;
+        }
+        if let Some(path) = pending_diagnostic_file.as_deref() {
+            if let Some(diagnostic) = parse_indented_line_column_diagnostic(line, path) {
+                diagnostics.push(diagnostic);
+                pending_rust = None;
+                pending_python_frames.clear();
+            }
         }
         if let Some((path, line_number)) = parse_python_traceback_location(trimmed) {
             pending_python_frames.push((path, line_number, trimmed.to_string()));
@@ -3171,6 +3183,7 @@ fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> 
             diagnostics.push(diagnostic);
             pending_rust = None;
             pending_python_frames.clear();
+            pending_diagnostic_file = None;
         }
         if diagnostics.len() >= max_diagnostics {
             break;
@@ -3326,6 +3339,41 @@ fn parse_colon_line_diagnostic(line: &str) -> Option<Value> {
     None
 }
 
+fn parse_diagnostic_file_context(line: &str) -> Option<String> {
+    let path = line.trim();
+    if path.is_empty()
+        || path.contains(char::is_whitespace)
+        || path.contains(':')
+        || !path.contains('.')
+        || path.starts_with(">")
+    {
+        return None;
+    }
+    Some(path.to_string())
+}
+
+fn parse_indented_line_column_diagnostic(line: &str, path: &str) -> Option<Value> {
+    if !line.starts_with(char::is_whitespace) {
+        return None;
+    }
+    let trimmed = line.trim_start();
+    let (line_text, rest) = trimmed.split_once(':')?;
+    let line_number = line_text.trim().parse::<u64>().ok()?;
+    let (column_text, rest) = rest.trim_start().split_once(char::is_whitespace)?;
+    let column = column_text.trim().parse::<u64>().ok()?;
+    let rest = rest.trim_start();
+    let (severity, message) = split_severity_message(rest)?;
+    Some(json!({
+        "source": "command_run",
+        "severity": severity,
+        "path": path,
+        "line": line_number,
+        "column": column,
+        "message": message,
+        "raw": line.trim()
+    }))
+}
+
 fn split_severity_message(text: &str) -> Option<(String, String)> {
     for severity in ["error", "warning"] {
         if text == severity {
@@ -3335,7 +3383,8 @@ fn split_severity_message(text: &str) -> Option<(String, String)> {
             return Some((severity.to_string(), message.trim().to_string()));
         }
         if text.starts_with(&format!("{severity} ")) {
-            return Some((severity.to_string(), text.to_string()));
+            let message = text[severity.len()..].trim_start().to_string();
+            return Some((severity.to_string(), message));
         }
     }
     None
@@ -5221,6 +5270,31 @@ AssertionError: broken invariant
             diagnostics[1]["message"],
             json!("AssertionError: expected true")
         );
+    }
+
+    #[test]
+    fn extract_command_diagnostics_parses_file_context_lint_blocks() {
+        let diagnostics = extract_command_diagnostics(
+            r#"src/main.ts
+  12:5  error  Unexpected any.  @typescript-eslint/no-explicit-any
+  18:1  warning  Missing return type  @typescript-eslint/explicit-function-return-type
+✖ 2 problems
+"#,
+            10,
+        );
+
+        assert_eq!(diagnostics.len(), 2);
+        assert_eq!(diagnostics[0]["severity"], json!("error"));
+        assert_eq!(diagnostics[0]["path"], json!("src/main.ts"));
+        assert_eq!(diagnostics[0]["line"], json!(12));
+        assert_eq!(diagnostics[0]["column"], json!(5));
+        assert_eq!(
+            diagnostics[0]["message"],
+            json!("Unexpected any.  @typescript-eslint/no-explicit-any")
+        );
+        assert_eq!(diagnostics[1]["severity"], json!("warning"));
+        assert_eq!(diagnostics[1]["line"], json!(18));
+        assert_eq!(diagnostics[1]["column"], json!(1));
     }
 
     #[test]
