@@ -106,7 +106,7 @@
     "context.measure": {
       "kind": "context_measure",
       "capability": "context.manage",
-      "max_context_chars": 45000,
+      "max_context_chars": 200000,
       "threshold_percent": 80
     },
     "artifact.validate": {

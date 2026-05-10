@@ -10,6 +10,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
+const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
+
 #[derive(Clone)]
 pub struct EchoTools;
 
@@ -1777,8 +1780,8 @@ impl ToolProvider for ConfigTools {
             } => call_context_measure_tool(
                 name,
                 input,
-                max_context_chars.unwrap_or(64 * 1024),
-                threshold_percent.unwrap_or(80),
+                max_context_chars.unwrap_or(DEFAULT_CONTEXT_MAX_CHARS),
+                threshold_percent.unwrap_or(DEFAULT_CONTEXT_THRESHOLD_PERCENT),
             ),
             ToolConfig::ArtifactValidate {
                 capability: _,
@@ -6200,6 +6203,33 @@ mod tests {
             tools.tool_capability("context.measure"),
             Some("context.manage")
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn context_measure_defaults_to_200k_context_window() {
+        let dir = temp_dir("air-tools-context-measure-default");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "context.measure": {
+                  "kind": "context_measure",
+                  "capability": "context.manage"
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool("context.measure", &json!({"payload": {"small": "ok"}}))
+            .unwrap();
+
+        assert_eq!(output["max_context_chars"], json!(200000));
+        assert_eq!(output["threshold_percent"], json!(80));
+        assert_eq!(output["threshold_chars"], json!(160000));
+        assert_eq!(output["should_compact"], json!(false));
         let _ = fs::remove_dir_all(dir);
     }
 

@@ -3,7 +3,7 @@
     "context.measure": {
       "kind": "context_measure",
       "capability": "context.manage",
-      "max_context_chars": 128000,
+      "max_context_chars": 200000,
       "threshold_percent": 80
     }
   }

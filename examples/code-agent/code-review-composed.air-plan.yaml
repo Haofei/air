@@ -45,7 +45,7 @@ connect:
       literal: a downstream code-review agent that needs concise, source-grounded repository evidence
   - to: compact.max_context_chars
     value:
-      literal: 45000
+      literal: 200000
   - to: compact.threshold_percent
     value:
       literal: 80

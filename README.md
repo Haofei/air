@@ -11,6 +11,10 @@ actually happened". The native VM, traces, typed tool contracts, budgets, and Ru
 designed around that audit surface. opencode optimizes for developer freedom; AIR optimizes for
 bounded freedom with guarantees.
 
+The end state is not an AI that rewrites its own constitution at runtime. It is a stable AIR
+constitution that lets coding agents continuously improve modules, tools, prompts, and backends
+through auditable traces, tests, benchmarks, and reviewed changes.
+
 | Problem | AIR |
 | --- | --- |
 | Agent code is locked to one SDK | One checked IR can run on the AIR VM or lower to LangGraph / OpenAI JS strict runtimes |

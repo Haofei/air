@@ -352,6 +352,54 @@ assert repair["patch_applied"] is True, repair
 assert Path("target/generated/code_agent_code_loop.trace.iter1.jsonl").exists()
 PY
 
+echo "[code-agent] bounded loop carries failed iteration context"
+code_loop_feedback_backup="$(mktemp)"
+cp examples/code-agent/repair-fixture/math.js "$code_loop_feedback_backup"
+restore_code_loop_feedback_fixture() {
+  cp "$code_loop_feedback_backup" examples/code-agent/repair-fixture/math.js
+  rm -f "$code_loop_feedback_backup"
+}
+trap restore_code_loop_feedback_fixture EXIT
+cargo run -q -p air-cli -- code "fix the failing add function until tests pass" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --related examples/code-agent/repair-fixture/test.js \
+  --loop \
+  --max-iterations 2 \
+  --model-config examples/code-agent/model-fixtures.loop-fail.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_code_loop_feedback.trace.jsonl \
+  > target/generated/code_agent_code_loop_feedback.output.json
+restore_code_loop_feedback_fixture
+trap - EXIT
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_agent_code_loop_feedback.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+
+assert output["status"] == "max_iterations_exhausted", output
+assert output["completed"] is False, output
+assert len(output["iterations"]) == 2, output
+assert output["iterations"][0]["outputs"]["repair"]["final_success"] is False, output
+assert Path("target/generated/code_agent_code_loop_feedback.trace.iter2.jsonl").exists()
+
+with open("target/generated/code_agent_code_loop_feedback.trace.iter2.jsonl", encoding="utf-8") as handle:
+    trace = [json.loads(line) for line in handle if line.strip()]
+
+repair_calls = [
+    event for event in trace
+    if event.get("action") == "model_call"
+    and event.get("meta", {}).get("model") == "code_repairer"
+]
+assert repair_calls, trace
+task = repair_calls[0]["input"]["task"]
+assert "AIR loop context from previous iterations" in task, task
+assert '"final_success":false' in task, task
+assert "Patch validation failed before apply" in task, task
+PY
+
 echo "[code-agent] core multifile repair offline run"
 multifile_math_backup="$(mktemp)"
 multifile_normalize_backup="$(mktemp)"

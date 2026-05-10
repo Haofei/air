@@ -351,7 +351,7 @@ fn code_loop_feedback(previous_iterations: &[Value]) -> String {
             .unwrap_or(false);
         let outputs = iteration.get("outputs").cloned().unwrap_or(Value::Null);
         let mut output_summary = serde_json::to_string(&outputs).unwrap_or_default();
-        const MAX_OUTPUT_SUMMARY_CHARS: usize = 2400;
+        const MAX_OUTPUT_SUMMARY_CHARS: usize = 200_000;
         if output_summary.chars().count() > MAX_OUTPUT_SUMMARY_CHARS {
             output_summary = output_summary
                 .chars()
