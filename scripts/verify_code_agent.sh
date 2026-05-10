@@ -1381,6 +1381,14 @@ repair_calls = [
     and event.get("meta", {}).get("model") == "code_repairer"
 ]
 assert repair_calls, trace
+operation_schema = repair_calls[0]["input"]["operation_schema"]
+assert operation_schema["tool"] == "file.ops", operation_schema
+assert operation_schema["max_operations"] == 6, operation_schema
+assert operation_schema["require_prior_read"] is True, operation_schema
+assert operation_schema["dry_run_first"] is True, operation_schema
+assert "edit" in operation_schema["operations"], operation_schema
+assert "write" in operation_schema["operations"], operation_schema
+assert "match_strategy" in operation_schema["operations"]["edit"]["optional"], operation_schema
 assert repair_calls[0]["input"]["progress"]["in_progress_count"] == 1, repair_calls[0]["input"]
 assert any(
     todo["id"] == "repair" and todo["status"] == "in_progress"

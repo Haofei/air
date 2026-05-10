@@ -702,6 +702,22 @@ workflow:
                 ref: test_results.log
               progress:
                 ref: progress
+              operation_schema:
+                literal:
+                  tool: file.ops
+                  max_operations: 6
+                  require_prior_read: true
+                  dry_run_first: true
+                  operations:
+                    edit:
+                      required: [kind, path, old_string, new_string]
+                      optional: [replace_all, match_strategy]
+                      match_strategy:
+                        enum: [exact, auto, line_trimmed, whitespace_normalized, indentation_flexible]
+                      note: "Prefer exact old_string from file_context, target_matches, or diagnostic_context. Set replace_all only when all matches should change."
+                    write:
+                      required: [kind, path, content]
+                      note: "Use only for bounded new files or full overwrites permitted by the selected tool config."
           output: repair_plan
           timeout_seconds: 120
           retry:
@@ -949,6 +965,22 @@ workflow:
                 ref: repair_plan.rationale
               progress:
                 ref: progress
+              operation_schema:
+                literal:
+                  tool: file.ops
+                  max_operations: 6
+                  require_prior_read: true
+                  dry_run_first: true
+                  operations:
+                    edit:
+                      required: [kind, path, old_string, new_string]
+                      optional: [replace_all, match_strategy]
+                      match_strategy:
+                        enum: [exact, auto, line_trimmed, whitespace_normalized, indentation_flexible]
+                      note: "Prefer exact old_string from reread context. Set replace_all only when all matches should change."
+                    write:
+                      required: [kind, path, content]
+                      note: "Use only for bounded new files or full overwrites permitted by the selected tool config."
           output: repair_plan_retry
           timeout_seconds: 120
           retry:
