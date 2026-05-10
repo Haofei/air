@@ -2286,6 +2286,50 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_exposes_core_opencode_style_discovery_tools() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let declared_tools = yaml["tools"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<HashSet<_>>();
+        let allowed_tools = yaml["workflow"]["rules"][1]["actions"][0]["input"]["object"]
+            ["allowed_tools"]["array"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["literal"].as_str())
+            .collect::<HashSet<_>>();
+
+        for tool in [
+            "repo.files",
+            "repo.search",
+            "repo.context",
+            "repo.symbols",
+            "repo.references",
+            "file.read",
+            "file.search",
+            "file.ops",
+            "test.run",
+            "git.diff",
+        ] {
+            assert!(
+                declared_tools.contains(tool),
+                "missing declared tool {tool}"
+            );
+            assert!(
+                allowed_tools.contains(tool),
+                "tool {tool} is not visible to the edit decider"
+            );
+        }
+    }
+
+    #[test]
     fn completion_detection_matches_recipe_outputs() {
         let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(

@@ -21,7 +21,7 @@ It runs as:
 init -> choose -> tool_dispatch -> choose -> ... -> summarize -> done
 ```
 
-The fixed structure is only the loop boundary. The model must choose each read/search/edit/test/diff step through declared tools such as `file.read`, `file.search`, `file.ops`, `test.run`, and `git.diff`.
+The fixed structure is only the loop boundary. The model must choose each discovery/read/search/edit/test/diff step through declared tools such as `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `file.read`, `file.search`, `file.ops`, `test.run`, and `git.diff`.
 
 Run the deterministic fixture:
 

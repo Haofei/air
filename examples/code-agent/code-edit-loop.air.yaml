@@ -87,10 +87,19 @@ tools:
   - name: todo.read
     capability: task.progress
     timeout_ms: 10000
+  - name: repo.files
+    capability: code.read
+    timeout_ms: 10000
   - name: repo.search
     capability: code.read
     timeout_ms: 10000
   - name: repo.context
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.symbols
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.references
     capability: code.read
     timeout_ms: 10000
   - name: file.read
@@ -159,8 +168,11 @@ workflow:
                 ref: observations
               allowed_tools:
                 array:
+                  - literal: repo.files
                   - literal: repo.search
                   - literal: repo.context
+                  - literal: repo.symbols
+                  - literal: repo.references
                   - literal: file.read
                   - literal: file.read_many
                   - literal: file.search
@@ -171,6 +183,7 @@ workflow:
                   - literal: test.run
               tool_policy:
                 literal:
+                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
                   small_steps: "Choose exactly one tool per turn. Do not request whole large files."
                   edits: "Use file.ops with kind=edit or kind=replace_lines for existing files. Use write only for new files."
