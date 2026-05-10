@@ -1824,6 +1824,58 @@ fn file_ops_rejects_diff_that_exceeds_max_changed_lines() {
 }
 
 #[test]
+fn file_ops_rejects_diff_when_per_call_max_changed_lines_exceeds_tool_cap() {
+    let dir = temp_dir("air-tools-file-ops-per-call-max-changed-lines-cap");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "require_read": true,
+                  "max_changed_lines": 2
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let error = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "max_changed_lines": 100,
+                "operations": [{
+                    "kind": "replace_lines",
+                    "path": "note.txt",
+                    "start_line": 1,
+                    "end_line": 3,
+                    "lines": ["four", "five", "six"]
+                }]
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("max_changed_lines=2"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "one\ntwo\nthree\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_ops_replace_lines_edits_large_files_without_full_file_payload() {
     let dir = temp_dir("air-tools-file-ops-replace-lines");
     let prefix = (0..200)
