@@ -320,68 +320,103 @@ mod tests {
     }
 
     #[test]
-    fn model_config_prompt_matches_code_repair_schema() {
+    fn model_config_prompts_match_code_agent_schemas() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .unwrap();
-        let module =
-            air_parser::parse_air_file(root.join("examples/code-agent/code-repair.air.yaml"))
-                .unwrap();
-        let required = model_output_required_keys(&module, "code_repairer");
-        assert_eq!(
-            required,
-            BTreeSet::from(["operations".to_string(), "rationale".to_string()])
-        );
-
         let config = air_backend_openai::parse_config_file(
             root.join("examples/bigmodel-openai-compatible.json"),
         )
         .unwrap();
-        let prompt = config
+        let requirements = code_agent_model_output_requirements(&root);
+        assert_eq!(
+            requirements
+                .get("code_repairer")
+                .cloned()
+                .unwrap_or_default(),
+            BTreeSet::from(["operations".to_string(), "rationale".to_string()])
+        );
+
+        for (alias, required) in requirements {
+            let prompt = config
+                .models
+                .get(&alias)
+                .and_then(|model| model.system_prompt.as_deref())
+                .unwrap_or_else(|| panic!("model config must define system_prompt for {alias}"))
+                .to_lowercase();
+
+            if !prompt.contains("json object") {
+                continue;
+            }
+            for key in &required {
+                assert!(
+                    prompt.contains(key),
+                    "{alias} prompt must mention required output key {key}"
+                );
+            }
+        }
+        let repair_prompt = config
             .models
             .get("code_repairer")
             .and_then(|model| model.system_prompt.as_deref())
             .unwrap_or_default()
             .to_lowercase();
-
-        for key in &required {
-            assert!(
-                prompt.contains(key),
-                "code_repairer prompt must mention required output key {key}"
-            );
-        }
         assert!(
-            !prompt.contains("exactly these keys: patch"),
+            !repair_prompt.contains("exactly these keys: patch"),
             "code_repairer prompt must not require the old patch-only schema"
         );
         assert!(
-            !prompt.contains("patch must be"),
+            !repair_prompt.contains("patch must be"),
             "code_repairer prompt must not describe the old patch-only schema"
         );
     }
 
-    fn model_output_required_keys(
+    fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
+        let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
+        for relative in [
+            "examples/code-agent/code-build-page.air.yaml",
+            "examples/code-agent/code-dynamic-explore.air.yaml",
+            "examples/code-agent/code-explore.air.yaml",
+            "examples/code-agent/code-project-plan.air.yaml",
+            "examples/code-agent/code-repair-context.air.yaml",
+            "examples/code-agent/code-repair.air.yaml",
+            "examples/code-agent/code-review-analyze.air.yaml",
+            "examples/code-agent/code-review.air.yaml",
+        ] {
+            let module = air_parser::parse_air_file(root.join(relative)).unwrap();
+            for (alias, required) in model_output_required_keys_by_alias(&module) {
+                requirements.entry(alias).or_default().extend(required);
+            }
+        }
+        requirements
+    }
+
+    fn model_output_required_keys_by_alias(
         module: &air_core::AirModule,
-        model_alias: &str,
-    ) -> BTreeSet<String> {
-        let mut required = BTreeSet::new();
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        let mut by_alias = BTreeMap::<String, BTreeSet<String>>::new();
         let Workflow::StateMachine(workflow) = &module.workflow else {
-            return required;
+            return by_alias;
         };
         for rule in &workflow.rules {
             for action in &rule.actions {
                 let StateAction::ModelCall { model, output, .. } = action else {
                     continue;
                 };
-                if model != model_alias {
-                    continue;
-                }
-                if let Some(TypeSpec::Detailed(schema)) = module.state.get(output) {
-                    required.extend(schema.required.iter().cloned());
+                let required = state_field_required_keys(module, output);
+                if !required.is_empty() {
+                    by_alias.entry(model.clone()).or_default().extend(required);
                 }
             }
         }
-        required
+        by_alias
+    }
+
+    fn state_field_required_keys(module: &air_core::AirModule, output: &str) -> BTreeSet<String> {
+        match module.state.get(output) {
+            Some(TypeSpec::Detailed(schema)) => schema.required.iter().cloned().collect(),
+            _ => BTreeSet::new(),
+        }
     }
 }
