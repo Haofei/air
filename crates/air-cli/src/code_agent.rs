@@ -1,4 +1,6 @@
-use crate::code_pack::{load_code_agent_pack, CodeAgentCompletion, CodeAgentPackContext};
+use crate::code_pack::{
+    load_code_agent_pack, CodeAgentCompletion, CodeAgentPackContext, CodeAgentRouteFacts,
+};
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -134,6 +136,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
 
     let requested_recipe = recipe;
     let recipe = resolve_recipe(
+        &pack,
         &task,
         recipe,
         target.as_ref(),
@@ -145,7 +148,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         brand.as_ref(),
         product.as_ref(),
         &constraints,
-    );
+    )?;
     let profile = match profile {
         Some(profile) => profile,
         None => default_profile(&pack, recipe)?,
@@ -1428,6 +1431,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
             "profile_override": active_profile != pack_default_profile,
             "intent": pack_recipe.intent,
             "completion": pack_recipe.completion,
+            "routing": pack.pack.routing,
         },
         "profile": active_profile,
         "plan": path_ref_to_input_string(&metadata.plan),
@@ -3358,6 +3362,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
     } = options;
 
     let recipe = resolve_recipe(
+        &load_code_agent_pack(None)?,
         &task,
         recipe,
         target.as_ref(),
@@ -3369,7 +3374,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
         brand.as_ref(),
         product.as_ref(),
         &constraints,
-    );
+    )?;
 
     match recipe {
         CodeRecipe::Auto => unreachable!("auto recipe is resolved before building input"),
@@ -3520,6 +3525,7 @@ fn recipe_name(recipe: CodeRecipe) -> &'static str {
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_recipe(
+    pack: &CodeAgentPackContext,
     task: &str,
     recipe: CodeRecipe,
     target: Option<&PathBuf>,
@@ -3531,34 +3537,42 @@ fn resolve_recipe(
     brand: Option<&String>,
     product: Option<&String>,
     constraints: &[String],
-) -> CodeRecipe {
+) -> Result<CodeRecipe> {
     if recipe != CodeRecipe::Auto {
-        return recipe;
+        return Ok(recipe);
     }
-    if output.is_some() || brand.is_some() || product.is_some() || !constraints.is_empty() {
-        return CodeRecipe::Build;
+    let route = pack.resolve_auto_recipe(&CodeAgentRouteFacts {
+        task: task.to_string(),
+        target: target.is_some(),
+        test: test.is_some(),
+        search_query: search_query.is_some(),
+        repo_query: repo_query.is_some(),
+        required_terms: !required_terms.is_empty(),
+        output: output.is_some(),
+        brand: brand.is_some(),
+        product: product.is_some(),
+        constraints: !constraints.is_empty(),
+    })?;
+    recipe_from_name(&route).with_context(|| {
+        format!(
+            "code-agent pack {} auto routing returned unsupported recipe {route}",
+            pack.path.display()
+        )
+    })
+}
+
+fn recipe_from_name(recipe: &str) -> Option<CodeRecipe> {
+    match recipe {
+        "auto" => Some(CodeRecipe::Auto),
+        "plan" => Some(CodeRecipe::Plan),
+        "explore" => Some(CodeRecipe::Explore),
+        "review" => Some(CodeRecipe::Review),
+        "repair" => Some(CodeRecipe::Repair),
+        "refactor" => Some(CodeRecipe::Refactor),
+        "open-refactor" => Some(CodeRecipe::OpenRefactor),
+        "build" => Some(CodeRecipe::Build),
+        _ => None,
     }
-    let asks_refactor = task
-        .split(|character: char| !character.is_ascii_alphanumeric())
-        .any(|token| token.eq_ignore_ascii_case("refactor"));
-    if asks_refactor {
-        if test.is_some() && target.is_some() {
-            return CodeRecipe::Refactor;
-        }
-        if test.is_none() && target.is_none() {
-            return CodeRecipe::OpenRefactor;
-        }
-    }
-    if test.is_some() {
-        return CodeRecipe::Repair;
-    }
-    if search_query.is_some() || repo_query.is_some() || !required_terms.is_empty() {
-        return CodeRecipe::Review;
-    }
-    if target.is_none() {
-        return CodeRecipe::Plan;
-    }
-    CodeRecipe::Explore
 }
 
 fn path_array(paths: Vec<PathBuf>) -> Value {

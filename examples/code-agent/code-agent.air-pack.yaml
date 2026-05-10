@@ -3,6 +3,31 @@ agent:
   version: 0.2.0
   description: "Pack manifest for AIR's bounded coding-agent recipes."
 
+routing:
+  auto:
+    - recipe: build
+      when:
+        any_present: [output, brand, product, constraints]
+    - recipe: refactor
+      when:
+        task_contains_word: refactor
+        all_present: [target, test]
+    - recipe: open-refactor
+      when:
+        task_contains_word: refactor
+        all_absent: [target, test]
+    - recipe: repair
+      when:
+        any_present: [test]
+    - recipe: review
+      when:
+        any_present: [search_query, repo_query, required_terms]
+    - recipe: plan
+      when:
+        all_absent: [target]
+    - recipe: explore
+      fallback: true
+
 recipes:
   - id: auto
     default_profile: explore.air-profile.yaml

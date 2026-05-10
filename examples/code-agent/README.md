@@ -202,8 +202,8 @@ For a repair task, the current input looks like this:
 }
 ```
 
-Run the user-facing wrapper. The default recipe is `auto`: `--output` selects build,
-`--test` selects repair, review-specific search flags select review, and ambiguous tasks fall
+Run the user-facing wrapper. The default recipe is `auto`: pack-declared routing maps `--output`
+to build, `--test` to repair, review-specific search flags to review, and ambiguous targeted tasks
 back to read-only exploration.
 
 ```bash

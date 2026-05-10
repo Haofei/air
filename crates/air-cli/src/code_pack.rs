@@ -11,7 +11,50 @@ const CODE_AGENT_PACK_YAML: &str =
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct CodeAgentPack {
+    #[serde(default)]
+    pub(crate) routing: CodeAgentRouting,
     pub(crate) recipes: Vec<CodeAgentPackRecipe>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct CodeAgentRouting {
+    #[serde(default)]
+    pub(crate) auto: Vec<CodeAgentAutoRoute>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CodeAgentAutoRoute {
+    pub(crate) recipe: String,
+    #[serde(default)]
+    pub(crate) fallback: bool,
+    #[serde(default)]
+    pub(crate) when: CodeAgentRouteWhen,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub(crate) struct CodeAgentRouteWhen {
+    #[serde(default)]
+    task_contains_word: Option<String>,
+    #[serde(default)]
+    all_present: Vec<String>,
+    #[serde(default)]
+    any_present: Vec<String>,
+    #[serde(default)]
+    all_absent: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct CodeAgentRouteFacts {
+    pub(crate) task: String,
+    pub(crate) target: bool,
+    pub(crate) test: bool,
+    pub(crate) search_query: bool,
+    pub(crate) repo_query: bool,
+    pub(crate) required_terms: bool,
+    pub(crate) output: bool,
+    pub(crate) brand: bool,
+    pub(crate) product: bool,
+    pub(crate) constraints: bool,
 }
 
 #[cfg(test)]
@@ -23,6 +66,7 @@ mod tests {
         let pack = CodeAgentPackContext {
             path: PathBuf::from("target/generated/custom-pack/code-agent.air-pack.yaml"),
             pack: CodeAgentPack {
+                routing: CodeAgentRouting::default(),
                 recipes: vec![CodeAgentPackRecipe {
                     id: "plan".to_string(),
                     default_profile: PathBuf::from("project-plan.air-profile.yaml"),
@@ -40,7 +84,10 @@ mod tests {
 
     #[test]
     fn pack_validation_rejects_empty_recipe_list() {
-        let pack = CodeAgentPack { recipes: vec![] };
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
+            recipes: vec![],
+        };
 
         let error = validate_code_agent_pack(&pack, "test-pack")
             .expect_err("empty recipe list should be rejected");
@@ -56,6 +103,7 @@ mod tests {
     #[test]
     fn pack_validation_rejects_empty_recipe_id() {
         let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
                 id: " ".to_string(),
                 default_profile: PathBuf::from("repair.air-profile.yaml"),
@@ -73,6 +121,7 @@ mod tests {
     #[test]
     fn pack_validation_rejects_empty_default_profile() {
         let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
                 id: "repair".to_string(),
                 default_profile: PathBuf::new(),
@@ -93,6 +142,7 @@ mod tests {
     #[test]
     fn pack_validation_rejects_duplicate_recipe_ids() {
         let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
             recipes: vec![
                 CodeAgentPackRecipe {
                     id: "repair".to_string(),
@@ -153,6 +203,7 @@ all:
     #[test]
     fn pack_validation_rejects_invalid_completion_rules() {
         let pack = CodeAgentPack {
+            routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
                 id: "repair".to_string(),
                 default_profile: PathBuf::from("repair.air-profile.yaml"),
@@ -171,6 +222,94 @@ all:
             .expect_err("completion paths must be JSON pointers");
 
         assert!(error.to_string().contains("JSON pointer"), "{error}");
+    }
+
+    #[test]
+    fn pack_auto_routing_selects_first_matching_route() {
+        let pack = load_code_agent_pack(None).unwrap();
+
+        let recipe = pack
+            .resolve_auto_recipe(&CodeAgentRouteFacts {
+                task: "refactor provider".to_string(),
+                target: true,
+                test: true,
+                ..CodeAgentRouteFacts::default()
+            })
+            .unwrap();
+
+        assert_eq!(recipe, "refactor");
+    }
+
+    #[test]
+    fn pack_auto_routing_uses_fallback() {
+        let pack = load_code_agent_pack(None).unwrap();
+
+        let recipe = pack
+            .resolve_auto_recipe(&CodeAgentRouteFacts {
+                task: "understand this file".to_string(),
+                target: true,
+                ..CodeAgentRouteFacts::default()
+            })
+            .unwrap();
+
+        assert_eq!(recipe, "explore");
+    }
+
+    #[test]
+    fn pack_validation_rejects_auto_route_without_fallback() {
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting {
+                auto: vec![CodeAgentAutoRoute {
+                    recipe: "repair".to_string(),
+                    fallback: false,
+                    when: CodeAgentRouteWhen {
+                        any_present: vec!["test".to_string()],
+                        ..CodeAgentRouteWhen::default()
+                    },
+                }],
+            },
+            recipes: vec![CodeAgentPackRecipe {
+                id: "repair".to_string(),
+                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                intent: None,
+                completion: None,
+            }],
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("auto routing should require one fallback");
+
+        assert!(
+            error.to_string().contains("exactly one fallback route"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pack_validation_rejects_auto_route_unknown_fields() {
+        let pack = CodeAgentPack {
+            routing: CodeAgentRouting {
+                auto: vec![CodeAgentAutoRoute {
+                    recipe: "repair".to_string(),
+                    fallback: true,
+                    when: CodeAgentRouteWhen {
+                        any_present: vec!["unknown_flag".to_string()],
+                        ..CodeAgentRouteWhen::default()
+                    },
+                }],
+            },
+            recipes: vec![CodeAgentPackRecipe {
+                id: "repair".to_string(),
+                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                intent: None,
+                completion: None,
+            }],
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("auto routing should reject unknown fields");
+
+        assert!(error.to_string().contains("unknown field"), "{error}");
     }
 }
 
@@ -277,7 +416,65 @@ fn validate_code_agent_pack(pack: &CodeAgentPack, source: &str) -> Result<()> {
             )?;
         }
     }
+    validate_auto_routes(pack, source)?;
     Ok(())
+}
+
+fn validate_auto_routes(pack: &CodeAgentPack, source: &str) -> Result<()> {
+    let recipe_ids = pack
+        .recipes
+        .iter()
+        .map(|recipe| recipe.id.as_str())
+        .collect::<HashSet<_>>();
+    let mut fallback_count = 0usize;
+    for route in &pack.routing.auto {
+        if route.recipe.trim().is_empty() {
+            bail!("code-agent pack {source} has an auto route with empty recipe");
+        }
+        if !recipe_ids.contains(route.recipe.as_str()) {
+            bail!(
+                "code-agent pack {source} auto route references missing recipe {}",
+                route.recipe
+            );
+        }
+        if route.fallback {
+            fallback_count += 1;
+        }
+        validate_route_when(&route.when, source)?;
+    }
+    if !pack.routing.auto.is_empty() && fallback_count != 1 {
+        bail!("code-agent pack {source} auto routing must declare exactly one fallback route");
+    }
+    Ok(())
+}
+
+fn validate_route_when(when: &CodeAgentRouteWhen, source: &str) -> Result<()> {
+    for field in when
+        .all_present
+        .iter()
+        .chain(when.any_present.iter())
+        .chain(when.all_absent.iter())
+    {
+        if !is_known_route_field(field) {
+            bail!("code-agent pack {source} auto route references unknown field {field}");
+        }
+    }
+    Ok(())
+}
+
+fn is_known_route_field(field: &str) -> bool {
+    matches!(
+        field,
+        "target"
+            | "test"
+            | "search_query"
+            | "repo_query"
+            | "required_terms"
+            | "output"
+            | "brand"
+            | "product"
+            | "constraints"
+    )
 }
 
 fn validate_completion(completion: &CodeAgentCompletion, source: &str) -> Result<()> {
@@ -352,6 +549,33 @@ impl CodeAgentPackContext {
         Ok(completion.is_complete(outputs))
     }
 
+    pub(crate) fn resolve_auto_recipe(&self, facts: &CodeAgentRouteFacts) -> Result<String> {
+        if self.pack.routing.auto.is_empty() {
+            bail!(
+                "code-agent pack {} is missing routing.auto",
+                self.path.display()
+            );
+        }
+        let fallback = self
+            .pack
+            .routing
+            .auto
+            .iter()
+            .find(|route| route.fallback)
+            .map(|route| route.recipe.clone());
+        for route in &self.pack.routing.auto {
+            if !route.fallback && route.when.matches(facts) {
+                return Ok(route.recipe.clone());
+            }
+        }
+        fallback.with_context(|| {
+            format!(
+                "code-agent pack {} auto routing has no fallback",
+                self.path.display()
+            )
+        })
+    }
+
     pub(crate) fn recipe_for_id(&self, recipe: &str) -> Result<CodeAgentPackRecipe> {
         let Some(mut pack_recipe) = self
             .pack
@@ -379,6 +603,61 @@ impl CodeAgentPackContext {
             .map(|parent| parent.join(profile))
             .unwrap_or_else(|| profile.to_path_buf())
     }
+}
+
+impl CodeAgentRouteWhen {
+    fn matches(&self, facts: &CodeAgentRouteFacts) -> bool {
+        if let Some(word) = &self.task_contains_word {
+            if !task_contains_word(&facts.task, word) {
+                return false;
+            }
+        }
+        if !self
+            .all_present
+            .iter()
+            .all(|field| facts.field_present(field))
+        {
+            return false;
+        }
+        if !self.any_present.is_empty()
+            && !self
+                .any_present
+                .iter()
+                .any(|field| facts.field_present(field))
+        {
+            return false;
+        }
+        if !self
+            .all_absent
+            .iter()
+            .all(|field| !facts.field_present(field))
+        {
+            return false;
+        }
+        true
+    }
+}
+
+impl CodeAgentRouteFacts {
+    fn field_present(&self, field: &str) -> bool {
+        match field {
+            "target" => self.target,
+            "test" => self.test,
+            "search_query" => self.search_query,
+            "repo_query" => self.repo_query,
+            "required_terms" => self.required_terms,
+            "output" => self.output,
+            "brand" => self.brand,
+            "product" => self.product,
+            "constraints" => self.constraints,
+            _ => false,
+        }
+    }
+}
+
+fn task_contains_word(task: &str, word: &str) -> bool {
+    task.split(|character: char| !character.is_ascii_alphanumeric())
+        .any(|token| token.eq_ignore_ascii_case(word))
 }
 
 impl CodeAgentCompletion {
