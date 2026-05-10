@@ -1215,6 +1215,17 @@ where
                 limit: max_calls,
                 attempted,
             };
+            if on_error == ToolErrorMode::Observe {
+                observe_tool_batch_dispatch_error(
+                    context,
+                    input,
+                    output,
+                    attempted,
+                    max_calls,
+                    &error.to_string(),
+                )?;
+                return Ok(());
+            }
             context.push_event_with_meta(
                 "tool_batch_dispatch",
                 Some(input),
@@ -1233,6 +1244,17 @@ where
             &resolved_dispatches,
             attempted,
         ) {
+            if on_error == ToolErrorMode::Observe {
+                observe_tool_batch_dispatch_error(
+                    context,
+                    input,
+                    output,
+                    attempted,
+                    max_calls,
+                    &error.to_string(),
+                )?;
+                return Ok(());
+            }
             context.push_event_with_meta(
                 "tool_batch_dispatch",
                 Some(input),
@@ -1475,6 +1497,36 @@ where
 
 fn validate_output(module: &AirModule, output: &str, value: &Value) -> Result<(), RuntimeError> {
     validate_named_value(output, value, output_spec(module, output))
+}
+
+fn observe_tool_batch_dispatch_error(
+    context: &mut ExecutionContext<'_>,
+    input: Value,
+    output: &str,
+    attempted: u32,
+    max_calls: u32,
+    error: &str,
+) -> Result<(), RuntimeError> {
+    let output_value = Value::Array(vec![tool_batch_level_error_observation(&input, error)]);
+    if let Err(error) = validate_output(context.module, output, &output_value) {
+        context.push_event_with_meta(
+            "tool_batch_dispatch",
+            Some(input),
+            Some(output_value),
+            Some(json!({"count": attempted, "max_calls": max_calls, "error_count": 1})),
+            Err(error.to_string()),
+        );
+        return Err(error);
+    }
+    context.state.insert(output.to_string(), output_value);
+    context.push_event_with_meta(
+        "tool_batch_dispatch",
+        Some(input),
+        context.state.get(output).cloned(),
+        Some(json!({"count": attempted, "max_calls": max_calls, "error_count": 1})),
+        Ok(()),
+    );
+    Ok(())
 }
 
 struct ModelOutputSchemaError {
@@ -2142,6 +2194,22 @@ fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value
         "output": {
             "status": "error",
             "error": error,
+        }
+    })
+}
+
+fn tool_batch_level_error_observation(input: &Value, error: &str) -> Value {
+    json!({
+        "tool": "<batch>",
+        "input": {
+            "requested": input,
+        },
+        "status": "error",
+        "error": error,
+        "output": {
+            "status": "error",
+            "error": error,
+            "requested": input,
         }
     })
 }

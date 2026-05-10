@@ -1225,6 +1225,61 @@ fn rejects_mixed_approval_required_tool_batch_before_provider_calls() {
 }
 
 #[test]
+fn tool_batch_dispatch_can_observe_approval_isolation_errors() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch-approval.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch { on_error, .. } =
+        workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *on_error = air_core::ToolErrorMode::Observe;
+
+    let mut vm = Vm {
+        tools: BatchApprovalTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {
+                    "tool": "file.ops",
+                    "input": {
+                        "path": "example.txt",
+                        "kind": "replace_lines",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "content": "patched"
+                    }
+                },
+                {"tool": "docs.search", "input": {"query": "alpha"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("mixed write and search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 0);
+    assert_eq!(result.outputs["observations"][0]["tool"], json!("<batch>"));
+    assert_eq!(result.outputs["observations"][0]["status"], json!("error"));
+    assert!(result.outputs["observations"][0]["error"]
+        .as_str()
+        .is_some_and(|error| error.contains("must be isolated")));
+    assert!(result.trace.iter().any(|event| {
+        event.action == "tool_batch_dispatch"
+            && event.status == TraceStatus::Ok
+            && event
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["error_count"] == 1)
+    }));
+}
+
+#[test]
 fn rejects_provider_tool_capability_mismatch_at_runtime() {
     let module = load_agent("tests/agents/tool-limit.air.yaml");
     let mut vm = Vm {
