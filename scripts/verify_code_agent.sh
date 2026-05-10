@@ -194,6 +194,123 @@ assert any(event.get("meta", {}).get("model") == "code_explorer" for event in ta
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 
+echo "[code-agent] project execution failure recovery fork"
+cat > target/generated/code_project_fail_model_fixtures.json <<'JSON'
+{
+  "fixtures": {
+    "project_planner": {
+      "summary": "Fixture project plan intentionally contains a failing acceptance command.",
+      "scope": {
+        "goal": "Exercise AIR code project recovery when a planned task fails acceptance.",
+        "non_goals": [],
+        "assumptions": ["The missing acceptance alias should fail without arbitrary shell access."]
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "title": "Failure recovery",
+          "objective": "Stop project execution and write a recovery fork.",
+          "task_ids": ["t1"]
+        }
+      ],
+      "tasks": [
+        {
+          "id": "t1",
+          "title": "Explore before failing acceptance",
+          "description": "Run a normal read-only exploration and then fail the declared acceptance gate.",
+          "kind": "test",
+          "recipe": "explore",
+          "input": {
+            "task": "Inspect code agent recovery behavior.",
+            "query": "code project recovery",
+            "target_path": "crates/air-cli/src/code_agent.rs"
+          },
+          "depends_on": [],
+          "files": ["crates/air-cli/src/code_agent.rs"],
+          "acceptance": [
+            {
+              "id": "missing-alias",
+              "command": "missing_acceptance_alias",
+              "expected": "This intentionally fails so recovery metadata is produced."
+            }
+          ]
+        }
+      ],
+      "files": [
+        {
+          "path": "crates/air-cli/src/code_agent.rs",
+          "purpose": "Recovery fork implementation.",
+          "change_type": "modify"
+        }
+      ],
+      "acceptance": [],
+      "risks": [],
+      "source_ids": ["docs-code-agent-loop"],
+      "next_steps": ["Inspect the recovery fork."]
+    },
+    "code_explorer": {
+      "summary": "Fixture exploration completed before acceptance failure.",
+      "relevant_files": [
+        {
+          "path": "crates/air-cli/src/code_agent.rs",
+          "reason": "Contains code session recovery behavior."
+        }
+      ],
+      "findings": [
+        {
+          "title": "Recovery is session-scoped",
+          "evidence": "The failed project turn should include recovery metadata.",
+          "source_ids": ["docs-provenance"]
+        }
+      ],
+      "source_ids": ["docs-provenance"],
+      "next_steps": ["Use the failed fork or revert workspace patches."]
+    }
+  }
+}
+JSON
+rm -f target/generated/code_project_fail.session.json target/generated/code_project_fail.output.json
+rm -rf target/generated/code_project_fail.session.traces target/generated/code_project_fail.session.forks
+cargo run -q -p air-cli -- code "plan and execute a project that should stop on acceptance failure" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 1 \
+  --query "code agent project failure recovery" \
+  --model-config target/generated/code_project_fail_model_fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --session target/generated/code_project_fail.session.json \
+  > target/generated/code_project_fail.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_fail.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+project = output["project"]
+assert project["status"] == "stopped", project
+assert project["completed"] is False, project
+assert project["executions"][0]["task_id"] == "t1", project
+assert project["executions"][0]["completed"] is False, project
+assert project["executions"][0]["acceptance"][0]["success"] is False, project
+recovery = output["recovery"]
+assert recovery["status"] == "stopped", recovery
+assert recovery["failed_task_id"] == "t1", recovery
+fork = Path(recovery["fork"])
+assert fork.exists(), recovery
+assert recovery["workspace_revert_argv"][:3] == ["air", "code-session", recovery["fork"]], recovery
+
+with open("target/generated/code_project_fail.session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
+turn = session["turns"][-1]
+assert turn["completed"] is False, turn
+assert turn["recovery"]["fork"] == recovery["fork"], turn
+assert turn["outputs"]["recovery"]["fork"] == recovery["fork"], turn
+with fork.open(encoding="utf-8") as handle:
+    fork_session = json.load(handle)
+assert fork_session["turns"][-1]["id"] == turn["id"], fork_session
+assert fork_session["turns"][-1]["recovery"]["failed_task_id"] == "t1", fork_session
+PY
+
 echo "[code-agent] user-facing code command explain"
 cargo run -q -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \

@@ -171,7 +171,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     }
 
     let session_input = input.clone();
-    let outputs = if execute_plan {
+    let mut outputs = if execute_plan {
         if recipe != CodeRecipe::Plan {
             bail!("air code --execute-plan requires the resolved recipe to be plan");
         }
@@ -250,6 +250,18 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     if let Some(path) = session.as_ref() {
         let state = session_state.get_or_insert_with(CodeSessionState::default);
         let turn_number = state.turns.len() + 1;
+        let turn_id = code_session_turn_id(turn_number);
+        let recovery = code_session_recovery_for_outputs(
+            recipe,
+            execute_plan,
+            path,
+            turn_number,
+            &turn_id,
+            &outputs,
+        );
+        if let Some((recovery, _)) = recovery.as_ref() {
+            code_session_insert_recovery(&mut outputs, recovery)?;
+        }
         let turn_time = CodeSessionTurnTime::now();
         let trace_files =
             code_session_trace_files(effective_trace_out.as_ref(), loop_enabled, &outputs);
@@ -257,7 +269,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         let summary = code_session_turn_summary(&parts);
         let patch_sets = code_session_patch_sets(&outputs);
         state.append_turn(CodeSessionTurn {
-            id: code_session_turn_id(turn_number),
+            id: turn_id,
             time: turn_time,
             task: session_input
                 .get("task")
@@ -275,8 +287,12 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             summary,
             parts,
             patch_sets,
+            recovery: recovery.as_ref().map(|(recovery, _)| recovery.clone()),
             outputs: outputs.clone(),
         });
+        if let Some((_, fork_path)) = recovery {
+            state.write(&fork_path)?;
+        }
         state.write(path)?;
     }
     serde_json::to_writer_pretty(std::io::stdout(), &outputs)?;
@@ -385,6 +401,8 @@ struct CodeSessionTurn {
     parts: Vec<CodeSessionPart>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     patch_sets: Vec<CodeSessionPatchSet>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<CodeSessionRecovery>,
     outputs: Value,
 }
 
@@ -447,6 +465,18 @@ struct CodeSessionPatchSet {
     diff_truncated: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     artifact_ids: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CodeSessionRecovery {
+    reason: String,
+    status: String,
+    fork: String,
+    turn_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    failed_task_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    workspace_revert_argv: Vec<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -678,6 +708,78 @@ fn default_session_trace_path(session_path: &Path, turn_number: usize) -> PathBu
     parent
         .join(format!("{stem}.traces"))
         .join(format!("turn{turn_number}.trace.jsonl"))
+}
+
+fn default_session_recovery_fork_path(session_path: &Path, turn_number: usize) -> PathBuf {
+    let parent = session_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = session_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("air-code-session");
+    parent
+        .join(format!("{stem}.forks"))
+        .join(format!("turn{turn_number}.failed.json"))
+}
+
+fn code_session_recovery_for_outputs(
+    recipe: CodeRecipe,
+    execute_plan: bool,
+    session_path: &Path,
+    turn_number: usize,
+    turn_id: &str,
+    outputs: &Value,
+) -> Option<(CodeSessionRecovery, PathBuf)> {
+    if recipe != CodeRecipe::Plan || !execute_plan {
+        return None;
+    }
+    let project = outputs.get("project")?;
+    let status = project.get("status").and_then(Value::as_str)?;
+    if status != "stopped" {
+        return None;
+    }
+
+    let fork_path = default_session_recovery_fork_path(session_path, turn_number);
+    let fork = path_ref_to_input_string(&fork_path);
+    let failed_task_id = project
+        .get("executions")
+        .and_then(Value::as_array)
+        .and_then(|executions| executions.last())
+        .filter(|execution| {
+            !execution
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+        .and_then(|execution| execution.get("task_id").and_then(Value::as_str))
+        .map(str::to_string);
+    let recovery = CodeSessionRecovery {
+        reason: "project execution stopped before completion".to_string(),
+        status: status.to_string(),
+        fork: fork.clone(),
+        turn_id: turn_id.to_string(),
+        failed_task_id,
+        workspace_revert_argv: vec![
+            "air".to_string(),
+            "code-session".to_string(),
+            fork,
+            "--revert-workspace-turn".to_string(),
+            turn_id.to_string(),
+            "--apply-workspace".to_string(),
+        ],
+    };
+    Some((recovery, fork_path))
+}
+
+fn code_session_insert_recovery(outputs: &mut Value, recovery: &CodeSessionRecovery) -> Result<()> {
+    let object = outputs
+        .as_object_mut()
+        .context("AIR code session recovery requires object outputs")?;
+    object.insert(
+        "recovery".to_string(),
+        serde_json::to_value(recovery).context("failed to serialize code session recovery")?,
+    );
+    Ok(())
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -2355,6 +2457,60 @@ mod tests {
     }
 
     #[test]
+    fn default_session_recovery_fork_path_uses_sibling_fork_directory() {
+        assert_eq!(
+            default_session_recovery_fork_path(Path::new("target/generated/code_session.json"), 3),
+            PathBuf::from("target/generated/code_session.forks/turn3.failed.json")
+        );
+    }
+
+    #[test]
+    fn project_recovery_only_for_stopped_execute_plan() {
+        let stopped = json!({
+            "project": {
+                "status": "stopped",
+                "executions": [
+                    {"task_id": "t1", "completed": false}
+                ]
+            }
+        });
+        let recovery = code_session_recovery_for_outputs(
+            CodeRecipe::Plan,
+            true,
+            Path::new("target/generated/code_session.json"),
+            1,
+            "turn-000001",
+            &stopped,
+        )
+        .unwrap();
+
+        assert_eq!(recovery.0.status, "stopped");
+        assert_eq!(recovery.0.failed_task_id, Some("t1".to_string()));
+        assert_eq!(
+            recovery.1,
+            PathBuf::from("target/generated/code_session.forks/turn1.failed.json")
+        );
+        assert!(code_session_recovery_for_outputs(
+            CodeRecipe::Plan,
+            true,
+            Path::new("target/generated/code_session.json"),
+            1,
+            "turn-000001",
+            &json!({"project": {"status": "max_tasks_exhausted"}}),
+        )
+        .is_none());
+        assert!(code_session_recovery_for_outputs(
+            CodeRecipe::Explore,
+            false,
+            Path::new("target/generated/code_session.json"),
+            1,
+            "turn-000001",
+            &stopped,
+        )
+        .is_none());
+    }
+
+    #[test]
     fn code_session_trace_files_prefers_explicit_project_trace_index() {
         let files = code_session_trace_files(
             Some(&PathBuf::from("target/generated/code.trace.jsonl")),
@@ -2624,6 +2780,7 @@ mod tests {
             },
             parts: Vec::new(),
             patch_sets: Vec::new(),
+            recovery: None,
             outputs: json!({
                 "exploration": {
                     "summary": "Found the dispatch implementation",
@@ -2663,6 +2820,7 @@ mod tests {
                 summary: CodeSessionTurnSummary::default(),
                 parts: Vec::new(),
                 patch_sets: Vec::new(),
+                recovery: None,
                 outputs: json!({"summary": "older turn"}),
             },
             CodeSessionTurn {
@@ -2680,6 +2838,7 @@ mod tests {
                 summary: CodeSessionTurnSummary::default(),
                 parts: Vec::new(),
                 patch_sets: Vec::new(),
+                recovery: None,
                 outputs: json!({"summary": large_output}),
             },
         ];
@@ -2732,6 +2891,7 @@ mod tests {
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
             patch_sets: Vec::new(),
+            recovery: None,
             outputs: json!({"repair": {"final_success": false}}),
         });
 
@@ -2763,6 +2923,7 @@ mod tests {
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
             patch_sets: Vec::new(),
+            recovery: None,
             outputs: json!({}),
         });
         state.append_turn(CodeSessionTurn {
@@ -2777,6 +2938,7 @@ mod tests {
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
             patch_sets: Vec::new(),
+            recovery: None,
             outputs: json!({}),
         });
 
@@ -2800,6 +2962,7 @@ mod tests {
             summary: CodeSessionTurnSummary::default(),
             parts: Vec::new(),
             patch_sets: Vec::new(),
+            recovery: None,
             outputs: json!({}),
         });
 
