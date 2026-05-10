@@ -57,6 +57,14 @@ pub(crate) struct CodeAgentRouteFacts {
     pub(crate) constraints: bool,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct CodeAgentRouteDecision {
+    pub(crate) recipe: String,
+    pub(crate) route_index: usize,
+    pub(crate) fallback: bool,
+    pub(crate) when: CodeAgentRouteWhen,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,8 +236,8 @@ all:
     fn pack_auto_routing_selects_first_matching_route() {
         let pack = load_code_agent_pack(None).unwrap();
 
-        let recipe = pack
-            .resolve_auto_recipe(&CodeAgentRouteFacts {
+        let decision = pack
+            .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
                 task: "refactor provider".to_string(),
                 target: true,
                 test: true,
@@ -237,22 +245,26 @@ all:
             })
             .unwrap();
 
-        assert_eq!(recipe, "refactor");
+        assert_eq!(decision.recipe, "refactor");
+        assert_eq!(decision.route_index, 1);
+        assert!(!decision.fallback);
     }
 
     #[test]
     fn pack_auto_routing_uses_fallback() {
         let pack = load_code_agent_pack(None).unwrap();
 
-        let recipe = pack
-            .resolve_auto_recipe(&CodeAgentRouteFacts {
+        let decision = pack
+            .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
                 task: "understand this file".to_string(),
                 target: true,
                 ..CodeAgentRouteFacts::default()
             })
             .unwrap();
 
-        assert_eq!(recipe, "explore");
+        assert_eq!(decision.recipe, "explore");
+        assert_eq!(decision.route_index, 6);
+        assert!(decision.fallback);
     }
 
     #[test]
@@ -549,7 +561,10 @@ impl CodeAgentPackContext {
         Ok(completion.is_complete(outputs))
     }
 
-    pub(crate) fn resolve_auto_recipe(&self, facts: &CodeAgentRouteFacts) -> Result<String> {
+    pub(crate) fn resolve_auto_recipe_decision(
+        &self,
+        facts: &CodeAgentRouteFacts,
+    ) -> Result<CodeAgentRouteDecision> {
         if self.pack.routing.auto.is_empty() {
             bail!(
                 "code-agent pack {} is missing routing.auto",
@@ -561,18 +576,29 @@ impl CodeAgentPackContext {
             .routing
             .auto
             .iter()
-            .find(|route| route.fallback)
-            .map(|route| route.recipe.clone());
-        for route in &self.pack.routing.auto {
+            .enumerate()
+            .find(|(_, route)| route.fallback);
+        for (route_index, route) in self.pack.routing.auto.iter().enumerate() {
             if !route.fallback && route.when.matches(facts) {
-                return Ok(route.recipe.clone());
+                return Ok(CodeAgentRouteDecision {
+                    recipe: route.recipe.clone(),
+                    route_index,
+                    fallback: false,
+                    when: route.when.clone(),
+                });
             }
         }
-        fallback.with_context(|| {
-            format!(
+        let Some((route_index, route)) = fallback else {
+            bail!(
                 "code-agent pack {} auto routing has no fallback",
                 self.path.display()
-            )
+            );
+        };
+        Ok(CodeAgentRouteDecision {
+            recipe: route.recipe.clone(),
+            route_index,
+            fallback: true,
+            when: route.when.clone(),
         })
     }
 

@@ -45,6 +45,7 @@ assert output["profile"] == "target/generated/examples/code-agent/project-plan.a
 assert output["pack"]["profile_override"] is False, output
 assert output["pack"]["completion"]["any"][1]["all"][1]["non_empty_array"] == "/project_plan/tasks", output
 assert output["pack"]["routing"]["auto"][0]["recipe"] == "build", output
+assert output["pack"]["routing_decision"] is None, output
 PY
 
 echo "[code-agent] deterministic tool coverage"
@@ -917,6 +918,8 @@ assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air
 assert output["pack"]["profile_override"] is False, output
 assert output["pack"]["completion"]["any"][0]["equals"]["path"] == "/repair/final_success", output
 assert output["pack"]["routing"]["auto"][3]["recipe"] == "repair", output
+assert output["pack"]["routing_decision"]["route_index"] == 3, output
+assert output["pack"]["routing_decision"]["recipe"] == "repair", output
 assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["plan"].endswith("examples/code-agent/code-repair.air-plan.yaml"), output
 assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml"), output
@@ -1150,6 +1153,8 @@ for index, turn in enumerate(session["turns"], start=1):
     assert turn["pack"]["default_profile"] == "examples/code-agent/explore.air-profile.yaml", turn
     assert turn["pack"]["profile_override"] is False, turn
     assert turn["pack"]["completion"]["any"][0]["exists"] == "/exploration", turn
+    assert turn["pack"]["routing_decision"]["route_index"] == 6, turn
+    assert turn["pack"]["routing_decision"]["fallback"] is True, turn
     assert turn["trace_files"], turn
     assert Path(turn["trace_files"][0]).exists(), turn
     assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn

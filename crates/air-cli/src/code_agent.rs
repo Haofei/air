@@ -1,5 +1,6 @@
 use crate::code_pack::{
-    load_code_agent_pack, CodeAgentCompletion, CodeAgentPackContext, CodeAgentRouteFacts,
+    load_code_agent_pack, CodeAgentCompletion, CodeAgentPackContext, CodeAgentRouteDecision,
+    CodeAgentRouteFacts,
 };
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
@@ -135,7 +136,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     let pack = load_code_agent_pack(pack)?;
 
     let requested_recipe = recipe;
-    let recipe = resolve_recipe(
+    let recipe_resolution = resolve_recipe(
         &pack,
         &task,
         recipe,
@@ -149,6 +150,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         product.as_ref(),
         &constraints,
     )?;
+    let recipe = recipe_resolution.recipe;
     let profile = match profile {
         Some(profile) => profile,
         None => default_profile(&pack, recipe)?,
@@ -186,6 +188,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         print_explain(CodePrintExplainOptions {
             requested_recipe,
             resolved_recipe: recipe,
+            routing_decision: recipe_resolution.routing_decision.clone(),
             pack: &pack,
             profile: &profile,
             input: &input,
@@ -332,7 +335,12 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             requested_recipe: Some(recipe_name(requested_recipe).to_string()),
             recipe: recipe_name(recipe).to_string(),
             profile: path_ref_to_input_string(&profile),
-            pack: code_session_turn_pack(&pack, recipe, &profile),
+            pack: code_session_turn_pack(
+                &pack,
+                recipe,
+                &profile,
+                recipe_resolution.routing_decision.clone(),
+            ),
             input: Value::Object(session_input),
             completed: code_outputs_complete(&pack, recipe, &outputs)?,
             trace_files: trace_files
@@ -475,6 +483,8 @@ struct CodeSessionTurnPack {
     intent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     completion: Option<CodeAgentCompletion>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    routing_decision: Option<CodeAgentRouteDecision>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -777,6 +787,7 @@ fn code_session_turn_pack(
     pack: &CodeAgentPackContext,
     recipe: CodeRecipe,
     active_profile: &Path,
+    routing_decision: Option<CodeAgentRouteDecision>,
 ) -> Option<CodeSessionTurnPack> {
     let recipe = pack.recipe_for_id(recipe_name(recipe)).ok()?;
     let default_profile = path_ref_to_input_string(&recipe.default_profile);
@@ -788,6 +799,7 @@ fn code_session_turn_pack(
         default_profile,
         intent: recipe.intent,
         completion: recipe.completion,
+        routing_decision,
     })
 }
 
@@ -796,7 +808,7 @@ fn code_pack_metadata_value(
     recipe: CodeRecipe,
     active_profile: &Path,
 ) -> Value {
-    code_session_turn_pack(pack, recipe, active_profile)
+    code_session_turn_pack(pack, recipe, active_profile, None)
         .and_then(|pack| serde_json::to_value(pack).ok())
         .unwrap_or(Value::Null)
 }
@@ -1389,6 +1401,7 @@ fn artifact_field_values(value: Option<&Value>, field: &str) -> Vec<String> {
 struct CodePrintExplainOptions<'a> {
     requested_recipe: CodeRecipe,
     resolved_recipe: CodeRecipe,
+    routing_decision: Option<CodeAgentRouteDecision>,
     pack: &'a CodeAgentPackContext,
     profile: &'a Path,
     input: &'a Map<String, Value>,
@@ -1402,6 +1415,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
     let CodePrintExplainOptions {
         requested_recipe,
         resolved_recipe,
+        routing_decision,
         pack,
         profile,
         input,
@@ -1435,6 +1449,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
             "intent": pack_recipe.intent,
             "completion": pack_recipe.completion,
             "routing": pack.pack.routing,
+            "routing_decision": routing_decision,
         },
         "profile": active_profile,
         "plan": path_ref_to_input_string(&metadata.plan),
@@ -3369,7 +3384,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
         force_patch,
     } = options;
 
-    let recipe = resolve_recipe(
+    let recipe = resolve_recipe_name(
         &load_code_agent_pack(None)?,
         &task,
         recipe,
@@ -3531,6 +3546,12 @@ fn recipe_name(recipe: CodeRecipe) -> &'static str {
     }
 }
 
+#[derive(Clone, Debug)]
+struct CodeRecipeResolution {
+    recipe: CodeRecipe,
+    routing_decision: Option<CodeAgentRouteDecision>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve_recipe(
     pack: &CodeAgentPackContext,
@@ -3545,11 +3566,14 @@ fn resolve_recipe(
     brand: Option<&String>,
     product: Option<&String>,
     constraints: &[String],
-) -> Result<CodeRecipe> {
+) -> Result<CodeRecipeResolution> {
     if recipe != CodeRecipe::Auto {
-        return Ok(recipe);
+        return Ok(CodeRecipeResolution {
+            recipe,
+            routing_decision: None,
+        });
     }
-    let route = pack.resolve_auto_recipe(&CodeAgentRouteFacts {
+    let routing_decision = pack.resolve_auto_recipe_decision(&CodeAgentRouteFacts {
         task: task.to_string(),
         target: target.is_some(),
         test: test.is_some(),
@@ -3561,12 +3585,49 @@ fn resolve_recipe(
         product: product.is_some(),
         constraints: !constraints.is_empty(),
     })?;
-    recipe_from_name(&route).with_context(|| {
+    let recipe = recipe_from_name(&routing_decision.recipe).with_context(|| {
         format!(
-            "code-agent pack {} auto routing returned unsupported recipe {route}",
-            pack.path.display()
+            "code-agent pack {} auto routing returned unsupported recipe {}",
+            pack.path.display(),
+            routing_decision.recipe
         )
+    })?;
+    Ok(CodeRecipeResolution {
+        recipe,
+        routing_decision: Some(routing_decision),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_recipe_name(
+    pack: &CodeAgentPackContext,
+    task: &str,
+    recipe: CodeRecipe,
+    target: Option<&PathBuf>,
+    test: Option<&String>,
+    search_query: Option<&String>,
+    repo_query: Option<&String>,
+    required_terms: &[String],
+    output: Option<&PathBuf>,
+    brand: Option<&String>,
+    product: Option<&String>,
+    constraints: &[String],
+) -> Result<CodeRecipe> {
+    Ok(resolve_recipe(
+        pack,
+        task,
+        recipe,
+        target,
+        test,
+        search_query,
+        repo_query,
+        required_terms,
+        output,
+        brand,
+        product,
+        constraints,
+    )?
+    .recipe)
 }
 
 fn recipe_from_name(recipe: &str) -> Option<CodeRecipe> {
@@ -5084,6 +5145,15 @@ mod tests {
                 .as_nanos()
         ));
         let mut state = CodeSessionState::default();
+        let pack = load_code_agent_pack(None).unwrap();
+        let routing_decision = pack
+            .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
+                task: "fix it".to_string(),
+                target: true,
+                test: true,
+                ..CodeAgentRouteFacts::default()
+            })
+            .unwrap();
         state.append_turn(CodeSessionTurn {
             id: code_session_turn_id(1),
             time: CodeSessionTurnTime {
@@ -5096,9 +5166,10 @@ mod tests {
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
             pack: Some(
                 code_session_turn_pack(
-                    &load_code_agent_pack(None).unwrap(),
+                    &pack,
                     CodeRecipe::Repair,
                     Path::new("examples/code-agent/repair-core.air-profile.yaml"),
+                    Some(routing_decision),
                 )
                 .unwrap(),
             ),
@@ -5138,6 +5209,10 @@ mod tests {
             serde_json::to_value(&pack.completion).unwrap()["any"][0]["equals"]["path"],
             Value::String("/repair/final_success".to_string())
         );
+        assert_eq!(
+            serde_json::to_value(&pack.routing_decision).unwrap()["route_index"],
+            Value::Number(3.into())
+        );
         assert!(!roundtrip.turns[0].completed);
     }
 
@@ -5147,6 +5222,7 @@ mod tests {
             &load_code_agent_pack(None).unwrap(),
             CodeRecipe::Repair,
             Path::new("examples/code-agent/repair.air-profile.yaml"),
+            None,
         )
         .unwrap();
 
