@@ -238,6 +238,9 @@ enum ToolConfig {
         forbidden_text: Option<Vec<String>>,
 
         #[serde(default)]
+        require_canvas: Option<bool>,
+
+        #[serde(default)]
         navigation_timeout_ms: Option<u64>,
 
         #[serde(default)]
@@ -841,6 +844,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 viewports,
                 required_text,
                 forbidden_text,
+                require_canvas: _,
                 navigation_timeout_ms,
                 max_text_chars,
                 timeout_seconds,
@@ -1415,6 +1419,7 @@ impl ToolProvider for ConfigTools {
                 viewports,
                 required_text,
                 forbidden_text,
+                require_canvas,
                 navigation_timeout_ms,
                 max_text_chars,
                 timeout_seconds,
@@ -1430,6 +1435,7 @@ impl ToolProvider for ConfigTools {
                     viewports: viewports.as_deref(),
                     required_text: required_text.as_deref(),
                     forbidden_text: forbidden_text.as_deref(),
+                    require_canvas,
                     navigation_timeout_ms,
                     max_text_chars,
                     timeout_seconds,
@@ -1893,6 +1899,7 @@ struct PlaywrightPageAuditConfig<'a> {
     viewports: Option<&'a [Value]>,
     required_text: Option<&'a [String]>,
     forbidden_text: Option<&'a [String]>,
+    require_canvas: Option<bool>,
     navigation_timeout_ms: Option<u64>,
     max_text_chars: Option<usize>,
     timeout_seconds: Option<u64>,
@@ -2027,6 +2034,11 @@ fn call_playwright_page_audit_tool(
     }
     insert_input_or_config_array(&mut request, input, "required_text", config.required_text);
     insert_input_or_config_array(&mut request, input, "forbidden_text", config.forbidden_text);
+    if let Some(value) = input.get("require_canvas") {
+        request.insert("require_canvas".to_string(), value.clone());
+    } else if let Some(require_canvas) = config.require_canvas {
+        request.insert("require_canvas".to_string(), Value::Bool(require_canvas));
+    }
     if let Some(value) = input.get("navigation_timeout_ms") {
         request.insert("navigation_timeout_ms".to_string(), value.clone());
     } else if let Some(navigation_timeout_ms) = config.navigation_timeout_ms {
@@ -8019,6 +8031,7 @@ process.stdin.on('end', () => {
                   "viewports": [{ "label": "desktop", "width": 1280, "height": 900 }],
                   "required_text": ["{{term}}"],
                   "forbidden_text": ["markdown fence"],
+                  "require_canvas": true,
                   "navigation_timeout_ms": 1000,
                   "max_text_chars": 500,
                   "timeout_seconds": 5
@@ -8047,6 +8060,7 @@ process.stdin.on('end', () => {
             output["received"]["forbidden_text"],
             json!(["markdown fence"])
         );
+        assert_eq!(output["received"]["require_canvas"], json!(true));
         assert!(output["received"]["screenshot_dir"]
             .as_str()
             .unwrap()

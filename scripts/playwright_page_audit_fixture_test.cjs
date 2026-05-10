@@ -25,6 +25,7 @@ fs.writeFileSync(
     body { margin: 0; font-family: system-ui, sans-serif; color: #111; background: #f7f7f8; }
     main { min-height: 100vh; display: grid; place-items: center; padding: 48px 24px; box-sizing: border-box; }
     section { width: min(760px, 100%); display: grid; gap: 20px; }
+    canvas { width: min(280px, 100%); height: auto; border-radius: 18px; }
     h1 { font-size: clamp(34px, 6vw, 72px); margin: 0; line-height: 1; }
     p { font-size: 18px; line-height: 1.6; margin: 0; max-width: 62ch; }
     a { display: inline-flex; width: max-content; padding: 12px 18px; border-radius: 999px; background: #111; color: white; text-decoration: none; }
@@ -35,9 +36,20 @@ fs.writeFileSync(
     <section>
       <h1>Rendered layout</h1>
       <p>This page is intentionally simple so the audit fixture can verify screenshots, text extraction, overflow checks, and overlap diagnostics.</p>
+      <canvas id="fixture-canvas" width="280" height="160"></canvas>
       <a href="#buy">Inspect</a>
     </section>
   </main>
+  <script>
+    const canvas = document.getElementById('fixture-canvas');
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#111';
+    ctx.fillRect(20, 20, 240, 120);
+    ctx.fillStyle = '#5eead4';
+    ctx.beginPath();
+    ctx.arc(140, 80, 46, 0, Math.PI * 2);
+    ctx.fill();
+  </script>
 </body>
 </html>`,
   'utf8'
@@ -56,6 +68,7 @@ const child = childProcess.spawnSync(
       ],
       required_text: ['Rendered layout'],
       forbidden_text: ['markdown fence'],
+      require_canvas: true,
       navigation_timeout_ms: 10000,
     }),
     encoding: 'utf8',
@@ -80,6 +93,9 @@ for (const screenshotPath of output.screenshot_paths) {
 }
 assert.equal(output.viewports[0].horizontal_overflow, false);
 assert.equal(output.viewports[0].overlap_count, 0);
+assert.equal(output.viewports[0].canvas_count, 1);
+assert.equal(output.viewports[0].nonblank_canvas_count, 1);
+assert.equal(output.has_required_canvas, true);
 assert(output.viewports[0].text_preview.includes('Rendered layout'));
 
 const failingChild = childProcess.spawnSync(
@@ -92,6 +108,7 @@ const failingChild = childProcess.spawnSync(
       viewports: [{ label: 'desktop', width: 1024, height: 768 }],
       required_text: ['Missing product name'],
       forbidden_text: ['Rendered layout'],
+      require_canvas: true,
       navigation_timeout_ms: 10000,
     }),
     encoding: 'utf8',
@@ -106,6 +123,7 @@ if (failingChild.status !== 0) {
 
 const failingOutput = JSON.parse(failingChild.stdout);
 assert.equal(failingOutput.success, false);
+assert.equal(failingOutput.has_required_canvas, true);
 assert.deepEqual(failingOutput.missing_required_text, ['Missing product name']);
 assert.deepEqual(failingOutput.present_forbidden_text, ['Rendered layout']);
 assert.deepEqual(failingOutput.diagnostics[0].missing_required_text, ['Missing product name']);

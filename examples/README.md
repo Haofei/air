@@ -44,16 +44,18 @@ cargo run -p air-cli -- run-plan --profile examples/code-agent/apple-build.air-p
 
 ## `context-compact`
 
-A reusable context-budget gate for any agent domain. It measures an arbitrary JSON payload with
-`context.measure`, skips the model call when the payload is under budget, and calls the shared
-`context_compactor` model only when semantic compaction is needed.
+A reusable context-budget gate for any agent domain. The implementation lives in
+`modules/std/context/compact.air.yaml`, so coding, research, support, and planning agents can all
+compose the same standard module. It measures an arbitrary JSON payload with `context.measure`,
+skips the model call when the payload is under budget, and calls the shared `context_compactor`
+model only when semantic compaction is needed.
 
 Run the deterministic under-budget path without a model config:
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/context-compact/profile.air-profile.yaml
 cargo run -p air-cli -- run-plan examples/context-compact/context-compact.air-plan.yaml \
-  --store examples/context-compact/module-store.air-store.yaml \
+  --store modules/std/module-store.air-store.yaml \
   --input examples/context-compact/input.json \
   --tool-config examples/context-compact/tools.json \
   --log

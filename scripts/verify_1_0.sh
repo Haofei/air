@@ -35,7 +35,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/context-compact/prof
 cargo run -q -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
 cargo run -q -p air-cli -- run-plan examples/context-compact/context-compact.air-plan.yaml \
-  --store examples/context-compact/module-store.air-store.yaml \
+  --store modules/std/module-store.air-store.yaml \
   --input examples/context-compact/input.json \
   --tool-config examples/context-compact/tools.json \
   > target/generated/context_compact.output.json

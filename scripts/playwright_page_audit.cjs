@@ -28,6 +28,7 @@ async function run(input) {
   const maxTextChars = positiveInt(input.max_text_chars, 2000);
   const requiredText = stringArray(input.required_text);
   const forbiddenText = stringArray(input.forbidden_text);
+  const requireCanvas = input.require_canvas === true;
   await fs.mkdir(screenshotDir, { recursive: true });
 
   const browser = await chromium.launch({ headless: true });
@@ -110,6 +111,46 @@ async function run(input) {
 
         const clientWidth = doc.clientWidth || window.innerWidth;
         const scrollWidth = Math.max(doc.scrollWidth || 0, body?.scrollWidth || 0);
+        const canvases = Array.from(document.querySelectorAll('canvas')).map((canvas, index) => {
+          const rect = canvas.getBoundingClientRect();
+          const width = canvas.width || Math.round(rect.width);
+          const height = canvas.height || Math.round(rect.height);
+          let nonblank = false;
+          let error = '';
+          try {
+            const context = canvas.getContext('2d', { willReadFrequently: true });
+            if (!context || width <= 0 || height <= 0) {
+              error = context ? 'empty_canvas_dimensions' : 'unsupported_canvas_context';
+            } else {
+              const xStep = Math.max(1, Math.floor(width / 16));
+              const yStep = Math.max(1, Math.floor(height / 16));
+              for (let y = 0; y < height && !nonblank; y += yStep) {
+                for (let x = 0; x < width; x += xStep) {
+                  const data = context.getImageData(x, y, 1, 1).data;
+                  if (data[3] !== 0 || data[0] !== 0 || data[1] !== 0 || data[2] !== 0) {
+                    nonblank = true;
+                    break;
+                  }
+                }
+              }
+            }
+          } catch (err) {
+            error = err && err.message ? err.message : String(err);
+          }
+          return {
+            index,
+            width,
+            height,
+            rect: {
+              x: Math.round(rect.x),
+              y: Math.round(rect.y),
+              width: Math.round(rect.width),
+              height: Math.round(rect.height),
+            },
+            nonblank,
+            error,
+          };
+        });
         return {
           title: document.title || '',
           h1: Array.from(document.querySelectorAll('h1')).map((node) => node.innerText.trim()).filter(Boolean),
@@ -125,6 +166,11 @@ async function run(input) {
           horizontal_overflow: scrollWidth > clientWidth + 2,
           overlap_count: overlaps.length,
           overlaps,
+          canvas_count: canvases.length,
+          nonblank_canvas_count: canvases.filter((canvas) => canvas.nonblank).length,
+          blank_canvas_count: canvases.filter((canvas) => !canvas.nonblank && !canvas.error).length,
+          canvas_error_count: canvases.filter((canvas) => canvas.error).length,
+          canvases,
         };
       }, maxTextChars);
 
@@ -156,6 +202,8 @@ async function run(input) {
           bytes: screenshotStat.size,
           horizontal_overflow: result.horizontal_overflow,
           overlap_count: result.overlap_count,
+          canvas_count: result.canvas_count,
+          nonblank_canvas_count: result.nonblank_canvas_count,
           console_error_count: result.console_errors.length,
           page_error_count: result.page_errors.length,
         },
@@ -166,9 +214,20 @@ async function run(input) {
     await browser.close();
   }
 
-  const combinedText = viewportResults.map((viewport) => viewport.text_preview).join('\n').toLowerCase();
+  const combinedText = viewportResults
+    .map((viewport) =>
+      [
+        viewport.title,
+        ...(Array.isArray(viewport.h1) ? viewport.h1 : []),
+        ...(Array.isArray(viewport.buttons) ? viewport.buttons : []),
+        viewport.text_preview,
+      ].join('\n')
+    )
+    .join('\n')
+    .toLowerCase();
   const missingRequiredText = requiredText.filter((term) => !combinedText.includes(term.toLowerCase()));
   const presentForbiddenText = forbiddenText.filter((term) => combinedText.includes(term.toLowerCase()));
+  const hasRequiredCanvas = !requireCanvas || viewportResults.some((viewport) => viewport.nonblank_canvas_count > 0);
   const diagnostics = viewportResults.map((viewport) => ({
     width: viewport.width,
     height: viewport.height,
@@ -178,6 +237,11 @@ async function run(input) {
     page_error_count: viewport.page_errors.length,
     missing_required_text: missingRequiredText,
     present_forbidden_text: presentForbiddenText,
+    require_canvas: requireCanvas,
+    canvas_count: viewport.canvas_count,
+    nonblank_canvas_count: viewport.nonblank_canvas_count,
+    blank_canvas_count: viewport.blank_canvas_count,
+    canvas_error_count: viewport.canvas_error_count,
     screenshot_path: viewport.screenshot_path,
   }));
   const success = viewportResults.every(
@@ -186,7 +250,7 @@ async function run(input) {
       viewport.overlap_count === 0 &&
       viewport.console_errors.length === 0 &&
       viewport.page_errors.length === 0
-  ) && missingRequiredText.length === 0 && presentForbiddenText.length === 0;
+  ) && missingRequiredText.length === 0 && presentForbiddenText.length === 0 && hasRequiredCanvas;
 
   return {
     target: target.input,
@@ -196,6 +260,8 @@ async function run(input) {
     screenshot_paths: viewportResults.map((viewport) => viewport.screenshot_path),
     missing_required_text: missingRequiredText,
     present_forbidden_text: presentForbiddenText,
+    require_canvas: requireCanvas,
+    has_required_canvas: hasRequiredCanvas,
     viewports: viewportResults,
     diagnostics,
     elapsed_ms: Date.now() - startedAt,

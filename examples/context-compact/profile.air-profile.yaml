@@ -1,5 +1,5 @@
 plan: context-compact.air-plan.yaml
-store: module-store.air-store.yaml
+store: ../../modules/std/module-store.air-store.yaml
 input_file: input.json
 model_config: ../bigmodel-openai-compatible.json
 tool_config: tools.json

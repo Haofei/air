@@ -1,7 +1,7 @@
 plan:
   name: context-compact
   version: 0.1.0
-  description: "Run the reusable generic context compaction module."
+  description: "Run the reusable AIR standard-library context compaction module."
 
 requires:
   capabilities: [context.manage]
