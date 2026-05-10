@@ -2819,6 +2819,9 @@ fn call_repo_search_tool(
             "tool {name} input.mode must be fixed or regex"
         )));
     }
+    let effective_max_matches =
+        optional_bounded_usize_input(name, input, "max_matches", max_matches)?
+            .unwrap_or(max_matches);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
     let mut command = Command::new("rg");
@@ -2853,7 +2856,7 @@ fn call_repo_search_tool(
     }
     let raw = String::from_utf8_lossy(&output.stdout);
     let mut matches = Vec::new();
-    for line in raw.lines().take(max_matches) {
+    for line in raw.lines().take(effective_max_matches) {
         matches.push(parse_rg_vimgrep_line(line));
     }
     let rendered = matches
@@ -2890,7 +2893,7 @@ fn call_repo_search_tool(
                 "query": query,
                 "mode": mode,
                 "paths": paths,
-                "max_matches": max_matches,
+                "max_matches": effective_max_matches,
                 "bytes": bytes,
                 "truncated": truncated
             }
@@ -5123,6 +5126,52 @@ mod tests {
             .unwrap()
             .contains("beta_value"));
         assert_eq!(output["artifacts"][0]["metadata"]["mode"], json!("regex"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn repo_search_supports_bounded_per_call_max_matches() {
+        let dir = temp_dir("air-tools-repo-search-max-matches");
+        fs::create_dir_all(dir.join("src")).unwrap();
+        fs::write(
+            dir.join("src/lib.rs"),
+            "alpha one\nalpha two\nalpha three\nalpha four\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 3
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "repo.search",
+                &json!({"query": "alpha", "path": "src", "max_matches": 2}),
+            )
+            .unwrap();
+
+        assert_eq!(output["matches"].as_array().unwrap().len(), 2);
+        assert_eq!(output["truncated"], json!(true));
+        assert_eq!(output["artifacts"][0]["metadata"]["max_matches"], json!(2));
+
+        let capped = tools
+            .call_tool(
+                "repo.search",
+                &json!({"query": "alpha", "path": "src", "max_matches": 99}),
+            )
+            .unwrap();
+        assert_eq!(capped["matches"].as_array().unwrap().len(), 3);
+        assert_eq!(capped["artifacts"][0]["metadata"]["max_matches"], json!(3));
         let _ = fs::remove_dir_all(dir);
     }
 
