@@ -131,6 +131,15 @@ async function main() {
 
     assert(output.documents.length === 2, `expected 2 documents, got ${output.documents.length}`);
     assert(output.diagnostics.search_runs[0].result_count === 2, 'expected 2 extracted search results');
+    assert(output.diagnostics.search_runs[0].elapsed_ms >= 0, 'search run elapsed_ms missing');
+    assert(
+      output.diagnostics.search_runs[0].matched_selector === '#b_results li.b_algo h2 a',
+      'matched selector mismatch'
+    );
+    assert(
+      output.diagnostics.search_runs[0].attempted_selectors.includes('#b_results h2 a'),
+      'attempted selectors missing fallback selector'
+    );
     assert(output.diagnostics.search_base_url === `http://127.0.0.1:${port}/search`, 'search_base_url diagnostic mismatch');
     assert(output.search_urls[0].startsWith(`http://127.0.0.1:${port}/search?`), 'search URL should use fixture base URL');
     assert(output.documents[0].fetch_status === 'ok', 'first document fetch should succeed');

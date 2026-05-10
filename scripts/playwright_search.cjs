@@ -65,12 +65,14 @@ async function run(input) {
     const searchRuns = [];
     for (let queryIndex = 0; queryIndex < queries.length; queryIndex += 1) {
       const currentQuery = queries[queryIndex];
+      const queryStartedAt = Date.now();
       if (deadlineExceeded(deadlineAt)) {
         searchRuns.push({
           query: currentQuery,
           search_url: searchUrl(currentQuery, searchBaseUrl),
           ok: false,
           error: 'overall_timeout_exceeded',
+          elapsed_ms: Date.now() - queryStartedAt,
           results: [],
         });
         continue;
@@ -83,6 +85,7 @@ async function run(input) {
           search_url: currentSearchUrl,
           ok: false,
           error: 'overall_timeout_exceeded',
+          elapsed_ms: Date.now() - queryStartedAt,
           results: [],
         });
         continue;
@@ -92,7 +95,8 @@ async function run(input) {
       page.setDefaultTimeout(timeoutMs);
       try {
         await page.goto(currentSearchUrl, { waitUntil: 'domcontentloaded', timeout: timeoutMs });
-        const results = await collectSearchResults(page);
+        const searchResult = await collectSearchResults(page);
+        const results = searchResult.results;
         const title = await page.title().catch(() => '');
         const body_preview =
           results.length === 0
@@ -121,9 +125,12 @@ async function run(input) {
           query: currentQuery,
           search_url: currentSearchUrl,
           ok: true,
+          elapsed_ms: Date.now() - queryStartedAt,
           page_title: title,
           body_preview,
           result_container_preview,
+          attempted_selectors: searchResult.selectors.map((selector) => selector.selector),
+          matched_selector: searchResult.selectors.find((selector) => selector.count > 0)?.selector,
           warning: challengeDetected
             ? 'challenge_detected'
             : results.length === 0
@@ -136,6 +143,7 @@ async function run(input) {
           query: currentQuery,
           search_url: currentSearchUrl,
           ok: false,
+          elapsed_ms: Date.now() - queryStartedAt,
           error: errorMessage(error),
           results: [],
         });
@@ -237,9 +245,12 @@ async function run(input) {
           ok: run.ok,
           error: run.error,
           warning: run.warning,
+          elapsed_ms: run.elapsed_ms,
           page_title: run.page_title,
           body_preview: run.body_preview,
           result_container_preview: run.result_container_preview,
+          attempted_selectors: run.attempted_selectors,
+          matched_selector: run.matched_selector,
           result_count: run.results.length,
         })),
         candidate_count: candidates.length,
@@ -419,10 +430,22 @@ async function fetchPageTextOnce(context, url, options) {
 }
 
 async function collectSearchResults(page) {
-  const results = await page.evaluate(() => {
-    const anchors = Array.from(document.querySelectorAll('#b_results li.b_algo h2 a, #b_results h2 a'));
+  const extraction = await page.evaluate(() => {
+    const resultSelectors = [
+      '#b_results li.b_algo h2 a',
+      '#b_results h2 a',
+      'li.b_algo h2 a',
+      'main h2 a',
+    ];
+    const selectorCounts = resultSelectors.map((selector) => ({
+      selector,
+      count: document.querySelectorAll(selector).length,
+    }));
+    const anchors = Array.from(
+      document.querySelectorAll(resultSelectors.find((selector) => document.querySelector(selector)) || resultSelectors[0])
+    );
     const seen = new Set();
-    return anchors
+    const results = anchors
       .map((anchor) => {
         const href = anchor.href || anchor.getAttribute('href') || '';
         const title = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
@@ -438,8 +461,9 @@ async function collectSearchResults(page) {
         return { title, url: href, snippet };
       })
       .filter(Boolean);
+    return { results, selectors: selectorCounts };
   });
-  return results
+  const results = extraction.results
     .map((result, index) => {
       const url = normalizeUrl(unwrapSearchRedirectUrl(result.url));
       if (!isHttpUrl(url) || isSearchEngineUrl(url)) return null;
@@ -453,6 +477,10 @@ async function collectSearchResults(page) {
       };
     })
     .filter(Boolean);
+  return {
+    results,
+    selectors: extraction.selectors,
+  };
 }
 
 function selectCandidates(searchRuns, options) {
