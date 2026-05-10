@@ -12,6 +12,7 @@ cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review.air-pla
   --store examples/code-agent/module-store.air-store.yaml
 cargo run -q -p air-cli -- validate-plan examples/code-agent/code-review-composed.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/project-plan.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
@@ -95,6 +96,63 @@ assert review["summary"].startswith("Fixture review completed")
 assert review["search_quality"]["sufficient"] is True
 PY
 
+echo "[code-agent] project plan offline run"
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/project-plan.air-profile.yaml \
+  --trace-out target/generated/code_project_plan_fixture.trace.jsonl \
+  > target/generated/code_project_plan_fixture.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_project_plan_fixture.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+plan = output["project_plan"]
+assert plan["summary"].startswith("Fixture project plan completed")
+assert plan["tasks"], plan
+assert plan["acceptance"], plan
+assert "docs-code-agent-loop" in plan["source_ids"], plan
+
+with open("target/generated/code_project_plan_fixture.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+tools = {
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_call"
+}
+assert {"repo.files", "repo.search", "repo.context"} <= tools, tools
+models = {
+    event.get("meta", {}).get("model")
+    for event in events
+    if event.get("action") == "model_call"
+}
+assert "project_planner" in models, models
+PY
+
+echo "[code-agent] user-facing project plan command offline run"
+cargo run -q -p air-cli -- code "plan a project-level task graph for the AIR code agent" \
+  --recipe plan \
+  --query "code agent project plan task graph" \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --session target/generated/code_project_plan.session.json \
+  > target/generated/code_command_project_plan.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_command_project_plan.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+plan = output["project_plan"]
+assert plan["tasks"], plan
+assert plan["acceptance"], plan
+
+with open("target/generated/code_project_plan.session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
+turn = session["turns"][-1]
+assert turn["recipe"] == "plan", turn
+assert turn["completed"] is True, turn
+assert turn["summary"]["model_call_count"] >= 1, turn
+assert "project_planner" in turn["summary"]["models"], turn["summary"]
+PY
+
 echo "[code-agent] user-facing code command explain"
 cargo run -q -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \
@@ -174,6 +232,11 @@ PY
 }
 
 echo "[code-agent] primary component routing explain"
+check_code_agent_route \
+  "plan" \
+  "Plan a project-level task graph with milestones, acceptance criteria, and source-grounded file touchpoints." \
+  "code.project_plan_recipe@0.1.0" \
+  "recipe"
 check_code_agent_route \
   "review" \
   "Review the command_run implementation for safety, provenance, and diagnostics." \

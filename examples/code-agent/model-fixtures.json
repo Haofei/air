@@ -1,5 +1,158 @@
 {
   "fixtures": {
+    "project_planner": {
+      "summary": "Fixture project plan completed: add a project-level planning recipe before editing so the code agent can produce a task graph, file plan, and acceptance checks.",
+      "scope": {
+        "goal": "Introduce a read-only AIR project planner that turns an open coding goal into milestones, implementation tasks, file touchpoints, and verification commands.",
+        "non_goals": [
+          "Do not add interactive session UI.",
+          "Do not grant file.write capability to the planning step."
+        ],
+        "assumptions": [
+          "Project planning should run before explore, repair, or build when the user gives an open-ended project goal.",
+          "The planner should cite repository and documentation artifacts instead of inventing project structure."
+        ]
+      },
+      "milestones": [
+        {
+          "id": "m1",
+          "title": "Planning module",
+          "objective": "Add a bounded AIR module and RunPlan for project-level planning.",
+          "task_ids": [
+            "t1",
+            "t2"
+          ]
+        },
+        {
+          "id": "m2",
+          "title": "CLI integration",
+          "objective": "Expose the planner as an air code recipe and verify it with deterministic fixtures.",
+          "task_ids": [
+            "t3",
+            "t4"
+          ]
+        }
+      ],
+      "tasks": [
+        {
+          "id": "t1",
+          "title": "Define project-plan AIR schema",
+          "description": "Create a read-only AIR module whose output includes scope, milestones, tasks, files, acceptance checks, risks, and source ids.",
+          "kind": "ir",
+          "depends_on": [],
+          "files": [
+            "examples/code-agent/code-project-plan.air.yaml",
+            "examples/code-agent/code-project-plan.air-plan.yaml"
+          ],
+          "acceptance": [
+            "validate-plan succeeds for the project-plan profile",
+            "offline run returns at least one task and one acceptance command"
+          ]
+        },
+        {
+          "id": "t2",
+          "title": "Ground planning in repository evidence",
+          "description": "Use web.search, repo.files, repo.search, repo.context, and todo tools before the model creates the plan.",
+          "kind": "tooling",
+          "depends_on": [
+            "t1"
+          ],
+          "files": [
+            "examples/code-agent/tools.json",
+            "examples/code-agent/model-fixtures.json"
+          ],
+          "acceptance": [
+            "trace contains repo.files, repo.search, repo.context, and project_planner events"
+          ]
+        },
+        {
+          "id": "t3",
+          "title": "Add air code plan recipe",
+          "description": "Route explicit --recipe plan and target-less auto coding requests to the project planner.",
+          "kind": "cli",
+          "depends_on": [
+            "t1"
+          ],
+          "files": [
+            "crates/air-cli/src/code_agent.rs"
+          ],
+          "acceptance": [
+            "air code --recipe plan works without --target",
+            "air code --explain without --target resolves to plan"
+          ]
+        },
+        {
+          "id": "t4",
+          "title": "Document and gate the project planner",
+          "description": "Add README usage and make the code-agent verification script run the offline project planning profile.",
+          "kind": "docs_test",
+          "depends_on": [
+            "t2",
+            "t3"
+          ],
+          "files": [
+            "examples/code-agent/README.md",
+            "scripts/verify_code_agent.sh"
+          ],
+          "acceptance": [
+            "scripts/verify_code_agent.sh validates and runs the project-plan profile"
+          ]
+        }
+      ],
+      "files": [
+        {
+          "path": "examples/code-agent/code-project-plan.air.yaml",
+          "purpose": "AIR state machine for project planning.",
+          "change_type": "add"
+        },
+        {
+          "path": "crates/air-cli/src/code_agent.rs",
+          "purpose": "Expose the plan recipe in the user-facing code command.",
+          "change_type": "modify"
+        },
+        {
+          "path": "scripts/verify_code_agent.sh",
+          "purpose": "Gate project planning with deterministic fixtures.",
+          "change_type": "modify"
+        }
+      ],
+      "acceptance": [
+        {
+          "id": "validate-plan",
+          "command": "cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/project-plan.air-profile.yaml",
+          "expected": "The profile validates."
+        },
+        {
+          "id": "offline-run",
+          "command": "cargo run -q -p air-cli -- run-plan --profile examples/code-agent/project-plan.air-profile.yaml",
+          "expected": "The output contains project_plan.tasks and project_plan.acceptance."
+        },
+        {
+          "id": "code-command",
+          "command": "cargo run -q -p air-cli -- code \"plan the next project\" --recipe plan --query \"code agent project plan\"",
+          "expected": "The user-facing code command returns project_plan."
+        }
+      ],
+      "risks": [
+        {
+          "risk": "A planner could over-plan with tiny tasks that waste later model calls.",
+          "mitigation": "Require milestones, dependencies, file touchpoints, and acceptance checks so downstream loops can choose the right granularity."
+        },
+        {
+          "risk": "Fixture output proves orchestration but not real model planning quality.",
+          "mitigation": "Keep the OpenAI-compatible config in sync so the same profile can run against GLM-5.1."
+        }
+      ],
+      "source_ids": [
+        "docs-code-agent-loop",
+        "docs-search-relevance",
+        "todo:list"
+      ],
+      "next_steps": [
+        "Use project_plan.tasks as the input contract for bounded repair/build loops.",
+        "Add session fork/revert after the planner can name project milestones."
+      ]
+    },
     "code_explorer": {
       "summary": "Fixture exploration completed: command_run is implemented as a fixed allowlisted argv runner with constrained template parameters, structured diagnostics, and bounded output artifacts.",
       "relevant_files": [

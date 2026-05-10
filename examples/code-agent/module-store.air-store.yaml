@@ -6,6 +6,14 @@ imports:
   - ../../modules/std/module-store.air-store.yaml
 
 modules:
+  code.project_plan@0.1.0:
+    path: examples/code-agent/code-project-plan.air.yaml
+    kind: composite
+    visibility: public
+    description: "Read-only project planning subagent that creates a grounded task graph, file plan, and acceptance checks before implementation."
+    tags: [coding, project_plan, task_graph, acceptance, provenance]
+    covers: [project_planning, task_graph, acceptance_criteria, source_grounding, coding_milestone_planning]
+    priority: 130
   code.explore@0.1.0:
     path: examples/code-agent/code-explore.air.yaml
     kind: composite
@@ -72,6 +80,33 @@ modules:
     priority: 95
 
 recipes:
+  - id: code.project_plan_recipe@0.1.0
+    visibility: public
+    description: "Project planning workflow: gather repository and external evidence, then return a structured task graph with files and acceptance checks."
+    tags: [coding, project_plan, task_graph, acceptance, provenance]
+    covers: [project_planning, task_graph, acceptance_criteria, source_grounding, coding_milestone_planning]
+    priority: 170
+    plan:
+      plan:
+        name: code-project-plan-recipe
+        version: 0.1.0
+      requires:
+        capabilities: [task.progress, network.search, code.read]
+      nodes:
+        - id: plan
+          module: code.project_plan@0.1.0
+      entry: plan
+      connect:
+        - from: $input.task
+          to: plan.task
+        - from: $input.query
+          to: plan.query
+      outputs:
+        project_plan: plan.project_plan
+      decisions:
+        - id: use-project-plan-recipe
+          rationale: "Use the high-level project planning component so the code agent starts with a grounded task graph instead of jumping directly into file edits."
+          selected: [code.project_plan_recipe@0.1.0]
   - id: code.core_repair@0.1.0
     visibility: public
     description: "Core coding-agent repair loop: gather read-only context, select bounded repair files, apply a constrained patch, and retest."

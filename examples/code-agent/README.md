@@ -2,6 +2,10 @@
 
 This example contains bounded AIR coding agents and one preferred composed review recipe:
 
+- `code.project_plan@0.1.0` is a read-only project planning subagent. It gathers repository and
+  external evidence, then returns a structured task graph with milestones, file touchpoints,
+  dependencies, acceptance commands, risks, and source ids. Use it before repair/build work when
+  the user gives a project-level goal instead of a single target file.
 - `code.explore@0.1.0` is a read-only exploration subagent for open-ended repository questions.
   It mirrors the opencode pattern of delegating broad codebase search to a specialized child agent:
   gather web/repo/file/symbol context, then return a concise answer with exact source ids.
@@ -28,7 +32,7 @@ This example contains bounded AIR coding agents and one preferred composed revie
   `smoke_log`, `audit_diagnostics`, `screenshots`, and `revised` so callers can judge a failed build
   without digging through the raw trace.
 
-The explore/review/repair agents use:
+The plan/explore/review/repair agents use:
 
 - `todo.write` for a structured progress artifact before evidence gathering;
 - `todo.read` for re-reading the current task-progress artifact before analysis;
@@ -87,8 +91,8 @@ diagnostics back into one bounded revision pass instead of relying only on strin
 
 The default `tools.json` uses deterministic local search documents so release verification does
 not depend on network access. For real research, switch to `tools.playwright.json`.
-`model-fixtures.json` provides deterministic schema-valid outputs for `code_explorer`,
-`context_compactor`, and `code_reviewer`, so the explore and composed review plans can run
+`model-fixtures.json` provides deterministic schema-valid outputs for `project_planner`,
+`code_explorer`, `context_compactor`, and `code_reviewer`, so the project-plan, explore, and composed review plans can run
 end-to-end offline in CI without an API key.
 The verification script also runs `scripts/playwright_search_fixture_test.cjs` and
 `scripts/playwright_page_audit_fixture_test.cjs` when a local
@@ -125,6 +129,14 @@ Run the read-only exploration subagent:
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
 
 cargo run -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml --log
+```
+
+Run the read-only project planner:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/project-plan.air-profile.yaml
+
+cargo run -p air-cli -- run-plan --profile examples/code-agent/project-plan.air-profile.yaml --log
 ```
 
 Check which high-level coding component the planner will see first without calling a model:
@@ -262,6 +274,10 @@ The same command can select the other public coding-agent recipes:
 cargo run -p air-cli -- code "explore command_run safety" \
   --target crates/air-tools/src/lib.rs \
   --query command_run
+
+cargo run -p air-cli -- code "plan the next code-agent project milestone" \
+  --recipe plan \
+  --query "code agent project plan"
 
 cargo run -p air-cli -- code "review the Playwright search tool" \
   --recipe review \

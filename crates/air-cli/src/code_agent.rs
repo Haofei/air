@@ -18,6 +18,8 @@ const DEFAULT_CONTEXT_THRESHOLD_PERCENT: usize = 80;
 pub(crate) enum CodeRecipe {
     /// Select a recipe from typed flags, preferring read-only exploration when ambiguous.
     Auto,
+    /// Project-level planning with a task graph, evidence, and acceptance criteria.
+    Plan,
     /// Read-only repository exploration and planning.
     Explore,
     /// Grounded code review with repository and external evidence.
@@ -966,6 +968,10 @@ fn truncate_for_context(value: &str, max_chars: usize) -> String {
 fn code_outputs_complete(recipe: CodeRecipe, outputs: &Value) -> bool {
     match recipe {
         CodeRecipe::Auto => false,
+        CodeRecipe::Plan => outputs
+            .pointer("/project_plan/tasks")
+            .and_then(Value::as_array)
+            .is_some_and(|tasks| !tasks.is_empty()),
         CodeRecipe::Explore => outputs.get("exploration").is_some(),
         CodeRecipe::Review => outputs
             .pointer("/review/search_quality/sufficient")
@@ -1051,6 +1057,12 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
 
     match recipe {
         CodeRecipe::Auto => unreachable!("auto recipe is resolved before building input"),
+        CodeRecipe::Plan => {
+            let mut input = Map::new();
+            input.insert("task".to_string(), Value::String(task.clone()));
+            input.insert("query".to_string(), Value::String(query.unwrap_or(task)));
+            Ok(input)
+        }
         CodeRecipe::Explore => {
             let target = required_path(target, "--target", recipe)?;
             let mut input = Map::new();
@@ -1142,6 +1154,7 @@ fn required_string(value: Option<String>, flag: &str, recipe: CodeRecipe) -> Res
 fn default_profile(recipe: CodeRecipe) -> PathBuf {
     match recipe {
         CodeRecipe::Auto => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
+        CodeRecipe::Plan => PathBuf::from("examples/code-agent/project-plan.air-profile.yaml"),
         CodeRecipe::Explore => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
         CodeRecipe::Review => PathBuf::from("examples/code-agent/profile.air-profile.yaml"),
         CodeRecipe::Repair => PathBuf::from("examples/code-agent/repair-core.air-profile.yaml"),
@@ -1152,6 +1165,7 @@ fn default_profile(recipe: CodeRecipe) -> PathBuf {
 fn recipe_name(recipe: CodeRecipe) -> &'static str {
     match recipe {
         CodeRecipe::Auto => "auto",
+        CodeRecipe::Plan => "plan",
         CodeRecipe::Explore => "explore",
         CodeRecipe::Review => "review",
         CodeRecipe::Repair => "repair",
@@ -1162,7 +1176,7 @@ fn recipe_name(recipe: CodeRecipe) -> &'static str {
 #[allow(clippy::too_many_arguments)]
 fn resolve_recipe(
     recipe: CodeRecipe,
-    _target: Option<&PathBuf>,
+    target: Option<&PathBuf>,
     test: Option<&String>,
     search_query: Option<&String>,
     repo_query: Option<&String>,
@@ -1183,6 +1197,9 @@ fn resolve_recipe(
     }
     if search_query.is_some() || repo_query.is_some() || !required_terms.is_empty() {
         return CodeRecipe::Review;
+    }
+    if target.is_none() {
+        return CodeRecipe::Plan;
     }
     CodeRecipe::Explore
 }
@@ -1328,6 +1345,36 @@ mod tests {
     }
 
     #[test]
+    fn auto_recipe_selects_plan_without_target() {
+        let input = build_input(CodeInputOptions {
+            task: "plan the next code-agent milestone".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: None,
+            test: None,
+            query: Some("code agent project planning".to_string()),
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["task"],
+            Value::String("plan the next code-agent milestone".to_string())
+        );
+        assert_eq!(
+            input["query"],
+            Value::String("code agent project planning".to_string())
+        );
+        assert!(input.get("target_path").is_none());
+    }
+
+    #[test]
     fn auto_recipe_defaults_to_read_only_explore() {
         let input = build_input(CodeInputOptions {
             task: "understand this".to_string(),
@@ -1436,6 +1483,14 @@ mod tests {
         assert!(!code_outputs_complete(
             CodeRecipe::Build,
             &json!({"build": {"test_success": true, "audit_success": false}})
+        ));
+        assert!(code_outputs_complete(
+            CodeRecipe::Plan,
+            &json!({"project_plan": {"tasks": [{"id": "t1"}]}})
+        ));
+        assert!(!code_outputs_complete(
+            CodeRecipe::Plan,
+            &json!({"project_plan": {"tasks": []}})
         ));
     }
 

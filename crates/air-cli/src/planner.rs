@@ -425,11 +425,14 @@ fn task_is_read_only_exploration(task_terms: &BTreeSet<String>) -> bool {
 }
 
 fn component_intent_penalty(component: &Value, read_only_exploration: bool) -> i64 {
+    let mut penalty = 0;
     if read_only_exploration && component_requires_capability(component, "file.write") {
-        -900
-    } else {
-        0
+        penalty -= 900;
     }
+    if read_only_exploration && !component_matches_any(component, &["explore", "exploration"]) {
+        penalty -= 900;
+    }
+    penalty
 }
 
 fn component_requires_capability(component: &Value, capability: &str) -> bool {
@@ -442,6 +445,40 @@ fn component_requires_capability(component: &Value, capability: &str) -> bool {
                 .iter()
                 .any(|value| value.as_str() == Some(capability))
         })
+}
+
+fn component_matches_any(component: &Value, terms: &[&str]) -> bool {
+    let mut component_terms = BTreeSet::new();
+    for key in ["id", "description", "tags", "covers"] {
+        if let Some(value) = component.get(key) {
+            collect_component_terms(value, &mut component_terms);
+        }
+    }
+    terms.iter().any(|term| component_terms.contains(*term))
+}
+
+fn collect_component_terms(value: &Value, terms: &mut BTreeSet<String>) {
+    match value {
+        Value::String(text) => {
+            for token in text
+                .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '_'))
+                .filter_map(normalize_component_token)
+            {
+                terms.insert(token);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_component_terms(value, terms);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_component_terms(value, terms);
+            }
+        }
+        _ => {}
+    }
 }
 
 fn candidate_has_matched_terms(candidate: &Value) -> bool {

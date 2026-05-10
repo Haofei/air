@@ -1288,6 +1288,11 @@ mod tests {
 
         for (task, expected_id, expected_source) in [
             (
+                "Plan a project-level task graph with milestones and acceptance criteria.",
+                "code.project_plan_recipe@0.1.0",
+                "recipe",
+            ),
+            (
                 "Review the command_run implementation for safety, provenance, and diagnostics.",
                 "code.review_with_std_context@0.1.0",
                 "recipe",

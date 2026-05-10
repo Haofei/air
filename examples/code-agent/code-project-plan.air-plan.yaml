@@ -1,0 +1,26 @@
+plan:
+  name: code-project-plan
+  version: 0.1.0
+
+requires:
+  capabilities: [task.progress, network.search, code.read]
+
+nodes:
+  - id: plan
+    module: code.project_plan@0.1.0
+
+entry: plan
+
+connect:
+  - from: $input.task
+    to: plan.task
+  - from: $input.query
+    to: plan.query
+
+outputs:
+  project_plan: plan.project_plan
+
+decisions:
+  - id: use-read-only-project-planning-subagent
+    rationale: "The task asks for project-level planning, so use the bounded read-only project planner before exploration, editing, or test execution."
+    selected: [code.project_plan@0.1.0]

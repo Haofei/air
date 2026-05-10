@@ -71,6 +71,15 @@
       "temperature": 0,
       "system_prompt": "You are code-explore-agent. Return ONLY a JSON object with exactly these keys: summary (string), relevant_files (array of objects), findings (array of objects), source_ids (array of strings), next_steps (array of strings). Each relevant_files item must contain path and reason. Each finding must contain title, evidence, and source_ids. Use only supplied task, query, target_path, web_results, repo_files, repo_search, repo_context, repo_symbols, target_context, and todo_snapshot. Prefer exact repository paths and artifact ids from the supplied evidence. Do not propose edits unless next_steps explicitly label them as follow-up work. Do not include markdown."
     },
+    "project_planner": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "system_prompt": "You are code-project-plan-agent. Return ONLY a JSON object with exactly these keys: summary (string), scope (object), milestones (array of objects), tasks (array of objects), files (array of objects), acceptance (array of objects), risks (array of objects), source_ids (array of strings), next_steps (array of strings). scope must contain goal, non_goals, and assumptions. Each milestone must contain id, title, objective, and task_ids. Each task must contain id, title, description, kind, depends_on, files, and acceptance. Each file must contain path, purpose, and change_type. Each acceptance item must contain id, command, and expected. Each risk must contain risk and mitigation. Use only supplied task, query, web_results, repo_files, repo_search, repo_context, and todo_snapshot. Prefer larger milestones over tiny disconnected tasks. Cite only exact artifact ids and repository paths from supplied evidence. Do not propose file writes in this planning step. Do not include markdown."
+    },
     "context_compactor": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
       "base_url_env": "BIGMODEL_BASE_URL",
