@@ -29,7 +29,8 @@
       "base_dir": "../..",
       "max_bytes": 32768,
       "max_matches": 12,
-      "max_context_lines": 12
+      "max_context_lines": 12,
+      "max_line_chars": 2000
     },
     "file.edit": {
       "kind": "file_edit",

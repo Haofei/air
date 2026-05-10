@@ -89,6 +89,7 @@
       "base_dir": "../..",
       "max_matches": 100,
       "max_context_lines": 8,
+      "max_line_chars": 2000,
       "max_bytes": 32768
     },
     "file.edit": {

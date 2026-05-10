@@ -24,6 +24,20 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refa
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
 cargo test -q -p air-cli pack_validation_rejects
 cargo test -q -p air-cli pack_input_contract
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+for path in [
+    "examples/code-agent/tools.json",
+    "examples/code-agent/tools.core.json",
+    "examples/code-agent/tools.repair.json",
+    "examples/code-agent/tools.playwright.json",
+]:
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    file_search = config["tools"]["file.search"]
+    assert file_search["max_line_chars"] == 2000, (path, file_search)
+PY
 rm -rf target/generated/examples/code-agent target/generated/modules
 mkdir -p target/generated/examples
 cp -R examples/code-agent target/generated/examples/code-agent
