@@ -258,7 +258,8 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
                 recipe.get("covers"),
             ],
         );
-        let score = priority + 1_000 + (matched_terms.len() as i64 * 25);
+        let match_penalty = if matched_terms.is_empty() { -2_000 } else { 0 };
+        let score = priority + 1_000 + (matched_terms.len() as i64 * 25) + match_penalty;
         candidates.push(json!({
             "id": id,
             "source": "recipe",
@@ -309,7 +310,8 @@ fn planner_component_selection(task: &str, catalog: &[Value], recipes: &[Value])
             "public_building_block" => 50,
             _ => -100,
         };
-        let score = priority + tier_bonus + (matched_terms.len() as i64 * 20);
+        let match_penalty = if matched_terms.is_empty() { -1_000 } else { 0 };
+        let score = priority + tier_bonus + (matched_terms.len() as i64 * 20) + match_penalty;
         candidates.push(json!({
             "id": id,
             "source": "module",
@@ -418,7 +420,8 @@ fn normalize_component_token(value: &str) -> Option<String> {
 }
 
 const COMPONENT_STOP_WORDS: &[&str] = &[
-    "and", "are", "for", "from", "into", "one", "the", "this", "that", "with", "when",
+    "agent", "agents", "air", "and", "are", "code", "coding", "for", "from", "into", "module",
+    "modules", "one", "task", "the", "this", "that", "tool", "tools", "using", "with", "when",
 ];
 
 pub(crate) fn module_catalog(

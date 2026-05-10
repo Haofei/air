@@ -1040,6 +1040,34 @@ mod tests {
     }
 
     #[test]
+    fn planner_request_ranks_code_explore_for_open_ended_code_questions() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let store = air_linker::parse_module_store_file(
+            root.join("examples/code-agent/module-store.air-store.yaml"),
+        )
+        .unwrap();
+        let catalog = module_catalog(&store, &root, true).unwrap();
+        let recipes = recipe_catalog(&store, &root, true).unwrap();
+
+        let request = planner_request(
+            "Explore how command_run is implemented and identify relevant repository files.",
+            &store,
+            catalog,
+            recipes,
+            true,
+        );
+
+        assert_eq!(
+            request["module_store"]["component_selection"]["first_choice"]["id"],
+            json!("code.explore@0.1.0")
+        );
+        assert_eq!(
+            request["module_store"]["component_selection"]["first_choice"]["tier"],
+            json!("large_component")
+        );
+    }
+
+    #[test]
     fn local_docs_search_dedupes_raw_content_before_limit() {
         let documents = vec![
             LocalDoc {
