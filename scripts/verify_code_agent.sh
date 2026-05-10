@@ -149,7 +149,6 @@ PY
 
 echo "[code-agent] user-facing explore command offline run"
 cargo run -q -p air-cli -- code "explore command_run safety" \
-  --recipe explore \
   --target crates/air-tools/src/lib.rs \
   --query command_run \
   > target/generated/code_command_explore.output.json

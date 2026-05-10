@@ -42,7 +42,7 @@ enum Command {
         task: String,
 
         /// Coding recipe to run.
-        #[arg(long, value_enum, default_value = "repair")]
+        #[arg(long, value_enum, default_value = "auto")]
         recipe: CodeRecipe,
 
         /// Primary file the coding agent is allowed to inspect.
@@ -1572,7 +1572,7 @@ mod tests {
         };
 
         assert_eq!(task, "fix the failing add function and retest");
-        assert_eq!(recipe, CodeRecipe::Repair);
+        assert_eq!(recipe, CodeRecipe::Auto);
         assert_eq!(
             target,
             Some(std::path::PathBuf::from(

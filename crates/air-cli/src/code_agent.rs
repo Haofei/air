@@ -6,6 +6,8 @@ use std::path::PathBuf;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeRecipe {
+    /// Select a recipe from typed flags, preferring read-only exploration when ambiguous.
+    Auto,
     /// Read-only repository exploration and planning.
     Explore,
     /// Grounded code review with repository and external evidence.
@@ -71,6 +73,18 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         tool_config,
     } = options;
 
+    let recipe = resolve_recipe(
+        recipe,
+        target.as_ref(),
+        test.as_ref(),
+        search_query.as_ref(),
+        repo_query.as_ref(),
+        &required_terms,
+        output.as_ref(),
+        brand.as_ref(),
+        product.as_ref(),
+        &constraints,
+    );
     let profile = profile.unwrap_or_else(|| default_profile(recipe));
     let input = build_input(CodeInputOptions {
         task,
@@ -141,7 +155,21 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
         constraints,
     } = options;
 
+    let recipe = resolve_recipe(
+        recipe,
+        target.as_ref(),
+        test.as_ref(),
+        search_query.as_ref(),
+        repo_query.as_ref(),
+        &required_terms,
+        output.as_ref(),
+        brand.as_ref(),
+        product.as_ref(),
+        &constraints,
+    );
+
     match recipe {
+        CodeRecipe::Auto => unreachable!("auto recipe is resolved before building input"),
         CodeRecipe::Explore => {
             let target = required_path(target, "--target", recipe)?;
             let mut input = Map::new();
@@ -232,6 +260,7 @@ fn required_string(value: Option<String>, flag: &str, recipe: CodeRecipe) -> Res
 
 fn default_profile(recipe: CodeRecipe) -> PathBuf {
     match recipe {
+        CodeRecipe::Auto => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
         CodeRecipe::Explore => PathBuf::from("examples/code-agent/explore.air-profile.yaml"),
         CodeRecipe::Review => PathBuf::from("examples/code-agent/profile.air-profile.yaml"),
         CodeRecipe::Repair => PathBuf::from("examples/code-agent/repair-core.air-profile.yaml"),
@@ -241,11 +270,40 @@ fn default_profile(recipe: CodeRecipe) -> PathBuf {
 
 fn recipe_name(recipe: CodeRecipe) -> &'static str {
     match recipe {
+        CodeRecipe::Auto => "auto",
         CodeRecipe::Explore => "explore",
         CodeRecipe::Review => "review",
         CodeRecipe::Repair => "repair",
         CodeRecipe::Build => "build",
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_recipe(
+    recipe: CodeRecipe,
+    _target: Option<&PathBuf>,
+    test: Option<&String>,
+    search_query: Option<&String>,
+    repo_query: Option<&String>,
+    required_terms: &[String],
+    output: Option<&PathBuf>,
+    brand: Option<&String>,
+    product: Option<&String>,
+    constraints: &[String],
+) -> CodeRecipe {
+    if recipe != CodeRecipe::Auto {
+        return recipe;
+    }
+    if output.is_some() || brand.is_some() || product.is_some() || !constraints.is_empty() {
+        return CodeRecipe::Build;
+    }
+    if test.is_some() {
+        return CodeRecipe::Repair;
+    }
+    if search_query.is_some() || repo_query.is_some() || !required_terms.is_empty() {
+        return CodeRecipe::Review;
+    }
+    CodeRecipe::Explore
 }
 
 fn path_array(paths: Vec<PathBuf>) -> Value {
@@ -300,6 +358,115 @@ mod tests {
             input["related_files"],
             Value::Array(vec![Value::String("src/test.rs".to_string())])
         );
+    }
+
+    #[test]
+    fn auto_recipe_selects_repair_when_test_is_present() {
+        let input = build_input(CodeInputOptions {
+            task: "fix it".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: Some("unit".to_string()),
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(input["test_command"], Value::String("unit".to_string()));
+        assert_eq!(
+            input["target_path"],
+            Value::String("src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn auto_recipe_selects_build_when_output_is_present() {
+        let input = build_input(CodeInputOptions {
+            task: "build it".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: None,
+            test: None,
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: Some(PathBuf::from("site/index.html")),
+            brand: Some("Acme".to_string()),
+            product: None,
+            constraints: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["output_path"],
+            Value::String("site/index.html".to_string())
+        );
+        assert_eq!(input["brand"], Value::String("Acme".to_string()));
+        assert_eq!(input["product"], Value::String("Acme".to_string()));
+    }
+
+    #[test]
+    fn auto_recipe_selects_review_when_review_flags_are_present() {
+        let input = build_input(CodeInputOptions {
+            task: "review it".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: None,
+            query: None,
+            related: vec![],
+            search_query: Some("library docs".to_string()),
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["search_query"],
+            Value::String("library docs".to_string())
+        );
+        assert_eq!(
+            input["target_file"],
+            Value::String("src/lib.rs".to_string())
+        );
+    }
+
+    #[test]
+    fn auto_recipe_defaults_to_read_only_explore() {
+        let input = build_input(CodeInputOptions {
+            task: "understand this".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: None,
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+        })
+        .unwrap();
+
+        assert_eq!(input["query"], Value::String("understand this".to_string()));
+        assert_eq!(
+            input["target_path"],
+            Value::String("src/lib.rs".to_string())
+        );
+        assert!(input.get("test_command").is_none());
     }
 
     #[test]

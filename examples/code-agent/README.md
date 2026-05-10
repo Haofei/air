@@ -160,7 +160,9 @@ For a repair task, the current input looks like this:
 }
 ```
 
-Run the user-facing wrapper. The default recipe is `repair`:
+Run the user-facing wrapper. The default recipe is `auto`: `--output` selects build,
+`--test` selects repair, review-specific search flags select review, and ambiguous tasks fall
+back to read-only exploration.
 
 ```bash
 cargo run -p air-cli -- code "fix the failing add function and retest" \
@@ -174,7 +176,6 @@ The same command can select the other public coding-agent recipes:
 
 ```bash
 cargo run -p air-cli -- code "explore command_run safety" \
-  --recipe explore \
   --target crates/air-tools/src/lib.rs \
   --query command_run
 
