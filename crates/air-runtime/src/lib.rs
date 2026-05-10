@@ -12,6 +12,8 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 pub type State = Map<String, Value>;
+type ResolvedToolDispatch = Result<(String, Value), RuntimeError>;
+type ResolvedToolBatchItem = (Value, ResolvedToolDispatch);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
@@ -1199,8 +1201,8 @@ where
             on_error,
         } = batch;
         reject_control_field_write("tool_batch_dispatch", output)?;
-        let dispatches = resolve_tool_batch_dispatch(&input)?;
-        let attempted = dispatches.len() as u32;
+        let dispatch_items = resolve_tool_batch_dispatch_items(&input)?;
+        let attempted = dispatch_items.len() as u32;
         if attempted > max_calls {
             let error = RuntimeError::ToolBatchDispatchLimitExceeded {
                 limit: max_calls,
@@ -1215,9 +1217,15 @@ where
             );
             return Err(error);
         }
-        if let Err(error) =
-            enforce_approval_required_batch_isolation(context.module, &dispatches, attempted)
-        {
+        let resolved_dispatches = dispatch_items
+            .iter()
+            .filter_map(|(_, dispatch)| dispatch.as_ref().ok().cloned())
+            .collect::<Vec<_>>();
+        if let Err(error) = enforce_approval_required_batch_isolation(
+            context.module,
+            &resolved_dispatches,
+            attempted,
+        ) {
             context.push_event_with_meta(
                 "tool_batch_dispatch",
                 Some(input),
@@ -1234,7 +1242,27 @@ where
             .unwrap_or(1)
             .max(1);
         let mut results = Vec::new();
-        for (index, (tool, tool_input)) in dispatches.into_iter().enumerate() {
+        for (index, (raw_dispatch, dispatch)) in dispatch_items.into_iter().enumerate() {
+            let (tool, tool_input) = match dispatch {
+                Ok(dispatch) => dispatch,
+                Err(error) => {
+                    context.push_event_with_meta(
+                        "tool_batch_dispatch_item",
+                        Some(raw_dispatch.clone()),
+                        None,
+                        Some(json!({"tool": invalid_dispatch_tool_name(&raw_dispatch), "index": index})),
+                        Err(error.to_string()),
+                    );
+                    if on_error == ToolErrorMode::Observe {
+                        results.push(tool_batch_malformed_observation(
+                            &raw_dispatch,
+                            &error.to_string(),
+                        ));
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 context.push_event_with_meta(
                     "tool_batch_dispatch_item",
@@ -2023,25 +2051,28 @@ fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeErr
     Ok((tool.to_string(), input))
 }
 
-fn resolve_tool_batch_dispatch(batch: &Value) -> Result<Vec<(String, Value)>, RuntimeError> {
+fn resolve_tool_batch_dispatch_items(
+    batch: &Value,
+) -> Result<Vec<ResolvedToolBatchItem>, RuntimeError> {
     let Some(items) = batch.as_array() else {
         return Err(RuntimeError::SchemaViolation(
             "tool_batch_dispatch input must be an array of objects with fields tool and input"
                 .to_string(),
         ));
     };
-    items
+    Ok(items
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            resolve_tool_dispatch(item).map_err(|error| match error {
+            let resolved = resolve_tool_dispatch(item).map_err(|error| match error {
                 RuntimeError::SchemaViolation(message) => RuntimeError::SchemaViolation(format!(
                     "tool_batch_dispatch input[{index}] invalid: {message}"
                 )),
                 other => other,
-            })
+            });
+            (item.clone(), resolved)
         })
-        .collect()
+        .collect())
 }
 
 fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value {
@@ -2055,6 +2086,30 @@ fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value
             "error": error,
         }
     })
+}
+
+fn tool_batch_malformed_observation(dispatch: &Value, error: &str) -> Value {
+    let tool = invalid_dispatch_tool_name(dispatch);
+    json!({
+        "tool": tool,
+        "input": {},
+        "status": "error",
+        "error": error,
+        "output": {
+            "status": "error",
+            "error": error,
+            "requested": dispatch,
+        }
+    })
+}
+
+fn invalid_dispatch_tool_name(dispatch: &Value) -> String {
+    dispatch
+        .as_object()
+        .and_then(|object| object.get("tool").or_else(|| object.get("name")))
+        .and_then(Value::as_str)
+        .unwrap_or("<invalid>")
+        .to_string()
 }
 
 fn validate_approval_capabilities(

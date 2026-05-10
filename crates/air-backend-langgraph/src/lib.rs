@@ -664,9 +664,13 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
             output.push_str("    for index, dispatch_value in enumerate(batch_value):\n");
             output.push_str("        tool_name = dispatch_value.get(\"tool\") if isinstance(dispatch_value, dict) else None\n");
             output.push_str("        if not isinstance(tool_name, str):\n");
-            output.push_str(
-                "            raise ValueError(f\"tool_batch_dispatch input[{index}].tool must be a string\")\n",
-            );
+            output.push_str("            error = ValueError(f\"tool_batch_dispatch input[{index}].tool must be a string\")\n");
+            if observe_errors {
+                output.push_str("            batch_outputs.append({\"tool\": \"<invalid>\", \"input\": {}, \"status\": \"error\", \"error\": str(error), \"output\": {\"status\": \"error\", \"error\": str(error), \"requested\": dispatch_value}})\n");
+                output.push_str("            continue\n");
+            } else {
+                output.push_str("            raise error\n");
+            }
             output.push_str("        tool_input = dispatch_value.get(\"input\", {})\n");
             output.push_str("        if not any(tool.get(\"name\") == tool_name for tool in AIR_MODULE.get(\"tools\", [])):\n");
             output.push_str("            error = RuntimeError(f\"tool {tool_name} is not declared by module {AIR_MODULE.get('agent', {}).get('name', '<unknown>')}\")\n");
@@ -1402,7 +1406,11 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                 max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
                 for index, dispatch_value in enumerate(batch_value):
                     if not isinstance(dispatch_value, dict) or not isinstance(dispatch_value.get("tool"), str):
-                        raise ValueError(f"tool_batch_dispatch input[{index}].tool must be a string")
+                        error = ValueError(f"tool_batch_dispatch input[{index}].tool must be a string")
+                        if observe_errors:
+                            batch_outputs.append({"tool": "<invalid>", "input": {}, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error), "requested": dispatch_value}})
+                            continue
+                        raise error
                     dispatched_action = dict(action)
                     dispatched_action["tool"] = dispatch_value["tool"]
                     try:
@@ -2228,6 +2236,7 @@ mod tests {
         assert!(code.contains("\"status\": \"error\""));
         assert!(code.contains("\"error\": str(error)"));
         assert!(code.contains("is not declared by module"));
+        assert!(code.contains("\"tool\": \"<invalid>\""));
     }
 
     #[test]

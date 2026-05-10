@@ -985,6 +985,72 @@ fn tool_batch_dispatch_can_observe_undeclared_tools() {
 }
 
 #[test]
+fn tool_batch_dispatch_can_observe_malformed_items() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    module.state.insert(
+        "choices".to_string(),
+        air_core::TypeSpec::Detailed(air_core::DetailedType {
+            kind: air_core::DetailedTypeKind::Array,
+            additional_properties: true,
+            required: Vec::new(),
+            properties: Default::default(),
+            items: Some(Box::new(air_core::TypeSpec::Shorthand(
+                air_core::PrimitiveType::Object,
+            ))),
+            min_items: None,
+            max_items: None,
+            enum_values: Vec::new(),
+        }),
+    );
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch { on_error, .. } =
+        workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *on_error = air_core::ToolErrorMode::Observe;
+
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"input": {"query": "bad"}},
+                {"tool": "docs.search", "input": {"query": "good"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 1);
+    assert_eq!(
+        result.outputs["observations"][0]["tool"],
+        json!("<invalid>")
+    );
+    assert_eq!(result.outputs["observations"][0]["status"], json!("error"));
+    assert_eq!(
+        result.outputs["observations"][0]["error"],
+        json!("schema violation: tool_batch_dispatch input[0] invalid: tool_dispatch input.tool must be a string")
+    );
+    assert_eq!(
+        result.outputs["observations"][0]["output"]["requested"],
+        json!({"input": {"query": "bad"}})
+    );
+    assert_eq!(result.outputs["observations"][1]["status"], json!("ok"));
+    assert_eq!(
+        result.outputs["observations"][1]["output"]["query"],
+        json!("good")
+    );
+}
+
+#[test]
 fn rejects_tool_batch_dispatch_over_action_bound_before_provider_calls() {
     let module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
     let mut vm = Vm {

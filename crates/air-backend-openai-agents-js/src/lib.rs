@@ -997,7 +997,12 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         for (let index = 0; index < batchValue.length; index += 1) {
           const dispatchValue = batchValue[index];
           if (!dispatchValue || typeof dispatchValue !== 'object' || Array.isArray(dispatchValue) || typeof dispatchValue.tool !== 'string') {
-            throw new Error(`tool_batch_dispatch input[${index}].tool must be a string`);
+            const error = new Error(`tool_batch_dispatch input[${index}].tool must be a string`);
+            if (observeErrors) {
+              batchOutputs.push({ tool: '<invalid>', input: {}, status: 'error', error: error.message, output: { status: 'error', error: error.message, requested: dispatchValue } });
+              continue;
+            }
+            throw error;
           }
           const dispatchedAction = { ...action, tool: dispatchValue.tool };
           const inputValue = dispatchValue.input ?? {};
@@ -1679,6 +1684,7 @@ mod tests {
         assert!(code.contains("const observeErrors = action.on_error === 'observe'"));
         assert!(code.contains("status: 'error'"));
         assert!(code.contains("is not declared by module"));
+        assert!(code.contains("tool: '<invalid>'"));
     }
 
     #[test]
