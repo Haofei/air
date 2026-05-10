@@ -5,13 +5,16 @@ agent:
 inputs:
   request:
     type: object
-    required: [research_brief, topic, topic_count, owner, notes]
+    required: [research_brief, topic, topic_count, owner, notes, optional_related]
     properties:
       research_brief: string
       topic: string
       topic_count: integer
       owner: string
       notes:
+        type: array
+        items: string
+      optional_related:
         type: array
         items: string
 

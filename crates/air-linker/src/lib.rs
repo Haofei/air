@@ -4619,15 +4619,16 @@ fn eval_link_expr(
             Ok(json!(array.len()))
         }
         LinkExpr::Coalesce { coalesce } => {
+            let mut empty_fallback = None;
             for candidate in coalesce {
                 match eval_link_expr(candidate, root_inputs, module_outputs) {
                     Ok(value) if !is_empty_link_value(&value) => return Ok(value),
-                    Ok(_) => {}
+                    Ok(value) => empty_fallback = Some(value),
                     Err(LinkerError::MissingOutput { .. } | LinkerError::MissingRootInput(_)) => {}
                     Err(error) => return Err(error),
                 }
             }
-            Ok(Value::Null)
+            Ok(empty_fallback.unwrap_or(Value::Null))
         }
     }
 }
@@ -4673,15 +4674,16 @@ fn eval_dynamic_link_expr(
             Ok(json!(array.len()))
         }
         LinkExpr::Coalesce { coalesce } => {
+            let mut empty_fallback = None;
             for candidate in coalesce {
                 match eval_dynamic_link_expr(candidate, item, root_inputs, module_outputs) {
                     Ok(value) if !is_empty_link_value(&value) => return Ok(value),
-                    Ok(_) => {}
+                    Ok(value) => empty_fallback = Some(value),
                     Err(LinkerError::MissingOutput { .. } | LinkerError::MissingRootInput(_)) => {}
                     Err(error) => return Err(error),
                 }
             }
-            Ok(Value::Null)
+            Ok(empty_fallback.unwrap_or(Value::Null))
         }
     }
 }

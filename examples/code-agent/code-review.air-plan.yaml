@@ -23,8 +23,11 @@ connect:
     to: review.required_terms
   - from: $input.target_file
     to: review.target_file
-  - from: $input.related_files
-    to: review.related_files
+  - to: review.related_files
+    value:
+      coalesce:
+        - from: $input.related_files
+        - literal: []
 
 outputs:
   review: review.review

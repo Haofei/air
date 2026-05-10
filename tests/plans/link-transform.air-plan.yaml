@@ -34,6 +34,10 @@ connect:
           array:
             - literal: planner
             - from: plan.plan.topics[1]
+        optional_related:
+          coalesce:
+            - from: $input.optional_related
+            - literal: []
 
 outputs:
   request: topic.response

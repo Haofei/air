@@ -1290,6 +1290,7 @@ def _air_link_expr_value(state: dict[str, Any], expr: dict[str, Any]) -> Any:
             raise RuntimeError("count expression requires an array input")
         return len(value)
     if "coalesce" in expr:
+        empty_fallback = None
         for candidate in expr["coalesce"]:
             try:
                 value = _air_link_expr_value(state, candidate)
@@ -1297,7 +1298,8 @@ def _air_link_expr_value(state: dict[str, Any], expr: dict[str, Any]) -> Any:
                 continue
             if not _air_empty_link_value(value):
                 return value
-        return None
+            empty_fallback = value
+        return empty_fallback
     raise RuntimeError(f"unsupported AIR link expression {expr}")
 
 
@@ -1317,6 +1319,7 @@ def _air_dynamic_link_expr_value(state: dict[str, Any], expr: dict[str, Any], it
             raise RuntimeError("count expression requires an array input")
         return len(value)
     if "coalesce" in expr:
+        empty_fallback = None
         for candidate in expr["coalesce"]:
             try:
                 value = _air_dynamic_link_expr_value(state, candidate, item)
@@ -1324,7 +1327,8 @@ def _air_dynamic_link_expr_value(state: dict[str, Any], expr: dict[str, Any], it
                 continue
             if not _air_empty_link_value(value):
                 return value
-        return None
+            empty_fallback = value
+        return empty_fallback
     raise RuntimeError(f"unsupported AIR link expression {expr}")
 
 
@@ -1348,6 +1352,7 @@ def _air_each_link_expr_value(state: dict[str, Any], expr: dict[str, Any], node_
             raise RuntimeError("count expression requires an array input")
         return len(value)
     if "coalesce" in expr:
+        empty_fallback = None
         for candidate in expr["coalesce"]:
             try:
                 value = _air_each_link_expr_value(state, candidate, node_id)
@@ -1355,7 +1360,8 @@ def _air_each_link_expr_value(state: dict[str, Any], expr: dict[str, Any], node_
                 continue
             if not _air_empty_link_value(value):
                 return value
-        return None
+            empty_fallback = value
+        return empty_fallback
     raise RuntimeError(f"unsupported AIR link expression {expr}")
 
 

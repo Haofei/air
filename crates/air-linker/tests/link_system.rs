@@ -713,7 +713,8 @@ fn run_plan_connect_value_supports_typed_transforms() {
             "topic": "dynamic fan-out",
             "topic_count": 2,
             "owner": "research_operations",
-            "notes": ["planner", "typed transforms"]
+            "notes": ["planner", "typed transforms"],
+            "optional_related": []
         })
     );
 }

@@ -954,15 +954,17 @@ function linkExprValue(state, expr) {
     return value.length;
   }
   if (Object.prototype.hasOwnProperty.call(expr, 'coalesce')) {
+    let emptyFallback = null;
     for (const candidate of expr.coalesce) {
       try {
         const value = linkExprValue(state, candidate);
         if (!emptyLinkValue(value)) return value;
+        emptyFallback = value;
       } catch (error) {
         continue;
       }
     }
-    return null;
+    return emptyFallback;
   }
   throw new Error(`unsupported AIR link expression ${JSON.stringify(expr)}`);
 }
@@ -986,15 +988,17 @@ function dynamicLinkExprValue(state, expr, item) {
     return value.length;
   }
   if (Object.prototype.hasOwnProperty.call(expr, 'coalesce')) {
+    let emptyFallback = null;
     for (const candidate of expr.coalesce) {
       try {
         const value = dynamicLinkExprValue(state, candidate, item);
         if (!emptyLinkValue(value)) return value;
+        emptyFallback = value;
       } catch (error) {
         continue;
       }
     }
-    return null;
+    return emptyFallback;
   }
   throw new Error(`unsupported AIR link expression ${JSON.stringify(expr)}`);
 }
@@ -1018,15 +1022,17 @@ function eachLinkExprValue(state, expr, nodeId) {
     return value.length;
   }
   if (Object.prototype.hasOwnProperty.call(expr, 'coalesce')) {
+    let emptyFallback = null;
     for (const candidate of expr.coalesce) {
       try {
         const value = eachLinkExprValue(state, candidate, nodeId);
         if (!emptyLinkValue(value)) return value;
+        emptyFallback = value;
       } catch (error) {
         continue;
       }
     }
-    return null;
+    return emptyFallback;
   }
   throw new Error(`unsupported AIR link expression ${JSON.stringify(expr)}`);
 }
