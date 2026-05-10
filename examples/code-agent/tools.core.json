@@ -74,7 +74,7 @@
       "kind": "file_read",
       "capability": "file.read",
       "base_dir": "../..",
-      "max_bytes": 65536
+      "max_bytes": 32768
     },
     "file.read_many": {
       "kind": "file_read_many",
@@ -89,7 +89,7 @@
       "base_dir": "../..",
       "max_matches": 100,
       "max_context_lines": 8,
-      "max_bytes": 65536
+      "max_bytes": 32768
     },
     "file.patch": {
       "kind": "file_patch",

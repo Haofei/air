@@ -1355,7 +1355,7 @@ fn model_result_for_output_schema(
     match validate_output(module, output, &value) {
         Ok(()) => Ok(value),
         Err(error) => {
-            if let Some(parsed) = parse_model_content_json(&value) {
+            for parsed in model_content_json_candidates(&value).into_iter().rev() {
                 if validate_output(module, output, &parsed).is_ok() {
                     return Ok(parsed);
                 }
@@ -1365,10 +1365,67 @@ fn model_result_for_output_schema(
     }
 }
 
-fn parse_model_content_json(value: &Value) -> Option<Value> {
-    let content = value.as_object()?.get("content")?.as_str()?;
+fn model_content_json_candidates(value: &Value) -> Vec<Value> {
+    let Some(content) = value
+        .as_object()
+        .and_then(|object| object.get("content"))
+        .and_then(Value::as_str)
+    else {
+        return Vec::new();
+    };
     let normalized = strip_model_content_code_fence(content).unwrap_or(content);
-    serde_json::from_str(normalized).ok()
+    let mut values = Vec::new();
+    if let Ok(value) = serde_json::from_str(normalized) {
+        values.push(value);
+    }
+    for slice in json_object_slices(normalized) {
+        if let Ok(value) = serde_json::from_str(slice) {
+            values.push(value);
+        }
+    }
+    values
+}
+
+fn json_object_slices(input: &str) -> Vec<&str> {
+    let mut slices = Vec::new();
+    let mut start = None;
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+
+    for (index, character) in input.char_indices() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if character == '\\' {
+                escaped = true;
+            } else if character == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        match character {
+            '"' => in_string = true,
+            '{' => {
+                if depth == 0 {
+                    start = Some(index);
+                }
+                depth += 1;
+            }
+            '}' if depth > 0 => {
+                depth -= 1;
+                if depth == 0 {
+                    if let Some(start_index) = start.take() {
+                        slices.push(&input[start_index..index + character.len_utf8()]);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    slices
 }
 
 fn strip_model_content_code_fence(content: &str) -> Option<&str> {
@@ -2329,4 +2386,40 @@ fn parse_condition_literal(raw: &str) -> Result<Value, RuntimeError> {
         return Ok(Value::String(raw[1..raw.len() - 1].to_string()));
     }
     serde_json::from_str(raw).map_err(|_| RuntimeError::UnsupportedCondition(raw.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_json_candidates_from_model_content_with_revision() {
+        let value = json!({
+            "content": "first {\"patch\":\"bad\",\"rationale\":\"old\"}\n\
+                Thinking aloud.\n\
+                {\"patch\":\"good { still inside string }\",\"rationale\":\"new\"}"
+        });
+
+        let candidates = model_content_json_candidates(&value);
+
+        assert_eq!(candidates.len(), 2);
+        assert_eq!(candidates[0]["patch"], json!("bad"));
+        assert_eq!(
+            candidates[1]["patch"],
+            json!("good { still inside string }")
+        );
+        assert_eq!(candidates[1]["rationale"], json!("new"));
+    }
+
+    #[test]
+    fn extracts_json_candidate_from_fenced_model_content() {
+        let value = json!({
+            "content": "```json\n{\"patch\":\"diff\",\"rationale\":\"ok\"}\n```"
+        });
+
+        let candidates = model_content_json_candidates(&value);
+
+        assert!(!candidates.is_empty());
+        assert_eq!(candidates[0]["patch"], json!("diff"));
+    }
 }

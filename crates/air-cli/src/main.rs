@@ -90,6 +90,10 @@ enum Command {
         #[arg(long = "constraint")]
         constraints: Vec<String>,
 
+        /// Continue into patch generation even when the initial repair test already passes.
+        #[arg(long)]
+        force_patch: bool,
+
         /// Coding-agent run profile. Defaults from --recipe.
         #[arg(long)]
         profile: Option<PathBuf>,
@@ -534,6 +538,7 @@ fn main() -> Result<()> {
             brand,
             product,
             constraints,
+            force_patch,
             profile,
             model_config,
             trace_out,
@@ -566,6 +571,7 @@ fn main() -> Result<()> {
             brand,
             product,
             constraints,
+            force_patch,
             profile,
             model_config,
             trace_out,

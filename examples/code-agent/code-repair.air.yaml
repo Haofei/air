@@ -5,11 +5,14 @@ agent:
 
 inputs:
   task: string
+  query: string
   target_path: string
+  target_search_pattern: string
   related_files:
     type: array
     items: string
   test_command: string
+  force_patch: boolean
 
 outputs:
   repair:
@@ -73,6 +76,24 @@ state:
       file_count: integer
       bytes: integer
       truncated: boolean
+      artifacts:
+        type: array
+        items: object
+  target_matches:
+    type: object
+    required: [path, pattern, matches, match_count, returned_match_count, total_lines, context_lines, truncated, bytes, artifacts]
+    properties:
+      path: string
+      pattern: string
+      matches:
+        type: array
+        items: object
+      match_count: integer
+      returned_match_count: integer
+      total_lines: integer
+      context_lines: integer
+      truncated: boolean
+      bytes: integer
       artifacts:
         type: array
         items: object
@@ -169,6 +190,24 @@ state:
     properties:
       path: string
       content: string
+      artifacts:
+        type: array
+        items: object
+  target_matches_retry:
+    type: object
+    required: [path, pattern, matches, match_count, returned_match_count, total_lines, context_lines, truncated, bytes, artifacts]
+    properties:
+      path: string
+      pattern: string
+      matches:
+        type: array
+        items: object
+      match_count: integer
+      returned_match_count: integer
+      total_lines: integer
+      context_lines: integer
+      truncated: boolean
+      bytes: integer
       artifacts:
         type: array
         items: object
@@ -360,6 +399,9 @@ tools:
   - name: file.read
     capability: file.read
     timeout_ms: 10000
+  - name: file.search
+    capability: file.read
+    timeout_ms: 10000
   - name: file.patch
     capability: file.write
     timeout_ms: 10000
@@ -462,6 +504,20 @@ workflow:
           retry:
             max_attempts: 1
         - kind: tool_call
+          tool: file.search
+          input:
+            object:
+              path:
+                ref: target_path
+              pattern:
+                ref: target_search_pattern
+              context_lines:
+                literal: 8
+          output: target_matches
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: tool_call
           tool: file.read_many
           input:
             object:
@@ -507,7 +563,7 @@ workflow:
             phase: route
 
     - id: already-passing
-      when: phase == "route" && test_results.success == true
+      when: phase == "route" && test_results.success == true && force_patch == false
       actions:
         - kind: set
           values:
@@ -530,7 +586,7 @@ workflow:
             phase: status
 
     - id: repair
-      when: phase == "route" && test_results.success == false
+      when: phase == "route" && test_results.success == false || phase == "route" && force_patch == true
       actions:
         - kind: tool_call
           tool: todo.write
@@ -596,6 +652,8 @@ workflow:
                 ref: target_path
               file_context:
                 ref: file_context
+              target_matches:
+                ref: target_matches
               related_context:
                 ref: related_context
               diagnostics:
@@ -647,23 +705,21 @@ workflow:
       actions:
         - kind: set
           values:
-            repair_draft:
+            final_test_results:
               object:
-                target_path:
-                  ref: target_path
-                initial_success:
+                command:
+                  ref: test_command
+                success:
                   literal: false
-                final_success:
-                  literal: false
-                patch_applied:
-                  literal: false
-                rationale:
-                  template: "Patch validation failed before apply: {{repair_plan.rationale}}"
+                status:
+                  literal: 1
+                log:
+                  literal: "patch dry-run failed before apply"
                 diagnostics:
                   ref: patch_check_result.diagnostics
-                changed_files:
-                  array: []
-            phase: status
+                artifacts:
+                  ref: patch_check_result.artifacts
+            phase: reread
 
     - id: patch
       when: phase == "patch"
@@ -741,6 +797,20 @@ workflow:
               line_numbers:
                 literal: true
           output: file_context_retry
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: tool_call
+          tool: file.search
+          input:
+            object:
+              path:
+                ref: target_path
+              pattern:
+                ref: target_search_pattern
+              context_lines:
+                literal: 8
+          output: target_matches_retry
           timeout_seconds: 10
           retry:
             max_attempts: 1
@@ -827,6 +897,8 @@ workflow:
                 ref: target_path
               file_context:
                 ref: file_context_retry
+              target_matches:
+                ref: target_matches_retry
               related_context:
                 ref: related_context
               diagnostics:
@@ -887,13 +959,13 @@ workflow:
                 final_success:
                   literal: false
                 patch_applied:
-                  literal: true
+                  literal: false
                 rationale:
                   template: "{{repair_plan.rationale}}\n\nSecond pass patch validation failed before apply: {{repair_plan_retry.rationale}}"
                 diagnostics:
                   ref: patch_check_result_retry.diagnostics
                 changed_files:
-                  ref: patch_result.files
+                  ref: patch_check_result_retry.files
             phase: status
 
     - id: patch-again

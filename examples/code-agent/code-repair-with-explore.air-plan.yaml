@@ -42,12 +42,18 @@ connect:
     to: select_context.exploration
   - from: $input.task
     to: repair.task
+  - from: $input.query
+    to: repair.query
   - from: select_context.repair_context.target_path
     to: repair.target_path
+  - from: $input.target_search_pattern
+    to: repair.target_search_pattern
   - from: select_context.repair_context.related_files
     to: repair.related_files
   - from: $input.test_command
     to: repair.test_command
+  - from: $input.force_patch
+    to: repair.force_patch
 
 outputs:
   exploration: explore.exploration

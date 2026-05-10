@@ -16,87 +16,13 @@ use file_tools::{
     call_file_search_tool, call_file_write_tool, file_modified_time, is_likely_binary,
     FilePatchOptions, FileWriteOptions,
 };
+mod helpdesk;
+use helpdesk::helpdesk_docs;
+mod provider;
+pub use provider::{EchoTools, ToolProviderChoice};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
-
-#[derive(Clone)]
-pub struct EchoTools;
-
-impl ToolProvider for EchoTools {
-    fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        Ok(json!({
-            "tool": name,
-            "input": input
-        }))
-    }
-}
-
-#[derive(Clone)]
-pub enum ToolProviderChoice {
-    Echo(EchoTools),
-    Config(ConfigTools),
-}
-
-impl ToolProviderChoice {
-    pub fn from_config(tool_config: Option<PathBuf>, example_tools: bool) -> Result<Self> {
-        if let Some(tool_config) = tool_config {
-            Ok(Self::Config(ConfigTools::from_file(tool_config)?))
-        } else if example_tools {
-            Ok(Self::Config(ConfigTools::example()))
-        } else {
-            Ok(Self::Echo(EchoTools))
-        }
-    }
-}
-
-impl ToolProvider for ToolProviderChoice {
-    fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        match self {
-            ToolProviderChoice::Echo(provider) => provider.call_tool(name, input),
-            ToolProviderChoice::Config(provider) => provider.call_tool(name, input),
-        }
-    }
-
-    fn call_tool_with_timeout(
-        &mut self,
-        name: &str,
-        input: &Value,
-        timeout: Duration,
-    ) -> Result<Value, RuntimeError> {
-        match self {
-            ToolProviderChoice::Echo(provider) => {
-                provider.call_tool_with_timeout(name, input, timeout)
-            }
-            ToolProviderChoice::Config(provider) => {
-                provider.call_tool_with_timeout(name, input, timeout)
-            }
-        }
-    }
-
-    fn tool_capability(&self, name: &str) -> Option<&str> {
-        match self {
-            ToolProviderChoice::Echo(provider) => provider.tool_capability(name),
-            ToolProviderChoice::Config(provider) => provider.tool_capability(name),
-        }
-    }
-
-    fn request_approval(
-        &mut self,
-        module: &air_core::AirModule,
-        approval_for: &[String],
-        state: &Value,
-    ) -> Result<ApprovalDecision, RuntimeError> {
-        match self {
-            ToolProviderChoice::Echo(provider) => {
-                provider.request_approval(module, approval_for, state)
-            }
-            ToolProviderChoice::Config(provider) => {
-                provider.request_approval(module, approval_for, state)
-            }
-        }
-    }
-}
 
 #[derive(Debug, Deserialize)]
 struct ToolConfigFile {
@@ -4986,32 +4912,6 @@ fn required_object_string<'a>(
         .ok_or_else(|| {
             RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
         })
-}
-
-struct HelpdeskDoc {
-    id: &'static str,
-    title: &'static str,
-    content: &'static str,
-}
-
-fn helpdesk_docs() -> Vec<HelpdeskDoc> {
-    vec![
-        HelpdeskDoc {
-            id: "kb-password-reset",
-            title: "Reset your password",
-            content: "Users can reset a password from the sign-in page by selecting Forgot password, entering the account email, and following the reset link. Reset links expire after 30 minutes.",
-        },
-        HelpdeskDoc {
-            id: "kb-lost-email-access",
-            title: "Account recovery when email is unavailable",
-            content: "If a user no longer has access to the account email, support must verify identity with the last invoice id and the last four digits of the payment method before changing the email address.",
-        },
-        HelpdeskDoc {
-            id: "kb-billing-upgrade",
-            title: "Billing after subscription upgrade",
-            content: "After an upgrade, a prorated charge may appear immediately. Duplicate charges should be escalated to billing support with invoice ids.",
-        },
-    ]
 }
 
 #[cfg(test)]

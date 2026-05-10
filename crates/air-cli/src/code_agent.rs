@@ -48,6 +48,7 @@ pub(crate) struct CodeOptions {
     pub(crate) brand: Option<String>,
     pub(crate) product: Option<String>,
     pub(crate) constraints: Vec<String>,
+    pub(crate) force_patch: bool,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
@@ -98,6 +99,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         brand,
         product,
         constraints,
+        force_patch,
         profile,
         model_config,
         trace_out,
@@ -150,6 +152,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         brand,
         product,
         constraints,
+        force_patch,
     })?;
     let mut session_state = match session.as_ref() {
         Some(path) => Some(CodeSessionState::read(path)?),
@@ -3165,6 +3168,7 @@ struct CodeInputOptions {
     brand: Option<String>,
     product: Option<String>,
     constraints: Vec<String>,
+    force_patch: bool,
 }
 
 fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
@@ -3182,6 +3186,7 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
         brand,
         product,
         constraints,
+        force_patch,
     } = options;
 
     let recipe = resolve_recipe(
@@ -3240,15 +3245,22 @@ fn build_input(options: CodeInputOptions) -> Result<Map<String, Value>> {
         CodeRecipe::Repair => {
             let target = required_path(target, "--target", recipe)?;
             let test = required_string(test, "--test", recipe)?;
+            let query = query.unwrap_or_else(|| task.clone());
+            let target_search_pattern = code_search_pattern(&query);
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
-            input.insert("query".to_string(), Value::String(query.unwrap_or(task)));
+            input.insert("query".to_string(), Value::String(query));
+            input.insert(
+                "target_search_pattern".to_string(),
+                Value::String(target_search_pattern),
+            );
             input.insert(
                 "target_path".to_string(),
                 Value::String(path_to_input_string(target)),
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("test_command".to_string(), Value::String(test));
+            input.insert("force_patch".to_string(), Value::Bool(force_patch));
             Ok(input)
         }
         CodeRecipe::Build => {
@@ -3368,6 +3380,35 @@ fn path_ref_to_input_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn code_search_pattern(query: &str) -> String {
+    let mut tokens = Vec::new();
+    let mut current = String::new();
+    for character in query.chars() {
+        if character == '_' || character.is_ascii_alphanumeric() {
+            current.push(character);
+        } else if !current.is_empty() {
+            push_search_token(&mut tokens, &current);
+            current.clear();
+        }
+    }
+    if !current.is_empty() {
+        push_search_token(&mut tokens, &current);
+    }
+
+    if tokens.is_empty() {
+        "TODO_DO_NOT_MATCH_EMPTY_CODE_SEARCH_PATTERN".to_string()
+    } else {
+        tokens.join("|")
+    }
+}
+
+fn push_search_token(tokens: &mut Vec<String>, token: &str) {
+    if token.len() < 3 || tokens.iter().any(|existing| existing == token) {
+        return;
+    }
+    tokens.push(token.to_string());
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3388,11 +3429,16 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
         assert_eq!(input["task"], Value::String("fix it".to_string()));
         assert_eq!(input["query"], Value::String("fix it".to_string()));
+        assert_eq!(
+            input["target_search_pattern"],
+            Value::String("fix".to_string())
+        );
         assert_eq!(
             input["target_path"],
             Value::String("src/lib.rs".to_string())
@@ -3420,6 +3466,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
@@ -3428,6 +3475,33 @@ mod tests {
             input["target_path"],
             Value::String("src/lib.rs".to_string())
         );
+    }
+
+    #[test]
+    fn repair_input_builds_code_search_pattern_from_query() {
+        let input = build_input(CodeInputOptions {
+            task: "Refactor provider".to_string(),
+            recipe: CodeRecipe::Repair,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: Some("unit".to_string()),
+            query: Some("EchoTools ToolProviderChoice provider module air-tools".to_string()),
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+            force_patch: true,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["target_search_pattern"],
+            Value::String("EchoTools|ToolProviderChoice|provider|module|air|tools".to_string())
+        );
+        assert_eq!(input["force_patch"], Value::Bool(true));
     }
 
     #[test]
@@ -3446,6 +3520,7 @@ mod tests {
             brand: Some("Acme".to_string()),
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
@@ -3473,6 +3548,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
@@ -3502,6 +3578,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
@@ -3532,6 +3609,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
@@ -3559,6 +3637,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
         let explanation = json!({
@@ -4619,6 +4698,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap_err();
 
@@ -4641,6 +4721,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 
@@ -4679,6 +4760,7 @@ mod tests {
             brand: None,
             product: None,
             constraints: vec![],
+            force_patch: false,
         })
         .unwrap();
 

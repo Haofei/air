@@ -487,6 +487,33 @@ fn file_read_many_rejects_more_than_configured_max_files() {
 }
 
 #[test]
+fn file_read_many_allows_empty_file_list() {
+    let dir = temp_dir("air-tools-file-read-many-empty");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read_many": {
+                  "kind": "file_read_many",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("file.read_many", &json!({"files": []}))
+        .unwrap();
+
+    assert_eq!(output["file_count"], json!(0));
+    assert_eq!(output["files"], json!([]));
+    assert_eq!(output["artifacts"], json!([]));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_returns_regex_matches_with_context() {
     let dir = temp_dir("air-tools-file-search");
     fs::write(

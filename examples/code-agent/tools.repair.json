@@ -14,7 +14,7 @@
       "kind": "file_read",
       "capability": "file.read",
       "base_dir": "../..",
-      "max_bytes": 65536
+      "max_bytes": 32768
     },
     "file.read_many": {
       "kind": "file_read_many",
@@ -22,6 +22,14 @@
       "base_dir": "../..",
       "max_files": 4,
       "max_bytes": 65536
+    },
+    "file.search": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 32768,
+      "max_matches": 12,
+      "max_context_lines": 12
     },
     "file.patch": {
       "kind": "file_patch",

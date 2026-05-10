@@ -147,9 +147,13 @@ pub(super) fn call_file_read_many_tool(
 ) -> Result<Value, RuntimeError> {
     let entries = file_read_many_entries(name, input)?;
     if entries.is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.files must contain at least one file"
-        )));
+        return Ok(json!({
+            "files": [],
+            "file_count": 0,
+            "bytes": 0,
+            "truncated": false,
+            "artifacts": []
+        }));
     }
     if entries.len() > max_files {
         return Err(RuntimeError::Provider(format!(
