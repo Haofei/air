@@ -63,6 +63,13 @@ pub(crate) struct CodeOptions {
     pub(crate) tool_config: Option<PathBuf>,
 }
 
+pub(crate) struct CodeSessionOptions {
+    pub(crate) session: PathBuf,
+    pub(crate) fork: Option<PathBuf>,
+    pub(crate) revert_to: Option<String>,
+    pub(crate) in_place: bool,
+}
+
 pub(crate) fn code(options: CodeOptions) -> Result<()> {
     let CodeOptions {
         task,
@@ -271,6 +278,56 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn code_session(options: CodeSessionOptions) -> Result<()> {
+    let CodeSessionOptions {
+        session,
+        fork,
+        revert_to,
+        in_place,
+    } = options;
+    let mut state = CodeSessionState::read(&session)?;
+    let original_turn_count = state.turns.len();
+    let mut reverted_to = None;
+    if let Some(target) = revert_to.as_deref() {
+        let index = code_session_turn_index(&state, target)?;
+        state.turns.truncate(index + 1);
+        reverted_to = state.turns.get(index).map(|turn| turn.id.clone());
+    }
+    let output_path = if let Some(path) = fork {
+        Some(path)
+    } else if in_place {
+        Some(session.clone())
+    } else {
+        None
+    };
+    if revert_to.is_some() && output_path.is_none() {
+        bail!("air code-session --revert-to requires --fork or --in-place");
+    }
+    if let Some(path) = output_path.as_ref() {
+        state.write(path)?;
+    }
+    let trace_file_count = state
+        .turns
+        .iter()
+        .map(|turn| turn.trace_files.len())
+        .sum::<usize>();
+    let summary = json!({
+        "source": path_ref_to_input_string(&session),
+        "output": output_path.as_ref().map(|path| path_ref_to_input_string(path)),
+        "version": state.version,
+        "original_turn_count": original_turn_count,
+        "turn_count": state.turns.len(),
+        "latest_turn_id": state.turns.last().map(|turn| turn.id.as_str()),
+        "reverted_to": reverted_to,
+        "trace_file_count": trace_file_count,
+        "workspace_reverted": false,
+        "note": "AIR code-session only forks or truncates session history; it does not modify workspace files."
+    });
+    serde_json::to_writer_pretty(std::io::stdout(), &summary)?;
+    println!();
+    Ok(())
+}
+
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 struct CodeSessionState {
     #[serde(default = "code_session_version")]
@@ -370,6 +427,18 @@ fn code_session_version() -> u32 {
 
 fn code_session_turn_id(turn_number: usize) -> String {
     format!("turn-{turn_number:06}")
+}
+
+fn code_session_turn_index(state: &CodeSessionState, target: &str) -> Result<usize> {
+    if let Some(index) = state.turns.iter().position(|turn| turn.id == target) {
+        return Ok(index);
+    }
+    if let Ok(number) = target.parse::<usize>() {
+        if number > 0 && number <= state.turns.len() {
+            return Ok(number - 1);
+        }
+    }
+    bail!("AIR code session does not contain turn {target:?}");
 }
 
 fn unix_millis() -> u64 {
@@ -2374,6 +2443,41 @@ mod tests {
         assert_eq!(roundtrip.turns[0].time.updated, 42);
         assert_eq!(roundtrip.turns[0].recipe, "repair");
         assert!(!roundtrip.turns[0].completed);
+    }
+
+    #[test]
+    fn session_turn_index_accepts_id_or_number() {
+        let mut state = CodeSessionState::default();
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000001".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "one".to_string(),
+            recipe: "explore".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: true,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            outputs: json!({}),
+        });
+        state.append_turn(CodeSessionTurn {
+            id: "turn-000002".to_string(),
+            time: CodeSessionTurnTime::default(),
+            task: "two".to_string(),
+            recipe: "review".to_string(),
+            profile: "profile".to_string(),
+            input: json!({}),
+            completed: true,
+            trace_files: Vec::new(),
+            summary: CodeSessionTurnSummary::default(),
+            parts: Vec::new(),
+            outputs: json!({}),
+        });
+
+        assert_eq!(code_session_turn_index(&state, "turn-000002").unwrap(), 1);
+        assert_eq!(code_session_turn_index(&state, "1").unwrap(), 0);
+        assert!(code_session_turn_index(&state, "3").is_err());
     }
 
     #[test]

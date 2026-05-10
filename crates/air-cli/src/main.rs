@@ -7,7 +7,7 @@ mod planner;
 mod profile;
 mod run_plan;
 mod tools;
-use crate::code_agent::{code, CodeOptions, CodeRecipe};
+use crate::code_agent::{code, code_session, CodeOptions, CodeRecipe, CodeSessionOptions};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -153,6 +153,24 @@ enum Command {
         /// Optional tool provider config JSON.
         #[arg(long)]
         tool_config: Option<PathBuf>,
+    },
+    /// Inspect, fork, or truncate an AIR code-agent session file.
+    #[command(hide = true)]
+    CodeSession {
+        /// Path to an AIR code-agent session JSON file.
+        session: PathBuf,
+
+        /// Write the resulting session to this new file.
+        #[arg(long)]
+        fork: Option<PathBuf>,
+
+        /// Keep turns through this turn id or 1-based turn number.
+        #[arg(long)]
+        revert_to: Option<String>,
+
+        /// Allow writing the reverted session back to the source file.
+        #[arg(long, conflicts_with = "fork")]
+        in_place: bool,
     },
     /// Parse and statically verify an AIR module.
     #[command(hide = true)]
@@ -546,6 +564,17 @@ fn main() -> Result<()> {
             execute_plan,
             max_iterations,
             tool_config,
+        }),
+        Command::CodeSession {
+            session,
+            fork,
+            revert_to,
+            in_place,
+        } => code_session(CodeSessionOptions {
+            session,
+            fork,
+            revert_to,
+            in_place,
         }),
         Command::Validate { file } => validate(file),
         Command::ValidateSystem { file } => validate_system(file),
@@ -1596,6 +1625,7 @@ mod tests {
             "run-system",
             "validate",
             "run",
+            "code-session",
             "lower",
             "replay",
             "deep-research",
@@ -1823,6 +1853,38 @@ mod tests {
         assert_eq!(recipe, CodeRecipe::Plan);
         assert!(execute_plan);
         assert_eq!(max_iterations, 2);
+    }
+
+    #[test]
+    fn hidden_code_session_command_accepts_fork_and_revert() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code-session",
+            "target/generated/session.json",
+            "--fork",
+            "target/generated/session-fork.json",
+            "--revert-to",
+            "turn-000001",
+        ])
+        .unwrap();
+
+        let Command::CodeSession {
+            session,
+            fork,
+            revert_to,
+            in_place,
+        } = cli.command
+        else {
+            panic!("expected code-session command");
+        };
+
+        assert_eq!(session, PathBuf::from("target/generated/session.json"));
+        assert_eq!(
+            fork,
+            Some(PathBuf::from("target/generated/session-fork.json"))
+        );
+        assert_eq!(revert_to, Some("turn-000001".to_string()));
+        assert!(!in_place);
     }
 
     #[test]

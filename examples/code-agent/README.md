@@ -268,6 +268,17 @@ per-turn trace beside the session file under `<session-stem>.traces/` and stores
 `parts[]` index for model calls, tool calls, approvals, and returns. The original trace remains the
 source of truth; the session index only makes prior AIR actions easy to inspect.
 
+Session history can be forked or truncated without touching workspace files:
+
+```bash
+cargo run -p air-cli -- code-session target/generated/code_session.json \
+  --fork target/generated/code_session.branch.json \
+  --revert-to turn-000001
+```
+
+`code-session` is a low-level session-history tool. It preserves trace references and never reverts
+files in the working tree; workspace rollback belongs to patch snapshots.
+
 The same command can select the other public coding-agent recipes:
 
 ```bash

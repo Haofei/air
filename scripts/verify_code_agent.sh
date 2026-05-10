@@ -432,6 +432,33 @@ assert any(
 ), session["turns"][1]["parts"]
 PY
 
+echo "[code-agent] session fork and revert"
+cargo run -q -p air-cli -- code-session target/generated/code_agent_session.json \
+  --fork target/generated/code_agent_session_fork.json \
+  --revert-to turn-000001 \
+  > target/generated/code_agent_session_fork.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_session_fork.output.json", encoding="utf-8") as handle:
+    summary = json.load(handle)
+assert summary["source"] == "target/generated/code_agent_session.json", summary
+assert summary["output"] == "target/generated/code_agent_session_fork.json", summary
+assert summary["original_turn_count"] == 2, summary
+assert summary["turn_count"] == 1, summary
+assert summary["reverted_to"] == "turn-000001", summary
+assert summary["workspace_reverted"] is False, summary
+
+with open("target/generated/code_agent_session.json", encoding="utf-8") as handle:
+    original = json.load(handle)
+with open("target/generated/code_agent_session_fork.json", encoding="utf-8") as handle:
+    fork = json.load(handle)
+assert len(original["turns"]) == 2, original
+assert len(fork["turns"]) == 1, fork
+assert fork["turns"][0]["id"] == "turn-000001", fork
+assert fork["turns"][0]["trace_files"], fork
+PY
+
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"
 if node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_repair_fixture.log 2>&1; then
   echo "repair fixture unexpectedly passed; it should start from a failing implementation" >&2
