@@ -232,6 +232,11 @@ acceptance results, changed files, artifact ids, and high-value recipe outputs. 
 that project memory instead of raw prior outputs, so long project runs keep stable context without
 turning every trace into prompt text.
 
+`project.artifacts[]` is the project-level artifact graph. It indexes trace JSONL files, tool/model
+artifacts declared by task outputs, changed files, and recovery forks. The memory object references
+the same artifact ids, so downstream tasks can cite concrete project artifacts instead of relying on
+natural-language summaries.
+
 Then run it:
 
 ```bash

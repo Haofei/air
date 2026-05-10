@@ -190,6 +190,10 @@ assert memory["task_count"] == 2, memory
 assert memory["completed_task_count"] == 2, memory
 assert [item["task_id"] for item in memory["tasks"]] == ["t1", "t2"], memory
 assert "exploration" in memory["tasks"][0]["outputs"], memory
+artifacts = project["artifacts"]
+artifact_ids = [item["id"] for item in artifacts]
+assert any(item["kind"] == "trace_jsonl" for item in artifacts), artifacts
+assert any(item.startswith("trace:") and item.endswith(".task1.jsonl") for item in artifact_ids), artifacts
 trace_files = [Path(path) for path in output["trace_files"]]
 assert len(trace_files) == 4, trace_files
 assert any(path.name.endswith(".acceptance.jsonl") for path in trace_files), trace_files
@@ -523,6 +527,8 @@ assert recovery["failed_execution"]["output_keys"] == ["exploration"], recovery
 fork = Path(recovery["fork"])
 assert fork.exists(), recovery
 assert recovery["workspace_revert_argv"][:3] == ["air", "code-session", recovery["fork"]], recovery
+project_artifacts = output["project"]["artifacts"]
+assert any(item["id"] == "recovery-fork:turn-000001" for item in project_artifacts), project_artifacts
 
 with open("target/generated/code_project_fail.session.json", encoding="utf-8") as handle:
     session = json.load(handle)

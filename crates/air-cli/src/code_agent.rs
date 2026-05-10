@@ -864,6 +864,29 @@ fn code_session_insert_recovery(outputs: &mut Value, recovery: &CodeSessionRecov
         "recovery".to_string(),
         serde_json::to_value(recovery).context("failed to serialize code session recovery")?,
     );
+    if let Some(project) = object.get_mut("project").and_then(Value::as_object_mut) {
+        let artifacts = project
+            .entry("artifacts")
+            .or_insert_with(|| Value::Array(Vec::new()));
+        if let Some(artifacts) = artifacts.as_array_mut() {
+            let mut seen = artifacts
+                .iter()
+                .filter_map(|artifact| artifact.get("id").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect::<HashSet<_>>();
+            push_project_artifact(
+                artifacts,
+                &mut seen,
+                json!({
+                    "id": format!("recovery-fork:{}", recovery.turn_id),
+                    "kind": "recovery_fork",
+                    "path": recovery.fork,
+                    "turn_id": recovery.turn_id,
+                    "failed_task_id": recovery.failed_task_id,
+                }),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1556,6 +1579,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                         options.budget_limits
                     ),
                     "memory": code_project_memory(&[]),
+                    "artifacts": code_project_artifacts(&trace_files, &[]),
                     "acceptance": [],
                     "executions": [{
                         "completed": false,
@@ -1642,6 +1666,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 "remaining_budget": remaining_budget,
                 "budget_limit": budget_limit,
                 "memory": code_project_memory(&executions),
+                "artifacts": code_project_artifacts(&trace_files, &executions),
                 "acceptance": [],
                 "executions": executions,
             },
@@ -1841,6 +1866,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "remaining_budget": remaining_budget,
             "budget_limit": budget_limit,
             "memory": code_project_memory(&executions),
+            "artifacts": code_project_artifacts(&trace_files, &executions),
             "acceptance": project_acceptance,
             "executions": executions,
         },
@@ -2113,6 +2139,119 @@ fn code_project_memory(executions: &[Value]) -> Value {
         "artifact_kinds": artifact_kinds,
         "tasks": tasks,
     })
+}
+
+fn code_project_artifacts(trace_files: &[String], executions: &[Value]) -> Value {
+    let mut artifacts = Vec::new();
+    let mut seen = HashSet::new();
+    for trace_file in trace_files {
+        push_project_artifact(
+            &mut artifacts,
+            &mut seen,
+            json!({
+                "id": format!("trace:{trace_file}"),
+                "kind": "trace_jsonl",
+                "path": trace_file,
+            }),
+        );
+    }
+    for execution in executions {
+        let task_id = execution
+            .get("task_id")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        if let Some(outputs) = execution.get("outputs") {
+            collect_project_output_artifacts(
+                outputs,
+                task_id,
+                "$.outputs",
+                &mut artifacts,
+                &mut seen,
+            );
+            for path in code_project_changed_files(outputs) {
+                push_project_artifact(
+                    &mut artifacts,
+                    &mut seen,
+                    json!({
+                        "id": format!("changed-file:{path}"),
+                        "kind": "changed_file",
+                        "path": path,
+                        "task_id": task_id,
+                    }),
+                );
+            }
+        }
+    }
+    Value::Array(artifacts)
+}
+
+fn collect_project_output_artifacts(
+    value: &Value,
+    task_id: &str,
+    source: &str,
+    artifacts: &mut Vec<Value>,
+    seen: &mut HashSet<String>,
+) {
+    match value {
+        Value::Object(object) => {
+            if let Some(values) = object.get("artifacts").and_then(Value::as_array) {
+                for (index, artifact) in values.iter().enumerate() {
+                    if let Some(mut artifact) = normalize_project_artifact(artifact) {
+                        if let Some(object) = artifact.as_object_mut() {
+                            object
+                                .insert("task_id".to_string(), Value::String(task_id.to_string()));
+                            object.insert(
+                                "source".to_string(),
+                                Value::String(format!("{source}.artifacts[{index}]")),
+                            );
+                        }
+                        push_project_artifact(artifacts, seen, artifact);
+                    }
+                }
+            }
+            for (key, value) in object {
+                collect_project_output_artifacts(
+                    value,
+                    task_id,
+                    &format!("{source}.{key}"),
+                    artifacts,
+                    seen,
+                );
+            }
+        }
+        Value::Array(values) => {
+            for (index, value) in values.iter().enumerate() {
+                collect_project_output_artifacts(
+                    value,
+                    task_id,
+                    &format!("{source}[{index}]"),
+                    artifacts,
+                    seen,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_project_artifact(artifact: &Value) -> Option<Value> {
+    let object = artifact.as_object()?;
+    let id = object.get("id").and_then(Value::as_str)?;
+    let mut normalized = object.clone();
+    normalized
+        .entry("kind".to_string())
+        .or_insert_with(|| Value::String("artifact".to_string()));
+    normalized.insert("id".to_string(), Value::String(id.to_string()));
+    Some(Value::Object(normalized))
+}
+
+fn push_project_artifact(artifacts: &mut Vec<Value>, seen: &mut HashSet<String>, artifact: Value) {
+    let Some(id) = artifact.get("id").and_then(Value::as_str) else {
+        return;
+    };
+    if seen.insert(id.to_string()) {
+        artifacts.push(artifact);
+    }
 }
 
 fn code_project_execution_memory(execution: &Value) -> Value {
@@ -3859,6 +3998,44 @@ mod tests {
             Value::Bool(true)
         );
         assert_eq!(memory["tasks"][0]["acceptance"][0].get("output"), None);
+    }
+
+    #[test]
+    fn project_artifacts_index_traces_outputs_and_changed_files() {
+        let traces = vec![
+            "target/generated/project.trace.plan.jsonl".to_string(),
+            "target/generated/project.trace.task1.jsonl".to_string(),
+        ];
+        let executions = vec![json!({
+            "task_id": "fix",
+            "outputs": {
+                "repair": {
+                    "workspace_changed_files": [{"path": "examples/math.js"}],
+                    "workspace_diff": {
+                        "artifacts": [{"id": "git-diff:examples/math.js", "kind": "file_patch", "path": "examples/math.js"}]
+                    }
+                }
+            }
+        })];
+
+        let artifacts = code_project_artifacts(&traces, &executions);
+        let artifact_items = artifacts.as_array().unwrap();
+        let ids = artifact_items
+            .iter()
+            .filter_map(|artifact| artifact.get("id").and_then(Value::as_str))
+            .collect::<Vec<_>>();
+
+        assert!(ids.contains(&"trace:target/generated/project.trace.plan.jsonl"));
+        assert!(ids.contains(&"trace:target/generated/project.trace.task1.jsonl"));
+        assert!(ids.contains(&"git-diff:examples/math.js"));
+        assert!(ids.contains(&"changed-file:examples/math.js"));
+        let patch = artifact_items
+            .iter()
+            .find(|artifact| {
+                artifact.get("id").and_then(Value::as_str) == Some("git-diff:examples/math.js")
+            })
+            .unwrap();
+        assert_eq!(patch["task_id"], Value::String("fix".to_string()));
     }
 
     #[test]
