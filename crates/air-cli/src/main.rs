@@ -150,6 +150,14 @@ enum Command {
         #[arg(long, default_value_t = 3)]
         max_iterations: usize,
 
+        /// Reject the coding run when the estimated model-call budget exceeds this limit.
+        #[arg(long)]
+        max_estimated_model_calls: Option<usize>,
+
+        /// Reject the coding run when the estimated tool-call budget exceeds this limit.
+        #[arg(long)]
+        max_estimated_tool_calls: Option<usize>,
+
         /// Optional tool provider config JSON.
         #[arg(long)]
         tool_config: Option<PathBuf>,
@@ -541,6 +549,8 @@ fn main() -> Result<()> {
             loop_enabled,
             execute_plan,
             max_iterations,
+            max_estimated_model_calls,
+            max_estimated_tool_calls,
             tool_config,
         } => code(CodeOptions {
             task,
@@ -571,6 +581,8 @@ fn main() -> Result<()> {
             loop_enabled,
             execute_plan,
             max_iterations,
+            max_estimated_model_calls,
+            max_estimated_tool_calls,
             tool_config,
         }),
         Command::CodeSession {
@@ -1849,6 +1861,10 @@ mod tests {
             "--execute-plan",
             "--max-iterations",
             "2",
+            "--max-estimated-model-calls",
+            "8",
+            "--max-estimated-tool-calls",
+            "24",
         ])
         .unwrap();
 
@@ -1856,6 +1872,8 @@ mod tests {
             recipe,
             execute_plan,
             max_iterations,
+            max_estimated_model_calls,
+            max_estimated_tool_calls,
             ..
         } = cli.command
         else {
@@ -1865,6 +1883,8 @@ mod tests {
         assert_eq!(recipe, CodeRecipe::Plan);
         assert!(execute_plan);
         assert_eq!(max_iterations, 2);
+        assert_eq!(max_estimated_model_calls, Some(8));
+        assert_eq!(max_estimated_tool_calls, Some(24));
     }
 
     #[test]

@@ -212,6 +212,21 @@ The preflight JSON includes the resolved AIR profile, RunPlan, declared capabili
 recipe can write to the workspace, and the estimated model/tool call budget. With `--loop`, the
 budget includes both the per-iteration estimate and the max-iteration total.
 
+Use estimated budget limits when a coding run should fail closed before spending a large project
+plan:
+
+```bash
+cargo run -p air-cli -- code "plan and execute the next project milestone" \
+  --recipe plan \
+  --execute-plan \
+  --max-estimated-model-calls 12 \
+  --max-estimated-tool-calls 60
+```
+
+For project execution, AIR plans first, computes the remaining task budget from the selected
+recipes, and returns `project.status = "budget_exceeded"` without starting task execution when the
+remaining task graph is over either limit.
+
 Then run it:
 
 ```bash

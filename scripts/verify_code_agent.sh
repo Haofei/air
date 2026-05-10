@@ -202,6 +202,39 @@ assert any(event.get("meta", {}).get("model") == "code_explorer" for event in ta
 assert any(event.get("meta", {}).get("tool") == "test.run" for event in acceptance_events), acceptance_events
 PY
 
+echo "[code-agent] project execution respects estimated budget limits"
+cargo run -q -p air-cli -- code "plan and start executing a project-level task graph for the AIR code agent" \
+  --recipe plan \
+  --execute-plan \
+  --max-iterations 2 \
+  --max-estimated-model-calls 1 \
+  --query "code agent project plan task graph" \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config examples/code-agent/tools.json \
+  --trace-out target/generated/code_project_budget_limit.trace.jsonl \
+  > target/generated/code_project_budget_limit.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+from pathlib import Path
+
+with open("target/generated/code_project_budget_limit.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+project = output["project"]
+assert project["status"] == "budget_exceeded", project
+assert project["completed"] is False, project
+assert project["executed_this_run"] == 0, project
+assert project["executions"] == [], project
+assert project["budget_limit"]["exceeded"] is True, project
+assert project["budget_limit"]["max_estimated_model_calls"] == 1, project
+assert project["budget_limit"]["model_exceeded"] is True, project
+assert project["remaining_budget"]["max_estimated_model_calls"] > 1, project
+assert project["remaining_task_ids"] == project["scheduled_task_ids"], project
+trace_files = [Path(path) for path in output["trace_files"]]
+assert len(trace_files) == 1, trace_files
+assert trace_files[0].name.endswith(".plan.jsonl"), trace_files
+assert trace_files[0].exists(), trace_files
+PY
+
 echo "[code-agent] project execution resumes exhausted sessions"
 rm -f target/generated/code_project_resume.session.json \
   target/generated/code_project_resume.first.output.json \
@@ -671,6 +704,7 @@ assert output["budget"]["per_iteration"]["max_estimated_model_calls"] > 0, outpu
 assert output["budget"]["per_iteration"]["max_estimated_tool_calls"] > 0, output
 assert output["budget"]["total"]["iterations"] == 1, output
 assert output["budget"]["total"]["max_estimated_tool_calls"] == output["budget"]["per_iteration"]["max_estimated_tool_calls"], output
+assert output["budget_limit"]["exceeded"] is False, output
 assert output["loop"]["enabled"] is False, output
 assert output["loop"]["max_iterations"] == 3, output
 assert output["input"]["test_command"] == "repair_fixture_test", output

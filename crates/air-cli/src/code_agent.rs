@@ -63,6 +63,8 @@ pub(crate) struct CodeOptions {
     pub(crate) loop_enabled: bool,
     pub(crate) execute_plan: bool,
     pub(crate) max_iterations: usize,
+    pub(crate) max_estimated_model_calls: Option<usize>,
+    pub(crate) max_estimated_tool_calls: Option<usize>,
     pub(crate) tool_config: Option<PathBuf>,
 }
 
@@ -73,6 +75,12 @@ pub(crate) struct CodeSessionOptions {
     pub(crate) revert_workspace_turn: Option<String>,
     pub(crate) apply_workspace: bool,
     pub(crate) in_place: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct CodeBudgetLimits {
+    max_estimated_model_calls: Option<usize>,
+    max_estimated_tool_calls: Option<usize>,
 }
 
 pub(crate) fn code(options: CodeOptions) -> Result<()> {
@@ -105,8 +113,14 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         loop_enabled,
         execute_plan,
         max_iterations,
+        max_estimated_model_calls,
+        max_estimated_tool_calls,
         tool_config,
     } = options;
+    let budget_limits = CodeBudgetLimits {
+        max_estimated_model_calls,
+        max_estimated_tool_calls,
+    };
 
     let requested_recipe = recipe;
     let recipe = resolve_recipe(
@@ -151,16 +165,25 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     }
 
     if explain {
-        print_explain(
+        print_explain(CodePrintExplainOptions {
             requested_recipe,
-            recipe,
-            &profile,
-            &input,
+            resolved_recipe: recipe,
+            profile: &profile,
+            input: &input,
             loop_enabled,
             execute_plan,
             max_iterations,
-        )?;
+            budget_limits,
+        })?;
         return Ok(());
+    }
+
+    if !execute_plan {
+        enforce_code_profile_budget_limits(
+            &profile,
+            if loop_enabled { max_iterations } else { 1 },
+            budget_limits,
+        )?;
     }
 
     let effective_trace_out = match (&session, &trace_out) {
@@ -196,6 +219,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             log,
             tool_config: tool_config.clone(),
             max_tasks: max_iterations,
+            budget_limits,
             resume,
         })?
     } else if loop_enabled {
@@ -1208,17 +1232,37 @@ fn artifact_field_values(value: Option<&Value>, field: &str) -> Vec<String> {
     values
 }
 
-fn print_explain(
+struct CodePrintExplainOptions<'a> {
     requested_recipe: CodeRecipe,
     resolved_recipe: CodeRecipe,
-    profile: &Path,
-    input: &Map<String, Value>,
+    profile: &'a Path,
+    input: &'a Map<String, Value>,
     loop_enabled: bool,
     execute_plan: bool,
     max_iterations: usize,
-) -> Result<()> {
+    budget_limits: CodeBudgetLimits,
+}
+
+fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
+    let CodePrintExplainOptions {
+        requested_recipe,
+        resolved_recipe,
+        profile,
+        input,
+        loop_enabled,
+        execute_plan,
+        max_iterations,
+        budget_limits,
+    } = options;
     let metadata = explain_metadata_for_profile(profile)?;
     let budget_iterations = if loop_enabled { max_iterations } else { 1 };
+    let total_model_calls = metadata
+        .max_estimated_model_calls
+        .saturating_mul(budget_iterations);
+    let total_tool_calls = metadata
+        .max_estimated_tool_calls
+        .saturating_mul(budget_iterations);
+    let budget_limit = code_budget_limit_status(total_model_calls, total_tool_calls, budget_limits);
     let explanation = json!({
         "command": "code",
         "will_run": false,
@@ -1237,10 +1281,11 @@ fn print_explain(
             },
             "total": {
                 "iterations": budget_iterations,
-                "max_estimated_model_calls": metadata.max_estimated_model_calls.saturating_mul(budget_iterations),
-                "max_estimated_tool_calls": metadata.max_estimated_tool_calls.saturating_mul(budget_iterations)
+                "max_estimated_model_calls": total_model_calls,
+                "max_estimated_tool_calls": total_tool_calls
             }
         },
+        "budget_limit": budget_limit,
         "loop": {
             "enabled": loop_enabled,
             "max_iterations": max_iterations
@@ -1292,6 +1337,82 @@ fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
     })
 }
 
+fn enforce_code_profile_budget_limits(
+    profile: &Path,
+    iterations: usize,
+    budget_limits: CodeBudgetLimits,
+) -> Result<()> {
+    if budget_limits.max_estimated_model_calls.is_none()
+        && budget_limits.max_estimated_tool_calls.is_none()
+    {
+        return Ok(());
+    }
+    let metadata = explain_metadata_for_profile(profile)?;
+    let model_calls = metadata
+        .max_estimated_model_calls
+        .saturating_mul(iterations);
+    let tool_calls = metadata.max_estimated_tool_calls.saturating_mul(iterations);
+    if let Some(violation) = code_budget_limit_violation(model_calls, tool_calls, budget_limits) {
+        bail!(
+            "estimated code-agent budget exceeded: model_calls={} tool_calls={} limit={}",
+            model_calls,
+            tool_calls,
+            violation
+        );
+    }
+    Ok(())
+}
+
+fn code_budget_limit_status(
+    max_estimated_model_calls: usize,
+    max_estimated_tool_calls: usize,
+    budget_limits: CodeBudgetLimits,
+) -> Value {
+    if let Some(Value::Object(mut violation)) = code_budget_limit_violation(
+        max_estimated_model_calls,
+        max_estimated_tool_calls,
+        budget_limits,
+    ) {
+        violation.insert("exceeded".to_string(), Value::Bool(true));
+        return Value::Object(violation);
+    }
+    json!({
+        "max_estimated_model_calls": budget_limits.max_estimated_model_calls,
+        "max_estimated_tool_calls": budget_limits.max_estimated_tool_calls,
+        "attempted_model_calls": max_estimated_model_calls,
+        "attempted_tool_calls": max_estimated_tool_calls,
+        "model_exceeded": false,
+        "tool_exceeded": false,
+        "exceeded": false,
+    })
+}
+
+fn code_budget_limit_violation(
+    max_estimated_model_calls: usize,
+    max_estimated_tool_calls: usize,
+    budget_limits: CodeBudgetLimits,
+) -> Option<Value> {
+    let model_exceeded = budget_limits
+        .max_estimated_model_calls
+        .map(|limit| max_estimated_model_calls > limit)
+        .unwrap_or(false);
+    let tool_exceeded = budget_limits
+        .max_estimated_tool_calls
+        .map(|limit| max_estimated_tool_calls > limit)
+        .unwrap_or(false);
+    if !model_exceeded && !tool_exceeded {
+        return None;
+    }
+    Some(json!({
+        "max_estimated_model_calls": budget_limits.max_estimated_model_calls,
+        "max_estimated_tool_calls": budget_limits.max_estimated_tool_calls,
+        "attempted_model_calls": max_estimated_model_calls,
+        "attempted_tool_calls": max_estimated_tool_calls,
+        "model_exceeded": model_exceeded,
+        "tool_exceeded": tool_exceeded,
+    }))
+}
+
 fn is_workspace_write_capability(capability: &str) -> bool {
     matches!(capability, "file.write")
 }
@@ -1327,6 +1448,7 @@ struct CodeProjectOptions {
     log: bool,
     tool_config: Option<PathBuf>,
     max_tasks: usize,
+    budget_limits: CodeBudgetLimits,
     resume: Option<CodeProjectResume>,
 }
 
@@ -1422,6 +1544,17 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                         "max_estimated_tool_calls": 0,
                         "tasks": [],
                     },
+                    "remaining_budget": {
+                        "task_count": 0,
+                        "max_estimated_model_calls": 0,
+                        "max_estimated_tool_calls": 0,
+                        "tasks": [],
+                    },
+                    "budget_limit": code_budget_limit_status(
+                        0,
+                        0,
+                        options.budget_limits
+                    ),
                     "acceptance": [],
                     "executions": [{
                         "completed": false,
@@ -1473,6 +1606,46 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .iter()
         .filter(|task| !completed_task_ids.contains(task.id.as_str()))
         .collect::<Vec<_>>();
+    let pending_task_values = pending_tasks
+        .iter()
+        .map(|task| (*task).clone())
+        .collect::<Vec<_>>();
+    let remaining_budget = code_project_budget_summary(&pending_task_values);
+    let (remaining_model_calls, remaining_tool_calls) = code_budget_value_counts(&remaining_budget);
+    let budget_limit = code_budget_limit_status(
+        remaining_model_calls,
+        remaining_tool_calls,
+        options.budget_limits,
+    );
+    if budget_limit
+        .get("exceeded")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let remaining_task_ids = pending_tasks
+            .iter()
+            .map(|task| Value::String(task.id.clone()))
+            .collect::<Vec<_>>();
+        return Ok(json!({
+            "project_plan": project_plan,
+            "project": {
+                "status": "budget_exceeded",
+                "completed": false,
+                "max_tasks": options.max_tasks,
+                "executed_tasks": executions.len(),
+                "executed_this_run": 0,
+                "resumed_from_turn": resumed_from_turn,
+                "scheduled_task_ids": scheduled_task_ids,
+                "remaining_task_ids": remaining_task_ids,
+                "budget": project_budget,
+                "remaining_budget": remaining_budget,
+                "budget_limit": budget_limit,
+                "acceptance": [],
+                "executions": executions,
+            },
+            "trace_files": trace_files,
+        }));
+    }
     for (index, task) in pending_tasks.iter().take(options.max_tasks).enumerate() {
         let task_number = starting_execution_count + index + 1;
         let task_id = task.id.clone();
@@ -1663,6 +1836,8 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
             "scheduled_task_ids": scheduled_task_ids,
             "remaining_task_ids": remaining_task_ids,
             "budget": project_budget,
+            "remaining_budget": remaining_budget,
+            "budget_limit": budget_limit,
             "acceptance": project_acceptance,
             "executions": executions,
         },
@@ -1799,6 +1974,20 @@ fn code_project_budget_summary(tasks: &[CodeProjectScheduledTask]) -> Value {
         "max_estimated_tool_calls": max_estimated_tool_calls,
         "tasks": task_budgets,
     })
+}
+
+fn code_budget_value_counts(budget: &Value) -> (usize, usize) {
+    let model_calls = budget
+        .get("max_estimated_model_calls")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    let tool_calls = budget
+        .get("max_estimated_tool_calls")
+        .and_then(Value::as_u64)
+        .and_then(|value| usize::try_from(value).ok())
+        .unwrap_or(0);
+    (model_calls, tool_calls)
 }
 
 fn code_project_task_budget(task: &CodeProjectScheduledTask) -> Value {
@@ -3404,6 +3593,24 @@ mod tests {
         assert!(task_budgets[1]["writes_workspace"].as_bool().unwrap());
         assert!(model_total > 0);
         assert!(tool_total > 0);
+    }
+
+    #[test]
+    fn budget_limit_status_reports_exceeded_dimension() {
+        let status = code_budget_limit_status(
+            6,
+            29,
+            CodeBudgetLimits {
+                max_estimated_model_calls: Some(5),
+                max_estimated_tool_calls: Some(100),
+            },
+        );
+
+        assert_eq!(status["exceeded"], Value::Bool(true));
+        assert_eq!(status["model_exceeded"], Value::Bool(true));
+        assert_eq!(status["tool_exceeded"], Value::Bool(false));
+        assert_eq!(status["attempted_model_calls"], Value::from(6));
+        assert_eq!(status["attempted_tool_calls"], Value::from(29));
     }
 
     #[test]
