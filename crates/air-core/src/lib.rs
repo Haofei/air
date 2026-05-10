@@ -557,3 +557,72 @@ fn value_kind(value: &Value) -> &'static str {
         Value::Object(_) => "object",
     }
 }
+
+/// Strip the leading namespace prefix (input., state., output., outputs.) from a path.
+pub fn normalize_path(path: &str) -> &str {
+    path.strip_prefix("input.")
+        .or_else(|| path.strip_prefix("state."))
+        .or_else(|| path.strip_prefix("output."))
+        .or_else(|| path.strip_prefix("outputs."))
+        .unwrap_or(path)
+}
+
+/// Parse a dot/bracket path like `state.items[0].name` into segments.
+pub fn path_segments(path: &str) -> Vec<String> {
+    let normalized = normalize_path(path);
+    let mut segments = Vec::new();
+    let mut current = String::new();
+    let mut chars = normalized.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match ch {
+            '.' => {
+                segments.push(std::mem::take(&mut current));
+            }
+            '[' => {
+                if !current.is_empty() {
+                    segments.push(std::mem::take(&mut current));
+                }
+                let mut index = String::new();
+                for nested in chars.by_ref() {
+                    if nested == ']' {
+                        break;
+                    }
+                    index.push(nested);
+                }
+                segments.push(index);
+                if matches!(chars.peek(), Some('.')) {
+                    chars.next();
+                }
+            }
+            _ => current.push(ch),
+        }
+    }
+
+    if !current.is_empty() || normalized.ends_with('.') {
+        segments.push(current);
+    }
+
+    segments
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn path_segments_normalizes_prefixes_and_array_indexes() {
+        assert_eq!(
+            path_segments("state.observation[0].tool"),
+            vec!["observation", "0", "tool"]
+        );
+        assert_eq!(
+            path_segments("outputs.result.items[12]"),
+            vec!["result", "items", "12"]
+        );
+        assert_eq!(
+            path_segments("input.customer.issue"),
+            vec!["customer", "issue"]
+        );
+    }
+}

@@ -1,6 +1,6 @@
 use air_core::{
-    AirModule, DagWorkflow, DetailedTypeKind, Diagnostic, NodeKind, Severity, StateAction,
-    StateMachineWorkflow, StateRule, TypeSpec, Workflow, WorkflowNode,
+    normalize_path, path_segments, AirModule, DagWorkflow, DetailedTypeKind, Diagnostic, NodeKind,
+    Severity, StateAction, StateMachineWorkflow, StateRule, TypeSpec, Workflow, WorkflowNode,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -1152,52 +1152,6 @@ fn is_array_type(spec: Option<&TypeSpec>) -> bool {
         Some(TypeSpec::Detailed(detailed))
             if detailed.kind == air_core::DetailedTypeKind::Array
     )
-}
-
-fn path_segments(path: &str) -> Vec<String> {
-    let normalized = normalize_path(path);
-    let mut segments = Vec::new();
-    let mut current = String::new();
-    let mut chars = normalized.chars().peekable();
-
-    while let Some(ch) = chars.next() {
-        match ch {
-            '.' => {
-                segments.push(std::mem::take(&mut current));
-            }
-            '[' => {
-                if !current.is_empty() {
-                    segments.push(std::mem::take(&mut current));
-                }
-                let mut index = String::new();
-                for nested in chars.by_ref() {
-                    if nested == ']' {
-                        break;
-                    }
-                    index.push(nested);
-                }
-                segments.push(index);
-                if matches!(chars.peek(), Some('.')) {
-                    chars.next();
-                }
-            }
-            _ => current.push(ch),
-        }
-    }
-
-    if !current.is_empty() || normalized.ends_with('.') {
-        segments.push(current);
-    }
-
-    segments
-}
-
-fn normalize_path(path: &str) -> &str {
-    path.strip_prefix("input.")
-        .or_else(|| path.strip_prefix("state."))
-        .or_else(|| path.strip_prefix("output."))
-        .or_else(|| path.strip_prefix("outputs."))
-        .unwrap_or(path)
 }
 
 fn template_paths(template: &str) -> Vec<String> {

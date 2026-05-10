@@ -271,11 +271,13 @@ workflow:
                       context_lines: "bounded context lines"
                       max_matches: "bounded result limit"
                   file.ops:
-                    required: {operations: "array of edit/write/replace_lines operations"}
+                    required:
+                      operations: "array; each item must be one of: {kind:'edit', path, old_string, new_string}; {kind:'replace_lines', path, start_line, end_line, new_string}; {kind:'write', path, content}"
                     optional:
                       path: "default repo-relative path for all operations"
                       kind: "default operation kind"
-                      edits: "operations alias"
+                      edits: "operations alias using the same operation shapes"
+                      ops: "operations alias using the same operation shapes"
                       dry_run: "boolean"
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
@@ -310,8 +312,8 @@ workflow:
                   discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
                   small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files."
-                  edits: "Use file.ops with kind=edit or kind=replace_lines for localized edits. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call."
-                  tests: "Use test.run with the supplied allowlisted test_command only."
+                  edits: "Use file.ops with kind=edit old_string/new_string or kind=replace_lines start_line/end_line/new_string. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call."
+                  tests: "Use test.run with the supplied allowlisted test_command only. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion."
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
