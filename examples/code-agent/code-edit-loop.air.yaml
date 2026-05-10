@@ -47,7 +47,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, choose, act, post_act, summarize, done, failed]
+    enum: [init, choose, act, post_act, post_verify, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -369,28 +369,9 @@ workflow:
           max_calls: 1
           timeout_seconds: 120
           on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: auto_verify
-              rationale:
-                literal: Automatically ran the allowlisted validation after file.ops changed the workspace.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: test.run
-                      input:
-                        object:
-                          command:
-                            ref: test_command
-              result:
-                ref: auto_verify_result
         - kind: set
           values:
-            phase: choose
+            phase: post_verify
 
     - id: auto-verify-file-patch
       when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "ok" && observation[0].output.applied == true
@@ -409,14 +390,73 @@ workflow:
           max_calls: 1
           timeout_seconds: 120
           on_error: observe
+        - kind: set
+          values:
+            phase: post_verify
+
+    - id: record-auto-verify-failed-output
+      when: phase == "post_verify" && auto_verify_result[0].output.success == false
+      actions:
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: auto_verify
+                literal: auto_verify_failed
               rationale:
-                literal: Automatically ran the allowlisted validation after file.patch changed the workspace.
+                literal: Automatically ran validation after a workspace edit; output.success=false, so diagnostics must be fixed before completion.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: test.run
+                      input:
+                        object:
+                          command:
+                            ref: test_command
+              result:
+                ref: auto_verify_result
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-auto-verify-failed-tool
+      when: phase == "post_verify" && auto_verify_result[0].status == "error"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify_failed
+              rationale:
+                literal: Automatically ran validation after a workspace edit; the validation tool returned an error and must be fixed before completion.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: test.run
+                      input:
+                        object:
+                          command:
+                            ref: test_command
+              result:
+                ref: auto_verify_result
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-auto-verify-passed
+      when: phase == "post_verify" && auto_verify_result[0].output.success == true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify_passed
+              rationale:
+                literal: Automatically ran the allowlisted validation after the workspace edit and it passed.
               requested:
                 array:
                   - object:
