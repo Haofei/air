@@ -210,7 +210,7 @@ summary = {
         "final_success": repair["final_success"],
         "patch_applied": repair["patch_applied"],
         "target_changed": repair["target_path"] in changed_paths,
-        "workspace_changed_files": len(changed_paths),
+        "workspace_changed_files": len(repair["workspace_changed_files"]),
         "explored_files": len(exploration["relevant_files"]),
         "selected_related_files": len(repair_context["related_files"]),
     },

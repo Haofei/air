@@ -14,7 +14,7 @@ inputs:
 outputs:
   repair:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files]
     properties:
       target_path: string
       initial_success: boolean
@@ -26,6 +26,9 @@ outputs:
         items: object
       workspace_clean: boolean
       changed_files:
+        type: array
+        items: object
+      workspace_changed_files:
         type: array
         items: object
 
@@ -243,7 +246,7 @@ state:
         items: object
   repair_draft:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, changed_files]
     properties:
       target_path: string
       initial_success: boolean
@@ -253,9 +256,12 @@ state:
       diagnostics:
         type: array
         items: object
+      changed_files:
+        type: array
+        items: object
   repair:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files]
     properties:
       target_path: string
       initial_success: boolean
@@ -267,6 +273,9 @@ state:
         items: object
       workspace_clean: boolean
       changed_files:
+        type: array
+        items: object
+      workspace_changed_files:
         type: array
         items: object
 
@@ -382,6 +391,8 @@ workflow:
                   literal: "The allowlisted test already passed, so no patch was applied."
                 diagnostics:
                   ref: test_results.diagnostics
+                changed_files:
+                  array: []
             phase: status
 
     - id: repair
@@ -458,6 +469,8 @@ workflow:
                   template: "Patch validation failed before apply: {{repair_plan.rationale}}"
                 diagnostics:
                   ref: patch_check_result.diagnostics
+                changed_files:
+                  array: []
             phase: status
 
     - id: patch
@@ -506,6 +519,8 @@ workflow:
                   ref: repair_plan.rationale
                 diagnostics:
                   ref: final_test_results.diagnostics
+                changed_files:
+                  ref: patch_result.files
             phase: evaluate
 
     - id: first-pass-success
@@ -629,6 +644,8 @@ workflow:
                   template: "{{repair_plan.rationale}}\n\nSecond pass patch validation failed before apply: {{repair_plan_retry.rationale}}"
                 diagnostics:
                   ref: patch_check_result_retry.diagnostics
+                changed_files:
+                  ref: patch_result.files
             phase: status
 
     - id: patch-again
@@ -677,6 +694,8 @@ workflow:
                   template: "{{repair_plan.rationale}}\n\nSecond pass: {{repair_plan_retry.rationale}}"
                 diagnostics:
                   ref: final_test_results_retry.diagnostics
+                changed_files:
+                  ref: patch_result_retry.files
             phase: status
 
     - id: status
@@ -709,6 +728,8 @@ workflow:
                 workspace_clean:
                   ref: workspace_status.clean
                 changed_files:
+                  ref: repair_draft.changed_files
+                workspace_changed_files:
                   ref: workspace_status.entries
             phase: done
 

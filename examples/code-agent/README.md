@@ -144,6 +144,34 @@ with typed output instead of becoming hidden linker behavior.
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
 search quality, source grounding, and local-code evidence can be tested.
 
+## User input shape
+
+The user-facing interface should be a natural-language task plus a small typed context object. The
+planner uses the task to pick a large component or recipe; the profile supplies model/tool policy.
+For a repair task, the current input looks like this:
+
+```json
+{
+  "task": "fix the failing add function using repository exploration, structured diagnostics, a bounded patch, and retest",
+  "query": "repair fixture add function test",
+  "target_path": "examples/code-agent/repair-fixture/math.js",
+  "related_files": [],
+  "test_command": "repair_fixture_test"
+}
+```
+
+The expected product wrapper can make this feel like:
+
+```bash
+air code "fix the failing add function and retest" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --profile examples/code-agent/repair-core.air-profile.yaml
+```
+
+That wrapper should only assemble the same typed input and run the selected AIR recipe. The AIR
+module still owns permissions, bounded tool calls, trace, retry, and output schema.
+
 Build the Apple-style landing page:
 
 ```bash

@@ -173,6 +173,8 @@ repair = output["repair"]
 assert repair["initial_success"] is False, repair
 assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
+assert repair["changed_files"], repair
+assert repair["workspace_changed_files"], repair
 assert any(
     event.get("action") == "model_call"
     and event.get("meta", {}).get("model") == "code_explorer"
@@ -220,12 +222,14 @@ with open("target/generated/code_agent_repair_multifile.trace.jsonl", encoding="
 
 repair = output["repair"]
 changed = {entry["path"] for entry in repair["changed_files"]}
+workspace_changed = {entry["path"] for entry in repair["workspace_changed_files"]}
 assert output["repair_context"]["related_files"], output
 assert repair["initial_success"] is False, repair
 assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
 assert "examples/code-agent/repair-multifile/math.js" in changed, repair
 assert "examples/code-agent/repair-multifile/normalize.js" in changed, repair
+assert changed <= workspace_changed, repair
 assert any(
     event.get("action") == "tool_call"
     and event.get("meta", {}).get("tool") == "file.patch"
