@@ -2539,20 +2539,15 @@ fn read_path<'a>(
     };
 
     let mut value = read_field(state, outputs, first)?;
+    let missing = || RuntimeError::MissingField(path.to_string());
     for segment in segments.iter().skip(1) {
         value = match value {
-            Value::Object(object) => object
-                .get(segment)
-                .ok_or_else(|| RuntimeError::MissingField(path.to_string()))?,
+            Value::Object(object) => object.get(segment).ok_or_else(missing)?,
             Value::Array(array) => {
-                let index = segment
-                    .parse::<usize>()
-                    .map_err(|_| RuntimeError::MissingField(path.to_string()))?;
-                array
-                    .get(index)
-                    .ok_or_else(|| RuntimeError::MissingField(path.to_string()))?
+                let index = segment.parse::<usize>().map_err(|_| missing())?;
+                array.get(index).ok_or_else(missing)?
             }
-            _ => return Err(RuntimeError::MissingField(path.to_string())),
+            _ => return Err(missing()),
         };
     }
 
