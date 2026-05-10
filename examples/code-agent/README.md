@@ -1,452 +1,49 @@
-# Code Agent Example
+# AIR Code Agent
 
-This example contains bounded AIR coding agents and one preferred composed review recipe:
+This example keeps the coding agent close to AIR's own design rule: small primitives, explicit policy, and auditable traces.
 
-- `code.project_plan@0.1.0` is a read-only project planning subagent. It gathers repository and
-  external evidence, then returns a structured task graph with milestones, file touchpoints,
-  dependencies, acceptance commands, risks, and source ids. Use it before repair/build work when
-  the user gives a project-level goal instead of a single target file.
-- `code.explore@0.1.0` is a read-only exploration subagent for open-ended repository questions.
-  It mirrors the opencode pattern of delegating broad codebase search to a specialized child agent:
-  gather web/repo/file/symbol context, then return a concise answer with exact source ids.
-- `code.dynamic_explore@0.1.0` is a bounded plan-act-observe exploration module. A model emits
-  `{tool, input}` batches, `tool_batch_dispatch` runs only declared read-only tools, and AIR still
-  enforces capabilities, budgets, batch size, repeated-call guards, timeouts, output schemas, and
-  trace metadata.
-- `code.review_with_std_context@0.1.0` is the preferred review recipe. It composes
-  `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
-  `code.review_analyze@0.1.0`.
-- `code.review@0.1.0` is the older monolithic review module kept for comparison.
-- `code.core_repair@0.1.0` is the preferred repair recipe when the target file and
-  allowlisted test command are already known. It runs the smallest opencode-style edit loop:
-  read, test, generate structured file operations, dry-run, apply, and retest.
-- `code.core_refactor@0.1.0` reuses the same direct edit loop for behavior-preserving changes,
-  invoking `code.repair@0.1.0` with `force_patch=true` so a passing test does not short-circuit
-  an intentional refactor.
-- `code.repair@0.1.0` reads a target file plus bounded related files, runs an allowlisted test,
-  uses structured diagnostics to gather nearby source context, asks the model for structured
-  `file.ops` edits, validates them with a dry-run, applies them through constrained `file.ops`,
-  then retests with one bounded retry pass if the first edit set does not fix the test. It finishes by calling `git.status`
-  so the returned summary includes workspace cleanliness and changed files.
-- `code.build_page@0.1.0` generates one static HTML file, writes it through constrained `file.write`,
-  runs an allowlisted smoke test, renders desktop/mobile screenshots through `browser.audit`, and
-  gets one bounded revision pass if either the smoke test or browser audit fails. Its output includes
-  `smoke_log`, `audit_diagnostics`, `screenshots`, and `revised` so callers can judge a failed build
-  without digging through the raw trace.
+The public recipes are:
 
-The plan/explore/review/repair agents use:
+- `plan`: turn an open coding goal into bounded tasks, files, dependencies, and acceptance checks.
+- `explore`: read-only repository exploration.
+- `review`: grounded review over repository, diff, test, and optional search evidence.
+- `edit`: the only workspace-writing primitive. The model chooses one declared tool per turn; AIR executes it, appends the observation, enforces capability/budget policy, and records the trace.
 
-- `todo.write` for a structured progress artifact before evidence gathering;
-- `todo.read` for re-reading the current task-progress artifact before analysis;
-- `artifact.validate` for fail-closed source-id validation against registered evidence artifacts;
-- `web.search` for external documentation or issues;
-- `repo.files` for relevant repository paths;
-- `repo.search` for symbol or text matches, with explicit regex mode available for grep-style discovery;
-- `repo.symbols` for a lightweight repository symbol map without requiring LSP setup;
-- `repo.references` for LSP-lite definition/reference lookup around an identifier token, with bounded snippets;
-- `repo.context` for automatically selected nearby code snippets around repository matches, also with explicit regex mode;
-- `file.read` for the target source file, with optional numbered output for diagnostics;
-- `file.read_many` for bounded related-file context, such as nearby configs, fixtures, or tests;
-- `git.diff` for local changes to that file.
-- `git.status` for structured workspace change awareness.
-- `test.run` for an allowlisted verification command.
+`edit` covers bug fixes, behavior-preserving changes, small feature edits, and bounded file creation. Those are task intents, not separate agent primitives.
 
-The repair module writes a todo artifact before reading files, updates it before invoking the
-repair model, re-reads it into the model input, and records those progress events in the trace. It
-also requires `file.write` approval before `file.ops` can run. That mirrors opencode's explicit
-task tracking while keeping progress and write permission state inside AIR's typed tool, approval,
-and capability boundary.
+## Edit Loop
 
-Before final analysis, the preferred composed review plan sends the evidence bundle through the
-shared `modules/std/context/compact.air.yaml` module. That module first runs deterministic
-`context.measure`; if the bundle crosses the configured threshold, the `context_compactor` model
-converts it into a bounded context object with retained facts and exact `source_ids`. If the bundle
-is under threshold, the standard module returns the raw payload in `context.raw_payload` and skips
-the extra model call. This keeps context growth explicit, reusable, and auditable without adding a
-new AIR instruction or baking compaction into one coding agent.
+The edit module is `code-edit-loop.air.yaml`, wired by `code-edit.air-plan.yaml` and `edit.air-profile.yaml`.
 
-For editing agents, prefer the opencode-style tool split already available in `air-tools`:
-`todo.write` and `todo.read` for explicit task tracking on non-trivial work,
-`file.read` for context, including `contains` + `occurrence` + `context_lines` when the agent has a symbol or error
-string but should not guess line numbers, `file.read_many` for bounded multi-file context gathering,
-`file.edit` for exact-string changes that require a prior read by default and explicit
-whitespace-tolerant strategies for indentation drift. Use `file.edit` with `edits[]` for atomic
-multi-point changes in one file; if any edit fails, the file is left unchanged. Each edit still
-emits bounded diff output for audit,
-`file.ops` for atomic multi-file structured edits/writes with dry-run validation and conservative
-auto matching, `file.patch` for reviewed multi-file unified diffs, and `file.write` for bounded file creation or
-explicit overwrites. Keep shell execution behind `command_run` aliases instead of giving the model
-a raw shell. `command_run` returns both raw logs and structured `diagnostics[]`, so repair loops can
-focus on file/line/column errors instead of re-parsing terminal output from scratch.
-`diagnostic.context` turns those diagnostics into bounded nearby source snippets, which keeps repair
-models grounded without forcing them to calculate line ranges by hand.
-`command_run` can also expose constrained argv templates such as
-`["cargo", "test", "-q", "-p", "air-tools", "{{test_filter}}"]`; every placeholder must have a
-declared parameter policy, so agents can target one test without receiving raw shell access.
-When `require_read` is enabled, `file.write`, `file.edit`, `file.ops`, and `file.patch` reject edits to files
-that were not read or were modified after the last read. `file.ops` and `file.patch` both support
-`dry_run: true` validation without mutating files; the repair agent uses `file.ops` dry-run before
-every apply.
-For frontend agents, `browser.audit` uses Playwright to open a local file or URL, capture desktop
-and mobile screenshots, and return structured layout diagnostics for console errors, page errors,
-horizontal overflow, and coarse text/click-target overlap. The build-page agent feeds those
-diagnostics back into one bounded revision pass instead of relying only on string checks.
-
-The default `tools.json` uses deterministic local search documents so release verification does
-not depend on network access. For real research, switch to `tools.playwright.json`.
-`model-fixtures.json` provides deterministic schema-valid outputs for `project_planner`,
-`code_explorer`, `context_compactor`, and `code_reviewer`, so the project-plan, explore, and composed review plans can run
-end-to-end offline in CI without an API key.
-The verification script also runs `scripts/playwright_search_fixture_test.cjs` and
-`scripts/playwright_page_audit_fixture_test.cjs` when a local
-Playwright Chromium browser is installed; that fixture serves Bing-like HTML from localhost and
-checks real DOM extraction, URL normalization, page fetch, screenshot capture, layout diagnostics,
-and artifact output without external network access. `tools.playwright.json` enables a TTL page-content cache under
-`target/generated/playwright_search_cache` so repeated research loops avoid re-fetching the same
-result pages.
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
-
-cargo run -p air-cli -- run-plan examples/code-agent/code-review-composed.air-plan.yaml \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/input.json \
-  --model-config examples/bigmodel-openai-compatible.json \
-  --tool-config examples/code-agent/tools.playwright.json \
-  --trace-out target/generated/code_agent.trace.jsonl
-```
-
-Run the composed review path fully offline with deterministic model fixtures:
-
-```bash
-cargo run -p air-cli -- run-plan examples/code-agent/code-review-composed.air-plan.yaml \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/input.json \
-  --model-config examples/code-agent/model-fixtures.json \
-  --tool-config examples/code-agent/tools.json
-```
-
-Run the read-only exploration subagent:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml --log
-```
-
-Run the read-only project planner:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/project-plan.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/project-plan.air-profile.yaml --log
-```
-
-Check which high-level coding component the planner will see first without calling a model:
-
-```bash
-cargo run -p air-cli -- plan --explain \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --task "Fix a failing test using diagnostics and retest"
-```
-
-This is the code-agent primary routing layer. It mirrors opencode's shape: a primary agent first
-chooses a large component or recipe, then only falls back to smaller building blocks when no large
-component covers the task. `plan --explain` is deterministic and model-free, so bench harnesses can
-assert that review, repair, page-build, and read-only exploration tasks route to the intended AIR
-component before any model is asked to generate a RunPlan.
-
-For fixes, the intended first choice is the repair recipe rather than the primitive repair module.
-That proves the core coding loop as a reusable AIR graph:
+It runs as:
 
 ```text
-repair -> test status
+init -> choose -> tool_dispatch -> choose -> ... -> summarize -> done
 ```
 
-When the target file and test command are already known, this path follows the opencode-style
-core loop directly instead of spending an extra model call on exploration. The
-`code-repair-with-explore.air-plan.yaml` plan is still available for open-ended fixes where the
-agent must first discover the relevant files and then use the semantic adapter to select bounded
-repair context.
+The fixed structure is only the loop boundary. The model must choose each read/search/edit/test/diff step through declared tools such as `file.read`, `file.search`, `file.ops`, `test.run`, and `git.diff`.
 
-Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
-search quality, source grounding, and local-code evidence can be tested.
-
-For cases where the static gather sequence is too rigid, use `dynamic-explore.air-profile.yaml`.
-It demonstrates the same read-only boundary with model-selected tools:
+Run the deterministic fixture:
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml --log
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
+cargo run -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.yaml --log
 ```
 
-This is the AIR kernel version of opencode's next-action loop: the model can choose the next
-declared read-only tools as a bounded batch, but the AIR module remains typed, bounded, and
-auditable. Its declared tool set now mirrors the core opencode exploration path: list files,
-search text, inspect lightweight symbols/references, read bounded files, then gather nearby context.
-The module also sets `policy.max_repeated_tool_calls`, so repeated identical tool/input choices fail
-closed instead of spinning until `max_steps`.
-
-## User input shape
-
-The user-facing interface should be a natural-language task plus a small typed context object. The
-planner uses the task to pick a large component or recipe; the profile supplies model/tool policy.
-For a repair task, the current input looks like this:
-
-```json
-{
-  "task": "fix the failing add function using repository exploration, structured diagnostics, bounded file operations, and retest",
-  "query": "repair fixture add function test",
-  "target_path": "examples/code-agent/repair-fixture/math.js",
-  "related_files": [],
-  "test_command": "repair_fixture_test"
-}
-```
-
-Run the user-facing wrapper. The default recipe is `auto`: pack-declared routing maps `--output`
-to build, `--test` to repair, review-specific search flags to review, and ambiguous targeted tasks
-back to read-only exploration.
+Run through the user-facing wrapper:
 
 ```bash
-cargo run -p air-cli -- code "fix the failing add function and retest" \
-  --target examples/code-agent/repair-fixture/math.js \
-  --test repair_fixture_test \
-  --explain
+cargo run -p air-cli -- code "edit the failing add function and retest" \
+  --recipe edit \
+  --target examples/code-agent/edit-fixture/math.js \
+  --test edit_fixture_test \
+  --related examples/code-agent/edit-fixture/test.js
 ```
 
-The preflight JSON includes the resolved AIR profile, RunPlan, declared capabilities, whether the
-recipe can write to the workspace, and the estimated model/tool call budget. With `--loop`, the
-budget includes both the per-iteration estimate and the max-iteration total.
-
-Use estimated budget limits when a coding run should fail closed before spending a large project
-plan:
-
-```bash
-cargo run -p air-cli -- code "plan and execute the next project milestone" \
-  --recipe plan \
-  --execute-plan \
-  --max-estimated-model-calls 12 \
-  --max-estimated-tool-calls 60
-```
-
-For project execution, AIR plans first, computes the remaining task budget from the selected
-recipes, and returns `project.status = "budget_exceeded"` without starting task execution when the
-remaining task graph is over either limit.
-
-Project execution also returns `project.memory`, a compact structured rollup of completed tasks,
-acceptance results, changed files, artifact ids, and high-value recipe outputs. Later tasks receive
-that project memory instead of raw prior outputs, so long project runs keep stable context without
-turning every trace into prompt text.
-
-`project.artifacts[]` is the project-level artifact graph. It indexes trace JSONL files, tool/model
-artifacts declared by task outputs, changed files, and recovery forks. The memory object references
-the same artifact ids, so downstream tasks can cite concrete project artifacts instead of relying on
-natural-language summaries.
-When executing later tasks, the wrapper injects an `Available project artifacts from previous tasks`
-section into the task text so unchanged AIR modules can still see the artifact ids without expanding
-their input schema.
-
-Then run it:
-
-```bash
-cargo run -p air-cli -- code "fix the failing add function and retest" \
-  --target examples/code-agent/repair-fixture/math.js \
-  --test repair_fixture_test \
-  --related examples/code-agent/repair-fixture/test.js \
-  --log
-```
-
-For coding tasks that need opencode-style iteration, keep the loop outside the AIR module and bound
-it explicitly:
-
-```bash
-cargo run -p air-cli -- code "fix the failing add function until tests pass" \
-  --target examples/code-agent/repair-fixture/math.js \
-  --test repair_fixture_test \
-  --related examples/code-agent/repair-fixture/test.js \
-  --loop \
-  --max-iterations 2 \
-  --trace-out target/generated/code_loop.trace.jsonl
-```
-
-Each iteration runs the same checked AIR recipe with the same capability contract. If a pass does
-not complete, the wrapper appends a bounded summary of prior AIR outputs to the next iteration's
-`task`, making the loop state explicit in the following `model_call` trace. The wrapper stops when
-the recipe's pack-declared completion rule passes, such as `repair.final_success == true` or both
-`build.test_success` and `build.audit_success` are true. Iteration trace paths are suffixed with
-`.iterN` so each pass remains auditable.
-
-For multi-turn coding work, use `--session` to persist a small AIR session file across separate
-`air code` invocations:
-
-```bash
-cargo run -p air-cli -- code "explore command_run safety" \
-  --target crates/air-tools/src/lib.rs \
-  --query command_run \
-  --session target/generated/code_session.json
-
-cargo run -p air-cli -- code "continue from the previous AIR turn" \
-  --target crates/air-tools/src/lib.rs \
-  --query command_run \
-  --session target/generated/code_session.json
-```
-
-This is intentionally a thin shell over verified AIR turns, not an unrestricted chat runtime. The
-session file records each turn's recipe, profile, typed input, completion flag, and outputs. On the
-next invocation, a bounded summary of previous turn outputs is appended to the new task, so the
-following `model_call` trace shows exactly what session context the model received. The injected
-session context uses the same default budget posture as AIR context management: assume a 200k
-context window, inject at most the 80% working threshold, and prefer recent turns when older history
-must be omitted. If `--session` is set and no `--trace-out` path is supplied, `air code` writes a
-per-turn trace beside the session file under `<session-stem>.traces/` and stores a lightweight
-`parts[]` index for model calls, tool calls, approvals, and returns. Turns that include a repair
-workspace diff also store `patch_sets[]` with changed files, pre-existing dirty files, diff text,
-and diff artifact ids. The original trace remains the source of truth; the session index only makes
-prior AIR actions easy to inspect.
-
-Session history can be forked or truncated without touching workspace files:
-
-```bash
-cargo run -p air-cli -- code-session target/generated/code_session.json \
-  --fork target/generated/code_session.branch.json \
-  --revert-to turn-000001
-```
-
-`code-session` is a low-level session-history tool. It preserves trace references; session fork and
-history truncation do not touch files in the working tree.
-
-Patch-set revert checks are also available from the same session index:
-
-```bash
-cargo run -p air-cli -- code-session target/generated/code_session.json \
-  --revert-workspace-turn turn-000001
-```
-
-This runs `git apply --reverse --check` against the indexed `patch_sets[]` without mutating files.
-Use `--apply-workspace` only when you want to apply the reverse patches after the checks pass.
-
-The same command can select the other public coding-agent recipes:
-
-```bash
-cargo run -p air-cli -- code "explore command_run safety" \
-  --target crates/air-tools/src/lib.rs \
-  --query command_run
-
-cargo run -p air-cli -- code "plan the next code-agent project milestone" \
-  --recipe plan \
-  --query "code agent project plan"
-
-cargo run -p air-cli -- code "plan and start the next code-agent project milestone" \
-  --recipe plan \
-  --execute-plan \
-  --max-iterations 2 \
-  --query "code agent project plan"
-
-cargo run -p air-cli -- code "review the Playwright search tool" \
-  --recipe review \
-  --target scripts/playwright_search.cjs \
-  --query playwright_search \
-  --search-query "Playwright browser search result extraction timeout Node.js" \
-  --required-term playwright
-
-cargo run -p air-cli -- code "refactor the sum implementation while keeping tests passing" \
-  --recipe refactor \
-  --target examples/code-agent/refactor-fixture/math.js \
-  --test refactor_fixture_test \
-  --related examples/code-agent/refactor-fixture/test.js
-
-cargo run -p air-cli -- code "build a premium product landing page" \
-  --recipe build \
-  --output examples/apple-landing/index.html \
-  --brand Apple \
-  --product "Apple Nova"
-```
-
-The wrapper only assembles the same typed input and runs the selected AIR recipe. The AIR module
-still owns permissions, bounded tool calls, trace, retry, and output schema. With `--execute-plan`,
-the project planner first returns `project_plan.tasks[]`; each task must declare a bounded AIR
-`recipe` and typed `input`, and the wrapper executes at most `--max-iterations` tasks through those
-existing recipes. Each planned task gets its own trace file, and later tasks receive a bounded
-summary of prior task outputs. Planned task `acceptance[]` entries are also executed through the
-configured `test.run` allowlist, never as raw shell commands, and are recorded in a separate
-acceptance trace. Repair outputs include
-both changed-file metadata and a bounded `workspace_diff` artifact filtered to the files patched by
-the agent, so the actual patch is visible without replaying the trace or mixing in unrelated dirty
-workspace changes. They also include `workspace_clean_before` and `preexisting_changed_files`, so a
-reviewer can distinguish user changes that existed before the agent ran from files changed by the
-repair. Use `--profile` to
-select another coding recipe, and `--model-config` / `--tool-config` to override the profile's
-providers.
-
-Build the Apple-style landing page:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/apple-build.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/apple-build.air-profile.yaml --log
-```
-
-Run the bounded repair loop on a tiny fixture:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/repair.air-profile.yaml --log
-```
-
-The repair fixture intentionally starts with a failing implementation so the agent has a concrete
-diagnostic to fix. Running the repair profile modifies `examples/code-agent/repair-fixture/math.js`.
-
-Run the preferred core repair loop, including exploration and context selection:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/repair-core.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-core.air-profile.yaml --log
-```
-
-This profile also modifies `examples/code-agent/repair-fixture/math.js`; reset or restore the
-fixture after manual runs.
-
-Run the behavior-preserving refactor fixture. The test starts passing, but the refactor recipe
-uses the direct edit kernel, forces a bounded patch, and then reruns the same allowlisted test:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/refactor-core.air-profile.yaml --log
-```
-
-This profile modifies `examples/code-agent/refactor-fixture/math.js`; reset or restore the fixture
-after manual runs.
-
-Run the bounded multi-file repair fixture:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/repair-multifile.air-profile.yaml
-
-cargo run -p air-cli -- run-plan --profile examples/code-agent/repair-multifile.air-profile.yaml --log
-```
-
-This uses the same core repair recipe, but `tools.core.json` allows structured file operations touching at most two
-existing files. The fixture starts with failures split across `math.js` and `normalize.js`; the
-verification gate asserts that the `file.ops` event reports `file_count == 2` and that the retest passes.
-
-Deterministic verification for these examples:
+## Verification
 
 ```bash
 bash scripts/verify_code_agent.sh
 ```
 
-Run the offline code-agent bench harness:
-
-```bash
-bash scripts/bench_code_agent.sh
-```
-
-The bench writes route decisions and offline review/explore/build/repair outputs under
-`target/generated/code-agent-bench/`, then emits a machine-readable `summary.json` with
-`status`, `cases[]`, metrics, and artifact paths. Set
-`AIR_CODE_AGENT_BENCH_REAL_BUILD=1` to include the real-model page build path.
-
-Set `AIR_CODE_AGENT_REAL=1` to include the real-model repair smoke; the script restores the repair
-fixture afterward.
+The gate validates current profiles, tool coverage, pack routing, prompt/schema alignment, and the edit loop trace shape.

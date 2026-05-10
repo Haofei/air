@@ -1,0 +1,37 @@
+plan:
+  name: code-edit
+  version: 0.1.0
+  description: "Unified coding-agent edit loop for one known target and one allowlisted validation command."
+
+requires:
+  capabilities: [task.progress, file.read, file.write, code.read, code.test]
+
+nodes:
+  - id: edit
+    module: code.edit@0.1.0
+
+entry: edit
+
+connect:
+  - from: $input.task
+    to: edit.task
+  - from: $input.query
+    to: edit.query
+  - from: $input.target_path
+    to: edit.target_path
+  - from: $input.target_search_pattern
+    to: edit.target_search_pattern
+  - from: $input.related_files
+    to: edit.related_files
+  - from: $input.test_command
+    to: edit.test_command
+  - from: $input.force_patch
+    to: edit.force_patch
+
+outputs:
+  edit: edit.edit
+
+decisions:
+  - id: choose-code-edit-loop
+    rationale: "The target file and validation command are known, so run the unified AIR edit loop."
+    selected: [edit]

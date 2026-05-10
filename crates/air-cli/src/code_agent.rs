@@ -55,10 +55,6 @@ pub(crate) struct CodeOptions {
     pub(crate) search_query: Option<String>,
     pub(crate) repo_query: Option<String>,
     pub(crate) required_terms: Vec<String>,
-    pub(crate) output: Option<PathBuf>,
-    pub(crate) brand: Option<String>,
-    pub(crate) product: Option<String>,
-    pub(crate) constraints: Vec<String>,
     pub(crate) force_patch: bool,
     pub(crate) pack: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
@@ -101,10 +97,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         search_query,
         repo_query,
         required_terms,
-        output,
-        brand,
-        product,
-        constraints,
         force_patch,
         pack,
         profile,
@@ -142,10 +134,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         search_query.as_ref(),
         repo_query.as_ref(),
         &required_terms,
-        output.as_ref(),
-        brand.as_ref(),
-        product.as_ref(),
-        &constraints,
     )?;
     let recipe = recipe_resolution.recipe;
     pack.validate_recipe_input_facts(
@@ -163,12 +151,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .as_ref()
                 .is_some_and(|value| !value.trim().is_empty()),
             required_terms: !required_terms.is_empty(),
-            output: output.is_some(),
-            brand: brand.as_ref().is_some_and(|value| !value.trim().is_empty()),
-            product: product
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            constraints: !constraints.is_empty(),
             force_patch,
         },
     )?;
@@ -188,10 +170,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             search_query,
             repo_query,
             required_terms,
-            output,
-            brand,
-            product,
-            constraints,
             force_patch,
         },
     )?;
@@ -1661,10 +1639,7 @@ fn task_recipe(task: &Value) -> Result<CodeRecipe> {
     match name {
         "explore" => Ok(CodeRecipe::Explore),
         "review" => Ok(CodeRecipe::Review),
-        "repair" => Ok(CodeRecipe::Repair),
-        "refactor" => Ok(CodeRecipe::Refactor),
-        "open-refactor" => Ok(CodeRecipe::OpenRefactor),
-        "build" => Ok(CodeRecipe::Build),
+        "edit" => Ok(CodeRecipe::Edit),
         other => bail!("unsupported planned task recipe {other:?}"),
     }
 }
@@ -1774,7 +1749,7 @@ fn code_project_task_input(
     prior_executions: &[Value],
 ) -> Map<String, Value> {
     let mut input = normalized_code_project_task_paths(base_input);
-    ensure_repair_task_defaults(&mut input);
+    ensure_edit_task_defaults(&mut input);
     if prior_executions.is_empty() {
         return input;
     }
@@ -1800,7 +1775,7 @@ fn code_project_task_input(
     input
 }
 
-fn ensure_repair_task_defaults(input: &mut Map<String, Value>) {
+fn ensure_edit_task_defaults(input: &mut Map<String, Value>) {
     if input.contains_key("target_path") {
         if !input.contains_key("target_search_pattern") {
             let query = input
@@ -1992,10 +1967,7 @@ mod tests {
             CodeRecipe::Plan,
             CodeRecipe::Explore,
             CodeRecipe::Review,
-            CodeRecipe::Repair,
-            CodeRecipe::Refactor,
-            CodeRecipe::OpenRefactor,
-            CodeRecipe::Build,
+            CodeRecipe::Edit,
         ];
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
@@ -2021,10 +1993,10 @@ mod tests {
     }
 
     #[test]
-    fn builds_repair_input() {
+    fn builds_edit_input() {
         let input = build_input(CodeInputOptions {
             task: "fix it".to_string(),
-            recipe: CodeRecipe::Repair,
+            recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
             test: Some("unit".to_string()),
             query: None,
@@ -2032,10 +2004,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -2058,7 +2026,7 @@ mod tests {
     }
 
     #[test]
-    fn auto_recipe_selects_repair_when_test_is_present() {
+    fn auto_recipe_selects_edit_when_target_and_test_are_present() {
         let input = build_input(CodeInputOptions {
             task: "fix it".to_string(),
             recipe: CodeRecipe::Auto,
@@ -2069,10 +2037,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -2085,10 +2049,10 @@ mod tests {
     }
 
     #[test]
-    fn repair_input_builds_code_search_pattern_from_query() {
+    fn edit_input_builds_code_search_pattern_from_query() {
         let input = build_input(CodeInputOptions {
             task: "Refactor provider".to_string(),
-            recipe: CodeRecipe::Repair,
+            recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
             test: Some("unit".to_string()),
             query: Some("EchoTools ToolProviderChoice provider module air-tools".to_string()),
@@ -2096,10 +2060,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: true,
         })
         .unwrap();
@@ -2112,10 +2072,10 @@ mod tests {
     }
 
     #[test]
-    fn refactor_input_forces_patch_even_when_flag_is_absent() {
+    fn edit_input_honors_force_patch() {
         let input = build_input(CodeInputOptions {
-            task: "refactor provider".to_string(),
-            recipe: CodeRecipe::Refactor,
+            task: "change provider".to_string(),
+            recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
             test: Some("unit".to_string()),
             query: None,
@@ -2123,11 +2083,7 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
-            force_patch: false,
+            force_patch: true,
         })
         .unwrap();
 
@@ -2143,9 +2099,9 @@ mod tests {
     }
 
     #[test]
-    fn auto_recipe_selects_refactor_when_task_and_test_request_it() {
+    fn auto_recipe_selects_edit_for_any_targeted_write_task() {
         let input = build_input(CodeInputOptions {
-            task: "refactor the provider and keep tests passing".to_string(),
+            task: "change the provider and keep tests passing".to_string(),
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
             test: Some("unit".to_string()),
@@ -2154,91 +2110,12 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
 
-        assert_eq!(input["force_patch"], Value::Bool(true));
+        assert_eq!(input["force_patch"], Value::Bool(false));
         assert_eq!(input["test_command"], Value::String("unit".to_string()));
-    }
-
-    #[test]
-    fn auto_recipe_selects_open_refactor_when_refactor_has_no_target_or_test() {
-        let input = build_input(CodeInputOptions {
-            task: "refactor the implementation to make it cleaner".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: None,
-            test: None,
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
-            force_patch: false,
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["query"],
-            Value::String("refactor the implementation to make it cleaner".to_string())
-        );
-        assert_eq!(
-            input["target_search_pattern"],
-            Value::String("refactor|the|implementation|make|cleaner".to_string())
-        );
-        assert_eq!(
-            input["allowed_test_commands"],
-            Value::Array(vec![
-                Value::String("repair_fixture_test".to_string()),
-                Value::String("repair_multifile_test".to_string()),
-                Value::String("refactor_fixture_test".to_string()),
-            ])
-        );
-    }
-
-    #[test]
-    fn auto_recipe_selects_build_when_output_is_present() {
-        let input = build_input(CodeInputOptions {
-            task: "build it".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: None,
-            test: None,
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-            output: Some(PathBuf::from("site/index.html")),
-            brand: Some("Acme".to_string()),
-            product: None,
-            constraints: vec![],
-            force_patch: false,
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["output_path"],
-            Value::String("site/index.html".to_string())
-        );
-        assert_eq!(input["brand"], Value::String("Acme".to_string()));
-        assert_eq!(input["product"], Value::String("Acme".to_string()));
-        assert_eq!(
-            input["constraints"],
-            Value::Array(vec![
-                Value::String("single self-contained HTML file".to_string()),
-                Value::String("no external network assets".to_string()),
-                Value::String("responsive down to mobile width".to_string()),
-                Value::String("buttons and text must not overlap".to_string()),
-            ])
-        );
     }
 
     #[test]
@@ -2253,10 +2130,6 @@ mod tests {
             search_query: Some("library docs".to_string()),
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -2283,10 +2156,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -2314,10 +2183,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -2342,10 +2207,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -2353,23 +2214,23 @@ mod tests {
             "command": "code",
             "will_run": false,
             "requested_recipe": recipe_name(CodeRecipe::Auto),
-            "resolved_recipe": recipe_name(CodeRecipe::Repair),
+            "resolved_recipe": recipe_name(CodeRecipe::Edit),
             "pack": {
                 "path": crate::code_pack::CODE_AGENT_PACK_PATH,
-                "recipe": "repair",
+                "recipe": "edit",
                 "default_profile": path_ref_to_input_string(
-                    &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Repair)
+                    &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Edit)
                         .unwrap()
                 ),
                 "profile_override": false,
                 "intent": load_code_agent_pack(None)
                     .unwrap()
-                    .recipe_for_id("repair")
+                    .recipe_for_id("edit")
                     .unwrap()
                     .intent,
             },
             "profile": path_ref_to_input_string(
-                &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Repair)
+                &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Edit)
                     .unwrap()
             ),
             "input": Value::Object(input),
@@ -2381,11 +2242,11 @@ mod tests {
         );
         assert_eq!(
             explanation["resolved_recipe"],
-            Value::String("repair".to_string())
+            Value::String("edit".to_string())
         );
         assert_eq!(
             explanation["profile"],
-            Value::String("examples/code-agent/repair-core.air-profile.yaml".to_string())
+            Value::String("examples/code-agent/edit.air-profile.yaml".to_string())
         );
         assert_eq!(
             explanation["pack"]["path"],
@@ -2393,11 +2254,11 @@ mod tests {
         );
         assert_eq!(
             explanation["pack"]["recipe"],
-            Value::String("repair".to_string())
+            Value::String("edit".to_string())
         );
         assert_eq!(
             explanation["pack"]["default_profile"],
-            Value::String("examples/code-agent/repair-core.air-profile.yaml".to_string())
+            Value::String("examples/code-agent/edit.air-profile.yaml".to_string())
         );
         assert_eq!(explanation["pack"]["profile_override"], Value::Bool(false));
         assert_eq!(
@@ -2410,7 +2271,7 @@ mod tests {
     fn explain_metadata_reports_profile_capabilities() {
         let profile = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("examples/code-agent/repair-core.air-profile.yaml");
+            .join("examples/code-agent/edit.air-profile.yaml");
         let metadata = explain_metadata_for_profile(&profile).unwrap();
 
         assert!(metadata
@@ -2421,7 +2282,7 @@ mod tests {
         assert!(!metadata.read_only);
         assert!(metadata.max_estimated_model_calls > 0);
         assert!(metadata.max_estimated_tool_calls > 0);
-        assert!(metadata.plan.ends_with("code-repair.air-plan.yaml"));
+        assert!(metadata.plan.ends_with("code-edit.air-plan.yaml"));
     }
 
     #[test]
@@ -2429,26 +2290,14 @@ mod tests {
         let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(
             &pack,
-            CodeRecipe::Repair,
-            &json!({"repair": {"final_success": true}})
+            CodeRecipe::Edit,
+            &json!({"edit": {"final_success": true}})
         )
         .unwrap());
         assert!(!code_outputs_complete(
             &pack,
-            CodeRecipe::Repair,
-            &json!({"repair": {"final_success": false}})
-        )
-        .unwrap());
-        assert!(code_outputs_complete(
-            &pack,
-            CodeRecipe::Build,
-            &json!({"build": {"test_success": true, "audit_success": true}})
-        )
-        .unwrap());
-        assert!(!code_outputs_complete(
-            &pack,
-            CodeRecipe::Build,
-            &json!({"build": {"test_success": true, "audit_success": false}})
+            CodeRecipe::Edit,
+            &json!({"edit": {"final_success": false}})
         )
         .unwrap());
         assert!(code_outputs_complete(
@@ -2737,7 +2586,7 @@ mod tests {
     #[test]
     fn session_patch_sets_extract_workspace_diff() {
         let patch_sets = code_session_patch_sets(&json!({
-            "repair": {
+            "edit": {
                 "workspace_clean_before": false,
                 "workspace_clean": false,
                 "changed_files": [{"path": "src/lib.rs"}],
@@ -2754,7 +2603,7 @@ mod tests {
         }));
 
         assert_eq!(patch_sets.len(), 1);
-        assert_eq!(patch_sets[0].source, "$.repair");
+        assert_eq!(patch_sets[0].source, "$.edit");
         assert_eq!(patch_sets[0].repo, Some("/tmp/repo".to_string()));
         assert_eq!(patch_sets[0].workspace_clean_before, Some(false));
         assert_eq!(patch_sets[0].workspace_clean_after, Some(false));
@@ -2881,7 +2730,7 @@ mod tests {
             "iteration": 1,
             "completed": false,
             "outputs": {
-                "repair": {
+                "edit": {
                     "final_success": false,
                     "diagnostics": [{"path": "src/lib.rs", "line": 3}]
                 }
@@ -3013,12 +2862,12 @@ mod tests {
         let executions = vec![json!({
             "task_id": "fix",
             "title": "Fix math",
-            "recipe": "repair",
+            "recipe": "edit",
             "depends_on": ["inspect"],
             "completed": true,
             "acceptance": [{"id": "unit", "success": true, "output": {"large": "omitted"}}],
             "outputs": {
-                "repair": {
+                "edit": {
                     "target_path": "examples/math.js",
                     "final_success": true,
                     "patch_applied": true,
@@ -3045,7 +2894,7 @@ mod tests {
             Value::String("git-diff:examples/math.js".to_string())
         );
         assert_eq!(
-            memory["tasks"][0]["outputs"]["repair"]["final_success"],
+            memory["tasks"][0]["outputs"]["edit"]["final_success"],
             Value::Bool(true)
         );
         assert_eq!(memory["tasks"][0]["acceptance"][0].get("output"), None);
@@ -3060,7 +2909,7 @@ mod tests {
         let executions = vec![json!({
             "task_id": "fix",
             "outputs": {
-                "repair": {
+                "edit": {
                     "workspace_changed_files": [{"path": "examples/math.js"}],
                     "workspace_diff": {
                         "artifacts": [{"id": "git-diff:examples/math.js", "kind": "file_patch", "path": "examples/math.js"}]
@@ -3133,7 +2982,7 @@ mod tests {
             json!({
                 "id": "fix",
                 "depends_on": ["inspect"],
-                "recipe": "repair",
+                "recipe": "edit",
                 "input": {}
             }),
         ];
@@ -3166,10 +3015,7 @@ mod tests {
             Value::String("explore".to_string())
         );
         assert_eq!(task_budgets[1]["task_id"], Value::String("fix".to_string()));
-        assert_eq!(
-            task_budgets[1]["recipe"],
-            Value::String("repair".to_string())
-        );
+        assert_eq!(task_budgets[1]["recipe"], Value::String("edit".to_string()));
         assert_eq!(
             task_budgets[1]["depends_on"],
             Value::Array(vec![Value::String("inspect".to_string())])
@@ -3392,8 +3238,8 @@ mod tests {
                 },
                 task: "new".to_string(),
                 requested_recipe: None,
-                recipe: "repair".to_string(),
-                profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
+                recipe: "edit".to_string(),
+                profile: "examples/code-agent/edit.air-profile.yaml".to_string(),
                 pack: None,
                 input: json!({"task": "new"}),
                 completed: false,
@@ -3456,13 +3302,13 @@ mod tests {
             },
             task: "fix it".to_string(),
             requested_recipe: Some("auto".to_string()),
-            recipe: "repair".to_string(),
-            profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
+            recipe: "edit".to_string(),
+            profile: "examples/code-agent/edit.air-profile.yaml".to_string(),
             pack: Some(
                 code_session_turn_pack(
                     &pack,
-                    CodeRecipe::Repair,
-                    Path::new("examples/code-agent/repair-core.air-profile.yaml"),
+                    CodeRecipe::Edit,
+                    Path::new("examples/code-agent/edit.air-profile.yaml"),
                     Some(routing_decision),
                 )
                 .unwrap(),
@@ -3474,7 +3320,7 @@ mod tests {
             parts: Vec::new(),
             patch_sets: Vec::new(),
             recovery: None,
-            outputs: json!({"repair": {"final_success": false}}),
+            outputs: json!({"edit": {"final_success": false}}),
         });
 
         state.write(&path).unwrap();
@@ -3486,26 +3332,26 @@ mod tests {
         assert_eq!(roundtrip.turns[0].id, "turn-000001");
         assert_eq!(roundtrip.turns[0].time.created, 42);
         assert_eq!(roundtrip.turns[0].time.updated, 42);
-        assert_eq!(roundtrip.turns[0].recipe, "repair");
+        assert_eq!(roundtrip.turns[0].recipe, "edit");
         assert_eq!(
             roundtrip.turns[0].requested_recipe,
             Some("auto".to_string())
         );
         let pack = roundtrip.turns[0].pack.as_ref().unwrap();
         assert_eq!(pack.path, crate::code_pack::CODE_AGENT_PACK_PATH);
-        assert_eq!(pack.recipe, "repair");
+        assert_eq!(pack.recipe, "edit");
         assert_eq!(
             pack.default_profile,
-            "examples/code-agent/repair-core.air-profile.yaml"
+            "examples/code-agent/edit.air-profile.yaml"
         );
         assert!(!pack.profile_override);
         assert_eq!(
             serde_json::to_value(&pack.completion).unwrap()["any"][0]["equals"]["path"],
-            Value::String("/repair/final_success".to_string())
+            Value::String("/edit/final_success".to_string())
         );
         assert_eq!(
             serde_json::to_value(&pack.routing_decision).unwrap()["route_index"],
-            Value::Number(3.into())
+            Value::Number(0.into())
         );
         assert!(!roundtrip.turns[0].completed);
     }
@@ -3514,16 +3360,16 @@ mod tests {
     fn session_pack_marks_profile_overrides() {
         let pack = code_session_turn_pack(
             &load_code_agent_pack(None).unwrap(),
-            CodeRecipe::Repair,
-            Path::new("examples/code-agent/repair.air-profile.yaml"),
+            CodeRecipe::Edit,
+            Path::new("examples/code-agent/custom-edit.air-profile.yaml"),
             None,
         )
         .unwrap();
 
-        assert_eq!(pack.recipe, "repair");
+        assert_eq!(pack.recipe, "edit");
         assert_eq!(
             pack.default_profile,
-            "examples/code-agent/repair-core.air-profile.yaml"
+            "examples/code-agent/edit.air-profile.yaml"
         );
         assert!(pack.profile_override);
         assert!(pack.completion.is_some());
@@ -3603,29 +3449,6 @@ mod tests {
     }
 
     #[test]
-    fn build_recipe_requires_output() {
-        let error = build_input(CodeInputOptions {
-            task: "build a page".to_string(),
-            recipe: CodeRecipe::Build,
-            target: None,
-            test: None,
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
-            force_patch: false,
-        })
-        .unwrap_err();
-
-        assert!(error.to_string().contains("requires --output"));
-    }
-
-    #[test]
     fn builds_review_input() {
         let input = build_input(CodeInputOptions {
             task: "review search".to_string(),
@@ -3637,10 +3460,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec!["playwright".to_string()],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();
@@ -3676,10 +3495,6 @@ mod tests {
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            output: None,
-            brand: None,
-            product: None,
-            constraints: vec![],
             force_patch: false,
         })
         .unwrap();

@@ -408,10 +408,9 @@ fn task_is_read_only_exploration(task_terms: &BTreeSet<String>) -> bool {
         .any(|term| task_terms.contains(*term));
     let asks_for_mutation = [
         "fix",
-        "repair",
         "patch",
-        "refactor",
         "edit",
+        "change",
         "write",
         "build",
         "create",

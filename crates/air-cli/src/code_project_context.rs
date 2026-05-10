@@ -256,11 +256,11 @@ fn code_project_outputs_memory(outputs: &Value) -> Value {
             ],
         );
     }
-    if let Some(repair) = outputs.get("repair") {
+    if let Some(edit) = outputs.get("edit") {
         copy_selected_output_fields(
             &mut memory,
-            "repair",
-            repair,
+            "edit",
+            edit,
             &[
                 "target_path",
                 "initial_success",
@@ -273,29 +273,14 @@ fn code_project_outputs_memory(outputs: &Value) -> Value {
                 "summary",
             ],
         );
-        if let Some(diff) = repair.get("workspace_diff") {
+        if let Some(diff) = edit.get("workspace_diff") {
             copy_selected_output_fields(
                 &mut memory,
-                "repair_workspace_diff",
+                "edit_workspace_diff",
                 diff,
                 &["repo", "bytes", "truncated", "artifacts"],
             );
         }
-    }
-    if let Some(build) = outputs.get("build") {
-        copy_selected_output_fields(
-            &mut memory,
-            "build",
-            build,
-            &[
-                "path",
-                "bytes",
-                "test_success",
-                "audit_success",
-                "screenshots",
-                "revised",
-            ],
-        );
     }
     if memory.is_empty() {
         collect_summary_fields(outputs, "$", &mut memory);
@@ -348,20 +333,20 @@ fn code_project_changed_files(outputs: &Value) -> Vec<String> {
     let mut files = Vec::new();
     collect_path_values(
         outputs
-            .get("repair")
-            .and_then(|repair| repair.get("changed_files")),
+            .get("edit")
+            .and_then(|edit| edit.get("changed_files")),
         &mut files,
     );
     collect_path_values(
         outputs
-            .get("repair")
-            .and_then(|repair| repair.get("workspace_changed_files")),
+            .get("edit")
+            .and_then(|edit| edit.get("workspace_changed_files")),
         &mut files,
     );
     collect_path_values(
         outputs
-            .get("repair")
-            .and_then(|repair| repair.get("workspace_diff"))
+            .get("edit")
+            .and_then(|edit| edit.get("workspace_diff"))
             .and_then(|diff| diff.get("artifacts")),
         &mut files,
     );

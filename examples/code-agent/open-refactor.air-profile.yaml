@@ -1,5 +1,0 @@
-plan: code-open-refactor.air-plan.yaml
-store: module-store.air-store.yaml
-input_file: open-refactor.input.json
-model_config: model-fixtures.open-refactor.json
-tool_config: tools.core.json

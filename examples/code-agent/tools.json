@@ -16,9 +16,9 @@
           "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with allowlisted tests."
         },
         {
-          "id": "docs-repair-safety",
-          "title": "Repair safety",
-          "content": "Repair loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
+          "id": "docs-edit-safety",
+          "title": "Edit safety",
+          "content": "Edit loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
         },
         {
           "id": "docs-playwright-timeouts",
@@ -177,10 +177,7 @@
       "kind": "command_run",
       "capability": "code.test",
       "cwd": "../..",
-      "commands": {
-        "air_tools": ["cargo", "test", "-q", "-p", "air-tools"],
-        "air_tools_filter": ["cargo", "test", "-q", "-p", "air-tools", "{{test_filter}}"]
-      },
+      "commands": {},
       "parameters": {
         "test_filter": {
           "allow": "identifier",

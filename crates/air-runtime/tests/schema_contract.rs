@@ -63,6 +63,34 @@ impl ModelProvider for DispatchModels {
     }
 }
 
+struct NameArgsDispatchModels;
+
+impl ModelProvider for NameArgsDispatchModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "dispatcher");
+        Ok(json!({
+            "name": "docs.search",
+            "arguments": {
+                "query": input["text"]
+            }
+        }))
+    }
+}
+
+struct ToolArgsDispatchModels;
+
+impl ModelProvider for ToolArgsDispatchModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "dispatcher");
+        Ok(json!({
+            "tool": "docs.search",
+            "args": {
+                "query": input["text"]
+            }
+        }))
+    }
+}
+
 struct UnsafeDispatchModels;
 
 impl ModelProvider for UnsafeDispatchModels {
@@ -649,6 +677,44 @@ fn dispatches_model_selected_tool_with_runtime_governance() {
                 .meta
                 .as_ref()
                 .is_some_and(|meta| meta["tool"] == "docs.search")));
+}
+
+#[test]
+fn dispatches_common_name_args_tool_shape() {
+    let module = load_agent("tests/agents/tool-dispatch-name-args.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: NameArgsDispatchModels,
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("typed agent ir"))]),
+        )
+        .unwrap();
+
+    assert_eq!(result.outputs["result"]["query"], json!("typed agent ir"));
+    assert_eq!(result.outputs["result"]["call"], json!(1));
+}
+
+#[test]
+fn dispatches_common_tool_args_tool_shape() {
+    let module = load_agent("tests/agents/tool-dispatch-name-args.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: ToolArgsDispatchModels,
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("typed agent ir"))]),
+        )
+        .unwrap();
+
+    assert_eq!(result.outputs["result"]["query"], json!("typed agent ir"));
+    assert_eq!(result.outputs["result"]["call"], json!(1));
 }
 
 #[test]

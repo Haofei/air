@@ -3955,7 +3955,13 @@ fn call_command_run_tool(
     timeout_seconds: u64,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let command_name = required_input_string(name, input, "command")?;
+    let command_name = input
+        .get("command")
+        .or_else(|| input.get("test_command"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.command must be a string"))
+        })?;
     let Some(command) = commands.get(command_name) else {
         return Err(RuntimeError::Provider(format!(
             "tool {name} command {command_name} is not configured"

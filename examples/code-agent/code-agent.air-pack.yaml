@@ -5,20 +5,9 @@ agent:
 
 routing:
   auto:
-    - recipe: build
+    - recipe: edit
       when:
-        any_present: [output, brand, product, constraints]
-    - recipe: refactor
-      when:
-        task_contains_word: refactor
         all_present: [target, test]
-    - recipe: open-refactor
-      when:
-        task_contains_word: refactor
-        all_absent: [target, test]
-    - recipe: repair
-      when:
-        any_present: [test]
     - recipe: review
       when:
         any_present: [search_query, repo_query, required_terms]
@@ -34,7 +23,7 @@ recipes:
     intent: "Fallback read-only exploration profile used before CLI recipe inference."
     input:
       required: [task]
-      optional: [target, test, query, related, search_query, repo_query, required_terms, output, brand, product, constraints, force_patch]
+      optional: [target, test, query, related, search_query, repo_query, required_terms, force_patch]
     completion:
       any:
         - exists: /exploration
@@ -75,56 +64,14 @@ recipes:
         - all:
             - missing: /review/search_quality/sufficient
             - exists: /review
-  - id: repair
-    default_profile: repair-core.air-profile.yaml
-    intent: "Patch one bounded target and retest it."
+  - id: edit
+    default_profile: edit.air-profile.yaml
+    intent: "Run the unified bounded code edit loop over one known target and allowlisted test."
     input:
       required: [task, target, test]
       optional: [query, related, force_patch]
     completion:
       any:
         - equals:
-            path: /repair/final_success
-            value: true
-  - id: refactor
-    default_profile: refactor-core.air-profile.yaml
-    intent: "Behavior-preserving refactor of a known target and test."
-    input:
-      required: [task, target, test]
-      optional: [query, related, force_patch]
-    completion:
-      any:
-        - equals:
-            path: /repair/final_success
-            value: true
-  - id: open-refactor
-    default_profile: open-refactor.air-profile.yaml
-    intent: "Select one bounded refactor target, patch it, and retest it."
-    input:
-      required: [task]
-      optional: [query, test]
-    completion:
-      any:
-        - equals:
-            path: /repair/final_success
-            value: true
-  - id: build
-    default_profile: apple-build.air-profile.yaml
-    intent: "Build one bounded static page and verify it."
-    input:
-      required: [task, output]
-      optional: [brand, product, constraints]
-      defaults:
-        constraints:
-          - "single self-contained HTML file"
-          - "no external network assets"
-          - "responsive down to mobile width"
-          - "buttons and text must not overlap"
-    completion:
-      all:
-        - equals:
-            path: /build/test_success
-            value: true
-        - equals:
-            path: /build/audit_success
+            path: /edit/final_success
             value: true

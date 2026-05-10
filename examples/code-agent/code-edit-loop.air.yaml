@@ -1,0 +1,249 @@
+agent:
+  name: code-edit-loop-agent
+  version: 0.1.0
+  description: "Bounded opencode-style code edit loop: model chooses one declared tool per turn, AIR executes it, and every observation is traced."
+
+inputs:
+  task: string
+  query: string
+  target_path: string
+  target_search_pattern: string
+  related_files:
+    type: array
+    items: string
+  test_command: string
+  force_patch: boolean
+
+outputs:
+  edit:
+    type: object
+    required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
+    properties:
+      initial_success: boolean
+      final_success: boolean
+      patch_applied: boolean
+      changed_files:
+        type: array
+        items: string
+      workspace_changed_files:
+        type: array
+        items: string
+      preexisting_changed_files:
+        type: array
+        items:
+          type: object
+      workspace_diff: object
+      rationale: string
+
+requires:
+  capabilities: [task.progress, file.read, file.write, code.read, code.test]
+
+state:
+  phase:
+    type: enum
+    enum: [init, choose, act, summarize, done, failed]
+  observations:
+    type: array
+    items: object
+  decision:
+    type: object
+    required: [complete, tool_call, rationale]
+    properties:
+      complete: boolean
+      tool_call:
+        type: object
+        properties:
+          tool: string
+          input: object
+          name: string
+          args: object
+      rationale: string
+  observation:
+    type: object
+  edit:
+    type: object
+    required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
+    properties:
+      initial_success: boolean
+      final_success: boolean
+      patch_applied: boolean
+      changed_files:
+        type: array
+        items: string
+      workspace_changed_files:
+        type: array
+        items: string
+      preexisting_changed_files:
+        type: array
+        items:
+          type: object
+      workspace_diff: object
+      rationale: string
+
+tools:
+  - name: todo.write
+    capability: task.progress
+    timeout_ms: 10000
+  - name: todo.read
+    capability: task.progress
+    timeout_ms: 10000
+  - name: repo.search
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.context
+    capability: code.read
+    timeout_ms: 10000
+  - name: file.read
+    capability: file.read
+    timeout_ms: 10000
+  - name: file.read_many
+    capability: file.read
+    timeout_ms: 10000
+  - name: file.search
+    capability: file.read
+    timeout_ms: 10000
+  - name: file.ops
+    capability: file.write
+    timeout_ms: 10000
+  - name: diagnostic.context
+    capability: code.read
+    timeout_ms: 10000
+  - name: git.status
+    capability: code.read
+    timeout_ms: 10000
+  - name: git.diff
+    capability: code.read
+    timeout_ms: 10000
+  - name: test.run
+    capability: code.test
+    timeout_ms: 30000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 18
+  terminal: [done, failed]
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: approval
+          approval_for: [file.write]
+        - kind: set
+          values:
+            observations: []
+            phase: choose
+
+    - id: choose
+      when: phase == "choose"
+      actions:
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              target_search_pattern:
+                ref: target_search_pattern
+              related_files:
+                ref: related_files
+              test_command:
+                ref: test_command
+              force_patch:
+                ref: force_patch
+              observations:
+                ref: observations
+              allowed_tools:
+                array:
+                  - literal: repo.search
+                  - literal: repo.context
+                  - literal: file.read
+                  - literal: file.read_many
+                  - literal: file.search
+                  - literal: file.ops
+                  - literal: diagnostic.context
+                  - literal: git.status
+                  - literal: git.diff
+                  - literal: test.run
+              tool_policy:
+                literal:
+                  read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
+                  small_steps: "Choose exactly one tool per turn. Do not request whole large files."
+                  edits: "Use file.ops with kind=edit or kind=replace_lines for existing files. Use write only for new files."
+                  tests: "Use test.run with the supplied allowlisted test_command only."
+                  verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
+                  finish: "Return complete=true with tool_call={} only after the edit/no-op decision is verified."
+          output: decision
+          timeout_seconds: 45
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: act
+
+    - id: act
+      when: phase == "act" && decision.complete == false
+      actions:
+        - kind: tool_dispatch
+          input:
+            path: decision.tool_call
+          output: observation
+          timeout_seconds: 30
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: tool_dispatch
+              rationale:
+                path: decision.rationale
+              requested:
+                path: decision.tool_call
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: summarize
+      when: phase == "act" && decision.complete == true
+      actions:
+        - kind: model_call
+          model: code_edit_summarizer
+          input:
+            object:
+              task:
+                ref: task
+              target_path:
+                ref: target_path
+              test_command:
+                ref: test_command
+              force_patch:
+                ref: force_patch
+              observations:
+                ref: observations
+              final_decision:
+                ref: decision
+          output: edit
+          timeout_seconds: 45
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: edit
+
+policy:
+  max_model_calls: 8
+  max_tool_calls: 20
+  max_repeated_tool_calls: 4
+  require_approval: [file.write]

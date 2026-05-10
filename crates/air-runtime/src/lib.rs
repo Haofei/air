@@ -1910,13 +1910,24 @@ fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeErr
             "tool_dispatch input must be an object with fields tool and input".to_string(),
         ));
     };
-    let Some(tool) = object.get("tool").and_then(Value::as_str) else {
+    if let Some(tool) = object.get("tool").and_then(Value::as_str) {
+        let input = object
+            .get("input")
+            .or_else(|| object.get("args"))
+            .or_else(|| object.get("arguments"))
+            .cloned()
+            .unwrap_or_else(|| Value::Object(Map::new()));
+        return Ok((tool.to_string(), input));
+    }
+    let Some(tool) = object.get("name").and_then(Value::as_str) else {
         return Err(RuntimeError::SchemaViolation(
             "tool_dispatch input.tool must be a string".to_string(),
         ));
     };
     let input = object
-        .get("input")
+        .get("args")
+        .or_else(|| object.get("arguments"))
+        .or_else(|| object.get("input"))
         .cloned()
         .unwrap_or_else(|| Value::Object(Map::new()));
     Ok((tool.to_string(), input))

@@ -275,7 +275,7 @@ mod tests {
             &path,
             r#"{
               "fixtures": {
-                "page_builder": {
+                "html_fixture": {
                   "content": { "$file": "fixtures/page.html" }
                 }
               }
@@ -285,7 +285,7 @@ mod tests {
 
         let mut provider = ModelProviderChoice::from_config_file(path).unwrap();
         let output = provider
-            .call_model("page_builder", &json!({"ignored": true}))
+            .call_model("html_fixture", &json!({"ignored": true}))
             .unwrap();
         assert_eq!(output["content"], json!("<!doctype html>\n<html></html>\n"));
         let _ = fs::remove_dir_all(dir);
@@ -332,10 +332,21 @@ mod tests {
         let requirements = code_agent_model_output_requirements(&root);
         assert_eq!(
             requirements
-                .get("code_repairer")
+                .get("code_edit_decider")
                 .cloned()
                 .unwrap_or_default(),
-            BTreeSet::from(["operations".to_string(), "rationale".to_string()])
+            BTreeSet::from([
+                "complete".to_string(),
+                "rationale".to_string(),
+                "tool_call".to_string()
+            ])
+        );
+        assert!(
+            requirements
+                .get("code_edit_summarizer")
+                .is_some_and(|required| required.contains("final_success")
+                    && required.contains("patch_applied")),
+            "code_edit_summarizer prompt must track edit completion fields"
         );
 
         for (alias, required) in requirements {
@@ -356,31 +367,29 @@ mod tests {
                 );
             }
         }
-        let repair_prompt = config
+        let edit_prompt = config
             .models
-            .get("code_repairer")
+            .get("code_edit_decider")
             .and_then(|model| model.system_prompt.as_deref())
             .unwrap_or_default()
             .to_lowercase();
         assert!(
-            !repair_prompt.contains("exactly these keys: patch"),
-            "code_repairer prompt must not require the old patch-only schema"
+            !edit_prompt.contains("exactly these keys: patch"),
+            "code_edit_decider prompt must not require the old patch-only schema"
         );
         assert!(
-            !repair_prompt.contains("patch must be"),
-            "code_repairer prompt must not describe the old patch-only schema"
+            !edit_prompt.contains("patch must be"),
+            "code_edit_decider prompt must not describe the old patch-only schema"
         );
     }
 
     fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
         let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
         for relative in [
-            "examples/code-agent/code-build-page.air.yaml",
             "examples/code-agent/code-dynamic-explore.air.yaml",
+            "examples/code-agent/code-edit-loop.air.yaml",
             "examples/code-agent/code-explore.air.yaml",
             "examples/code-agent/code-project-plan.air.yaml",
-            "examples/code-agent/code-repair-context.air.yaml",
-            "examples/code-agent/code-repair.air.yaml",
             "examples/code-agent/code-review-analyze.air.yaml",
             "examples/code-agent/code-review.air.yaml",
         ] {

@@ -83,23 +83,7 @@ enum Command {
         #[arg(long = "required-term")]
         required_terms: Vec<String>,
 
-        /// Output file for build recipes.
-        #[arg(long)]
-        output: Option<PathBuf>,
-
-        /// Brand name for build recipes.
-        #[arg(long)]
-        brand: Option<String>,
-
-        /// Product name for build recipes. Defaults to --brand.
-        #[arg(long)]
-        product: Option<String>,
-
-        /// Build constraint. May be repeated.
-        #[arg(long = "constraint")]
-        constraints: Vec<String>,
-
-        /// Continue into patch generation even when the initial repair test already passes.
+        /// Tell the edit loop that a behavior-preserving change is intended even if validation already passes.
         #[arg(long)]
         force_patch: bool,
 
@@ -547,10 +531,6 @@ fn main() -> Result<()> {
             search_query,
             repo_query,
             required_terms,
-            output,
-            brand,
-            product,
-            constraints,
             force_patch,
             pack,
             profile,
@@ -581,10 +561,6 @@ fn main() -> Result<()> {
             search_query,
             repo_query,
             required_terms,
-            output,
-            brand,
-            product,
-            constraints,
             force_patch,
             pack,
             profile,
@@ -1378,14 +1354,9 @@ mod tests {
                 "recipe",
             ),
             (
-                "Fix a failing test using structured diagnostics, apply a bounded patch, and retest.",
-                "code.core_repair@0.1.0",
+                "Edit a failing test using structured diagnostics, apply a bounded patch, and retest.",
+                "code.edit_loop@0.1.0",
                 "recipe",
-            ),
-            (
-                "Create a polished static landing page and verify it with browser screenshots.",
-                "code.build_page@0.1.0",
-                "module",
             ),
             (
                 "Explore how command_run is implemented and identify relevant repository files.",
@@ -1683,17 +1654,17 @@ mod tests {
     }
 
     #[test]
-    fn code_command_accepts_minimal_typed_repair_input() {
+    fn code_command_accepts_minimal_typed_edit_input() {
         let cli = Cli::try_parse_from([
             "air",
             "code",
             "fix the failing add function and retest",
             "--target",
-            "examples/code-agent/repair-fixture/math.js",
+            "examples/code-agent/edit-fixture/math.js",
             "--test",
-            "repair_fixture_test",
+            "edit_fixture_test",
             "--related",
-            "examples/code-agent/repair-fixture/test.js",
+            "examples/code-agent/edit-fixture/test.js",
         ])
         .unwrap();
 
@@ -1716,61 +1687,18 @@ mod tests {
         assert_eq!(
             target,
             Some(std::path::PathBuf::from(
-                "examples/code-agent/repair-fixture/math.js"
+                "examples/code-agent/edit-fixture/math.js"
             ))
         );
-        assert_eq!(test, Some("repair_fixture_test".to_string()));
+        assert_eq!(test, Some("edit_fixture_test".to_string()));
         assert_eq!(
             related,
             vec![std::path::PathBuf::from(
-                "examples/code-agent/repair-fixture/test.js"
+                "examples/code-agent/edit-fixture/test.js"
             )]
         );
         assert_eq!(profile, None);
         assert!(!explain);
-    }
-
-    #[test]
-    fn code_command_accepts_build_recipe_input() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code",
-            "build a landing page",
-            "--recipe",
-            "build",
-            "--output",
-            "examples/apple-landing/index.html",
-            "--brand",
-            "Apple",
-            "--product",
-            "Apple Nova",
-            "--constraint",
-            "single HTML file",
-        ])
-        .unwrap();
-
-        let Command::Code {
-            recipe,
-            output,
-            brand,
-            product,
-            constraints,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code command");
-        };
-
-        assert_eq!(recipe, CodeRecipe::Build);
-        assert_eq!(
-            output,
-            Some(std::path::PathBuf::from(
-                "examples/apple-landing/index.html"
-            ))
-        );
-        assert_eq!(brand, Some("Apple".to_string()));
-        assert_eq!(product, Some("Apple Nova".to_string()));
-        assert_eq!(constraints, vec!["single HTML file".to_string()]);
     }
 
     #[test]
@@ -1818,19 +1746,19 @@ mod tests {
     }
 
     #[test]
-    fn code_command_accepts_refactor_recipe_input() {
+    fn code_command_accepts_edit_recipe_input() {
         let cli = Cli::try_parse_from([
             "air",
             "code",
-            "refactor sum while keeping tests passing",
+            "change sum while keeping tests passing",
             "--recipe",
-            "refactor",
+            "edit",
             "--target",
-            "examples/code-agent/refactor-fixture/math.js",
+            "examples/code-agent/edit-fixture/math.js",
             "--test",
-            "refactor_fixture_test",
+            "edit_fixture_test",
             "--related",
-            "examples/code-agent/refactor-fixture/test.js",
+            "examples/code-agent/edit-fixture/test.js",
         ])
         .unwrap();
 
@@ -1845,18 +1773,18 @@ mod tests {
             panic!("expected code command");
         };
 
-        assert_eq!(recipe, CodeRecipe::Refactor);
+        assert_eq!(recipe, CodeRecipe::Edit);
         assert_eq!(
             target,
             Some(std::path::PathBuf::from(
-                "examples/code-agent/refactor-fixture/math.js"
+                "examples/code-agent/edit-fixture/math.js"
             ))
         );
-        assert_eq!(test, Some("refactor_fixture_test".to_string()));
+        assert_eq!(test, Some("edit_fixture_test".to_string()));
         assert_eq!(
             related,
             vec![std::path::PathBuf::from(
-                "examples/code-agent/refactor-fixture/test.js"
+                "examples/code-agent/edit-fixture/test.js"
             )]
         );
     }
@@ -1868,9 +1796,9 @@ mod tests {
             "code",
             "fix the failing add function and retest",
             "--target",
-            "examples/code-agent/repair-fixture/math.js",
+            "examples/code-agent/edit-fixture/math.js",
             "--test",
-            "repair_fixture_test",
+            "edit_fixture_test",
             "--explain",
         ])
         .unwrap();
@@ -1893,9 +1821,9 @@ mod tests {
             "code",
             "fix the failing add function until tests pass",
             "--target",
-            "examples/code-agent/repair-fixture/math.js",
+            "examples/code-agent/edit-fixture/math.js",
             "--test",
-            "repair_fixture_test",
+            "edit_fixture_test",
             "--loop",
             "--max-iterations",
             "2",
@@ -2346,9 +2274,9 @@ modules:
 
         replay(ReplayOptions {
             trace: trace_path.clone(),
+            output: Some(output_path.clone()),
             specialize_run_plan: true,
             store: Some(store_path.clone()),
-            output: Some(output_path.clone()),
             identity_out: Some(identity_path.clone()),
         })
         .unwrap();
@@ -2430,9 +2358,9 @@ modules:
 
         replay(ReplayOptions {
             trace: trace_path.clone(),
+            output: Some(specialized_path.clone()),
             specialize_run_plan: true,
             store: Some(store_path.clone()),
-            output: Some(specialized_path.clone()),
             identity_out: Some(identity_path.clone()),
         })
         .unwrap();

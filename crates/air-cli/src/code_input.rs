@@ -16,14 +16,8 @@ pub(crate) enum CodeRecipe {
     Explore,
     /// Grounded code review with repository and external evidence.
     Review,
-    /// Core repair loop: explore, select context, patch, and retest.
-    Repair,
-    /// Behavior-preserving refactor loop: explore, patch intentionally, and retest.
-    Refactor,
-    /// Open-ended bounded refactor loop: explore, select one target/test, patch, and retest.
-    OpenRefactor,
-    /// Build one bounded static page and verify it.
-    Build,
+    /// Unified code edit loop: model-selected read/search/edit/test tools under AIR policy.
+    Edit,
 }
 
 pub(crate) struct CodeInputOptions {
@@ -36,10 +30,6 @@ pub(crate) struct CodeInputOptions {
     pub(crate) search_query: Option<String>,
     pub(crate) repo_query: Option<String>,
     pub(crate) required_terms: Vec<String>,
-    pub(crate) output: Option<PathBuf>,
-    pub(crate) brand: Option<String>,
-    pub(crate) product: Option<String>,
-    pub(crate) constraints: Vec<String>,
     pub(crate) force_patch: bool,
 }
 
@@ -63,10 +53,6 @@ pub(crate) fn build_input_with_pack(
         search_query,
         repo_query,
         required_terms,
-        output,
-        brand,
-        product,
-        constraints,
         force_patch,
     } = options;
 
@@ -79,10 +65,6 @@ pub(crate) fn build_input_with_pack(
         search_query.as_ref(),
         repo_query.as_ref(),
         &required_terms,
-        output.as_ref(),
-        brand.as_ref(),
-        product.as_ref(),
-        &constraints,
     )?;
 
     match recipe {
@@ -125,7 +107,7 @@ pub(crate) fn build_input_with_pack(
             input.insert("related_files".to_string(), path_array(related));
             Ok(input)
         }
-        CodeRecipe::Repair | CodeRecipe::Refactor => {
+        CodeRecipe::Edit => {
             let target = required_path(target, "--target", recipe)?;
             let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
@@ -143,87 +125,10 @@ pub(crate) fn build_input_with_pack(
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("test_command".to_string(), Value::String(test));
-            input.insert(
-                "force_patch".to_string(),
-                Value::Bool(force_patch || recipe == CodeRecipe::Refactor),
-            );
-            Ok(input)
-        }
-        CodeRecipe::OpenRefactor => {
-            let query = query.unwrap_or_else(|| task.clone());
-            let target_search_pattern = code_search_pattern(&query);
-            let allowed_test_commands = match test {
-                Some(test) => vec![test],
-                None => vec![
-                    "repair_fixture_test".to_string(),
-                    "repair_multifile_test".to_string(),
-                    "refactor_fixture_test".to_string(),
-                ],
-            };
-            let mut input = Map::new();
-            input.insert("task".to_string(), Value::String(task.clone()));
-            input.insert("query".to_string(), Value::String(query));
-            input.insert(
-                "target_search_pattern".to_string(),
-                Value::String(target_search_pattern),
-            );
-            input.insert(
-                "allowed_test_commands".to_string(),
-                string_array(allowed_test_commands),
-            );
-            Ok(input)
-        }
-        CodeRecipe::Build => {
-            let output = required_path(output, "--output", recipe)?;
-            let brand = brand.unwrap_or_else(|| "Product".to_string());
-            let product = product.unwrap_or_else(|| brand.clone());
-            let constraints = if constraints.is_empty() {
-                code_recipe_string_array_default(pack, recipe, "constraints")?
-            } else {
-                constraints
-            };
-            let mut input = Map::new();
-            input.insert("task".to_string(), Value::String(task));
-            input.insert(
-                "output_path".to_string(),
-                Value::String(path_to_input_string(output)),
-            );
-            input.insert("brand".to_string(), Value::String(brand));
-            input.insert("product".to_string(), Value::String(product));
-            input.insert("constraints".to_string(), string_array(constraints));
+            input.insert("force_patch".to_string(), Value::Bool(force_patch));
             Ok(input)
         }
     }
-}
-
-fn code_recipe_string_array_default(
-    pack: &CodeAgentPackContext,
-    recipe: CodeRecipe,
-    field: &str,
-) -> Result<Vec<String>> {
-    let pack_recipe = pack.recipe_for_id(recipe_name(recipe))?;
-    let Some(value) = pack_recipe.input.defaults.get(field) else {
-        return Ok(Vec::new());
-    };
-    let Some(items) = value.as_array() else {
-        bail!(
-            "code-agent pack {} recipe {} input default {field} must be an array of strings",
-            pack.path.display(),
-            recipe_name(recipe)
-        );
-    };
-    items
-        .iter()
-        .map(|item| {
-            item.as_str().map(ToString::to_string).with_context(|| {
-                format!(
-                    "code-agent pack {} recipe {} input default {field} must be an array of strings",
-                    pack.path.display(),
-                    recipe_name(recipe)
-                )
-            })
-        })
-        .collect()
 }
 
 fn required_path(value: Option<PathBuf>, flag: &str, recipe: CodeRecipe) -> Result<PathBuf> {
@@ -250,10 +155,7 @@ pub(crate) fn recipe_name(recipe: CodeRecipe) -> &'static str {
         CodeRecipe::Plan => "plan",
         CodeRecipe::Explore => "explore",
         CodeRecipe::Review => "review",
-        CodeRecipe::Repair => "repair",
-        CodeRecipe::Refactor => "refactor",
-        CodeRecipe::OpenRefactor => "open-refactor",
-        CodeRecipe::Build => "build",
+        CodeRecipe::Edit => "edit",
     }
 }
 
@@ -273,10 +175,6 @@ pub(crate) fn resolve_recipe(
     search_query: Option<&String>,
     repo_query: Option<&String>,
     required_terms: &[String],
-    output: Option<&PathBuf>,
-    brand: Option<&String>,
-    product: Option<&String>,
-    constraints: &[String],
 ) -> Result<CodeRecipeResolution> {
     if recipe != CodeRecipe::Auto {
         return Ok(CodeRecipeResolution {
@@ -291,10 +189,6 @@ pub(crate) fn resolve_recipe(
         search_query: search_query.is_some(),
         repo_query: repo_query.is_some(),
         required_terms: !required_terms.is_empty(),
-        output: output.is_some(),
-        brand: brand.is_some(),
-        product: product.is_some(),
-        constraints: !constraints.is_empty(),
     })?;
     let recipe = recipe_from_name(&routing_decision.recipe).with_context(|| {
         format!(
@@ -319,10 +213,6 @@ fn resolve_recipe_name(
     search_query: Option<&String>,
     repo_query: Option<&String>,
     required_terms: &[String],
-    output: Option<&PathBuf>,
-    brand: Option<&String>,
-    product: Option<&String>,
-    constraints: &[String],
 ) -> Result<CodeRecipe> {
     Ok(resolve_recipe(
         pack,
@@ -333,10 +223,6 @@ fn resolve_recipe_name(
         search_query,
         repo_query,
         required_terms,
-        output,
-        brand,
-        product,
-        constraints,
     )?
     .recipe)
 }
@@ -347,10 +233,7 @@ fn recipe_from_name(recipe: &str) -> Option<CodeRecipe> {
         "plan" => Some(CodeRecipe::Plan),
         "explore" => Some(CodeRecipe::Explore),
         "review" => Some(CodeRecipe::Review),
-        "repair" => Some(CodeRecipe::Repair),
-        "refactor" => Some(CodeRecipe::Refactor),
-        "open-refactor" => Some(CodeRecipe::OpenRefactor),
-        "build" => Some(CodeRecipe::Build),
+        "edit" => Some(CodeRecipe::Edit),
         _ => None,
     }
 }

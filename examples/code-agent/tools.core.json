@@ -16,9 +16,9 @@
           "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with allowlisted tests."
         },
         {
-          "id": "docs-repair-safety",
-          "title": "Repair safety",
-          "content": "Repair loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
+          "id": "docs-edit-safety",
+          "title": "Edit safety",
+          "content": "Edit loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
         }
       ]
     },
@@ -134,9 +134,7 @@
       "capability": "code.read",
       "base_dir": "../..",
       "allowed_test_commands": [
-        "repair_fixture_test",
-        "repair_multifile_test",
-        "refactor_fixture_test"
+        "edit_fixture_test"
       ]
     },
     "git.status": {
@@ -156,17 +154,9 @@
       "capability": "code.test",
       "cwd": "../..",
       "commands": {
-        "repair_fixture_test": [
+        "edit_fixture_test": [
           "node",
-          "examples/code-agent/repair-fixture/test.js"
-        ],
-        "repair_multifile_test": [
-          "node",
-          "examples/code-agent/repair-multifile/test.js"
-        ],
-        "refactor_fixture_test": [
-          "node",
-          "examples/code-agent/refactor-fixture/test.js"
+          "examples/code-agent/edit-fixture/test.js"
         ]
       },
       "timeout_seconds": 30,

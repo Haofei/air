@@ -912,11 +912,166 @@ struct FileOpsPendingFile {
     content: String,
 }
 
+fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
+    if input.get("operations").is_some() {
+        return normalize_file_ops_array_input(input, "operations");
+    }
+    if let Some(ops) = input.get("ops") {
+        let mut normalized = serde_json::Map::new();
+        normalized.insert(
+            "operations".to_string(),
+            normalize_file_ops_operations(ops)?,
+        );
+        if let Some(dry_run) = input.get("dry_run") {
+            normalized.insert("dry_run".to_string(), dry_run.clone());
+        }
+        return Ok(Value::Object(normalized));
+    }
+    let Some(kind) = input.get("kind").and_then(Value::as_str) else {
+        return Ok(input.clone());
+    };
+    let mut operation = serde_json::Map::new();
+    operation.insert("kind".to_string(), Value::String(kind.to_string()));
+    for field in [
+        "path",
+        "old_string",
+        "new_string",
+        "content",
+        "start_line",
+        "end_line",
+        "replace_all",
+        "match_strategy",
+    ] {
+        if let Some(value) = input.get(field) {
+            operation.insert(field.to_string(), value.clone());
+        }
+    }
+    if let Some(args) = input.get("args").or_else(|| input.get("arguments")) {
+        let Some(args) = args.as_object() else {
+            return Ok(input.clone());
+        };
+        merge_file_ops_args(&mut operation, args);
+    }
+    normalize_file_ops_operation_aliases(&mut operation);
+    let mut normalized = serde_json::Map::new();
+    normalized.insert(
+        "operations".to_string(),
+        Value::Array(vec![Value::Object(operation)]),
+    );
+    if let Some(dry_run) = input.get("dry_run") {
+        normalized.insert("dry_run".to_string(), dry_run.clone());
+    }
+    Ok(Value::Object(normalized))
+}
+
+fn normalize_file_ops_array_input(input: &Value, field: &str) -> Result<Value, RuntimeError> {
+    let Some(operations) = input.get(field) else {
+        return Ok(input.clone());
+    };
+    let mut normalized = input.clone();
+    if let Some(object) = normalized.as_object_mut() {
+        object.insert(
+            "operations".to_string(),
+            normalize_file_ops_operations(operations)?,
+        );
+    }
+    Ok(normalized)
+}
+
+fn normalize_file_ops_operations(operations: &Value) -> Result<Value, RuntimeError> {
+    let Some(items) = operations.as_array() else {
+        return Ok(operations.clone());
+    };
+    let mut normalized_items = Vec::with_capacity(items.len());
+    for item in items {
+        let Some(object) = item.as_object() else {
+            normalized_items.push(item.clone());
+            continue;
+        };
+        let mut operation = object.clone();
+        if let Some(args) = object
+            .get("args")
+            .or_else(|| object.get("arguments"))
+            .and_then(Value::as_object)
+        {
+            merge_file_ops_args(&mut operation, args);
+        }
+        normalize_file_ops_operation_aliases(&mut operation);
+        normalized_items.push(Value::Object(operation));
+    }
+    Ok(Value::Array(normalized_items))
+}
+
+fn merge_file_ops_args(
+    operation: &mut serde_json::Map<String, Value>,
+    args: &serde_json::Map<String, Value>,
+) {
+    for (key, value) in args {
+        operation
+            .entry(key.to_string())
+            .or_insert_with(|| value.clone());
+    }
+}
+
+fn normalize_file_ops_operation_aliases(operation: &mut serde_json::Map<String, Value>) {
+    let kind = operation.get("kind").and_then(Value::as_str);
+    if kind != Some("replace_lines") || operation.contains_key("new_string") {
+        return;
+    }
+    let value = if let Some(lines) = operation.get("new_lines").and_then(Value::as_array) {
+        let mut text = String::new();
+        for line in lines {
+            let Some(line) = line.as_str() else {
+                return;
+            };
+            text.push_str(line);
+            text.push('\n');
+        }
+        Some(Value::String(text))
+    } else {
+        operation
+            .get("replacement")
+            .or_else(|| operation.get("content"))
+            .cloned()
+    };
+    let Some(mut value) = value else {
+        return;
+    };
+    if let Some(text) = value.as_str() {
+        if !text.ends_with('\n') {
+            value = Value::String(format!("{text}\n"));
+        }
+    }
+    operation.insert("new_string".to_string(), value);
+}
+
+fn labeled_string_input_with_aliases<'a>(
+    name: &str,
+    input: &'a Value,
+    label: &str,
+    field: &str,
+    aliases: &[&str],
+) -> Result<&'a str, RuntimeError> {
+    if let Some(value) = optional_labeled_string_input(name, input, label, field)? {
+        return Ok(value);
+    }
+    for alias in aliases {
+        if let Some(value) = optional_labeled_string_input(name, input, label, alias)? {
+            return Ok(value);
+        }
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {name} {label}.{field} must be a string"
+    )))
+}
+
 pub(super) fn call_file_ops_tool(
     name: &str,
     input: &Value,
     options: FileOpsOptions<'_>,
 ) -> Result<Value, RuntimeError> {
+    let normalized_input = normalize_file_ops_input(input)?;
+    let input = &normalized_input;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
     let operations = input
         .get("operations")
@@ -979,8 +1134,13 @@ pub(super) fn call_file_ops_tool(
                 };
                 let old_string =
                     required_labeled_string_input(name, operation, &label, "old_string")?;
-                let new_string =
-                    required_labeled_string_input(name, operation, &label, "new_string")?;
+                let new_string = labeled_string_input_with_aliases(
+                    name,
+                    operation,
+                    &label,
+                    "new_string",
+                    &["replacement", "content"],
+                )?;
                 validate_file_edit_operation(name, &label, old_string, new_string)?;
                 let replace_all =
                     optional_labeled_bool_input(name, operation, &label, "replace_all")?
@@ -1104,8 +1264,13 @@ pub(super) fn call_file_ops_tool(
                 let start_line =
                     required_labeled_usize_input(name, operation, &label, "start_line")?;
                 let end_line = required_labeled_usize_input(name, operation, &label, "end_line")?;
-                let new_string =
-                    required_labeled_string_input(name, operation, &label, "new_string")?;
+                let new_string = labeled_string_input_with_aliases(
+                    name,
+                    operation,
+                    &label,
+                    "new_string",
+                    &["replacement", "content"],
+                )?;
                 let Some(line_match) = line_range_edit_match(&current, start_line, end_line) else {
                     return Ok(file_ops_failure_output(
                         name,

@@ -1,5 +1,0 @@
-plan: code-build-page.air-plan.yaml
-store: module-store.air-store.yaml
-input_file: apple-landing.input.json
-model_config: ../bigmodel-openai-compatible.json
-tool_config: tools.build.json

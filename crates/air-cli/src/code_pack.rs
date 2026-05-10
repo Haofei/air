@@ -51,10 +51,6 @@ pub(crate) struct CodeAgentRouteFacts {
     pub(crate) search_query: bool,
     pub(crate) repo_query: bool,
     pub(crate) required_terms: bool,
-    pub(crate) output: bool,
-    pub(crate) brand: bool,
-    pub(crate) product: bool,
-    pub(crate) constraints: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -75,10 +71,6 @@ pub(crate) struct CodeAgentInputFacts {
     pub(crate) search_query: bool,
     pub(crate) repo_query: bool,
     pub(crate) required_terms: bool,
-    pub(crate) output: bool,
-    pub(crate) brand: bool,
-    pub(crate) product: bool,
-    pub(crate) constraints: bool,
     pub(crate) force_patch: bool,
 }
 
@@ -132,7 +124,7 @@ mod tests {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
                 id: " ".to_string(),
-                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput::default(),
                 completion: None,
@@ -150,7 +142,7 @@ mod tests {
         let pack = CodeAgentPack {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
-                id: "repair".to_string(),
+                id: "edit".to_string(),
                 default_profile: PathBuf::new(),
                 intent: None,
                 input: CodeAgentRecipeInput::default(),
@@ -173,15 +165,15 @@ mod tests {
             routing: CodeAgentRouting::default(),
             recipes: vec![
                 CodeAgentPackRecipe {
-                    id: "repair".to_string(),
-                    default_profile: PathBuf::from("repair.air-profile.yaml"),
+                    id: "edit".to_string(),
+                    default_profile: PathBuf::from("edit.air-profile.yaml"),
                     intent: None,
                     input: CodeAgentRecipeInput::default(),
                     completion: None,
                 },
                 CodeAgentPackRecipe {
-                    id: "repair".to_string(),
-                    default_profile: PathBuf::from("other-repair.air-profile.yaml"),
+                    id: "edit".to_string(),
+                    default_profile: PathBuf::from("other-edit.air-profile.yaml"),
                     intent: None,
                     input: CodeAgentRecipeInput::default(),
                     completion: None,
@@ -193,7 +185,7 @@ mod tests {
             .expect_err("duplicate recipe ids should be rejected");
 
         assert!(
-            error.to_string().contains("duplicate recipe repair"),
+            error.to_string().contains("duplicate recipe edit"),
             "{error}"
         );
     }
@@ -204,28 +196,28 @@ mod tests {
             r#"
 all:
   - equals:
-      path: /build/test_success
+      path: /edit/final_success
       value: true
   - any:
       - equals:
-          path: /build/audit_success
+          path: /edit/patch_applied
           value: true
-      - exists: /build/manual_approval
+      - exists: /edit/manual_approval
 "#,
         )
         .unwrap();
 
         assert!(completion.is_complete(&serde_json::json!({
-            "build": {
-                "test_success": true,
-                "audit_success": false,
+            "edit": {
+                "final_success": true,
+                "patch_applied": false,
                 "manual_approval": {"by": "reviewer"}
             }
         })));
         assert!(!completion.is_complete(&serde_json::json!({
-            "build": {
-                "test_success": false,
-                "audit_success": true
+            "edit": {
+                "final_success": false,
+                "patch_applied": true
             }
         })));
     }
@@ -235,13 +227,13 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
-                id: "repair".to_string(),
-                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput::default(),
                 completion: Some(CodeAgentCompletion {
                     all: vec![CodeAgentCompletionRule {
-                        exists: Some("repair/final_success".to_string()),
+                        exists: Some("edit/final_success".to_string()),
                         ..CodeAgentCompletionRule::default()
                     }],
                     any: vec![],
@@ -260,8 +252,8 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
-                id: "repair".to_string(),
-                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput {
                     required: vec!["task".to_string()],
@@ -283,8 +275,8 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
-                id: "repair".to_string(),
-                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput {
                     required: vec!["task".to_string()],
@@ -309,8 +301,8 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
-                id: "build".to_string(),
-                default_profile: PathBuf::from("build.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput {
                     required: vec!["task".to_string()],
@@ -338,15 +330,15 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting::default(),
             recipes: vec![CodeAgentPackRecipe {
-                id: "build".to_string(),
-                default_profile: PathBuf::from("build.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput {
                     required: vec!["task".to_string()],
                     optional: vec![],
                     defaults: Map::from_iter([(
-                        "constraints".to_string(),
-                        Value::Array(vec![Value::String("responsive".to_string())]),
+                        "query".to_string(),
+                        Value::String("default query".to_string()),
                     )]),
                 },
                 completion: None,
@@ -364,7 +356,7 @@ all:
         let pack = load_code_agent_pack(None).unwrap();
 
         pack.validate_recipe_input_facts(
-            "repair",
+            "edit",
             &CodeAgentInputFacts {
                 task: true,
                 target: true,
@@ -381,7 +373,7 @@ all:
 
         let error = pack
             .validate_recipe_input_facts(
-                "repair",
+                "edit",
                 &CodeAgentInputFacts {
                     task: true,
                     test: true,
@@ -403,15 +395,15 @@ all:
 
         let decision = pack
             .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
-                task: "refactor provider".to_string(),
+                task: "edit provider".to_string(),
                 target: true,
                 test: true,
                 ..CodeAgentRouteFacts::default()
             })
             .unwrap();
 
-        assert_eq!(decision.recipe, "refactor");
-        assert_eq!(decision.route_index, 1);
+        assert_eq!(decision.recipe, "edit");
+        assert_eq!(decision.route_index, 0);
         assert!(!decision.fallback);
     }
 
@@ -428,7 +420,7 @@ all:
             .unwrap();
 
         assert_eq!(decision.recipe, "explore");
-        assert_eq!(decision.route_index, 6);
+        assert_eq!(decision.route_index, 3);
         assert!(decision.fallback);
     }
 
@@ -437,7 +429,7 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting {
                 auto: vec![CodeAgentAutoRoute {
-                    recipe: "repair".to_string(),
+                    recipe: "edit".to_string(),
                     fallback: false,
                     when: CodeAgentRouteWhen {
                         any_present: vec!["test".to_string()],
@@ -446,8 +438,8 @@ all:
                 }],
             },
             recipes: vec![CodeAgentPackRecipe {
-                id: "repair".to_string(),
-                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput::default(),
                 completion: None,
@@ -468,7 +460,7 @@ all:
         let pack = CodeAgentPack {
             routing: CodeAgentRouting {
                 auto: vec![CodeAgentAutoRoute {
-                    recipe: "repair".to_string(),
+                    recipe: "edit".to_string(),
                     fallback: true,
                     when: CodeAgentRouteWhen {
                         any_present: vec!["unknown_flag".to_string()],
@@ -477,8 +469,8 @@ all:
                 }],
             },
             recipes: vec![CodeAgentPackRecipe {
-                id: "repair".to_string(),
-                default_profile: PathBuf::from("repair.air-profile.yaml"),
+                id: "edit".to_string(),
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
                 intent: None,
                 input: CodeAgentRecipeInput::default(),
                 completion: None,
@@ -662,10 +654,6 @@ fn is_known_recipe_input_field(field: &str) -> bool {
             | "search_query"
             | "repo_query"
             | "required_terms"
-            | "output"
-            | "brand"
-            | "product"
-            | "constraints"
             | "force_patch"
     )
 }
@@ -715,15 +703,7 @@ fn validate_route_when(when: &CodeAgentRouteWhen, source: &str) -> Result<()> {
 fn is_known_route_field(field: &str) -> bool {
     matches!(
         field,
-        "target"
-            | "test"
-            | "search_query"
-            | "repo_query"
-            | "required_terms"
-            | "output"
-            | "brand"
-            | "product"
-            | "constraints"
+        "target" | "test" | "search_query" | "repo_query" | "required_terms"
     )
 }
 
@@ -933,10 +913,6 @@ impl CodeAgentRouteFacts {
             "search_query" => self.search_query,
             "repo_query" => self.repo_query,
             "required_terms" => self.required_terms,
-            "output" => self.output,
-            "brand" => self.brand,
-            "product" => self.product,
-            "constraints" => self.constraints,
             _ => false,
         }
     }
@@ -953,10 +929,6 @@ impl CodeAgentInputFacts {
             "search_query" => self.search_query,
             "repo_query" => self.repo_query,
             "required_terms" => self.required_terms,
-            "output" => self.output,
-            "brand" => self.brand,
-            "product" => self.product,
-            "constraints" => self.constraints,
             "force_patch" => self.force_patch,
             _ => false,
         }

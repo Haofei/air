@@ -9,7 +9,7 @@
           "Do not grant file.write capability to the planning step."
         ],
         "assumptions": [
-          "Project planning should run before explore, repair, or build when the user gives an open-ended project goal.",
+          "Project planning should run before explore, review, or edit when the user gives an open-ended project goal.",
           "The planner should cite repository and documentation artifacts instead of inventing project structure."
         ]
       },
@@ -208,7 +208,7 @@
         "todo:list"
       ],
       "next_steps": [
-        "Use project_plan.tasks as the input contract for bounded repair/build loops.",
+        "Use project_plan.tasks as the input contract for bounded edit loops.",
         "Add session fork/revert after the planner can name project milestones."
       ]
     },
@@ -237,8 +237,8 @@
           ]
         },
         {
-          "title": "The tool supports targeted repair loops",
-          "evidence": "Rendered argv and diagnostics are returned in the command_run output so downstream repair modules can run a focused test and inspect file/line failures.",
+          "title": "The tool supports targeted edit loops",
+          "evidence": "Rendered argv and diagnostics are returned in the command_run output so downstream edit modules can run a focused test and inspect file/line failures.",
           "source_ids": [
             "todo:list"
           ]
@@ -248,7 +248,7 @@
         "todo:list"
       ],
       "next_steps": [
-        "Use code.explore for open-ended repository questions before invoking code.repair or code.build_page.",
+        "Use code.explore for open-ended repository questions before invoking code.edit.",
         "Keep command aliases narrow and prefer parameter policies over raw shell access."
       ]
     },
@@ -284,26 +284,89 @@
         "This fixture output is intentionally static for offline regression."
       ]
     },
-    "code_repairer": {
-      "operations": [
+    "code_edit_decider": {
+      "$sequence": [
         {
-          "kind": "edit",
-          "path": "examples/code-agent/repair-fixture/math.js",
-          "old_string": "function add(a, b) {\n  return a - b;\n}",
-          "new_string": "function add(a, b) {\n  return a + b;\n}"
+          "complete": false,
+          "tool_call": {
+            "tool": "test.run",
+            "input": {
+              "command": "edit_fixture_test"
+            }
+          },
+          "rationale": "Run the allowlisted validation first to capture the current failure."
+        },
+        {
+          "complete": false,
+          "tool_call": {
+            "tool": "file.read",
+            "input": {
+              "path": "examples/code-agent/edit-fixture/math.js",
+              "line_numbers": true,
+              "max_bytes": 20000
+            }
+          },
+          "rationale": "Read the small target before selecting a file operation."
+        },
+        {
+          "complete": false,
+          "tool_call": {
+            "tool": "file.ops",
+            "input": {
+              "operations": [
+                {
+                  "kind": "replace_lines",
+                  "path": "examples/code-agent/edit-fixture/math.js",
+                  "start_line": 2,
+                  "end_line": 2,
+                  "new_string": "  return a + b;"
+                }
+              ]
+            }
+          },
+          "rationale": "The failing implementation subtracts on line 2; replace only that line."
+        },
+        {
+          "complete": false,
+          "tool_call": {
+            "tool": "test.run",
+            "input": {
+              "command": "edit_fixture_test"
+            }
+          },
+          "rationale": "Verify the edited implementation with the allowlisted test."
+        },
+        {
+          "complete": false,
+          "tool_call": {
+            "tool": "git.diff",
+            "input": {}
+          },
+          "rationale": "Inspect the workspace diff before finishing."
+        },
+        {
+          "complete": true,
+          "tool_call": {},
+          "rationale": "The edit was applied, validation passed, and the diff was inspected."
         }
-      ],
-      "rationale": "The failing diagnostic shows add(2, 3) returned -1 because the implementation subtracts. Replace subtraction with addition and keep the CommonJS export unchanged."
+      ]
     },
-    "code_repair_context_selector": {
-      "target_path": "examples/code-agent/repair-fixture/math.js",
-      "related_files": [
-        "examples/code-agent/repair-fixture/test.js"
+    "code_edit_summarizer": {
+      "initial_success": false,
+      "final_success": true,
+      "patch_applied": true,
+      "changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
       ],
-      "rationale": "The test fixture is the narrow related file needed to understand the failing add assertion before patching math.js."
-    },
-    "page_builder": {
-      "content": { "$file": "fixtures/apple-nova.html" }
+      "workspace_changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "preexisting_changed_files": [],
+      "workspace_diff": {
+        "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
+      },
+      "rationale": "The bounded tool loop read the target and test, applied a one-line replace_lines operation, and the allowlisted fixture test passed.",
+      "observations": []
     },
     "code_reviewer": {
       "summary": "Fixture review completed: the composed code-review workflow gathered evidence, routed it through the standard context module, and produced schema-valid grounded guidance.",
