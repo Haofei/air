@@ -22,6 +22,23 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair-mu
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/refactor-core.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/open-refactor.air-profile.yaml
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
+cp examples/code-agent/code-agent.air-pack.yaml target/generated/code-agent.air-pack.yaml
+cargo run -q -p air-cli -- code "explain explicit code-agent pack" \
+  --pack target/generated/code-agent.air-pack.yaml \
+  --recipe plan \
+  --query "code agent pack" \
+  --explain \
+  > target/generated/code_agent_pack_explain.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_pack_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+assert output["pack"]["path"] == "target/generated/code-agent.air-pack.yaml", output
+assert output["pack"]["recipe"] == "plan", output
+assert output["pack"]["default_profile"] == "examples/code-agent/project-plan.air-profile.yaml", output
+assert output["pack"]["profile_override"] is False, output
+PY
 
 echo "[code-agent] deterministic tool coverage"
 node --check scripts/playwright_search.cjs

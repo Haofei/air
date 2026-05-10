@@ -1,4 +1,4 @@
-use crate::code_pack::{default_profile_for_recipe, default_recipe_for_id, CODE_AGENT_PACK_PATH};
+use crate::code_pack::{load_code_agent_pack, CodeAgentPackContext};
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -54,6 +54,7 @@ pub(crate) struct CodeOptions {
     pub(crate) product: Option<String>,
     pub(crate) constraints: Vec<String>,
     pub(crate) force_patch: bool,
+    pub(crate) pack: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
@@ -105,6 +106,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         product,
         constraints,
         force_patch,
+        pack,
         profile,
         model_config,
         trace_out,
@@ -128,6 +130,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         max_estimated_model_calls,
         max_estimated_tool_calls,
     };
+    let pack = load_code_agent_pack(pack)?;
 
     let requested_recipe = recipe;
     let recipe = resolve_recipe(
@@ -143,7 +146,10 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         product.as_ref(),
         &constraints,
     );
-    let profile = profile.unwrap_or_else(|| default_profile(recipe));
+    let profile = match profile {
+        Some(profile) => profile,
+        None => default_profile(&pack, recipe)?,
+    };
     let mut input = build_input(CodeInputOptions {
         task,
         recipe,
@@ -177,6 +183,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         print_explain(CodePrintExplainOptions {
             requested_recipe,
             resolved_recipe: recipe,
+            pack: &pack,
             profile: &profile,
             input: &input,
             loop_enabled,
@@ -216,6 +223,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         let resume = session_state.as_ref().and_then(code_session_project_resume);
         run_code_project(CodeProjectOptions {
             plan_profile: profile.clone(),
+            pack: pack.clone(),
             input,
             model_config: model_config.clone(),
             trace_out: effective_trace_out.clone(),
@@ -319,7 +327,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .to_string(),
             recipe: recipe_name(recipe).to_string(),
             profile: path_ref_to_input_string(&profile),
-            pack: code_session_turn_pack(recipe, &profile),
+            pack: code_session_turn_pack(&pack, recipe, &profile),
             input: Value::Object(session_input),
             completed: code_outputs_complete(recipe, &outputs),
             trace_files: trace_files
@@ -757,14 +765,15 @@ impl CodeSessionState {
 }
 
 fn code_session_turn_pack(
+    pack: &CodeAgentPackContext,
     recipe: CodeRecipe,
     active_profile: &Path,
 ) -> Option<CodeSessionTurnPack> {
-    let recipe = default_recipe_for_id(recipe_name(recipe)).ok()?;
+    let recipe = pack.recipe_for_id(recipe_name(recipe)).ok()?;
     let default_profile = path_ref_to_input_string(&recipe.default_profile);
     let active_profile = path_ref_to_input_string(active_profile);
     Some(CodeSessionTurnPack {
-        path: CODE_AGENT_PACK_PATH.to_string(),
+        path: path_ref_to_input_string(&pack.path),
         recipe: recipe.id,
         profile_override: active_profile != default_profile,
         default_profile,
@@ -772,8 +781,12 @@ fn code_session_turn_pack(
     })
 }
 
-fn code_pack_metadata_value(recipe: CodeRecipe, active_profile: &Path) -> Value {
-    code_session_turn_pack(recipe, active_profile)
+fn code_pack_metadata_value(
+    pack: &CodeAgentPackContext,
+    recipe: CodeRecipe,
+    active_profile: &Path,
+) -> Value {
+    code_session_turn_pack(pack, recipe, active_profile)
         .and_then(|pack| serde_json::to_value(pack).ok())
         .unwrap_or(Value::Null)
 }
@@ -1366,6 +1379,7 @@ fn artifact_field_values(value: Option<&Value>, field: &str) -> Vec<String> {
 struct CodePrintExplainOptions<'a> {
     requested_recipe: CodeRecipe,
     resolved_recipe: CodeRecipe,
+    pack: &'a CodeAgentPackContext,
     profile: &'a Path,
     input: &'a Map<String, Value>,
     loop_enabled: bool,
@@ -1378,6 +1392,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
     let CodePrintExplainOptions {
         requested_recipe,
         resolved_recipe,
+        pack,
         profile,
         input,
         loop_enabled,
@@ -1386,7 +1401,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         budget_limits,
     } = options;
     let metadata = explain_metadata_for_profile(profile)?;
-    let pack_recipe = default_recipe_for_id(recipe_name(resolved_recipe))?;
+    let pack_recipe = pack.recipe_for_id(recipe_name(resolved_recipe))?;
     let pack_default_profile = path_ref_to_input_string(&pack_recipe.default_profile);
     let active_profile = path_ref_to_input_string(profile);
     let budget_iterations = if loop_enabled { max_iterations } else { 1 };
@@ -1403,7 +1418,7 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         "requested_recipe": recipe_name(requested_recipe),
         "resolved_recipe": recipe_name(resolved_recipe),
         "pack": {
-            "path": CODE_AGENT_PACK_PATH,
+            "path": path_ref_to_input_string(&pack.path),
             "recipe": pack_recipe.id,
             "default_profile": pack_default_profile,
             "profile_override": active_profile != pack_default_profile,
@@ -1577,6 +1592,7 @@ struct CodeLoopOptions {
 
 struct CodeProjectOptions {
     plan_profile: PathBuf,
+    pack: CodeAgentPackContext,
     input: Map<String, Value>,
     model_config: Option<PathBuf>,
     trace_out: Option<PathBuf>,
@@ -1712,7 +1728,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .iter()
         .map(|task| Value::String(task.id.clone()))
         .collect::<Vec<_>>();
-    let project_budget = code_project_budget_summary(&scheduled_tasks);
+    let project_budget = code_project_budget_summary(&options.pack, &scheduled_tasks);
     let task_budget_by_id = project_budget
         .get("tasks")
         .and_then(Value::as_array)
@@ -1753,7 +1769,7 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
         .iter()
         .map(|task| (*task).clone())
         .collect::<Vec<_>>();
-    let remaining_budget = code_project_budget_summary(&pending_task_values);
+    let remaining_budget = code_project_budget_summary(&options.pack, &pending_task_values);
     let (remaining_model_calls, remaining_tool_calls) = code_budget_value_counts(&remaining_budget);
     let budget_limit = code_budget_limit_status(
         remaining_model_calls,
@@ -1845,8 +1861,8 @@ fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
                 recipe_name(recipe)
             );
         }
-        let task_profile = default_profile(recipe);
-        let task_pack = code_pack_metadata_value(recipe, &task_profile);
+        let task_profile = default_profile(&options.pack, recipe)?;
+        let task_pack = code_pack_metadata_value(&options.pack, recipe, &task_profile);
         let task_result = run_plan_capture(RunPlanOptions {
             plan: None,
             profile: Some(task_profile),
@@ -2105,10 +2121,13 @@ fn code_project_task_schedule(tasks: &[Value]) -> Result<Vec<CodeProjectSchedule
     Ok(scheduled)
 }
 
-fn code_project_budget_summary(tasks: &[CodeProjectScheduledTask]) -> Value {
+fn code_project_budget_summary(
+    pack: &CodeAgentPackContext,
+    tasks: &[CodeProjectScheduledTask],
+) -> Value {
     let task_budgets = tasks
         .iter()
-        .map(code_project_task_budget)
+        .map(|task| code_project_task_budget(pack, task))
         .collect::<Vec<_>>();
     let max_estimated_model_calls = task_budgets
         .iter()
@@ -2143,7 +2162,7 @@ fn code_budget_value_counts(budget: &Value) -> (usize, usize) {
     (model_calls, tool_calls)
 }
 
-fn code_project_task_budget(task: &CodeProjectScheduledTask) -> Value {
+fn code_project_task_budget(pack: &CodeAgentPackContext, task: &CodeProjectScheduledTask) -> Value {
     let recipe = match task_recipe(&task.definition) {
         Ok(recipe) => recipe,
         Err(error) => {
@@ -2154,8 +2173,18 @@ fn code_project_task_budget(task: &CodeProjectScheduledTask) -> Value {
             });
         }
     };
-    let profile = default_profile(recipe);
-    let pack = code_pack_metadata_value(recipe, &profile);
+    let profile = match default_profile(pack, recipe) {
+        Ok(profile) => profile,
+        Err(error) => {
+            return json!({
+                "task_id": task.id.clone(),
+                "recipe": recipe_name(recipe),
+                "depends_on": task.depends_on.clone(),
+                "error": error.to_string(),
+            });
+        }
+    };
+    let pack = code_pack_metadata_value(pack, recipe, &profile);
     let metadata_profile = code_profile_metadata_path(&profile);
     match explain_metadata_for_profile(&metadata_profile) {
         Ok(metadata) => json!({
@@ -3492,8 +3521,8 @@ fn required_string(value: Option<String>, flag: &str, recipe: CodeRecipe) -> Res
     Ok(value)
 }
 
-fn default_profile(recipe: CodeRecipe) -> PathBuf {
-    default_profile_for_recipe(recipe_name(recipe)).unwrap_or_else(|error| panic!("{error:#}"))
+fn default_profile(pack: &CodeAgentPackContext, recipe: CodeRecipe) -> Result<PathBuf> {
+    pack.default_profile_for_recipe(recipe_name(recipe))
 }
 
 fn recipe_name(recipe: CodeRecipe) -> &'static str {
@@ -3609,7 +3638,7 @@ mod tests {
 
     #[test]
     fn code_agent_pack_declares_all_default_profiles() {
-        let pack = crate::code_pack::default_code_agent_pack().unwrap();
+        let pack = load_code_agent_pack(None).unwrap();
         let recipes = [
             CodeRecipe::Auto,
             CodeRecipe::Plan,
@@ -3622,9 +3651,9 @@ mod tests {
         ];
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        assert_eq!(pack.recipes.len(), recipes.len());
+        assert_eq!(pack.pack.recipes.len(), recipes.len());
         for recipe in recipes {
-            let profile = default_profile(recipe);
+            let profile = default_profile(&pack, recipe).unwrap();
             assert!(
                 workspace_root.join(&profile).exists(),
                 "default profile for {} does not exist: {}",
@@ -3632,7 +3661,7 @@ mod tests {
                 profile.display()
             );
             assert!(
-                pack.recipes.iter().any(|pack_recipe| {
+                pack.pack.recipes.iter().any(|pack_recipe| {
                     pack_recipe.id == recipe_name(recipe) && pack_recipe.default_profile == profile
                 }),
                 "pack is missing {} -> {}",
@@ -3968,13 +3997,23 @@ mod tests {
             "requested_recipe": recipe_name(CodeRecipe::Auto),
             "resolved_recipe": recipe_name(CodeRecipe::Repair),
             "pack": {
-                "path": CODE_AGENT_PACK_PATH,
+                "path": crate::code_pack::CODE_AGENT_PACK_PATH,
                 "recipe": "repair",
-                "default_profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
+                "default_profile": path_ref_to_input_string(
+                    &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Repair)
+                        .unwrap()
+                ),
                 "profile_override": false,
-                "intent": default_recipe_for_id("repair").unwrap().intent,
+                "intent": load_code_agent_pack(None)
+                    .unwrap()
+                    .recipe_for_id("repair")
+                    .unwrap()
+                    .intent,
             },
-            "profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
+            "profile": path_ref_to_input_string(
+                &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Repair)
+                    .unwrap()
+            ),
             "input": Value::Object(input),
         });
 
@@ -4725,7 +4764,8 @@ mod tests {
         ];
         let schedule = code_project_task_schedule(&tasks).unwrap();
 
-        let budget = code_project_budget_summary(&schedule);
+        let pack = load_code_agent_pack(None).unwrap();
+        let budget = code_project_budget_summary(&pack, &schedule);
         let task_budgets = budget["tasks"].as_array().unwrap();
         let model_total = task_budgets
             .iter()
@@ -5031,6 +5071,7 @@ mod tests {
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
             pack: Some(
                 code_session_turn_pack(
+                    &load_code_agent_pack(None).unwrap(),
                     CodeRecipe::Repair,
                     Path::new("examples/code-agent/repair-core.air-profile.yaml"),
                 )
@@ -5057,7 +5098,7 @@ mod tests {
         assert_eq!(roundtrip.turns[0].time.updated, 42);
         assert_eq!(roundtrip.turns[0].recipe, "repair");
         let pack = roundtrip.turns[0].pack.as_ref().unwrap();
-        assert_eq!(pack.path, CODE_AGENT_PACK_PATH);
+        assert_eq!(pack.path, crate::code_pack::CODE_AGENT_PACK_PATH);
         assert_eq!(pack.recipe, "repair");
         assert_eq!(
             pack.default_profile,
@@ -5070,6 +5111,7 @@ mod tests {
     #[test]
     fn session_pack_marks_profile_overrides() {
         let pack = code_session_turn_pack(
+            &load_code_agent_pack(None).unwrap(),
             CodeRecipe::Repair,
             Path::new("examples/code-agent/repair.air-profile.yaml"),
         )

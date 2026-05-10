@@ -95,6 +95,10 @@ enum Command {
         #[arg(long)]
         force_patch: bool,
 
+        /// Code-agent pack manifest. Defaults to examples/code-agent/code-agent.air-pack.yaml.
+        #[arg(long)]
+        pack: Option<PathBuf>,
+
         /// Coding-agent run profile. Defaults from --recipe.
         #[arg(long)]
         profile: Option<PathBuf>,
@@ -540,6 +544,7 @@ fn main() -> Result<()> {
             product,
             constraints,
             force_patch,
+            pack,
             profile,
             model_config,
             trace_out,
@@ -573,6 +578,7 @@ fn main() -> Result<()> {
             product,
             constraints,
             force_patch,
+            pack,
             profile,
             model_config,
             trace_out,
