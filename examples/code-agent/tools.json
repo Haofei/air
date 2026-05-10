@@ -33,6 +33,13 @@
       "base_dir": "../..",
       "max_bytes": 65536
     },
+    "file.read_many": {
+      "kind": "file_read_many",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_files": 8,
+      "max_bytes": 65536
+    },
     "repo.files": {
       "kind": "repo_files",
       "capability": "code.read",

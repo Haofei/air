@@ -226,6 +226,18 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    FileReadMany {
+        #[serde(default)]
+        capability: Option<String>,
+
+        base_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+
+        #[serde(default)]
+        max_files: Option<usize>,
+    },
     FileWrite {
         #[serde(default)]
         capability: Option<String>,
@@ -431,6 +443,7 @@ impl ToolConfig {
             | ToolConfig::WebFetch { capability, .. }
             | ToolConfig::PlaywrightSearch { capability, .. }
             | ToolConfig::FileRead { capability, .. }
+            | ToolConfig::FileReadMany { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
             | ToolConfig::FilePatch { capability, .. }
@@ -803,6 +816,21 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::FileReadMany {
+                base_dir,
+                max_bytes,
+                max_files,
+                ..
+            } => {
+                if base_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.base_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
             }
             ToolConfig::FileWrite {
                 base_dir,
@@ -1287,13 +1315,35 @@ impl ToolProvider for ConfigTools {
                 base_dir,
                 max_bytes,
             } => {
-                let output = call_file_read_tool(
+                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let output =
+                    call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))?;
+                if let Some(path) = output.get("path").and_then(Value::as_str) {
+                    self.remember_read_snapshot(Path::new(path))?;
+                }
+                Ok(output)
+            }
+            ToolConfig::FileReadMany {
+                capability: _,
+                base_dir,
+                max_bytes,
+                max_files,
+            } => {
+                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let output = call_file_read_many_tool(
                     name,
                     input,
-                    &resolve_config_path(&self.config_dir, &base_dir),
-                    max_bytes.unwrap_or(256 * 1024),
+                    &base_dir,
+                    max_bytes.unwrap_or(64 * 1024),
+                    max_files.unwrap_or(8),
                 )?;
-                if let Some(path) = output.get("path").and_then(Value::as_str) {
+                for path in output
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|file| file.get("path").and_then(Value::as_str))
+                {
                     self.remember_read_snapshot(Path::new(path))?;
                 }
                 Ok(output)
@@ -1541,6 +1591,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::WebFetch { capability, .. }
             | ToolConfig::PlaywrightSearch { capability, .. }
             | ToolConfig::FileRead { capability, .. }
+            | ToolConfig::FileReadMany { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
             | ToolConfig::FilePatch { capability, .. }
@@ -2120,6 +2171,88 @@ fn call_file_read_tool(
             }
         }],
     }))
+}
+
+fn call_file_read_many_tool(
+    name: &str,
+    input: &Value,
+    base_dir: &Path,
+    max_bytes: usize,
+    max_files: usize,
+) -> Result<Value, RuntimeError> {
+    let entries = file_read_many_entries(name, input)?;
+    if entries.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.files must contain at least one file"
+        )));
+    }
+    if entries.len() > max_files {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.files must contain at most {max_files} files"
+        )));
+    }
+
+    let mut files = Vec::with_capacity(entries.len());
+    let mut artifacts = Vec::new();
+    let mut total_bytes = 0usize;
+    let mut any_truncated = false;
+    for entry in entries {
+        let output = call_file_read_tool(name, &entry, base_dir, max_bytes)?;
+        total_bytes += output.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize;
+        any_truncated |= output
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if let Some(entry_artifacts) = output.get("artifacts").and_then(Value::as_array) {
+            artifacts.extend(entry_artifacts.iter().cloned());
+        }
+        files.push(output);
+    }
+
+    let file_count = files.len();
+    Ok(json!({
+        "files": files,
+        "file_count": file_count,
+        "bytes": total_bytes,
+        "truncated": any_truncated,
+        "artifacts": artifacts
+    }))
+}
+
+fn file_read_many_entries(name: &str, input: &Value) -> Result<Vec<Value>, RuntimeError> {
+    let Some(files_value) = input.get("files").or_else(|| input.get("paths")) else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.files must be an array"
+        )));
+    };
+    let files = files_value.as_array().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} input.files must be an array"))
+    })?;
+    files
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| {
+            if let Some(path) = entry.as_str() {
+                Ok(json!({ "path": path }))
+            } else if entry.is_object() {
+                let path = entry.get("path").and_then(Value::as_str).ok_or_else(|| {
+                    RuntimeError::Provider(format!(
+                        "tool {name} input.files[{index}].path must be a string"
+                    ))
+                })?;
+                if path.is_empty() {
+                    return Err(RuntimeError::Provider(format!(
+                        "tool {name} input.files[{index}].path must not be empty"
+                    )));
+                }
+                Ok(entry.clone())
+            } else {
+                Err(RuntimeError::Provider(format!(
+                    "tool {name} input.files[{index}] must be a string path or object"
+                )))
+            }
+        })
+        .collect()
 }
 
 fn numbered_content(content: &str, first_line: usize) -> String {
@@ -5424,6 +5557,84 @@ mod tests {
             .unwrap()
             .starts_with("file:"));
         assert_eq!(tools.tool_capability("file.read"), Some("file.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_many_reads_multiple_files_with_artifacts() {
+        let dir = temp_dir("air-tools-file-read-many");
+        fs::write(dir.join("one.txt"), "alpha\nbeta\n").unwrap();
+        fs::write(dir.join("two.txt"), "first\nneedle\nlast\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read_many": {
+                  "kind": "file_read_many",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_files": 3,
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.read_many",
+                &json!({
+                    "files": [
+                        "one.txt",
+                        {
+                            "path": "two.txt",
+                            "contains": "needle",
+                            "context_lines": 1,
+                            "line_numbers": true
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["file_count"], json!(2));
+        assert_eq!(output["files"][0]["content"], json!("alpha\nbeta\n"));
+        assert_eq!(output["files"][1]["match_line"], json!(2));
+        assert_eq!(
+            output["files"][1]["numbered_content"],
+            json!("00001| first\n00002| needle\n00003| last")
+        );
+        assert_eq!(output["artifacts"].as_array().unwrap().len(), 2);
+        assert_eq!(tools.tool_capability("file.read_many"), Some("file.read"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_read_many_rejects_more_than_configured_max_files() {
+        let dir = temp_dir("air-tools-file-read-many-max");
+        fs::write(dir.join("one.txt"), "one").unwrap();
+        fs::write(dir.join("two.txt"), "two").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read_many": {
+                  "kind": "file_read_many",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_files": 1
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let error = tools
+            .call_tool("file.read_many", &json!({"files": ["one.txt", "two.txt"]}))
+            .unwrap_err();
+
+        assert!(error.to_string().contains("at most 1 files"));
         let _ = fs::remove_dir_all(dir);
     }
 

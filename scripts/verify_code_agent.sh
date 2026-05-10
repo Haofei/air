@@ -16,6 +16,7 @@ node --check scripts/playwright_search.cjs
 node --check scripts/playwright_search_fixture_test.cjs
 node scripts/playwright_search_fixture_test.cjs
 cargo test -q -p air-tools file_read
+cargo test -q -p air-tools file_read_many
 cargo test -q -p air-tools file_patch
 cargo test -q -p air-tools file_edit
 cargo test -q -p air-tools stale_read
