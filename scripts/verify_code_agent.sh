@@ -13,6 +13,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.ai
 
 echo "[code-agent] deterministic tool coverage"
 cargo test -q -p air-tools file_patch
+cargo test -q -p air-tools file_edit
 cargo test -q -p air-tools stale_read
 cargo test -q -p air-tools git_status
 cargo test -q -p air-tools command_run_extracts_structured_diagnostics

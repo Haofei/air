@@ -1763,6 +1763,172 @@ fn require_fresh_read(
     Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EditMatchStrategy {
+    Exact,
+    LineTrimmed,
+    IndentationFlexible,
+}
+
+impl EditMatchStrategy {
+    fn from_input(tool_name: &str, input: &Value) -> Result<Self, RuntimeError> {
+        let Some(value) = optional_string_input(tool_name, input, "match_strategy")? else {
+            return Ok(Self::Exact);
+        };
+        match value {
+            "exact" => Ok(Self::Exact),
+            "line_trimmed" => Ok(Self::LineTrimmed),
+            "indentation_flexible" => Ok(Self::IndentationFlexible),
+            _ => Err(RuntimeError::Provider(format!(
+                "tool {tool_name} input.match_strategy must be one of exact, line_trimmed, indentation_flexible"
+            ))),
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exact => "exact",
+            Self::LineTrimmed => "line_trimmed",
+            Self::IndentationFlexible => "indentation_flexible",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct EditMatch {
+    start: usize,
+    end: usize,
+}
+
+fn find_edit_matches(
+    content: &str,
+    old_string: &str,
+    strategy: EditMatchStrategy,
+) -> Vec<EditMatch> {
+    match strategy {
+        EditMatchStrategy::Exact => content
+            .match_indices(old_string)
+            .map(|(start, value)| EditMatch {
+                start,
+                end: start + value.len(),
+            })
+            .collect(),
+        EditMatchStrategy::LineTrimmed => {
+            find_line_based_edit_matches(content, old_string, |line| line.trim().to_string())
+        }
+        EditMatchStrategy::IndentationFlexible => {
+            find_line_based_edit_matches(content, old_string, strip_common_indentation)
+        }
+    }
+}
+
+fn apply_edit_matches(
+    content: &str,
+    matches: &[EditMatch],
+    new_string: &str,
+    replace_all: bool,
+) -> String {
+    let selected = if replace_all {
+        matches.to_vec()
+    } else {
+        vec![matches[0]]
+    };
+    let mut updated = content.to_string();
+    for edit_match in selected.iter().rev() {
+        updated.replace_range(edit_match.start..edit_match.end, new_string);
+    }
+    updated
+}
+
+fn find_line_based_edit_matches<F>(content: &str, old_string: &str, normalize: F) -> Vec<EditMatch>
+where
+    F: Fn(&str) -> String,
+{
+    let content_lines = split_lines_with_offsets(content);
+    let mut search_lines = old_string.split('\n').collect::<Vec<_>>();
+    if search_lines.last() == Some(&"") {
+        search_lines.pop();
+    }
+    if search_lines.is_empty() || search_lines.len() > content_lines.len() {
+        return Vec::new();
+    }
+    let normalized_search = search_lines
+        .iter()
+        .map(|line| normalize(line))
+        .collect::<Vec<_>>();
+    let mut matches = Vec::new();
+    for start_line in 0..=content_lines.len() - search_lines.len() {
+        let mut matched = true;
+        for (offset, expected) in normalized_search.iter().enumerate() {
+            if normalize(content_lines[start_line + offset].text) != *expected {
+                matched = false;
+                break;
+            }
+        }
+        if matched {
+            matches.push(EditMatch {
+                start: content_lines[start_line].start,
+                end: content_lines[start_line + search_lines.len() - 1].end,
+            });
+        }
+    }
+    matches
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineSpan<'a> {
+    text: &'a str,
+    start: usize,
+    end: usize,
+}
+
+fn split_lines_with_offsets(content: &str) -> Vec<LineSpan<'_>> {
+    let mut lines = Vec::new();
+    let mut start = 0;
+    for segment in content.split_inclusive('\n') {
+        let end = start + segment.trim_end_matches('\n').len();
+        lines.push(LineSpan {
+            text: &content[start..end],
+            start,
+            end,
+        });
+        start += segment.len();
+    }
+    if start < content.len() || content.is_empty() {
+        lines.push(LineSpan {
+            text: &content[start..],
+            start,
+            end: content.len(),
+        });
+    }
+    lines
+}
+
+fn strip_common_indentation(text: &str) -> String {
+    let lines = text.split('\n').collect::<Vec<_>>();
+    let min_indent = lines
+        .iter()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.chars()
+                .take_while(|ch| *ch == ' ' || *ch == '\t')
+                .count()
+        })
+        .min()
+        .unwrap_or(0);
+    lines
+        .iter()
+        .map(|line| {
+            if line.trim().is_empty() {
+                String::new()
+            } else {
+                line.chars().skip(min_indent).collect::<String>()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 struct FileWriteOptions<'a> {
     base_dir: &'a Path,
     max_bytes: usize,
@@ -1883,6 +2049,7 @@ fn call_file_edit_tool(
             "tool {name} input.replace_all is true but allow_replace_all is false"
         )));
     }
+    let match_strategy = EditMatchStrategy::from_input(name, input)?;
 
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
     let candidate = base.join(input_path);
@@ -1898,23 +2065,22 @@ fn call_file_edit_tool(
 
     let content = fs::read_to_string(&path)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-    let matches = content.match_indices(old_string).count();
-    if matches == 0 {
+    let matches = find_edit_matches(&content, old_string, match_strategy);
+    if matches.is_empty() {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} input.old_string was not found"
+            "tool {name} input.old_string was not found with match_strategy={}",
+            match_strategy.as_str()
         )));
     }
-    if matches > 1 && !replace_all {
+    if matches.len() > 1 && !replace_all {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} input.old_string matched {matches} times; set replace_all=true only when all matches should change"
+            "tool {name} input.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
+            matches.len(),
+            match_strategy.as_str()
         )));
     }
 
-    let updated = if replace_all {
-        content.replace(old_string, new_string)
-    } else {
-        content.replacen(old_string, new_string, 1)
-    };
+    let updated = apply_edit_matches(&content, &matches, new_string, replace_all);
     let updated_bytes = updated.as_bytes();
     if updated_bytes.len() > max_bytes {
         return Err(RuntimeError::Provider(format!(
@@ -1927,7 +2093,8 @@ fn call_file_edit_tool(
     Ok(json!({
         "path": path.display().to_string(),
         "bytes": updated_bytes.len(),
-        "replacements": if replace_all { matches } else { 1 },
+        "replacements": if replace_all { matches.len() } else { 1 },
+        "match_strategy": match_strategy.as_str(),
         "artifacts": [{
             "id": format!("file-edit:{}", path.display()),
             "kind": "file_edit",
@@ -1937,15 +2104,17 @@ fn call_file_edit_tool(
                 .unwrap_or("file edit"),
             "uri": path.display().to_string(),
             "content": format!(
-                "edited {} replacement(s) in {}",
-                if replace_all { matches } else { 1 },
-                path.display()
+                "edited {} replacement(s) in {} using match_strategy={}",
+                if replace_all { matches.len() } else { 1 },
+                path.display(),
+                match_strategy.as_str()
             ),
             "metadata": {
                 "provider": "file_edit",
                 "path": path.display().to_string(),
                 "bytes": updated_bytes.len(),
-                "replacements": if replace_all { matches } else { 1 }
+                "replacements": if replace_all { matches.len() } else { 1 },
+                "match_strategy": match_strategy.as_str()
             }
         }]
     }))
@@ -2969,6 +3138,19 @@ fn required_input_string<'a>(
     })
 }
 
+fn optional_string_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    field: &str,
+) -> Result<Option<&'a str>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    value.as_str().map(Some).ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+    })
+}
+
 fn optional_positive_usize_input(
     tool_name: &str,
     input: &Value,
@@ -3658,6 +3840,110 @@ mod tests {
             fs::read_to_string(dir.join("note.txt")).unwrap(),
             "hello outside\n"
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_supports_explicit_line_trimmed_match_strategy() {
+        let dir = temp_dir("air-tools-file-edit-line-trimmed");
+        fs::write(
+            dir.join("note.txt"),
+            "function demo() {\n    return \"before\";\n}\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let exact_error = tools
+            .call_tool(
+                "file.edit",
+                &json!({
+                    "path": "note.txt",
+                    "old_string": "function demo() {\nreturn \"before\";\n}",
+                    "new_string": "function demo() {\n    return \"after\";\n}"
+                }),
+            )
+            .unwrap_err();
+        assert!(exact_error.to_string().contains("match_strategy=exact"));
+
+        let output = tools
+            .call_tool(
+                "file.edit",
+                &json!({
+                    "path": "note.txt",
+                    "old_string": "function demo() {\nreturn \"before\";\n}",
+                    "new_string": "function demo() {\n    return \"after\";\n}",
+                    "match_strategy": "line_trimmed"
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(output["match_strategy"], json!("line_trimmed"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "function demo() {\n    return \"after\";\n}\n"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_rejects_unknown_match_strategy() {
+        let dir = temp_dir("air-tools-file-edit-match-strategy");
+        fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.edit",
+                &json!({
+                    "path": "note.txt",
+                    "old_string": "AIR",
+                    "new_string": "Agent",
+                    "match_strategy": "semantic_guess"
+                }),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("input.match_strategy"));
         let _ = fs::remove_dir_all(dir);
     }
 
