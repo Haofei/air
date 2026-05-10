@@ -435,21 +435,37 @@ restore_code_command_fixture() {
   rm -f "$code_command_fixture_backup"
 }
 trap restore_code_command_fixture EXIT
+rm -f target/generated/code_agent_code_command.session.json
+rm -rf target/generated/code_agent_code_command.session.traces
 cargo run -q -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \
   --test repair_fixture_test \
   --related examples/code-agent/repair-fixture/test.js \
-  --trace-out target/generated/code_agent_code_command.trace.jsonl \
+  --session target/generated/code_agent_code_command.session.json \
   > target/generated/code_agent_code_command.output.json
 node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_code_command.post_test.log
 restore_code_command_fixture
 trap - EXIT
 "${PYTHON:-python3}" - <<'PY'
 import json
+from pathlib import Path
 
 with open("target/generated/code_agent_code_command.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
-with open("target/generated/code_agent_code_command.trace.jsonl", encoding="utf-8") as handle:
+with open("target/generated/code_agent_code_command.session.json", encoding="utf-8") as handle:
+    session = json.load(handle)
+assert len(session["turns"]) == 1, session
+turn = session["turns"][0]
+assert turn["trace_files"], turn
+assert Path(turn["trace_files"][0]).exists(), turn
+assert any(
+    part["kind"] == "tool_call"
+    and part.get("tool") == "file.patch"
+    and "examples/code-agent/repair-fixture/math.js" in part.get("files", [])
+    and "file_patch" in part.get("artifact_kinds", [])
+    for part in turn["parts"]
+), turn["parts"]
+with open(turn["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 
 assert output["exploration"]["relevant_files"], output

@@ -277,6 +277,12 @@ struct CodeSessionPart {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     approval_for: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    artifact_kinds: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     input_keys: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     output_keys: Vec<String>,
@@ -420,6 +426,9 @@ fn code_session_part_from_event(trace_file: &str, event: &TraceEvent) -> Option<
                     .collect()
             })
             .unwrap_or_default(),
+        files: output_files(event.output.as_ref()),
+        artifact_ids: artifact_field_values(event.output.as_ref(), "id"),
+        artifact_kinds: artifact_field_values(event.output.as_ref(), "kind"),
         input_keys: value_keys(event.input.as_ref()),
         output_keys: value_keys(event.output.as_ref()),
         error: event.error.clone(),
@@ -438,6 +447,57 @@ fn value_keys(value: Option<&Value>) -> Vec<String> {
         return Vec::new();
     };
     object.keys().cloned().collect()
+}
+
+fn output_files(value: Option<&Value>) -> Vec<String> {
+    let Some(Value::Object(object)) = value else {
+        return Vec::new();
+    };
+    let mut files = Vec::new();
+    if let Some(path) = object.get("path").and_then(Value::as_str) {
+        files.push(path.to_string());
+    }
+    if let Some(values) = object.get("files").and_then(Value::as_array) {
+        for value in values {
+            match value {
+                Value::String(path) => files.push(path.clone()),
+                Value::Object(file) => {
+                    if let Some(path) = file.get("path").and_then(Value::as_str) {
+                        files.push(path.to_string());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if let Some(values) = object.get("entries").and_then(Value::as_array) {
+        for value in values {
+            if let Some(path) = value.get("path").and_then(Value::as_str) {
+                files.push(path.to_string());
+            }
+        }
+    }
+    files.sort();
+    files.dedup();
+    files
+}
+
+fn artifact_field_values(value: Option<&Value>, field: &str) -> Vec<String> {
+    let Some(Value::Object(object)) = value else {
+        return Vec::new();
+    };
+    let Some(artifacts) = object.get("artifacts").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+    let mut values = artifacts
+        .iter()
+        .filter_map(|artifact| artifact.get(field))
+        .filter_map(Value::as_str)
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    values.sort();
+    values.dedup();
+    values
 }
 
 fn print_explain(
@@ -1268,7 +1328,11 @@ mod tests {
             rule: "analyze".to_string(),
             action: "model_call".to_string(),
             input: Some(json!({"task": "review", "context": {}})),
-            output: Some(json!({"summary": "ok"})),
+            output: Some(json!({
+                "summary": "ok",
+                "files": [{"path": "src/lib.rs"}],
+                "artifacts": [{"id": "artifact:1", "kind": "file_patch"}]
+            })),
             meta: Some(json!({"model": "code_reviewer"})),
             status: TraceStatus::Ok,
             error: None,
@@ -1281,6 +1345,9 @@ mod tests {
         assert_eq!(part.model, Some("code_reviewer".to_string()));
         assert!(part.input_keys.iter().any(|key| key == "task"));
         assert!(part.output_keys.iter().any(|key| key == "summary"));
+        assert_eq!(part.files, vec!["src/lib.rs"]);
+        assert_eq!(part.artifact_ids, vec!["artifact:1"]);
+        assert_eq!(part.artifact_kinds, vec!["file_patch"]);
         assert_eq!(part.status, "ok");
     }
 
