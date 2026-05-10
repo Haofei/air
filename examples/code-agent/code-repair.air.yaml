@@ -1,11 +1,14 @@
 agent:
   name: code-repair-agent
   version: 0.1.0
-  description: "Bounded coding repair agent: read one target file, run an allowlisted test, generate a unified diff from diagnostics, apply it through file.patch, retest, and optionally run one more bounded repair pass."
+  description: "Bounded coding repair agent: read one target file plus related context files, run an allowlisted test, generate a unified diff from diagnostics, apply it through file.patch, retest, and optionally run one more bounded repair pass."
 
 inputs:
   task: string
   target_path: string
+  related_files:
+    type: array
+    items: string
   test_command: string
 
 outputs:
@@ -39,6 +42,19 @@ state:
     properties:
       path: string
       content: string
+      artifacts:
+        type: array
+        items: object
+  related_context:
+    type: object
+    required: [files, file_count, bytes, truncated, artifacts]
+    properties:
+      files:
+        type: array
+        items: object
+      file_count: integer
+      bytes: integer
+      truncated: boolean
       artifacts:
         type: array
         items: object
@@ -261,6 +277,9 @@ tools:
   - name: file.patch
     capability: file.write
     timeout_ms: 10000
+  - name: file.read_many
+    capability: file.read
+    timeout_ms: 10000
   - name: diagnostic.context
     capability: code.read
     timeout_ms: 10000
@@ -296,6 +315,18 @@ workflow:
               line_numbers:
                 literal: true
           output: file_context
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: tool_call
+          tool: file.read_many
+          input:
+            object:
+              files:
+                ref: related_files
+              line_numbers:
+                literal: true
+          output: related_context
           timeout_seconds: 10
           retry:
             max_attempts: 1
@@ -366,6 +397,8 @@ workflow:
                 ref: target_path
               file_context:
                 ref: file_context
+              related_context:
+                ref: related_context
               diagnostics:
                 ref: test_results.diagnostics
               diagnostic_context:
@@ -533,6 +566,8 @@ workflow:
                 ref: target_path
               file_context:
                 ref: file_context_retry
+              related_context:
+                ref: related_context
               diagnostics:
                 ref: final_test_results.diagnostics
               diagnostic_context:
@@ -684,7 +719,7 @@ workflow:
           output: repair
 
 policy:
-  max_tool_calls: 12
+  max_tool_calls: 14
   max_model_calls: 2
   timeout_seconds: 360
 

@@ -1,5 +1,8 @@
 {
   "task": "fix the failing add function using the diagnostics from the allowlisted test",
   "target_path": "examples/code-agent/repair-fixture/math.js",
+  "related_files": [
+    "examples/code-agent/repair-fixture/test.js"
+  ],
   "test_command": "repair_fixture_test"
 }

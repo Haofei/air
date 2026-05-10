@@ -16,6 +16,8 @@ connect:
     to: repair.task
   - from: $input.target_path
     to: repair.target_path
+  - from: $input.related_files
+    to: repair.related_files
   - from: $input.test_command
     to: repair.test_command
 

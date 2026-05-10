@@ -361,8 +361,9 @@ external references, list repository files, search local code, gather automatic 
 snippets, inspect a target file and diff, run one allowlisted verification command, and ask a model
 for review findings that cite exact artifact ids. Build agents can generate a bounded artifact,
 write it through `file.write`, run an allowlisted smoke command, render browser screenshots, and
-perform one bounded revision from smoke-test or browser-audit feedback. Repair agents use
-diagnostics, source snippets, patch dry-runs, constrained patch apply, retest, and workspace status.
+perform one bounded revision from smoke-test or browser-audit feedback. Repair agents use a target
+file plus bounded related-file context, diagnostics, source snippets, patch dry-runs, constrained
+patch apply, retest, and workspace status.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 

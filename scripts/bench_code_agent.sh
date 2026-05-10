@@ -82,6 +82,7 @@ cargo run -q -p air-cli -- run-plan examples/code-agent/code-repair.air-plan.yam
   --input examples/code-agent/repair.input.json \
   --model-config examples/code-agent/model-fixtures.json \
   --tool-config examples/code-agent/tools.repair.json \
+  --trace-out target/generated/code-agent-bench/repair.trace.jsonl \
   > target/generated/code-agent-bench/repair.output.json
 node examples/code-agent/repair-fixture/test.js > target/generated/code-agent-bench/repair.post_test.log
 restore_fixture
@@ -111,6 +112,8 @@ with (root / "explore.output.json").open(encoding="utf-8") as handle:
     explore = json.load(handle)["exploration"]
 with (root / "repair.output.json").open(encoding="utf-8") as handle:
     repair = json.load(handle)["repair"]
+with (root / "repair.trace.jsonl").open(encoding="utf-8") as handle:
+    repair_trace = [json.loads(line) for line in handle if line.strip()]
 
 assert review["search_quality"]["sufficient"] is True
 assert review["findings"], review
@@ -121,6 +124,12 @@ assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
 changed_paths = [entry["path"] for entry in repair["changed_files"]]
 assert repair["target_path"] in changed_paths, repair
+assert any(
+    event.get("action") == "tool_call"
+    and event.get("meta", {}).get("tool") == "file.read_many"
+    and event.get("status") == "ok"
+    for event in repair_trace
+), repair_trace
 
 summary = {
     "routes": routes,

@@ -9,11 +9,11 @@ This example contains bounded AIR coding agents and one preferred composed revie
   `code.review_gather@0.1.0`, the shared `context.compact@0.1.0` standard module, and
   `code.review_analyze@0.1.0`.
 - `code.review@0.1.0` is the older monolithic review module kept for comparison.
-- `code.repair@0.1.0` reads a target file, runs an allowlisted test, uses structured diagnostics to
-  gather nearby source context, generates a unified diff, validates it with `file.patch` dry-run,
-  applies it through constrained `file.patch`, then retests with one bounded retry pass if the
-  first patch does not fix the test. It finishes by calling `git.status` so the returned summary
-  includes workspace cleanliness and changed files.
+- `code.repair@0.1.0` reads a target file plus bounded related files, runs an allowlisted test,
+  uses structured diagnostics to gather nearby source context, generates a unified diff, validates
+  it with `file.patch` dry-run, applies it through constrained `file.patch`, then retests with one
+  bounded retry pass if the first patch does not fix the test. It finishes by calling `git.status`
+  so the returned summary includes workspace cleanliness and changed files.
 - `code.build_page@0.1.0` generates one static HTML file, writes it through constrained `file.write`,
   runs an allowlisted smoke test, renders desktop/mobile screenshots through `browser.audit`, and
   gets one bounded revision pass if either the smoke test or browser audit fails. Its output includes
