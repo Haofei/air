@@ -86,6 +86,14 @@ Important fields:
 - `workflow.max_steps` bounds execution.
 - `policy` can add budgets such as `max_tool_calls`, `max_model_calls`, `timeout_seconds`, and `require_approval`.
 
+Use `tool_call` when the AIR module knows the exact tool statically. Use `tool_dispatch` when a
+model or prior tool emits a typed choice shaped like `{ "tool": "declared.tool", "input": {...} }`.
+The runtime still requires the selected tool to be declared in `tools`, checks the declared
+capability against `requires.capabilities` and the provider capability, enforces approval paths and
+`policy.max_tool_calls`, and records the selected tool in trace metadata. This is the bounded AIR
+version of an opencode-style plan-act-observe step: the model can choose the next action, but only
+inside the module's declared tool boundary.
+
 Object schemas allow undeclared fields by default for compatibility with provider metadata and evolving module contracts. Add `additional_properties: false` to a detailed object schema when the AIR VM and generated strict backends should reject undeclared fields.
 
 Conditions use AIR's small equality-only condition DSL. `&&` binds tighter than `||`; parentheses and numeric comparisons are not supported. See [condition_dsl.md](condition_dsl.md) for the formal grammar and limits.
@@ -295,6 +303,8 @@ AIR checks:
 - the provider-configured capability matches the module-declared capability;
 - `policy.max_tool_calls` is not exceeded.
 - when tool outputs register artifacts, later `sources`, `citations`, and `source_ids` in model or return outputs refer only to known artifact ids.
+- for `tool_dispatch`, the selected tool is one of the module's declared tools and receives only the
+  emitted `input` object.
 
 Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
 

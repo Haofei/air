@@ -555,6 +555,24 @@ impl Verifier {
                 self.verify_timeout(rule_id, "tool_call", *timeout_seconds);
                 self.verify_retry(rule_id, retry);
             }
+            StateAction::ToolDispatch {
+                input,
+                output,
+                timeout_seconds,
+                retry,
+            } => {
+                if tools_by_name.is_empty() {
+                    self.error(
+                        "AIR096",
+                        format!("tool_dispatch action in rule {rule_id} requires at least one declared tool"),
+                    );
+                }
+                self.verify_input_spec(rule_id, "tool_dispatch input", input, module);
+                self.verify_control_field_write(rule_id, "tool_dispatch output", output);
+                self.verify_state_ref(rule_id, "tool_dispatch output", output, module);
+                self.verify_timeout(rule_id, "tool_dispatch", *timeout_seconds);
+                self.verify_retry(rule_id, retry);
+            }
             StateAction::Approval { approval_for } => {
                 if approval_for.is_empty() {
                     self.error(
@@ -656,6 +674,25 @@ impl Verifier {
                                         "AIR073",
                                         format!(
                                             "tool_call action in rule {} calls capability {}, but not every reachable state_machine path includes approval first",
+                                            rule.id, capability
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        StateAction::ToolDispatch { .. } => {
+                            for capability in tools_by_name
+                                .values()
+                                .filter_map(|tool_spec| tool_spec.capability.as_ref())
+                            {
+                                if required.contains(capability)
+                                    && !approved.contains(capability)
+                                    && reported.insert((rule.id.clone(), capability.clone()))
+                                {
+                                    self.error(
+                                        "AIR073",
+                                        format!(
+                                            "tool_dispatch action in rule {} can call capability {}, but not every reachable state_machine path includes approval first",
                                             rule.id, capability
                                         ),
                                     );

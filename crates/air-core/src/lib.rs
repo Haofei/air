@@ -129,6 +129,14 @@ pub enum StateAction {
         #[serde(default)]
         retry: Option<RetryPolicy>,
     },
+    ToolDispatch {
+        input: InputSpec,
+        output: String,
+        timeout_seconds: u64,
+
+        #[serde(default)]
+        retry: Option<RetryPolicy>,
+    },
     Approval {
         #[serde(default)]
         approval_for: Vec<String>,

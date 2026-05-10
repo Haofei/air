@@ -595,6 +595,33 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
                 py_string(output_field)?
             ));
         }
+        StateAction::ToolDispatch {
+            input,
+            output: output_field,
+            ..
+        } => {
+            output.push_str(&format!("    dispatch_value = {}\n", input_expr(input)?));
+            output.push_str("    tool_name = dispatch_value.get(\"tool\") if isinstance(dispatch_value, dict) else None\n");
+            output.push_str("    if not isinstance(tool_name, str):\n");
+            output.push_str(
+                "        raise ValueError(\"tool_dispatch input.tool must be a string\")\n",
+            );
+            output.push_str("    tool_input = dispatch_value.get(\"input\", {})\n");
+            output.push_str("    result_value = call_tool(tool_name, tool_input)\n");
+            output.push_str(&format!(
+                "    _air_validate_output(AIR_MODULE, {}, result_value)\n",
+                py_string(output_field)?
+            ));
+            output.push_str(&format!(
+                "    updates[{}] = result_value\n",
+                py_string(output_field)?
+            ));
+            output.push_str(&format!(
+                "    working[{}] = updates[{}]\n",
+                py_string(output_field)?,
+                py_string(output_field)?
+            ));
+        }
         StateAction::Approval { approval_for } => {
             output.push_str(&format!(
                 "    request_approval({}, AIR_MODULE, working)\n",
@@ -1188,6 +1215,44 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     local_state[action["output"]] = result_value
                     elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
                     _air_emit_trace(module_id, step, rule_id, "tool_call", "ok", input_value=input_value, output_value=result_value, meta=_air_action_meta(action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=False))
+                    break
+            elif kind == "tool_dispatch":
+                dispatch_value = _air_eval_input(local_state, outputs, action["input"])
+                if not isinstance(dispatch_value, dict) or not isinstance(dispatch_value.get("tool"), str):
+                    raise ValueError("tool_dispatch input.tool must be a string")
+                dispatched_action = dict(action)
+                dispatched_action["tool"] = dispatch_value["tool"]
+                try:
+                    _air_validate_tool_capability(module, dispatched_action)
+                except Exception as error:
+                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", meta={"tool": dispatch_value["tool"]}, error=str(error))
+                    raise
+                input_value = dispatch_value.get("input", {})
+                retry_policy = action.get("retry") or {}
+                max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
+                for attempt in range(1, max_attempts + 1):
+                    limit = module.get("policy", {}).get("max_tool_calls")
+                    if limit is not None and tool_calls + 1 > int(limit):
+                        error = RuntimeError(f"policy.max_tool_calls exceeded: limit={limit} attempted={tool_calls + 1}")
+                        _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", input_value=input_value, meta=_air_action_meta(dispatched_action, attempt=attempt, max_attempts=max_attempts, will_retry=False), error=str(error))
+                        raise error
+                    tool_calls += 1
+                    action_started_at = time.monotonic()
+                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch_start", "ok", input_value=input_value, meta=_air_action_meta(dispatched_action, attempt=attempt, max_attempts=max_attempts))
+                    result_value = None
+                    try:
+                        result_value = call_tool(dispatch_value["tool"], input_value)
+                        _air_check_action_timeout("tool_dispatch", action["timeout_seconds"], action_started_at)
+                        _air_validate_output(module, action["output"], result_value)
+                    except Exception as error:
+                        elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
+                        _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", input_value=input_value, output_value=locals().get("result_value"), meta=_air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=attempt != max_attempts), error=str(error))
+                        if attempt == max_attempts:
+                            raise
+                        continue
+                    local_state[action["output"]] = result_value
+                    elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
+                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "ok", input_value=input_value, output_value=result_value, meta=_air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=False))
                     break
             elif kind == "approval":
                 try:
@@ -1903,6 +1968,19 @@ mod tests {
         assert!(code.contains("request_approval([\"production.deploy\"], AIR_MODULE, working)"));
         assert!(code.contains("approval provider is not wired"));
         assert!(code.contains("approval denied for"));
+    }
+
+    #[test]
+    fn lowers_tool_dispatch_to_langgraph_runtime() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let module =
+            air_parser::parse_air_file(root.join("tests/agents/tool-dispatch.air.yaml")).unwrap();
+
+        let code = lower_module(&module).unwrap();
+
+        assert!(code.contains("tool_name = dispatch_value.get(\"tool\")"));
+        assert!(code.contains("result_value = call_tool(tool_name, tool_input)"));
+        assert!(code.contains("tool_dispatch input.tool must be a string"));
     }
 
     #[test]

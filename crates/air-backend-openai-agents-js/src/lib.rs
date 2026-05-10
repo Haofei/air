@@ -883,6 +883,43 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
             if (attempt === maxAttempts) throw error;
           }
         }
+      } else if (action.kind === 'tool_dispatch') {
+        const dispatchValue = evalInput(localState, outputs, action.input);
+        if (!dispatchValue || typeof dispatchValue !== 'object' || Array.isArray(dispatchValue) || typeof dispatchValue.tool !== 'string') {
+          throw new Error('tool_dispatch input.tool must be a string');
+        }
+        const dispatchedAction = { ...action, tool: dispatchValue.tool };
+        try {
+          validateToolCapability(module, dispatchedAction, toolConfig);
+        } catch (error) {
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', meta: { tool: dispatchValue.tool }, error: String(error?.message ?? error) });
+          throw error;
+        }
+        const inputValue = dispatchValue.input ?? {};
+        const maxAttempts = Math.max(1, Number(action.retry?.max_attempts ?? 1));
+        for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+          const limit = module.policy?.max_tool_calls;
+          if (limit != null && toolCalls + 1 > Number(limit)) {
+            const error = new Error(`policy.max_tool_calls exceeded: limit=${limit} attempted=${toolCalls + 1}`);
+            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', input: inputValue, meta: actionMeta(dispatchedAction, { attempt, maxAttempts, willRetry: false }), error: error.message });
+            throw error;
+          }
+          toolCalls += 1;
+          const actionStartedAt = Date.now();
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch_start', status: 'ok', input: inputValue, meta: actionMeta(dispatchedAction, { attempt, maxAttempts }) });
+          let resultValue;
+          try {
+            resultValue = await callTool(toolConfig, dispatchValue.tool, inputValue);
+            checkActionTimeout('tool_dispatch', action.timeout_seconds, actionStartedAt);
+            validateOutput(module, action.output, resultValue);
+            localState[action.output] = resultValue;
+            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'ok', input: inputValue, output: resultValue, meta: actionMeta(dispatchedAction, { elapsedMs: Date.now() - actionStartedAt, attempt, maxAttempts, willRetry: false }) });
+            break;
+          } catch (error) {
+            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', input: inputValue, output: resultValue, meta: actionMeta(dispatchedAction, { elapsedMs: Date.now() - actionStartedAt, attempt, maxAttempts, willRetry: attempt !== maxAttempts }), error: String(error?.message ?? error) });
+            if (attempt === maxAttempts) throw error;
+          }
+        }
       } else if (action.kind === 'approval') {
         try {
           const decision = await requestApproval(toolConfig, module, action, localState);
@@ -1476,6 +1513,17 @@ mod tests {
         assert!(code.contains("dynamic_fanout"));
         assert!(code.contains("spec.min_items != null"));
         assert!(code.contains("spec.max_items != null"));
+    }
+
+    #[test]
+    fn strict_runtime_supports_tool_dispatch_actions() {
+        let mut code = String::new();
+        push_strict_js_runtime(&mut code);
+
+        assert!(code.contains("action.kind === 'tool_dispatch'"));
+        assert!(code.contains("tool_dispatch input.tool must be a string"));
+        assert!(code.contains("await callTool(toolConfig, dispatchValue.tool, inputValue)"));
+        assert!(code.contains("action: 'tool_dispatch_start'"));
     }
 
     #[test]

@@ -461,6 +461,7 @@ fn estimate_module_call_budget(module: &air_core::AirModule) -> CallBudget {
                 .flat_map(|rule| &rule.actions)
                 .map(|action| match action {
                     StateAction::ToolCall { retry, .. } => retry_attempts(retry),
+                    StateAction::ToolDispatch { retry, .. } => retry_attempts(retry),
                     _ => 0,
                 })
                 .sum::<usize>()

@@ -62,6 +62,18 @@ fn accepts_append_actions_to_state_arrays() {
 }
 
 #[test]
+fn accepts_tool_dispatch_actions() {
+    let module = parse_air_file("../../tests/agents/tool-dispatch.air.yaml").unwrap();
+    let report = verify(&module);
+
+    assert!(
+        report.is_success(),
+        "expected success, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_state_machine_approval_gate() {
     let module = parse_air_file("../../tests/agents/approval-gate.air.yaml").unwrap();
     let report = verify(&module);
@@ -69,6 +81,26 @@ fn accepts_state_machine_approval_gate() {
     assert!(
         report.is_success(),
         "expected success, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn rejects_tool_dispatch_without_approval_path_for_required_capability() {
+    let mut module = parse_air_file("../../tests/agents/tool-dispatch.air.yaml").unwrap();
+    module
+        .policy
+        .require_approval
+        .push("retrieval.local".to_string());
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR073"),
+        "expected AIR073, got {:?}",
         report.diagnostics
     );
 }

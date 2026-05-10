@@ -49,6 +49,20 @@ impl ToolProvider for CountingTools {
     }
 }
 
+struct DispatchModels;
+
+impl ModelProvider for DispatchModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "dispatcher");
+        Ok(json!({
+            "tool": "docs.search",
+            "input": {
+                "query": input["text"]
+            }
+        }))
+    }
+}
+
 struct TimeoutRecordingModels {
     seen: Rc<RefCell<Option<Duration>>>,
 }
@@ -519,6 +533,41 @@ fn enforces_max_tool_calls_policy() {
         }
     ));
     assert_eq!(vm.tools.calls, 1);
+}
+
+#[test]
+fn dispatches_model_selected_tool_with_runtime_governance() {
+    let module = load_agent("tests/agents/tool-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: DispatchModels,
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("typed agent ir"))]),
+        )
+        .unwrap();
+
+    assert_eq!(result.outputs["result"]["query"], json!("typed agent ir"));
+    assert_eq!(result.outputs["result"]["call"], json!(1));
+    assert!(result
+        .trace
+        .iter()
+        .any(|event| event.action == "tool_dispatch_start"
+            && event
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["tool"] == "docs.search")));
+    assert!(result
+        .trace
+        .iter()
+        .any(|event| event.action == "tool_dispatch"
+            && event
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["tool"] == "docs.search")));
 }
 
 #[test]

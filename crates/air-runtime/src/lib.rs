@@ -1,5 +1,6 @@
 use air_core::{
-    validate_value_against_type, AirModule, Expr, InputSpec, StateAction, TypeSpec, Workflow,
+    validate_value_against_type, AirModule, Expr, InputSpec, RetryPolicy, StateAction, TypeSpec,
+    Workflow,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -815,157 +816,38 @@ where
                 retry,
                 ..
             } => {
-                reject_control_field_write("tool_call", output)?;
-                if let Err(error) = validate_tool_capability(context.module, tool, &self.tools) {
-                    context.push_event_with_meta(
-                        "tool_call",
-                        None,
-                        None,
-                        Some(json!({"tool": tool})),
-                        Err(error.to_string()),
-                    );
-                    return Err(error);
-                }
                 let input = resolve_input(context.state, context.outputs, input)?;
-                let max_attempts = retry
-                    .as_ref()
-                    .map(|retry| retry.max_attempts)
-                    .unwrap_or(1)
-                    .max(1);
-                for attempt in 1..=max_attempts {
-                    if let Some(limit) = context.module.policy.max_tool_calls {
-                        let attempted = *context.tool_calls + 1;
-                        if attempted > limit {
-                            let error = RuntimeError::ToolCallLimitExceeded { limit, attempted };
-                            context.push_event_with_meta(
-                                "tool_call",
-                                Some(input),
-                                None,
-                                Some(tool_call_result_meta(
-                                    tool,
-                                    attempt,
-                                    max_attempts,
-                                    output,
-                                    *timeout_seconds,
-                                    0,
-                                    false,
-                                )),
-                                Err(error.to_string()),
-                            );
-                            return Err(error);
-                        }
-                    }
-                    *context.tool_calls += 1;
-                    context.push_event_with_meta(
-                        "tool_call_start",
-                        Some(input.clone()),
-                        None,
-                        Some(tool_call_meta(
-                            tool,
-                            attempt,
-                            max_attempts,
-                            output,
-                            *timeout_seconds,
-                        )),
-                        Ok(()),
-                    );
-                    let attempt_started_at = Instant::now();
-                    let result = match self.tools.call_tool_with_timeout(
+                self.execute_tool_call(
+                    context,
+                    ToolExecution {
+                        action_name: "tool_call",
                         tool,
-                        &input,
-                        Duration::from_secs(*timeout_seconds),
-                    ) {
-                        Ok(result) => result,
-                        Err(error) => {
-                            let is_final_attempt = attempt == max_attempts;
-                            context.push_event_with_meta(
-                                "tool_call",
-                                Some(input.clone()),
-                                None,
-                                Some(tool_call_result_meta(
-                                    tool,
-                                    attempt,
-                                    max_attempts,
-                                    output,
-                                    *timeout_seconds,
-                                    attempt_started_at.elapsed().as_millis(),
-                                    !is_final_attempt,
-                                )),
-                                Err(error.to_string()),
-                            );
-                            if is_final_attempt {
-                                return Err(error);
-                            }
-                            continue;
-                        }
-                    };
-                    if let Some(error) =
-                        action_timeout_error("tool_call", *timeout_seconds, attempt_started_at)
-                    {
-                        let is_final_attempt = attempt == max_attempts;
-                        context.push_event_with_meta(
-                            "tool_call",
-                            Some(input.clone()),
-                            Some(result),
-                            Some(tool_call_result_meta(
-                                tool,
-                                attempt,
-                                max_attempts,
-                                output,
-                                *timeout_seconds,
-                                attempt_started_at.elapsed().as_millis(),
-                                !is_final_attempt,
-                            )),
-                            Err(error.to_string()),
-                        );
-                        if is_final_attempt {
-                            return Err(error);
-                        }
-                        continue;
-                    }
-                    if let Err(error) = validate_output(context.module, output, &result) {
-                        let is_final_attempt = attempt == max_attempts;
-                        context.push_event_with_meta(
-                            "tool_call",
-                            Some(input.clone()),
-                            Some(result),
-                            Some(tool_call_result_meta(
-                                tool,
-                                attempt,
-                                max_attempts,
-                                output,
-                                *timeout_seconds,
-                                attempt_started_at.elapsed().as_millis(),
-                                !is_final_attempt,
-                            )),
-                            Err(error.to_string()),
-                        );
-                        if is_final_attempt {
-                            return Err(error);
-                        }
-                        continue;
-                    }
-                    let artifact_ids = register_artifacts(context.artifact_registry, &result);
-                    context.state.insert(output.clone(), result);
-                    let mut meta = tool_call_result_meta(
-                        tool,
-                        attempt,
-                        max_attempts,
+                        input,
                         output,
-                        *timeout_seconds,
-                        attempt_started_at.elapsed().as_millis(),
-                        false,
-                    );
-                    insert_artifact_result_meta(&mut meta, &artifact_ids);
-                    context.push_event_with_meta(
-                        "tool_call",
-                        Some(input),
-                        context.state.get(output).cloned(),
-                        Some(meta),
-                        Ok(()),
-                    );
-                    return Ok(());
-                }
+                        timeout_seconds: *timeout_seconds,
+                        retry,
+                    },
+                )?;
+            }
+            StateAction::ToolDispatch {
+                input,
+                output,
+                timeout_seconds,
+                retry,
+            } => {
+                let dispatch = resolve_input(context.state, context.outputs, input)?;
+                let (tool, tool_input) = resolve_tool_dispatch(&dispatch)?;
+                self.execute_tool_call(
+                    context,
+                    ToolExecution {
+                        action_name: "tool_dispatch",
+                        tool: &tool,
+                        input: tool_input,
+                        output,
+                        timeout_seconds: *timeout_seconds,
+                        retry,
+                    },
+                )?;
             }
             StateAction::Approval { approval_for } => {
                 if let Err(error) = validate_approval_capabilities(context.module, approval_for) {
@@ -1050,6 +932,172 @@ where
             }
         }
 
+        Ok(())
+    }
+
+    fn execute_tool_call(
+        &mut self,
+        context: &mut ExecutionContext<'_>,
+        call: ToolExecution<'_>,
+    ) -> Result<(), RuntimeError> {
+        let ToolExecution {
+            action_name,
+            tool,
+            input,
+            output,
+            timeout_seconds,
+            retry,
+        } = call;
+        reject_control_field_write(action_name, output)?;
+        if let Err(error) = validate_tool_capability(context.module, tool, &self.tools) {
+            context.push_event_with_meta(
+                action_name,
+                None,
+                None,
+                Some(json!({"tool": tool})),
+                Err(error.to_string()),
+            );
+            return Err(error);
+        }
+        let max_attempts = retry
+            .as_ref()
+            .map(|retry| retry.max_attempts)
+            .unwrap_or(1)
+            .max(1);
+        for attempt in 1..=max_attempts {
+            if let Some(limit) = context.module.policy.max_tool_calls {
+                let attempted = *context.tool_calls + 1;
+                if attempted > limit {
+                    let error = RuntimeError::ToolCallLimitExceeded { limit, attempted };
+                    context.push_event_with_meta(
+                        action_name,
+                        Some(input),
+                        None,
+                        Some(tool_call_result_meta(
+                            tool,
+                            attempt,
+                            max_attempts,
+                            output,
+                            timeout_seconds,
+                            0,
+                            false,
+                        )),
+                        Err(error.to_string()),
+                    );
+                    return Err(error);
+                }
+            }
+            *context.tool_calls += 1;
+            context.push_event_with_meta(
+                &format!("{action_name}_start"),
+                Some(input.clone()),
+                None,
+                Some(tool_call_meta(
+                    tool,
+                    attempt,
+                    max_attempts,
+                    output,
+                    timeout_seconds,
+                )),
+                Ok(()),
+            );
+            let attempt_started_at = Instant::now();
+            let result = match self.tools.call_tool_with_timeout(
+                tool,
+                &input,
+                Duration::from_secs(timeout_seconds),
+            ) {
+                Ok(result) => result,
+                Err(error) => {
+                    let is_final_attempt = attempt == max_attempts;
+                    context.push_event_with_meta(
+                        action_name,
+                        Some(input.clone()),
+                        None,
+                        Some(tool_call_result_meta(
+                            tool,
+                            attempt,
+                            max_attempts,
+                            output,
+                            timeout_seconds,
+                            attempt_started_at.elapsed().as_millis(),
+                            !is_final_attempt,
+                        )),
+                        Err(error.to_string()),
+                    );
+                    if is_final_attempt {
+                        return Err(error);
+                    }
+                    continue;
+                }
+            };
+            if let Some(error) =
+                action_timeout_error(action_name, timeout_seconds, attempt_started_at)
+            {
+                let is_final_attempt = attempt == max_attempts;
+                context.push_event_with_meta(
+                    action_name,
+                    Some(input.clone()),
+                    Some(result),
+                    Some(tool_call_result_meta(
+                        tool,
+                        attempt,
+                        max_attempts,
+                        output,
+                        timeout_seconds,
+                        attempt_started_at.elapsed().as_millis(),
+                        !is_final_attempt,
+                    )),
+                    Err(error.to_string()),
+                );
+                if is_final_attempt {
+                    return Err(error);
+                }
+                continue;
+            }
+            if let Err(error) = validate_output(context.module, output, &result) {
+                let is_final_attempt = attempt == max_attempts;
+                context.push_event_with_meta(
+                    action_name,
+                    Some(input.clone()),
+                    Some(result),
+                    Some(tool_call_result_meta(
+                        tool,
+                        attempt,
+                        max_attempts,
+                        output,
+                        timeout_seconds,
+                        attempt_started_at.elapsed().as_millis(),
+                        !is_final_attempt,
+                    )),
+                    Err(error.to_string()),
+                );
+                if is_final_attempt {
+                    return Err(error);
+                }
+                continue;
+            }
+            let artifact_ids = register_artifacts(context.artifact_registry, &result);
+            context.state.insert(output.to_string(), result);
+            let mut meta = tool_call_result_meta(
+                tool,
+                attempt,
+                max_attempts,
+                output,
+                timeout_seconds,
+                attempt_started_at.elapsed().as_millis(),
+                false,
+            );
+            insert_artifact_result_meta(&mut meta, &artifact_ids);
+            context.push_event_with_meta(
+                action_name,
+                Some(input),
+                context.state.get(output).cloned(),
+                Some(meta),
+                Ok(()),
+            );
+            return Ok(());
+        }
         Ok(())
     }
 }
@@ -1453,6 +1501,24 @@ fn validate_tool_capability<T: ToolProvider>(
     Ok(())
 }
 
+fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeError> {
+    let Some(object) = dispatch.as_object() else {
+        return Err(RuntimeError::SchemaViolation(
+            "tool_dispatch input must be an object with fields tool and input".to_string(),
+        ));
+    };
+    let Some(tool) = object.get("tool").and_then(Value::as_str) else {
+        return Err(RuntimeError::SchemaViolation(
+            "tool_dispatch input.tool must be a string".to_string(),
+        ));
+    };
+    let input = object
+        .get("input")
+        .cloned()
+        .unwrap_or_else(|| Value::Object(Map::new()));
+    Ok((tool.to_string(), input))
+}
+
 fn validate_approval_capabilities(
     module: &AirModule,
     approval_for: &[String],
@@ -1480,6 +1546,15 @@ struct ExecutionContext<'a> {
     module_started_at: Instant,
     step: u32,
     rule: &'a str,
+}
+
+struct ToolExecution<'a> {
+    action_name: &'a str,
+    tool: &'a str,
+    input: Value,
+    output: &'a str,
+    timeout_seconds: u64,
+    retry: &'a Option<RetryPolicy>,
 }
 
 impl ExecutionContext<'_> {
