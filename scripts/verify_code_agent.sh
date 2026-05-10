@@ -84,6 +84,25 @@ assert review["summary"].startswith("Fixture review completed")
 assert review["search_quality"]["sufficient"] is True
 PY
 
+echo "[code-agent] user-facing code command explain"
+cargo run -q -p air-cli -- code "fix the failing add function and retest" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
+  --explain \
+  > target/generated/code_command_explain.output.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_command_explain.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+assert output["command"] == "code", output
+assert output["will_run"] is False, output
+assert output["requested_recipe"] == "auto", output
+assert output["resolved_recipe"] == "repair", output
+assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
+assert output["input"]["test_command"] == "repair_fixture_test", output
+PY
+
 check_code_agent_route() {
   local name="$1"
   local task="$2"

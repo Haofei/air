@@ -129,6 +129,10 @@ enum Command {
         #[arg(long)]
         log: bool,
 
+        /// Print the resolved recipe, profile, and typed input without running.
+        #[arg(long)]
+        explain: bool,
+
         /// Optional tool provider config JSON.
         #[arg(long)]
         tool_config: Option<PathBuf>,
@@ -489,6 +493,7 @@ fn main() -> Result<()> {
             jit_cache,
             parallel,
             log,
+            explain,
             tool_config,
         } => code(CodeOptions {
             task,
@@ -514,6 +519,7 @@ fn main() -> Result<()> {
             jit_cache,
             parallel,
             log,
+            explain,
             tool_config,
         }),
         Command::Validate { file } => validate(file),
@@ -1565,6 +1571,7 @@ mod tests {
             test,
             related,
             profile,
+            explain,
             ..
         } = cli.command
         else {
@@ -1587,6 +1594,7 @@ mod tests {
             )]
         );
         assert_eq!(profile, None);
+        assert!(!explain);
     }
 
     #[test]
@@ -1674,6 +1682,31 @@ mod tests {
             Some("Playwright timeout behavior".to_string())
         );
         assert_eq!(required_terms, vec!["playwright".to_string()]);
+    }
+
+    #[test]
+    fn code_command_accepts_explain_flag() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "code",
+            "fix the failing add function and retest",
+            "--target",
+            "examples/code-agent/repair-fixture/math.js",
+            "--test",
+            "repair_fixture_test",
+            "--explain",
+        ])
+        .unwrap();
+
+        let Command::Code {
+            recipe, explain, ..
+        } = cli.command
+        else {
+            panic!("expected code command");
+        };
+
+        assert_eq!(recipe, CodeRecipe::Auto);
+        assert!(explain);
     }
 
     #[test]

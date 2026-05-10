@@ -1,8 +1,8 @@
 use crate::run_plan::{run_plan, RunPlanOptions};
 use anyhow::{bail, Result};
 use clap::ValueEnum;
-use serde_json::{Map, Value};
-use std::path::PathBuf;
+use serde_json::{json, Map, Value};
+use std::path::{Path, PathBuf};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub(crate) enum CodeRecipe {
@@ -42,6 +42,7 @@ pub(crate) struct CodeOptions {
     pub(crate) jit_cache: Option<PathBuf>,
     pub(crate) parallel: bool,
     pub(crate) log: bool,
+    pub(crate) explain: bool,
     pub(crate) tool_config: Option<PathBuf>,
 }
 
@@ -70,9 +71,11 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         jit_cache,
         parallel,
         log,
+        explain,
         tool_config,
     } = options;
 
+    let requested_recipe = recipe;
     let recipe = resolve_recipe(
         recipe,
         target.as_ref(),
@@ -102,6 +105,11 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         constraints,
     })?;
 
+    if explain {
+        print_explain(requested_recipe, recipe, &profile, &input)?;
+        return Ok(());
+    }
+
     run_plan(RunPlanOptions {
         plan: None,
         profile: Some(profile),
@@ -120,6 +128,25 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         example_tools: false,
         tool_config,
     })
+}
+
+fn print_explain(
+    requested_recipe: CodeRecipe,
+    resolved_recipe: CodeRecipe,
+    profile: &Path,
+    input: &Map<String, Value>,
+) -> Result<()> {
+    let explanation = json!({
+        "command": "code",
+        "will_run": false,
+        "requested_recipe": recipe_name(requested_recipe),
+        "resolved_recipe": recipe_name(resolved_recipe),
+        "profile": path_ref_to_input_string(profile),
+        "input": Value::Object(input.clone()),
+    });
+    serde_json::to_writer_pretty(std::io::stdout(), &explanation)?;
+    println!();
+    Ok(())
 }
 
 struct CodeInputOptions {
@@ -324,6 +351,10 @@ fn path_to_input_string(path: PathBuf) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+fn path_ref_to_input_string(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -467,6 +498,51 @@ mod tests {
             Value::String("src/lib.rs".to_string())
         );
         assert!(input.get("test_command").is_none());
+    }
+
+    #[test]
+    fn explain_payload_reports_requested_and_resolved_recipe() {
+        let input = build_input(CodeInputOptions {
+            task: "fix it".to_string(),
+            recipe: CodeRecipe::Auto,
+            target: Some(PathBuf::from("src/lib.rs")),
+            test: Some("unit".to_string()),
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            output: None,
+            brand: None,
+            product: None,
+            constraints: vec![],
+        })
+        .unwrap();
+        let explanation = json!({
+            "command": "code",
+            "will_run": false,
+            "requested_recipe": recipe_name(CodeRecipe::Auto),
+            "resolved_recipe": recipe_name(CodeRecipe::Repair),
+            "profile": path_ref_to_input_string(&default_profile(CodeRecipe::Repair)),
+            "input": Value::Object(input),
+        });
+
+        assert_eq!(
+            explanation["requested_recipe"],
+            Value::String("auto".to_string())
+        );
+        assert_eq!(
+            explanation["resolved_recipe"],
+            Value::String("repair".to_string())
+        );
+        assert_eq!(
+            explanation["profile"],
+            Value::String("examples/code-agent/repair-core.air-profile.yaml".to_string())
+        );
+        assert_eq!(
+            explanation["input"]["test_command"],
+            Value::String("unit".to_string())
+        );
     }
 
     #[test]

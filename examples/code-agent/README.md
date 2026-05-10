@@ -168,6 +168,15 @@ back to read-only exploration.
 cargo run -p air-cli -- code "fix the failing add function and retest" \
   --target examples/code-agent/repair-fixture/math.js \
   --test repair_fixture_test \
+  --explain
+```
+
+Then run it:
+
+```bash
+cargo run -p air-cli -- code "fix the failing add function and retest" \
+  --target examples/code-agent/repair-fixture/math.js \
+  --test repair_fixture_test \
   --related examples/code-agent/repair-fixture/test.js \
   --log
 ```
