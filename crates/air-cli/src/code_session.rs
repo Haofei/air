@@ -1,4 +1,4 @@
-use crate::code_context::{default_context_budget_chars, truncate_for_context};
+use crate::code_context::{recent_context_feedback, ContextFeedbackEntry};
 use crate::code_pack::{CodeAgentCompletion, CodeAgentRouteDecision};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -202,42 +202,16 @@ pub(crate) fn code_session_turn_index(state: &CodeSessionState, target: &str) ->
 }
 
 pub(crate) fn code_session_feedback(previous_turns: &[CodeSessionTurn]) -> String {
-    let budget = default_context_budget_chars();
-    let mut lines = Vec::new();
-    let mut used = 0usize;
-    let mut omitted = 0usize;
-    for (index, turn) in previous_turns.iter().enumerate().rev() {
-        let turn_number = index + 1;
-        let summary = code_session_feedback_summary(turn);
-        let prefix = format!(
-            "- turn {turn_number}: {summary}; outputs={output_summary}",
-            output_summary = ""
-        );
-        let available = budget.saturating_sub(used + prefix.chars().count());
-        if available == 0 {
-            omitted += 1;
-            continue;
-        }
-        let output_summary = truncate_for_context(
-            &serde_json::to_string(&turn.outputs).unwrap_or_default(),
-            available,
-        );
-        let line = format!("- turn {turn_number}: {summary}; outputs={output_summary}");
-        used += line.chars().count() + 1;
-        lines.push(line);
-        if used >= budget {
-            omitted += index;
-            break;
-        }
-    }
-    if omitted > 0 {
-        lines.push(
-            format!(
-                "- {omitted} older turn(s) omitted because AIR session context is capped at {budget} chars"
-            ),
-        );
-    }
-    truncate_for_context(&lines.join("\n"), budget)
+    let entries = previous_turns
+        .iter()
+        .enumerate()
+        .map(|(index, turn)| ContextFeedbackEntry {
+            label: format!("turn {}", index + 1),
+            summary: code_session_feedback_summary(turn),
+            output: serde_json::to_string(&turn.outputs).unwrap_or_default(),
+        })
+        .collect::<Vec<_>>();
+    recent_context_feedback(&entries, "turn")
 }
 
 pub(crate) fn code_session_workspace_revert(

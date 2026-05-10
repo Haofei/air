@@ -1,4 +1,7 @@
-use crate::code_context::{default_context_budget_chars, truncate_for_context};
+use crate::code_context::{
+    default_context_budget_chars, recent_context_feedback, truncate_for_context,
+    ContextFeedbackEntry,
+};
 #[cfg(test)]
 use crate::code_input::build_input;
 pub(crate) use crate::code_input::CodeRecipe;
@@ -2801,51 +2804,26 @@ fn code_loop_iteration_input(
 }
 
 fn code_loop_feedback(previous_iterations: &[Value]) -> String {
-    let budget = default_context_budget_chars();
-    let mut lines = Vec::new();
-    let mut used = 0usize;
-    let mut omitted = 0usize;
-    for iteration in previous_iterations.iter().rev() {
-        let iteration_number = iteration
-            .get("iteration")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let completed = iteration
-            .get("completed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        let outputs = iteration.get("outputs").cloned().unwrap_or(Value::Null);
-        let prefix = format!(
-            "- iteration {iteration_number}: completed={completed}; outputs={output_summary}",
-            output_summary = ""
-        );
-        let available = budget.saturating_sub(used + prefix.chars().count());
-        if available == 0 {
-            omitted += 1;
-            continue;
-        }
-        let output_summary = truncate_for_context(
-            &serde_json::to_string(&outputs).unwrap_or_default(),
-            available,
-        );
-        let line = format!(
-            "- iteration {iteration_number}: completed={completed}; outputs={output_summary}"
-        );
-        used += line.chars().count() + 1;
-        lines.push(line);
-        if used >= budget {
-            omitted += iteration_number.saturating_sub(1) as usize;
-            break;
-        }
-    }
-    if omitted > 0 {
-        lines.push(
-            format!(
-                "- {omitted} older iteration(s) omitted because AIR loop context is capped at {budget} chars"
-            ),
-        );
-    }
-    truncate_for_context(&lines.join("\n"), budget)
+    let entries = previous_iterations
+        .iter()
+        .map(|iteration| {
+            let iteration_number = iteration
+                .get("iteration")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let completed = iteration
+                .get("completed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            let outputs = iteration.get("outputs").cloned().unwrap_or(Value::Null);
+            ContextFeedbackEntry {
+                label: format!("iteration {iteration_number}"),
+                summary: format!("completed={completed}"),
+                output: serde_json::to_string(&outputs).unwrap_or_default(),
+            }
+        })
+        .collect::<Vec<_>>();
+    recent_context_feedback(&entries, "iteration")
 }
 
 fn code_outputs_complete(

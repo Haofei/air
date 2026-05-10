@@ -22,6 +22,57 @@ pub(crate) fn truncate_for_context(value: &str, max_chars: usize) -> String {
     truncated
 }
 
+pub(crate) struct ContextFeedbackEntry {
+    pub(crate) label: String,
+    pub(crate) summary: String,
+    pub(crate) output: String,
+}
+
+pub(crate) fn recent_context_feedback(
+    entries: &[ContextFeedbackEntry],
+    omitted_item_name: &str,
+) -> String {
+    let budget = default_context_budget_chars();
+    let mut lines = Vec::new();
+    let mut used = 0usize;
+    let mut omitted = 0usize;
+
+    for (index, entry) in entries.iter().enumerate().rev() {
+        let prefix = format!(
+            "- {label}: {summary}; outputs={output_summary}",
+            label = entry.label,
+            summary = entry.summary,
+            output_summary = ""
+        );
+        let available = budget.saturating_sub(used + prefix.chars().count());
+        if available == 0 {
+            omitted += 1;
+            continue;
+        }
+
+        let output_summary = truncate_for_context(&entry.output, available);
+        let line = format!(
+            "- {label}: {summary}; outputs={output_summary}",
+            label = entry.label,
+            summary = entry.summary
+        );
+        used += line.chars().count() + 1;
+        lines.push(line);
+        if used >= budget {
+            omitted += index;
+            break;
+        }
+    }
+
+    if omitted > 0 {
+        lines.insert(0, format!(
+            "- {omitted} older {omitted_item_name}(s) omitted because AIR context is capped at {budget} chars"
+        ));
+    }
+
+    truncate_for_context(&lines.join("\n"), budget)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -47,5 +98,28 @@ mod tests {
 
         assert_eq!(truncated.chars().count(), 32);
         assert!(truncated.ends_with("[AIR_TRUNCATED]"));
+    }
+
+    #[test]
+    fn recent_feedback_prefers_newer_entries_and_reports_omissions() {
+        let entries = vec![
+            ContextFeedbackEntry {
+                label: "turn 1".to_string(),
+                summary: "old".to_string(),
+                output: "older".to_string(),
+            },
+            ContextFeedbackEntry {
+                label: "turn 2".to_string(),
+                summary: "new".to_string(),
+                output: "x".repeat(default_context_budget_chars() + 1024),
+            },
+        ];
+
+        let feedback = recent_context_feedback(&entries, "turn");
+
+        assert!(feedback.chars().count() <= default_context_budget_chars());
+        assert!(feedback.contains("turn 2"));
+        assert!(feedback.contains("AIR_TRUNCATED"));
+        assert!(feedback.contains("older turn(s) omitted"));
     }
 }
