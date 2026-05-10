@@ -203,11 +203,7 @@ pub struct WorkflowNode {
 pub enum NodeKind {
     ModelCall,
     ToolCall,
-    Branch,
     Approval,
-    EmitEvent,
-    SaveArtifact,
-    LoadMemory,
     Return,
 }
 

@@ -215,6 +215,41 @@ fn accepts_provider_token_limit_retry_policy() {
 }
 
 #[test]
+fn rejects_unimplemented_dag_node_kinds_at_parse_time() {
+    let result = serde_json::from_value::<air_core::AirModule>(serde_json::json!({
+        "agent": {
+            "name": "unimplemented-dag-node-agent",
+            "version": "0.1.0"
+        },
+        "outputs": {
+            "result": "object"
+        },
+        "workflow": {
+            "kind": "dag",
+            "entry": "branch",
+            "nodes": [
+                {
+                    "id": "branch",
+                    "kind": "branch"
+                },
+                {
+                    "id": "done",
+                    "kind": "return"
+                }
+            ],
+            "edges": [
+                {
+                    "from": "branch",
+                    "to": "done"
+                }
+            ]
+        }
+    }));
+
+    assert!(result.is_err(), "branch node kind should not parse");
+}
+
+#[test]
 fn rejects_zero_token_limit_retry_budget() {
     let mut module = parse_air_file("../../tests/agents/model-token-limit-retry.air.yaml").unwrap();
     let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {

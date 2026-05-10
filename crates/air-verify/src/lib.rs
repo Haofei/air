@@ -210,7 +210,6 @@ impl Verifier {
                         }
                     }
                 }
-                _ => {}
             }
 
             if matches!(node.kind, NodeKind::ToolCall | NodeKind::ModelCall)
