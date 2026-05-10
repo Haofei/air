@@ -638,6 +638,41 @@ fn file_search_returns_regex_matches_with_context() {
 }
 
 #[test]
+fn file_search_accepts_query_alias_for_pattern() {
+    let dir = temp_dir("air-tools-file-search-query-alias");
+    fs::write(dir.join("note.txt"), "alpha\nneedle\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.search",
+            &json!({"path": "note.txt", "query": "needle"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["pattern"], json!("needle"));
+    assert_eq!(output["pattern_source"], json!("query"));
+    assert_eq!(output["match_count"], json!(1));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["pattern_source"],
+        json!("query")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_recurses_within_directory_paths() {
     let dir = temp_dir("air-tools-file-search-directory");
     fs::create_dir_all(dir.join("src/nested")).unwrap();

@@ -243,7 +243,7 @@ pub(super) fn call_file_search_tool(
     max_line_chars: usize,
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
-    let pattern = required_input_string(name, input, "pattern")?;
+    let (pattern, pattern_source) = file_search_pattern_input(name, input)?;
     if pattern.is_empty() {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.pattern must not be empty"
@@ -334,6 +334,7 @@ pub(super) fn call_file_search_tool(
         "path": path.display().to_string(),
         "directory": directory,
         "pattern": pattern,
+        "pattern_source": pattern_source,
         "matches": result.matches,
         "match_count": result.total_match_count,
         "returned_match_count": result.matches.len(),
@@ -357,6 +358,7 @@ pub(super) fn call_file_search_tool(
                 "path": path.display().to_string(),
                 "directory": directory,
                 "pattern": pattern,
+                "pattern_source": pattern_source,
                 "match_count": result.total_match_count,
                 "returned_match_count": result.matches.len(),
                 "total_lines": result.total_lines,
@@ -370,6 +372,28 @@ pub(super) fn call_file_search_tool(
             }
         }]
     }))
+}
+
+fn file_search_pattern_input<'a>(
+    name: &str,
+    input: &'a Value,
+) -> Result<(&'a str, &'static str), RuntimeError> {
+    if let Some(pattern) = input.get("pattern") {
+        return pattern
+            .as_str()
+            .map(|pattern| (pattern, "pattern"))
+            .ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {name} input.pattern must be a string"))
+            });
+    }
+    if let Some(query) = input.get("query") {
+        return query.as_str().map(|query| (query, "query")).ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.query must be a string"))
+        });
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {name} input.pattern must be a string"
+    )))
 }
 
 #[derive(Default)]
