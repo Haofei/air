@@ -37,6 +37,12 @@
       "repo_dir": "../..",
       "max_files": 200
     },
+    "git.diff": {
+      "kind": "git_diff",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_bytes": 65536
+    },
     "test.run": {
       "kind": "command_run",
       "capability": "code.test",

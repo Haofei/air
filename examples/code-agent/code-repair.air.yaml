@@ -14,7 +14,7 @@ inputs:
 outputs:
   repair:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files, workspace_diff]
     properties:
       target_path: string
       initial_success: boolean
@@ -31,6 +31,17 @@ outputs:
       workspace_changed_files:
         type: array
         items: object
+      workspace_diff:
+        type: object
+        required: [repo, diff, bytes, truncated, artifacts]
+        properties:
+          repo: string
+          diff: string
+          bytes: integer
+          truncated: boolean
+          artifacts:
+            type: array
+            items: object
 
 requires:
   capabilities: [file.read, file.write, code.read, code.test]
@@ -244,6 +255,17 @@ state:
       artifacts:
         type: array
         items: object
+  workspace_diff:
+    type: object
+    required: [repo, diff, bytes, truncated, artifacts]
+    properties:
+      repo: string
+      diff: string
+      bytes: integer
+      truncated: boolean
+      artifacts:
+        type: array
+        items: object
   repair_draft:
     type: object
     required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, changed_files]
@@ -261,7 +283,7 @@ state:
         items: object
   repair:
     type: object
-    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files]
+    required: [target_path, initial_success, final_success, patch_applied, rationale, diagnostics, workspace_clean, changed_files, workspace_changed_files, workspace_diff]
     properties:
       target_path: string
       initial_success: boolean
@@ -278,6 +300,17 @@ state:
       workspace_changed_files:
         type: array
         items: object
+      workspace_diff:
+        type: object
+        required: [repo, diff, bytes, truncated, artifacts]
+        properties:
+          repo: string
+          diff: string
+          bytes: integer
+          truncated: boolean
+          artifacts:
+            type: array
+            items: object
 
 tools:
   - name: file.read
@@ -293,6 +326,9 @@ tools:
     capability: code.read
     timeout_ms: 10000
   - name: git.status
+    capability: code.read
+    timeout_ms: 10000
+  - name: git.diff
     capability: code.read
     timeout_ms: 10000
   - name: test.run
@@ -709,6 +745,14 @@ workflow:
           timeout_seconds: 10
           retry:
             max_attempts: 1
+        - kind: tool_call
+          tool: git.diff
+          input:
+            literal: {}
+          output: workspace_diff
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
         - kind: set
           values:
             repair:
@@ -731,6 +775,8 @@ workflow:
                   ref: repair_draft.changed_files
                 workspace_changed_files:
                   ref: workspace_status.entries
+                workspace_diff:
+                  ref: workspace_diff
             phase: done
 
     - id: done

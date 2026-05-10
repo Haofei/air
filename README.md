@@ -27,7 +27,7 @@ For coding agents, that means the important questions have first-class places to
 
 | Question | AIR audit surface |
 | --- | --- |
-| Which files changed? | `file.edit`, `file.patch`, and `file.write` return bounded diff artifacts in the trace |
+| Which files changed? | `file.edit`, `file.patch`, `file.write`, and repair `workspace_diff` return bounded diff artifacts |
 | Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |

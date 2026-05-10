@@ -247,6 +247,7 @@ assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
 assert repair["changed_files"], repair
 assert repair["workspace_changed_files"], repair
+assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
 assert any(
     event.get("action") == "model_call"
     and event.get("meta", {}).get("model") == "code_explorer"
@@ -300,6 +301,7 @@ assert repair["initial_success"] is False, repair
 assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
 assert "examples/code-agent/repair-fixture/math.js" in changed, repair
+assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
 assert any(
     event.get("action") == "model_call"
     and event.get("meta", {}).get("model") == "code_repair_context_selector"
@@ -349,6 +351,7 @@ assert len(output["iterations"]) == 1, output
 repair = output["final_outputs"]["repair"]
 assert repair["final_success"] is True, repair
 assert repair["patch_applied"] is True, repair
+assert "examples/code-agent/repair-fixture/math.js" in repair["workspace_diff"]["diff"], repair
 assert Path("target/generated/code_agent_code_loop.trace.iter1.jsonl").exists()
 PY
 
@@ -435,6 +438,8 @@ assert repair["patch_applied"] is True, repair
 assert "examples/code-agent/repair-multifile/math.js" in changed, repair
 assert "examples/code-agent/repair-multifile/normalize.js" in changed, repair
 assert changed <= workspace_changed, repair
+assert "examples/code-agent/repair-multifile/math.js" in repair["workspace_diff"]["diff"], repair
+assert "examples/code-agent/repair-multifile/normalize.js" in repair["workspace_diff"]["diff"], repair
 assert any(
     event.get("action") == "tool_call"
     and event.get("meta", {}).get("tool") == "file.patch"
