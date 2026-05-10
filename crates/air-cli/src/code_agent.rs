@@ -2,7 +2,8 @@ use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::run_plan::{run_plan, run_plan_capture, RunPlanOptions};
-use anyhow::{bail, Result};
+use air_runtime::{read_trace_jsonl, TraceEvent, TraceStatus};
+use anyhow::{bail, Context, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -138,6 +139,19 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         return Ok(());
     }
 
+    let effective_trace_out = match (&session, &trace_out) {
+        (Some(path), None) => Some(default_session_trace_path(
+            path,
+            session_state
+                .as_ref()
+                .map_or(1, |state| state.turns.len() + 1),
+        )),
+        _ => trace_out.clone(),
+    };
+    if let Some(path) = effective_trace_out.as_ref() {
+        ensure_parent_dir(path)?;
+    }
+
     let session_input = input.clone();
     let outputs = if loop_enabled {
         run_code_loop(CodeLoopOptions {
@@ -145,7 +159,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             profile: profile.clone(),
             input,
             model_config: model_config.clone(),
-            trace_out: trace_out.clone(),
+            trace_out: effective_trace_out.clone(),
             trace_redact,
             trace_raw,
             state_out: state_out.clone(),
@@ -164,7 +178,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             input: None,
             input_values: Some(input.clone()),
             model_config: model_config.clone(),
-            trace_out: trace_out.clone(),
+            trace_out: effective_trace_out.clone(),
             trace_redact,
             trace_raw,
             state_out: state_out.clone(),
@@ -198,6 +212,9 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
 
     if let Some(path) = session.as_ref() {
         let state = session_state.get_or_insert_with(CodeSessionState::default);
+        let trace_files =
+            code_session_trace_files(effective_trace_out.as_ref(), loop_enabled, &outputs);
+        let parts = code_session_parts(&trace_files)?;
         state.append_turn(CodeSessionTurn {
             task: session_input
                 .get("task")
@@ -208,6 +225,11 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             profile: path_ref_to_input_string(&profile),
             input: Value::Object(session_input),
             completed: code_outputs_complete(recipe, &outputs),
+            trace_files: trace_files
+                .iter()
+                .map(|path| path_ref_to_input_string(path))
+                .collect(),
+            parts,
             outputs: outputs.clone(),
         });
         state.write(path)?;
@@ -232,7 +254,34 @@ struct CodeSessionTurn {
     profile: String,
     input: Value,
     completed: bool,
+    #[serde(default)]
+    trace_files: Vec<String>,
+    #[serde(default)]
+    parts: Vec<CodeSessionPart>,
     outputs: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CodeSessionPart {
+    kind: String,
+    trace_file: String,
+    agent: String,
+    step: u32,
+    rule: String,
+    action: String,
+    status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    approval_for: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    input_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    output_keys: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 fn code_session_version() -> u32 {
@@ -273,6 +322,122 @@ impl CodeSessionState {
         self.version = code_session_version();
         self.turns.push(turn);
     }
+}
+
+fn default_session_trace_path(session_path: &Path, turn_number: usize) -> PathBuf {
+    let parent = session_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = session_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("air-code-session");
+    parent
+        .join(format!("{stem}.traces"))
+        .join(format!("turn{turn_number}.trace.jsonl"))
+}
+
+fn ensure_parent_dir(path: &Path) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
+fn code_session_trace_files(
+    trace_out: Option<&PathBuf>,
+    loop_enabled: bool,
+    outputs: &Value,
+) -> Vec<PathBuf> {
+    let Some(trace_out) = trace_out else {
+        return Vec::new();
+    };
+    if !loop_enabled {
+        return vec![trace_out.clone()];
+    }
+    let iterations = outputs
+        .get("iterations")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    (1..=iterations)
+        .map(|iteration| iteration_path(trace_out, iteration))
+        .collect()
+}
+
+fn code_session_parts(trace_files: &[PathBuf]) -> Result<Vec<CodeSessionPart>> {
+    let mut parts = Vec::new();
+    for trace_file in trace_files {
+        let events = read_trace_jsonl(trace_file).with_context(|| {
+            format!(
+                "failed to read AIR code session trace {}",
+                trace_file.display()
+            )
+        })?;
+        let trace_file = path_ref_to_input_string(trace_file);
+        parts.extend(
+            events
+                .iter()
+                .filter_map(|event| code_session_part_from_event(&trace_file, event)),
+        );
+    }
+    Ok(parts)
+}
+
+fn code_session_part_from_event(trace_file: &str, event: &TraceEvent) -> Option<CodeSessionPart> {
+    if !matches!(
+        event.action.as_str(),
+        "model_call" | "tool_call" | "approval" | "return"
+    ) {
+        return None;
+    }
+    let meta = event.meta.as_ref();
+    Some(CodeSessionPart {
+        kind: event.action.clone(),
+        trace_file: trace_file.to_string(),
+        agent: event.agent.clone(),
+        step: event.step,
+        rule: event.rule.clone(),
+        action: event.action.clone(),
+        status: trace_status_name(&event.status).to_string(),
+        model: meta
+            .and_then(|value| value.get("model"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        tool: meta
+            .and_then(|value| value.get("tool"))
+            .and_then(Value::as_str)
+            .map(ToString::to_string),
+        approval_for: meta
+            .and_then(|value| value.get("approval_for"))
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToString::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        input_keys: value_keys(event.input.as_ref()),
+        output_keys: value_keys(event.output.as_ref()),
+        error: event.error.clone(),
+    })
+}
+
+fn trace_status_name(status: &TraceStatus) -> &'static str {
+    match status {
+        TraceStatus::Ok => "ok",
+        TraceStatus::Error => "error",
+    }
+}
+
+fn value_keys(value: Option<&Value>) -> Vec<String> {
+    let Some(Value::Object(object)) = value else {
+        return Vec::new();
+    };
+    object.keys().cloned().collect()
 }
 
 fn print_explain(
@@ -1088,6 +1253,38 @@ mod tests {
     }
 
     #[test]
+    fn default_session_trace_path_uses_sibling_trace_directory() {
+        assert_eq!(
+            default_session_trace_path(Path::new("target/generated/code_session.json"), 3),
+            PathBuf::from("target/generated/code_session.traces/turn3.trace.jsonl")
+        );
+    }
+
+    #[test]
+    fn session_part_indexes_trace_event() {
+        let event = TraceEvent {
+            agent: "code-agent".to_string(),
+            step: 2,
+            rule: "analyze".to_string(),
+            action: "model_call".to_string(),
+            input: Some(json!({"task": "review", "context": {}})),
+            output: Some(json!({"summary": "ok"})),
+            meta: Some(json!({"model": "code_reviewer"})),
+            status: TraceStatus::Ok,
+            error: None,
+        };
+
+        let part = code_session_part_from_event("trace.jsonl", &event).unwrap();
+
+        assert_eq!(part.kind, "model_call");
+        assert_eq!(part.trace_file, "trace.jsonl");
+        assert_eq!(part.model, Some("code_reviewer".to_string()));
+        assert!(part.input_keys.iter().any(|key| key == "task"));
+        assert!(part.output_keys.iter().any(|key| key == "summary"));
+        assert_eq!(part.status, "ok");
+    }
+
+    #[test]
     fn loop_iteration_input_appends_previous_outputs_to_task() {
         let mut input = Map::new();
         input.insert("task".to_string(), Value::String("fix it".to_string()));
@@ -1132,6 +1329,8 @@ mod tests {
             profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
             input: json!({"task": "inspect repo"}),
             completed: true,
+            trace_files: Vec::new(),
+            parts: Vec::new(),
             outputs: json!({
                 "exploration": {
                     "summary": "Found the dispatch implementation",
@@ -1159,6 +1358,8 @@ mod tests {
                 profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
                 input: json!({"task": "old"}),
                 completed: true,
+                trace_files: Vec::new(),
+                parts: Vec::new(),
                 outputs: json!({"summary": "older turn"}),
             },
             CodeSessionTurn {
@@ -1167,6 +1368,8 @@ mod tests {
                 profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
                 input: json!({"task": "new"}),
                 completed: false,
+                trace_files: Vec::new(),
+                parts: Vec::new(),
                 outputs: json!({"summary": large_output}),
             },
         ];
@@ -1210,6 +1413,8 @@ mod tests {
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
             input: json!({"task": "fix it"}),
             completed: false,
+            trace_files: Vec::new(),
+            parts: Vec::new(),
             outputs: json!({"repair": {"final_success": false}}),
         });
 

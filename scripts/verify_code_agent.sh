@@ -276,20 +276,20 @@ PY
 
 echo "[code-agent] persistent session carries turn context"
 rm -f target/generated/code_agent_session.json
+rm -rf target/generated/code_agent_session.traces
 cargo run -q -p air-cli -- code "explore command_run safety" \
   --target crates/air-tools/src/lib.rs \
   --query command_run \
   --session target/generated/code_agent_session.json \
-  --trace-out target/generated/code_agent_session_turn1.trace.jsonl \
   > target/generated/code_agent_session_turn1.output.json
 cargo run -q -p air-cli -- code "continue from the previous AIR code-agent turn" \
   --target crates/air-tools/src/lib.rs \
   --query command_run \
   --session target/generated/code_agent_session.json \
-  --trace-out target/generated/code_agent_session_turn2.trace.jsonl \
   > target/generated/code_agent_session_turn2.output.json
 "${PYTHON:-python3}" - <<'PY'
 import json
+from pathlib import Path
 
 with open("target/generated/code_agent_session.json", encoding="utf-8") as handle:
     session = json.load(handle)
@@ -297,8 +297,14 @@ assert session["version"] == 1, session
 assert len(session["turns"]) == 2, session
 assert session["turns"][0]["recipe"] == "explore", session
 assert session["turns"][1]["completed"] is True, session
+for index, turn in enumerate(session["turns"], start=1):
+    assert turn["trace_files"], turn
+    assert Path(turn["trace_files"][0]).exists(), turn
+    assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn
+    assert any(part["kind"] == "model_call" for part in turn["parts"]), turn
+    assert any(part["kind"] == "tool_call" for part in turn["parts"]), turn
 
-with open("target/generated/code_agent_session_turn2.trace.jsonl", encoding="utf-8") as handle:
+with open(session["turns"][1]["trace_files"][0], encoding="utf-8") as handle:
     trace = [json.loads(line) for line in handle if line.strip()]
 model_calls = [
     event for event in trace
@@ -309,6 +315,10 @@ assert model_calls, trace
 task = model_calls[0]["input"]["task"]
 assert "AIR session context from previous turns" in task, task
 assert "Fixture exploration completed" in task, task
+assert any(
+    part["kind"] == "model_call" and part.get("model") == "code_explorer"
+    for part in session["turns"][1]["parts"]
+), session["turns"][1]["parts"]
 PY
 
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"
