@@ -2083,10 +2083,10 @@ fn code_project_task_input(
     base_input: &Map<String, Value>,
     prior_executions: &[Value],
 ) -> Map<String, Value> {
+    let mut input = normalized_code_project_task_paths(base_input);
     if prior_executions.is_empty() {
-        return base_input.clone();
+        return input;
     }
-    let mut input = base_input.clone();
     let task = input
         .get("task")
         .and_then(Value::as_str)
@@ -2107,6 +2107,130 @@ fn code_project_task_input(
         )),
     );
     input
+}
+
+fn normalized_code_project_task_paths(base_input: &Map<String, Value>) -> Map<String, Value> {
+    let mut input = base_input.clone();
+    for field in ["target_path", "target_file"] {
+        normalize_file_target_field(&mut input, field);
+    }
+    input
+}
+
+fn normalize_file_target_field(input: &mut Map<String, Value>, field: &str) {
+    let Some(path) = input.get(field).and_then(Value::as_str) else {
+        return;
+    };
+    let Some(file) = preferred_file_for_target(Path::new(path)) else {
+        return;
+    };
+    input.insert(field.to_string(), Value::String(path_to_input_string(file)));
+}
+
+fn preferred_file_for_target(path: &Path) -> Option<PathBuf> {
+    if path.is_file() {
+        return None;
+    }
+    if !path.is_dir() {
+        return None;
+    }
+    preferred_file_in_directory(path)
+}
+
+fn preferred_file_in_directory(path: &Path) -> Option<PathBuf> {
+    for candidate in [
+        "lib.rs",
+        "main.rs",
+        "mod.rs",
+        "index.ts",
+        "index.tsx",
+        "index.js",
+        "index.jsx",
+        "index.html",
+        "README.md",
+        "Cargo.toml",
+        "package.json",
+    ] {
+        let candidate = path.join(candidate);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+
+    let mut files = collect_candidate_files(path, 3, 64);
+    files.sort();
+    files.into_iter().next()
+}
+
+fn collect_candidate_files(path: &Path, max_depth: usize, max_files: usize) -> Vec<PathBuf> {
+    if max_depth == 0 || max_files == 0 {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(path) else {
+        return Vec::new();
+    };
+    let mut entries = entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
+    entries.sort_by_key(|entry| entry.path());
+
+    let mut files = Vec::new();
+    for entry in entries {
+        let entry_path = entry.path();
+        if ignored_code_agent_path(&entry_path) {
+            continue;
+        }
+        if entry_path.is_file() && is_likely_code_agent_context_file(&entry_path) {
+            files.push(entry_path);
+            if files.len() >= max_files {
+                break;
+            }
+        } else if entry_path.is_dir() {
+            files.extend(collect_candidate_files(
+                &entry_path,
+                max_depth.saturating_sub(1),
+                max_files.saturating_sub(files.len()),
+            ));
+            if files.len() >= max_files {
+                break;
+            }
+        }
+    }
+    files
+}
+
+fn ignored_code_agent_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            name.starts_with('.')
+                || matches!(
+                    name,
+                    "target" | "node_modules" | "dist" | "build" | "__pycache__"
+                )
+        })
+}
+
+fn is_likely_code_agent_context_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            matches!(
+                extension,
+                "rs" | "toml"
+                    | "yaml"
+                    | "yml"
+                    | "json"
+                    | "md"
+                    | "ts"
+                    | "tsx"
+                    | "js"
+                    | "jsx"
+                    | "py"
+                    | "go"
+                    | "java"
+                    | "html"
+                    | "css"
+            )
+        })
 }
 
 fn code_project_memory(executions: &[Value]) -> Value {
@@ -3967,6 +4091,39 @@ mod tests {
         assert!(task.contains("Available project artifacts from previous tasks"));
         assert!(task.contains("found routing code"));
         assert!(task.contains("repo-search:routing"));
+    }
+
+    #[test]
+    fn project_task_input_resolves_directory_targets_to_files() {
+        let dir = std::env::temp_dir().join(format!(
+            "air-code-project-dir-target-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        let lib = dir.join("lib.rs");
+        fs::write(&lib, "pub fn tool() {}\n").unwrap();
+
+        let mut input = Map::new();
+        input.insert(
+            "task".to_string(),
+            Value::String("explore tool".to_string()),
+        );
+        input.insert(
+            "target_path".to_string(),
+            Value::String(path_ref_to_input_string(&dir)),
+        );
+
+        let next = code_project_task_input(&input, &[]);
+
+        assert_eq!(
+            next["target_path"],
+            Value::String(path_ref_to_input_string(&lib))
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

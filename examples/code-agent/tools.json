@@ -55,6 +55,14 @@
       "max_files": 8,
       "max_bytes": 65536
     },
+    "file.search": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_matches": 100,
+      "max_context_lines": 8,
+      "max_bytes": 65536
+    },
     "repo.files": {
       "kind": "repo_files",
       "capability": "code.read",
@@ -91,6 +99,24 @@
       "max_matches": 80,
       "max_files": 8,
       "context_lines": 8,
+      "max_bytes": 65536
+    },
+    "file.patch": {
+      "kind": "file_patch",
+      "capability": "file.write",
+      "repo_dir": "../..",
+      "require_read": true,
+      "allow_new_files": false,
+      "allow_delete_files": false,
+      "max_files": 3,
+      "max_bytes": 65536
+    },
+    "diagnostic.context": {
+      "kind": "diagnostic_context",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_diagnostics": 10,
+      "context_lines": 4,
       "max_bytes": 65536
     },
     "git.diff": {
@@ -143,6 +169,13 @@
       },
       "timeout_seconds": 120,
       "max_bytes": 65536
+    }
+  },
+  "approvals": {
+    "file.write": {
+      "approved": true,
+      "approver": "code-agent-fixture",
+      "reason": "bounded code-agent write is allowed after AIR approval gate"
     }
   }
 }

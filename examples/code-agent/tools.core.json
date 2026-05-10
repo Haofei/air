@@ -83,6 +83,14 @@
       "max_files": 4,
       "max_bytes": 65536
     },
+    "file.search": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_matches": 100,
+      "max_context_lines": 8,
+      "max_bytes": 65536
+    },
     "file.patch": {
       "kind": "file_patch",
       "capability": "file.write",

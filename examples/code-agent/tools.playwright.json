@@ -43,6 +43,14 @@
       "max_files": 8,
       "max_bytes": 65536
     },
+    "file.search": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_matches": 100,
+      "max_context_lines": 8,
+      "max_bytes": 65536
+    },
     "repo.files": {
       "kind": "repo_files",
       "capability": "code.read",

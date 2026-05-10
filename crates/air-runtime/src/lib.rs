@@ -750,30 +750,34 @@ where
                         retry_error = Some(RetryError::Message(error_message));
                         continue;
                     }
-                    if let Err(error) = validate_output(context.module, output, &result) {
-                        let is_final_attempt = attempt == max_attempts;
-                        let error_message = error.to_string();
-                        context.push_event_with_meta(
-                            "model_call",
-                            Some(attempt_input),
-                            Some(result),
-                            Some(model_call_result_meta(
-                                model,
-                                attempt,
-                                max_attempts,
-                                output,
-                                *timeout_seconds,
-                                attempt_started_at.elapsed().as_millis(),
-                                !is_final_attempt,
-                            )),
-                            Err(error_message.clone()),
-                        );
-                        if is_final_attempt {
-                            return Err(error);
-                        }
-                        retry_error = Some(RetryError::Message(error_message));
-                        continue;
-                    }
+                    let result =
+                        match model_result_for_output_schema(context.module, output, result) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                let is_final_attempt = attempt == max_attempts;
+                                let error_message = error.error.to_string();
+                                context.push_event_with_meta(
+                                    "model_call",
+                                    Some(attempt_input),
+                                    Some(error.value),
+                                    Some(model_call_result_meta(
+                                        model,
+                                        attempt,
+                                        max_attempts,
+                                        output,
+                                        *timeout_seconds,
+                                        attempt_started_at.elapsed().as_millis(),
+                                        !is_final_attempt,
+                                    )),
+                                    Err(error_message.clone()),
+                                );
+                                if is_final_attempt {
+                                    return Err(error.error);
+                                }
+                                retry_error = Some(RetryError::Message(error_message));
+                                continue;
+                            }
+                        };
                     if let Err(error) = validate_citations_against_registry(
                         output,
                         &result,
@@ -1336,6 +1340,57 @@ where
 
 fn validate_output(module: &AirModule, output: &str, value: &Value) -> Result<(), RuntimeError> {
     validate_named_value(output, value, output_spec(module, output))
+}
+
+struct ModelOutputSchemaError {
+    value: Value,
+    error: RuntimeError,
+}
+
+fn model_result_for_output_schema(
+    module: &AirModule,
+    output: &str,
+    value: Value,
+) -> Result<Value, ModelOutputSchemaError> {
+    match validate_output(module, output, &value) {
+        Ok(()) => Ok(value),
+        Err(error) => {
+            if let Some(parsed) = parse_model_content_json(&value) {
+                if validate_output(module, output, &parsed).is_ok() {
+                    return Ok(parsed);
+                }
+            }
+            Err(ModelOutputSchemaError { value, error })
+        }
+    }
+}
+
+fn parse_model_content_json(value: &Value) -> Option<Value> {
+    let content = value.as_object()?.get("content")?.as_str()?;
+    let normalized = strip_model_content_code_fence(content).unwrap_or(content);
+    serde_json::from_str(normalized).ok()
+}
+
+fn strip_model_content_code_fence(content: &str) -> Option<&str> {
+    let trimmed = content.trim();
+    let after_open = trimmed.strip_prefix("```")?;
+    let close_index = after_open.rfind("```")?;
+    let inner = &after_open[..close_index];
+    let inner = inner.trim_start();
+    let inner = match inner.find('\n') {
+        Some(index) => {
+            let language = inner[..index].trim();
+            if language.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
+            }) {
+                &inner[index + 1..]
+            } else {
+                inner
+            }
+        }
+        None => inner,
+    };
+    Some(inner.trim())
 }
 
 fn reject_control_field_write(action: &str, field: &str) -> Result<(), RuntimeError> {

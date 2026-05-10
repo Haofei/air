@@ -127,6 +127,9 @@ tools:
   - name: file.read_many
     capability: file.read
     timeout_ms: 10000
+  - name: file.search
+    capability: file.read
+    timeout_ms: 10000
 
 workflow:
   kind: state_machine
@@ -166,6 +169,7 @@ workflow:
                   - literal: repo.context
                   - literal: file.read
                   - literal: file.read_many
+                  - literal: file.search
           output: decision
           timeout_seconds: 30
         - kind: set

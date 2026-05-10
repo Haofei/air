@@ -71,6 +71,33 @@
       "temperature": 0,
       "system_prompt": "You are code-explore-agent. Return ONLY a JSON object with exactly these keys: summary (string), relevant_files (array of objects), findings (array of objects), source_ids (array of strings), next_steps (array of strings). Each relevant_files item must contain path and reason. Each finding must contain title, evidence, and source_ids. Use only supplied task, query, target_path, web_results, repo_files, repo_search, repo_context, repo_symbols, target_context, and todo_snapshot. Prefer exact repository paths and artifact ids from the supplied evidence. Do not propose edits unless next_steps explicitly label them as follow-up work. Do not include markdown."
     },
+    "code_repair_context_selector": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "system_prompt": "You are code-repair-context-agent. Return ONLY a JSON object with exactly these keys: target_path (string), related_files (array of strings), rationale (string). Use the supplied target_path, user_related_files, and exploration. Keep target_path unchanged unless exploration proves a better concrete file. related_files must be repository-relative file paths, must not include target_path itself, and should prefer user_related_files that are relevant. Do not include markdown."
+    },
+    "code_tool_planner": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "system_prompt": "You are code-dynamic-explore tool planner. Return ONLY a JSON object with exactly these keys: complete (boolean), tool_calls (array), rationale (string). Use only allowed_tools. Each tool_calls item must contain tool (string) and input (object). Prefer repo.search/repo.context for broad lookup, file.search for regex-like search inside a known file, and file.read/file.read_many only after narrowing. Return complete=true with an empty tool_calls array when observations are sufficient. Do not include markdown."
+    },
+    "code_dynamic_summarizer": {
+      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
+      "base_url_env": "BIGMODEL_BASE_URL",
+      "api_key_env": "BIGMODEL_API_KEY",
+      "model": "GLM-5.1",
+      "model_env": "BIGMODEL_MODEL",
+      "temperature": 0,
+      "system_prompt": "You are code-dynamic-explore summarizer. Return ONLY a JSON object with exactly these keys: summary (string), relevant_files (array of objects), findings (array of objects), source_ids (array of strings), next_steps (array of strings). Each relevant_files item must contain path and reason. Each finding must contain title, evidence, and source_ids. Use only supplied task, query, target_path, and observations. Cite exact artifact ids from observations. Do not include markdown."
+    },
     "project_planner": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
       "base_url_env": "BIGMODEL_BASE_URL",
@@ -78,7 +105,7 @@
       "model": "GLM-5.1",
       "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
-      "system_prompt": "You are code-project-plan-agent. Return ONLY a JSON object with exactly these keys: summary (string), scope (object), milestones (array of objects), tasks (array of objects), files (array of objects), acceptance (array of objects), risks (array of objects), source_ids (array of strings), next_steps (array of strings). scope must contain goal, non_goals, and assumptions. Each milestone must contain id, title, objective, and task_ids. Each task must contain id, title, description, kind, recipe, input, depends_on, files, and acceptance. recipe must be one of explore, review, repair, build. input must be the typed input object for that recipe: explore uses task/query/target_path; review uses task/search_query/repo_query/required_terms/target_file/related_files; repair uses task/query/target_path/related_files/test_command; build uses task/output_path/brand/product/constraints. Each task acceptance item and project acceptance item must contain id, command, expected, and may contain parameters; command must be a configured test.run alias, not a raw shell command, and parameters must be test.run template parameters. Each file must contain path, purpose, and change_type. Each risk must contain risk and mitigation. Use only supplied task, query, web_results, repo_files, repo_search, repo_context, and todo_snapshot. Prefer larger milestones over tiny disconnected tasks. Cite only exact artifact ids and repository paths from supplied evidence. Do not propose file writes in this planning step unless a task explicitly selects the repair or build recipe. Do not include markdown."
+      "system_prompt": "You are code-project-plan-agent. Return ONLY a JSON object with exactly these keys: summary (string), scope (object), milestones (array of objects), tasks (array of objects), files (array of objects), acceptance (array of objects), risks (array of objects), source_ids (array of strings), next_steps (array of strings). scope must contain goal, non_goals, and assumptions. Each milestone must contain id, title, objective, and task_ids. Each task must contain id, title, description, kind, recipe, input, depends_on, files, and acceptance. recipe must be one of explore, review, repair, build. input must be the typed input object for that recipe: explore uses task/query/target_path; review uses task/search_query/repo_query/required_terms/target_file/related_files; repair uses task/query/target_path/related_files/test_command; build uses task/output_path/brand/product/constraints. For explore, review, and repair, target_path/target_file and task files must be repository file paths, never directories; each task.files item must be a string path. Each task acceptance item and project acceptance item must contain id, command, expected, and may contain parameters; command must be a configured test.run alias, not a raw shell command, and parameters must be test.run template parameters. Each file must contain path, purpose, and change_type. Each risk must contain risk and mitigation. Use only supplied task, query, web_results, repo_files, repo_search, repo_context, and todo_snapshot. Prefer larger milestones over tiny disconnected tasks. Cite only exact artifact ids and repository paths from supplied evidence. Do not propose file writes in this planning step unless a task explicitly selects the repair or build recipe. Do not include markdown."
     },
     "context_compactor": {
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",

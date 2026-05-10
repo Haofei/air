@@ -311,6 +311,18 @@ impl ModelProvider for RetryModels {
     }
 }
 
+struct ContentWrappedModels;
+
+impl ModelProvider for ContentWrappedModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "retry_model");
+        assert!(input.get("_air_retry").is_none());
+        Ok(json!({
+            "content": "{\"summary\":\"wrapped model result\",\"rationale\":\"content parsed into the declared output schema\"}"
+        }))
+    }
+}
+
 struct TokenLimitRetryModels {
     calls: usize,
 }
@@ -1159,6 +1171,37 @@ fn retries_model_call_after_schema_violation() {
             .filter(|event| event.action == "model_call" && event.status == TraceStatus::Ok)
             .count(),
         1
+    );
+}
+
+#[test]
+fn accepts_model_content_wrapper_when_parsed_json_matches_schema() {
+    let module = load_agent("tests/agents/model-retry.air.yaml");
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: ContentWrappedModels,
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("research plan"))]),
+        )
+        .unwrap();
+
+    assert_eq!(
+        result.outputs["result"]["summary"],
+        json!("wrapped model result")
+    );
+    let model_event = result
+        .trace
+        .iter()
+        .find(|event| event.action == "model_call")
+        .expect("model_call event");
+    assert_eq!(model_event.status, TraceStatus::Ok);
+    assert_eq!(
+        model_event.output.as_ref().unwrap()["rationale"],
+        json!("content parsed into the declared output schema")
     );
 }
 
