@@ -319,6 +319,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .to_string(),
             recipe: recipe_name(recipe).to_string(),
             profile: path_ref_to_input_string(&profile),
+            pack: code_session_turn_pack(recipe),
             input: Value::Object(session_input),
             completed: code_outputs_complete(recipe, &outputs),
             trace_files: trace_files
@@ -432,6 +433,8 @@ struct CodeSessionTurn {
     task: String,
     recipe: String,
     profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pack: Option<CodeSessionTurnPack>,
     input: Value,
     completed: bool,
     #[serde(default)]
@@ -445,6 +448,15 @@ struct CodeSessionTurn {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     recovery: Option<CodeSessionRecovery>,
     outputs: Value,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct CodeSessionTurnPack {
+    path: String,
+    recipe: String,
+    default_profile: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    intent: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
@@ -741,6 +753,16 @@ impl CodeSessionState {
         self.version = code_session_version();
         self.turns.push(turn);
     }
+}
+
+fn code_session_turn_pack(recipe: CodeRecipe) -> Option<CodeSessionTurnPack> {
+    let recipe = default_recipe_for_id(recipe_name(recipe)).ok()?;
+    Some(CodeSessionTurnPack {
+        path: CODE_AGENT_PACK_PATH.to_string(),
+        recipe: recipe.id,
+        default_profile: path_ref_to_input_string(&recipe.default_profile),
+        intent: recipe.intent,
+    })
 }
 
 fn default_session_trace_path(session_path: &Path, turn_number: usize) -> PathBuf {
@@ -4104,6 +4126,7 @@ mod tests {
             task: "run two tasks".to_string(),
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: false,
             trace_files: Vec::new(),
@@ -4151,6 +4174,7 @@ mod tests {
             task: "run two tasks".to_string(),
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: false,
             trace_files: Vec::new(),
@@ -4172,6 +4196,7 @@ mod tests {
             task: "failed recovery".to_string(),
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: false,
             trace_files: Vec::new(),
@@ -4209,6 +4234,7 @@ mod tests {
             task: "run project".to_string(),
             recipe: "plan".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: false,
             trace_files: Vec::new(),
@@ -4812,6 +4838,7 @@ mod tests {
             task: "inspect repo".to_string(),
             recipe: "explore".to_string(),
             profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
+            pack: None,
             input: json!({"task": "inspect repo"}),
             completed: true,
             trace_files: Vec::new(),
@@ -4904,6 +4931,7 @@ mod tests {
                 task: "old".to_string(),
                 recipe: "explore".to_string(),
                 profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
+                pack: None,
                 input: json!({"task": "old"}),
                 completed: true,
                 trace_files: Vec::new(),
@@ -4922,6 +4950,7 @@ mod tests {
                 task: "new".to_string(),
                 recipe: "repair".to_string(),
                 profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
+                pack: None,
                 input: json!({"task": "new"}),
                 completed: false,
                 trace_files: Vec::new(),
@@ -4975,6 +5004,7 @@ mod tests {
             task: "fix it".to_string(),
             recipe: "repair".to_string(),
             profile: "examples/code-agent/repair-core.air-profile.yaml".to_string(),
+            pack: Some(code_session_turn_pack(CodeRecipe::Repair).unwrap()),
             input: json!({"task": "fix it"}),
             completed: false,
             trace_files: Vec::new(),
@@ -4995,6 +5025,13 @@ mod tests {
         assert_eq!(roundtrip.turns[0].time.created, 42);
         assert_eq!(roundtrip.turns[0].time.updated, 42);
         assert_eq!(roundtrip.turns[0].recipe, "repair");
+        let pack = roundtrip.turns[0].pack.as_ref().unwrap();
+        assert_eq!(pack.path, CODE_AGENT_PACK_PATH);
+        assert_eq!(pack.recipe, "repair");
+        assert_eq!(
+            pack.default_profile,
+            "examples/code-agent/repair-core.air-profile.yaml"
+        );
         assert!(!roundtrip.turns[0].completed);
     }
 
@@ -5007,6 +5044,7 @@ mod tests {
             task: "one".to_string(),
             recipe: "explore".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: true,
             trace_files: Vec::new(),
@@ -5022,6 +5060,7 @@ mod tests {
             task: "two".to_string(),
             recipe: "review".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: true,
             trace_files: Vec::new(),
@@ -5046,6 +5085,7 @@ mod tests {
             task: "inspect".to_string(),
             recipe: "explore".to_string(),
             profile: "profile".to_string(),
+            pack: None,
             input: json!({}),
             completed: true,
             trace_files: Vec::new(),

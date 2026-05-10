@@ -155,6 +155,9 @@ with open("target/generated/code_project_plan.session.json", encoding="utf-8") a
     session = json.load(handle)
 turn = session["turns"][-1]
 assert turn["recipe"] == "plan", turn
+assert turn["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml", turn
+assert turn["pack"]["recipe"] == "plan", turn
+assert turn["pack"]["default_profile"] == "examples/code-agent/project-plan.air-profile.yaml", turn
 assert turn["completed"] is True, turn
 assert turn["summary"]["model_call_count"] >= 1, turn
 assert "project_planner" in turn["summary"]["models"], turn["summary"]
@@ -876,6 +879,9 @@ assert output["command"] == "code", output
 assert output["will_run"] is False, output
 assert output["requested_recipe"] == "auto", output
 assert output["resolved_recipe"] == "repair", output
+assert output["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml", output
+assert output["pack"]["recipe"] == "repair", output
+assert output["pack"]["default_profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["profile"] == "examples/code-agent/repair-core.air-profile.yaml", output
 assert output["plan"].endswith("examples/code-agent/code-repair.air-plan.yaml"), output
 assert output["store"].endswith("examples/code-agent/module-store.air-store.yaml"), output
@@ -1083,6 +1089,9 @@ for index, turn in enumerate(session["turns"], start=1):
     assert turn["id"] == f"turn-{index:06}", turn
     assert turn["time"]["created"] > 0, turn
     assert turn["time"]["updated"] >= turn["time"]["created"], turn
+    assert turn["pack"]["path"] == "examples/code-agent/code-agent.air-pack.yaml", turn
+    assert turn["pack"]["recipe"] == "explore", turn
+    assert turn["pack"]["default_profile"] == "examples/code-agent/explore.air-profile.yaml", turn
     assert turn["trace_files"], turn
     assert Path(turn["trace_files"][0]).exists(), turn
     assert turn["trace_files"][0].endswith(f"turn{index}.trace.jsonl"), turn
