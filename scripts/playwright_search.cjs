@@ -252,6 +252,19 @@ async function run(input) {
 }
 
 async function fetchPageText(context, url, options) {
+  if (!isHttpUrl(url)) {
+    return {
+      content: '',
+      content_chars: 0,
+      truncated: false,
+      fetch_status: 'failed',
+      fetch_error: 'unsupported_url_scheme',
+      fetch_attempts: 0,
+      status: 0,
+      content_type: '',
+      language: '',
+    };
+  }
   let lastFailure = null;
   for (let attempt = 0; attempt <= options.retryCount; attempt += 1) {
     if (deadlineExceeded(options.deadlineAt)) {
@@ -273,7 +286,7 @@ async function fetchPageText(context, url, options) {
     }
     lastFailure = result;
     if (attempt < options.retryCount) {
-      await delay(Math.min(2_000, 250 * 2 ** attempt));
+      await delay(Math.min(30_000, 500 * 2 ** attempt));
     }
   }
   return { ...lastFailure, fetch_attempts: options.retryCount + 1 };
@@ -306,7 +319,7 @@ async function fetchPageTextOnce(context, url, options) {
         content_chars: 0,
         truncated: false,
         fetch_status: 'non_ok_status',
-        fetch_error: '',
+        fetch_error: `HTTP ${status}`,
         status,
         content_type: contentType,
         language: '',
@@ -318,7 +331,7 @@ async function fetchPageTextOnce(context, url, options) {
         content_chars: 0,
         truncated: false,
         fetch_status: 'non_html',
-        fetch_error: '',
+        fetch_error: contentType ? `unsupported content type: ${contentType}` : 'unsupported content type',
         status,
         content_type: contentType,
         language: '',

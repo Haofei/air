@@ -12,6 +12,7 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/apple-bui
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/repair.air-profile.yaml
 
 echo "[code-agent] deterministic tool coverage"
+node --check scripts/playwright_search.cjs
 cargo test -q -p air-tools file_read
 cargo test -q -p air-tools file_patch
 cargo test -q -p air-tools file_edit
