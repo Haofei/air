@@ -2444,6 +2444,48 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_prefers_preflight_search_for_targeted_context() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        let search_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("preflight-target-search"))
+            .unwrap();
+        let read_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("preflight-target-read"))
+            .unwrap();
+
+        assert_eq!(
+            search_rule["actions"][0]["input"]["array"][0]["object"]["tool"]["literal"],
+            serde_yaml::Value::String("file.search".to_string())
+        );
+        assert_eq!(
+            search_rule["actions"][0]["input"]["array"][0]["object"]["input"]["object"]["pattern"]
+                ["ref"],
+            serde_yaml::Value::String("target_search_pattern".to_string())
+        );
+        assert_eq!(
+            search_rule["when"],
+            serde_yaml::Value::String(
+                "phase == \"preflight\" && target_path != \"\" && target_search_pattern != \"\""
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            read_rule["when"],
+            serde_yaml::Value::String(
+                "phase == \"preflight\" && target_path != \"\" && target_search_pattern == \"\""
+                    .to_string()
+            )
+        );
+    }
+
+    #[test]
     fn edit_loop_handles_auto_verify_tool_errors_before_output_checks() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -2468,6 +2510,42 @@ mod tests {
         assert!(
             failed_tool < failed_output,
             "tool-error branch must run before reading auto_verify_result[0].output.success"
+        );
+    }
+
+    #[test]
+    fn edit_loop_handles_edit_validation_failures_before_continue() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rule_ids = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|rule| rule["id"].as_str())
+            .collect::<Vec<_>>();
+        let file_ops_failed = rule_ids
+            .iter()
+            .position(|id| *id == "record-file-ops-validation-failed")
+            .unwrap();
+        let file_patch_failed = rule_ids
+            .iter()
+            .position(|id| *id == "record-file-patch-validation-failed")
+            .unwrap();
+        let continue_after_act = rule_ids
+            .iter()
+            .position(|id| *id == "continue-after-act")
+            .unwrap();
+
+        assert!(
+            file_ops_failed < continue_after_act,
+            "file.ops validation failures must be observed before the generic post_act transition"
+        );
+        assert!(
+            file_patch_failed < continue_after_act,
+            "file.patch validation failures must be observed before the generic post_act transition"
         );
     }
 

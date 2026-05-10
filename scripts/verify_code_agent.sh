@@ -94,7 +94,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.read", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
 file_ops = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
@@ -264,9 +264,9 @@ assert any(
     for event in events
 ), events
 assert any(
-    event.get("rule") == "preflight-target-read"
+    event.get("rule") == "preflight-target-search"
     and event.get("action") == "append"
-    and event.get("output", [{}])[-1].get("action") == "initial_target_read"
+    and event.get("output", [{}])[-1].get("action") == "initial_target_search"
     for event in events
 ), events
 failed_read = next(
@@ -285,6 +285,59 @@ assert any(
     observation.get("action") == "path_error_hint"
     for observation in summarizer["input"]["observations"]
 ), summarizer
+PY
+
+echo "[code-agent] edit loop records edit validation failures"
+edit_validation_failed_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_validation_failed_backup"
+restore_edit_validation_failed_fixture() {
+  cp "$edit_validation_failed_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_validation_failed_backup"
+}
+trap restore_edit_validation_failed_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.validation-failed.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_validation_failed.trace.jsonl \
+  > target/generated/code_agent_edit_validation_failed.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_validation_failed.post_test.log
+restore_edit_validation_failed_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_validation_failed.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_validation_failed.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+assert any(
+    event.get("rule") == "record-file-ops-validation-failed"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "edit_validation_failed"
+    for event in events
+), events
+failed_file_ops = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("status") == "ok"
+    and event.get("output", {}).get("applied") is False
+)
+assert failed_file_ops["output"]["diagnostics"][0]["field"] == "old_string", failed_file_ops
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == ["file.search", "file.ops", "file.ops", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop repairs single allowed write path"
@@ -331,7 +384,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "file.ops", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -386,7 +439,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.read", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -478,7 +531,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.read", "test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
+assert tools == ["file.search", "test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
 file_patch = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"

@@ -1,0 +1,63 @@
+{
+  "fixtures": {
+    "code_edit_decider": {
+      "$sequence": [
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "operations": [
+                  {
+                    "kind": "edit",
+                    "path": "examples/code-agent/edit-fixture/math.js",
+                    "old_string": "return a * b;",
+                    "new_string": "return a + b;"
+                  }
+                ]
+              }
+            }
+          ],
+          "rationale": "Intentionally use an old_string that is not present so AIR records edit_validation_failed."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "operations": [
+                  {
+                    "kind": "edit",
+                    "path": "examples/code-agent/edit-fixture/math.js",
+                    "old_string": "return a - b;",
+                    "new_string": "return a + b;"
+                  }
+                ]
+              }
+            }
+          ],
+          "rationale": "Use the exact old_string after receiving edit_validation_failed diagnostics."
+        }
+      ]
+    },
+    "code_edit_summarizer": {
+      "initial_success": false,
+      "final_success": true,
+      "patch_applied": true,
+      "changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "workspace_changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "preexisting_changed_files": [],
+      "workspace_diff": {
+        "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
+      },
+      "rationale": "AIR recorded edit_validation_failed for a non-matching old_string, then the loop retried with the exact old_string, revalidated, and inspected the diff.",
+      "observations": []
+    }
+  }
+}

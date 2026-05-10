@@ -177,8 +177,56 @@ workflow:
             verification_status: unknown
             phase: preflight
 
+    - id: preflight-target-search
+      when: phase == "preflight" && target_path != "" && target_search_pattern != ""
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: file.search
+                  input:
+                    object:
+                      path:
+                        ref: target_path
+                      pattern:
+                        ref: target_search_pattern
+                      context_lines:
+                        literal: 8
+                      max_matches:
+                        literal: 20
+          output: initial_target_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: initial_target_search
+              rationale:
+                literal: Deterministically search target_path before the first model decision so large files start from narrow, task-relevant context.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: file.search
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+                          pattern:
+                            ref: target_search_pattern
+              result:
+                ref: initial_target_context
+        - kind: set
+          values:
+            phase: choose
+
     - id: preflight-target-read
-      when: phase == "preflight" && target_path != ""
+      when: phase == "preflight" && target_path != "" && target_search_pattern == ""
       actions:
         - kind: tool_batch_dispatch
           input:
@@ -665,6 +713,44 @@ workflow:
                     ref: observation[0].tool
                   failed_input:
                     ref: observation[0].input
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-file-ops-validation-failed
+      when: phase == "post_act" && observation[0].tool == "file.ops" && observation[0].status == "ok" && observation[0].output.applied == false
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: edit_validation_failed
+              rationale:
+                literal: A file.ops edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid operation.
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-file-patch-validation-failed
+      when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "ok" && observation[0].output.applied == false
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: edit_validation_failed
+              rationale:
+                literal: A file.patch edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid patch.
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
         - kind: set
           values:
             phase: choose
