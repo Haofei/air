@@ -815,7 +815,10 @@ fn code_session_start_meta_by_action(events: &[TraceEvent]) -> HashMap<String, V
     for event in events {
         if !matches!(
             event.action.as_str(),
-            "model_call_start" | "tool_call_start" | "approval_start"
+            "model_call_start"
+                | "tool_call_start"
+                | "tool_batch_dispatch_item_start"
+                | "approval_start"
         ) {
             continue;
         }
@@ -842,7 +845,7 @@ fn code_session_turn_summary(parts: &[CodeSessionPart]) -> CodeSessionTurnSummar
         if part.kind == "model_call" {
             summary.model_call_count += 1;
         }
-        if part.kind == "tool_call" {
+        if matches!(part.kind.as_str(), "tool_call" | "tool_batch_dispatch_item") {
             summary.tool_call_count += 1;
         }
         if part.kind == "approval" {
@@ -948,7 +951,7 @@ fn sort_dedup(values: &mut Vec<String>) {
 fn code_session_part_from_event(trace_file: &str, event: &TraceEvent) -> Option<CodeSessionPart> {
     if !matches!(
         event.action.as_str(),
-        "model_call" | "tool_call" | "approval" | "return"
+        "model_call" | "tool_call" | "tool_batch_dispatch_item" | "approval" | "return"
     ) {
         return None;
     }
@@ -2694,6 +2697,32 @@ mod tests {
     }
 
     #[test]
+    fn session_part_indexes_batch_tool_trace_event() {
+        let event = TraceEvent {
+            agent: "code-agent".to_string(),
+            step: 4,
+            rule: "act".to_string(),
+            action: "tool_batch_dispatch_item".to_string(),
+            input: Some(json!({"path": "src/lib.rs"})),
+            output: Some(json!({
+                "path": "src/lib.rs",
+                "artifacts": [{"id": "file:src/lib.rs", "kind": "file_span"}]
+            })),
+            meta: Some(json!({"tool": "file.read", "index": 0})),
+            status: TraceStatus::Ok,
+            error: None,
+        };
+
+        let part = code_session_part_from_event("trace.jsonl", &event).unwrap();
+
+        assert_eq!(part.kind, "tool_batch_dispatch_item");
+        assert_eq!(part.tool, Some("file.read".to_string()));
+        assert_eq!(part.files, vec!["src/lib.rs"]);
+        assert_eq!(part.artifact_ids, vec!["file:src/lib.rs"]);
+        assert_eq!(part.artifact_kinds, vec!["file_span"]);
+    }
+
+    #[test]
     fn session_turn_summary_rolls_up_parts() {
         let parts = vec![
             CodeSessionPart {
@@ -2715,12 +2744,12 @@ mod tests {
                 error: None,
             },
             CodeSessionPart {
-                kind: "tool_call".to_string(),
+                kind: "tool_batch_dispatch_item".to_string(),
                 trace_file: "trace.jsonl".to_string(),
                 agent: "agent".to_string(),
                 step: 2,
                 rule: "patch".to_string(),
-                action: "tool_call".to_string(),
+                action: "tool_batch_dispatch_item".to_string(),
                 status: "ok".to_string(),
                 model: None,
                 tool: Some("file.patch".to_string()),
