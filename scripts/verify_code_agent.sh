@@ -20,6 +20,7 @@ cargo test -q -p air-tools git_status
 cargo test -q -p air-tools todo_write
 cargo test -q -p air-tools command_run_extracts_structured_diagnostics
 cargo test -q -p air-tools extract_command_diagnostics_parses_rustc_location_blocks
+cargo test -q -p air-tools extract_command_diagnostics_parses_python_tracebacks
 
 echo "[code-agent] repair fixture starts failing with a structured diagnostic"
 if node examples/code-agent/repair-fixture/test.js > target/generated/code_agent_repair_fixture.log 2>&1; then

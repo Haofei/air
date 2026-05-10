@@ -3126,11 +3126,31 @@ fn call_command_run_tool(
 fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> {
     let mut diagnostics = Vec::new();
     let mut pending_rust = None;
+    let mut pending_python_frames: Vec<(String, u64, String)> = Vec::new();
     for line in log.lines() {
         let trimmed = line.trim_start();
         if let Some((severity, message)) = parse_rust_severity_message(trimmed) {
             pending_rust = Some((severity, message, trimmed.to_string()));
             continue;
+        }
+        if let Some((path, line_number)) = parse_python_traceback_location(trimmed) {
+            pending_python_frames.push((path, line_number, trimmed.to_string()));
+            continue;
+        }
+        if let Some(message) = parse_python_exception_line(trimmed) {
+            if let Some((path, line_number, raw)) = pending_python_frames.last() {
+                diagnostics.push(json!({
+                    "source": "command_run",
+                    "severity": "error",
+                    "path": path,
+                    "line": line_number,
+                    "column": 1,
+                    "message": message,
+                    "raw": raw
+                }));
+                pending_python_frames.clear();
+                pending_rust = None;
+            }
         }
         if let Some((path, line_number, column)) = parse_rust_location_line(trimmed) {
             if let Some((severity, message, raw)) = pending_rust.take() {
@@ -3149,6 +3169,7 @@ fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> 
         {
             diagnostics.push(diagnostic);
             pending_rust = None;
+            pending_python_frames.clear();
         }
         if diagnostics.len() >= max_diagnostics {
             break;
@@ -3199,6 +3220,41 @@ fn parse_typescript_diagnostic(line: &str) -> Option<Value> {
         "message": message,
         "raw": line
     }))
+}
+
+fn parse_python_traceback_location(line: &str) -> Option<(String, u64)> {
+    let rest = line.strip_prefix("File ")?;
+    let rest = rest.strip_prefix('"')?;
+    let (path, rest) = rest.split_once('"')?;
+    let rest = rest.trim_start();
+    let rest = rest.strip_prefix(", line ")?;
+    let line_number = rest
+        .split(|character: char| !character.is_ascii_digit())
+        .next()?
+        .parse::<u64>()
+        .ok()?;
+    Some((path.to_string(), line_number))
+}
+
+fn parse_python_exception_line(line: &str) -> Option<String> {
+    if line.is_empty()
+        || line == "Traceback (most recent call last):"
+        || line.starts_with("File ")
+        || line.starts_with("During handling of the above exception")
+        || line.starts_with("The above exception was the direct cause")
+    {
+        return None;
+    }
+    let (exception, _message) = line.split_once(':').unwrap_or((line, ""));
+    let exception = exception.trim();
+    let valid_exception_name = exception
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_' || character == '.')
+        && exception
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_uppercase() || character == '_');
+    valid_exception_name.then(|| line.to_string())
 }
 
 fn parse_colon_diagnostic(line: &str) -> Option<Value> {
@@ -5076,6 +5132,29 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("cannot find value"));
+    }
+
+    #[test]
+    fn extract_command_diagnostics_parses_python_tracebacks() {
+        let diagnostics = extract_command_diagnostics(
+            r#"Traceback (most recent call last):
+  File "/tmp/project/run.py", line 8, in <module>
+    main()
+  File "src/app.py", line 3, in main
+    assert False
+AssertionError: broken invariant
+"#,
+            10,
+        );
+
+        assert_eq!(diagnostics[0]["severity"], json!("error"));
+        assert_eq!(diagnostics[0]["path"], json!("src/app.py"));
+        assert_eq!(diagnostics[0]["line"], json!(3));
+        assert_eq!(diagnostics[0]["column"], json!(1));
+        assert_eq!(
+            diagnostics[0]["message"],
+            json!("AssertionError: broken invariant")
+        );
     }
 
     #[test]
