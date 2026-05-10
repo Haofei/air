@@ -35,6 +35,8 @@ The fixed structure is only the loop boundary. The model chooses one to four pla
 
 `tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind `test.run` aliases for workspace tests, clippy, the code-agent gate, backend conformance, and bounded package/test-filter runs.
 
+Completion is blocked until verification has passed. The loop does not transition to `summarize -> done` until a `test.run` invocation returns `success: true`. This means every edit cycle must ultimately prove its change through the configured verification command; if tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
+
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 
 ```bash
