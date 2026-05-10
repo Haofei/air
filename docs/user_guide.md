@@ -167,6 +167,9 @@ Planner behavior:
 - `priority` and `covers` help the planner choose large verified components;
 - recipes let the planner select a pre-validated topology by `recipe_id`;
 - selected recipes are materialized locally and validated before execution.
+- `air plan --explain --task "..." --store ...` prints the local component-selection ranking
+  without calling a model. Use it to confirm the planner will see the right large component before
+  spending a model call or running a bench.
 
 ## 5. Dynamic Fan-Out
 

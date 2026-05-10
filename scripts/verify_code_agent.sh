@@ -62,6 +62,21 @@ assert review["findings"][0]["severity"] == "info"
 assert review["search_quality"]["sufficient"] is True
 PY
 
+echo "[code-agent] planner component selection explain"
+cargo run -q -p air-cli -- plan --explain \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --task "Fix a failing test using structured diagnostics, apply a bounded patch, and retest." \
+  > target/generated/code_agent_plan_explain.json
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_plan_explain.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+first = output["component_selection"]["first_choice"]
+assert first["id"] == "code.repair@0.1.0"
+assert first["tier"] == "large_component"
+PY
+
 echo "[code-agent] read-only explore offline run"
 cargo run -q -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml \
   > target/generated/code_explore_fixture.output.json

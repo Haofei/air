@@ -78,8 +78,8 @@ enum Command {
         store: PathBuf,
 
         /// OpenAI-compatible model config JSON containing the planner model alias.
-        #[arg(long)]
-        model_config: PathBuf,
+        #[arg(long, required_unless_present = "explain")]
+        model_config: Option<PathBuf>,
 
         /// Planner model alias from --model-config.
         #[arg(long, default_value = "planner")]
@@ -88,6 +88,10 @@ enum Command {
         /// Include internal primitive modules in the planner catalog.
         #[arg(long)]
         allow_internal: bool,
+
+        /// Print local component-selection reasoning without calling the planner model.
+        #[arg(long)]
+        explain: bool,
 
         /// Optional output path. Prints YAML to stdout when omitted.
         #[arg(long)]
@@ -382,6 +386,7 @@ fn main() -> Result<()> {
             model_config,
             planner_model,
             allow_internal,
+            explain,
             output,
         } => plan_task(PlanOptions {
             task,
@@ -390,6 +395,7 @@ fn main() -> Result<()> {
             model_config,
             planner_model,
             allow_internal,
+            explain,
             output,
         }),
         Command::Run {
@@ -1857,5 +1863,49 @@ modules:
         };
 
         assert!(explain);
+    }
+
+    #[test]
+    fn plan_explain_accepts_no_model_config() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "plan",
+            "--explain",
+            "--store",
+            "examples/code-agent/module-store.air-store.yaml",
+            "--task",
+            "Explore the command_run implementation",
+        ])
+        .unwrap();
+
+        let Command::Plan {
+            model_config,
+            explain,
+            ..
+        } = cli.command
+        else {
+            panic!("expected plan command");
+        };
+
+        assert_eq!(model_config, None);
+        assert!(explain);
+    }
+
+    #[test]
+    fn plan_requires_model_config_without_explain() {
+        let error = Cli::try_parse_from([
+            "air",
+            "plan",
+            "--store",
+            "examples/code-agent/module-store.air-store.yaml",
+            "--task",
+            "Explore the command_run implementation",
+        ])
+        .unwrap_err();
+
+        assert_eq!(
+            error.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument
+        );
     }
 }

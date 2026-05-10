@@ -112,6 +112,14 @@ cargo run -p air-cli -- validate-plan --profile examples/code-agent/explore.air-
 cargo run -p air-cli -- run-plan --profile examples/code-agent/explore.air-profile.yaml --log
 ```
 
+Check which high-level coding component the planner will see first without calling a model:
+
+```bash
+cargo run -p air-cli -- plan --explain \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --task "Fix a failing test using diagnostics and retest"
+```
+
 Use this as the first coding-agent shape for bench work. It is intentionally static and bounded so
 search quality, source grounding, and local-code evidence can be tested.
 

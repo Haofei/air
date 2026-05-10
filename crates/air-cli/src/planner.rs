@@ -9,9 +9,10 @@ pub(crate) struct PlanOptions {
     pub(crate) task: Option<String>,
     pub(crate) task_file: Option<PathBuf>,
     pub(crate) store: PathBuf,
-    pub(crate) model_config: PathBuf,
+    pub(crate) model_config: Option<PathBuf>,
     pub(crate) planner_model: String,
     pub(crate) allow_internal: bool,
+    pub(crate) explain: bool,
     pub(crate) output: Option<PathBuf>,
 }
 
@@ -30,6 +31,7 @@ pub(crate) fn plan_task(options: PlanOptions) -> Result<()> {
         model_config,
         planner_model,
         allow_internal,
+        explain,
         output,
     } = options;
 
@@ -46,6 +48,26 @@ pub(crate) fn plan_task(options: PlanOptions) -> Result<()> {
     let catalog = module_catalog(&store, &base_dir, allow_internal)?;
     let recipes = recipe_catalog(&store, &base_dir, allow_internal)?;
     let request = planner_request(&task, &store, catalog, recipes, allow_internal);
+
+    if explain {
+        let explanation = json!({
+            "task": task.trim(),
+            "store": store_path.display().to_string(),
+            "allow_internal": allow_internal,
+            "component_selection": request["module_store"]["component_selection"],
+        });
+        let json = serde_json::to_string_pretty(&explanation)?;
+        if let Some(output) = output {
+            fs::write(output, format!("{json}\n"))?;
+        } else {
+            println!("{json}");
+        }
+        return Ok(());
+    }
+
+    let Some(model_config) = model_config else {
+        anyhow::bail!("plan requires --model-config unless --explain is used");
+    };
 
     let plan_value = call_openai_model(model_config, &planner_model, &request)?;
     let mut plan = parse_planner_response(plan_value, &store, &base_dir, allow_internal)?;
