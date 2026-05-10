@@ -1822,22 +1822,70 @@ fn find_edit_matches(
     }
 }
 
-fn apply_edit_matches(
-    content: &str,
-    matches: &[EditMatch],
-    new_string: &str,
-    replace_all: bool,
-) -> String {
-    let selected = if replace_all {
+fn selected_edit_matches(matches: &[EditMatch], replace_all: bool) -> Vec<EditMatch> {
+    if replace_all {
         matches.to_vec()
     } else {
         vec![matches[0]]
-    };
+    }
+}
+
+fn apply_selected_edit_matches(content: &str, selected: &[EditMatch], new_string: &str) -> String {
     let mut updated = content.to_string();
     for edit_match in selected.iter().rev() {
         updated.replace_range(edit_match.start..edit_match.end, new_string);
     }
     updated
+}
+
+fn edit_unified_diff(
+    path: &str,
+    content: &str,
+    selected: &[EditMatch],
+    new_string: &str,
+) -> String {
+    let mut diff = format!("--- a/{path}\n+++ b/{path}\n");
+    for edit_match in selected {
+        let old_segment = &content[edit_match.start..edit_match.end];
+        let old_start_line = line_number_at(content, edit_match.start);
+        let old_line_count = diff_line_count(old_segment);
+        let new_line_count = diff_line_count(new_string);
+        diff.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start_line, old_line_count, old_start_line, new_line_count
+        ));
+        for line in diff_lines(old_segment) {
+            diff.push('-');
+            diff.push_str(line);
+            diff.push('\n');
+        }
+        for line in diff_lines(new_string) {
+            diff.push('+');
+            diff.push_str(line);
+            diff.push('\n');
+        }
+    }
+    diff
+}
+
+fn line_number_at(content: &str, byte_index: usize) -> usize {
+    content[..byte_index]
+        .bytes()
+        .filter(|byte| *byte == b'\n')
+        .count()
+        + 1
+}
+
+fn diff_line_count(text: &str) -> usize {
+    diff_lines(text).len().max(1)
+}
+
+fn diff_lines(text: &str) -> Vec<&str> {
+    if text.is_empty() {
+        Vec::new()
+    } else {
+        text.lines().collect()
+    }
 }
 
 fn find_line_based_edit_matches<F>(content: &str, old_string: &str, normalize: F) -> Vec<EditMatch>
@@ -2080,21 +2128,27 @@ fn call_file_edit_tool(
         )));
     }
 
-    let updated = apply_edit_matches(&content, &matches, new_string, replace_all);
+    let selected_matches = selected_edit_matches(&matches, replace_all);
+    let updated = apply_selected_edit_matches(&content, &selected_matches, new_string);
     let updated_bytes = updated.as_bytes();
     if updated_bytes.len() > max_bytes {
         return Err(RuntimeError::Provider(format!(
             "tool {name} edited content exceeds max_bytes={max_bytes}"
         )));
     }
+    let diff = edit_unified_diff(input_path, &content, &selected_matches, new_string);
+    let (diff_content, diff_truncated, diff_bytes) =
+        bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
     fs::write(&path, updated_bytes)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
 
     Ok(json!({
         "path": path.display().to_string(),
         "bytes": updated_bytes.len(),
-        "replacements": if replace_all { matches.len() } else { 1 },
+        "replacements": selected_matches.len(),
         "match_strategy": match_strategy.as_str(),
+        "diff": diff_content,
+        "diff_truncated": diff_truncated,
         "artifacts": [{
             "id": format!("file-edit:{}", path.display()),
             "kind": "file_edit",
@@ -2103,18 +2157,21 @@ fn call_file_edit_tool(
                 .and_then(|value| value.to_str())
                 .unwrap_or("file edit"),
             "uri": path.display().to_string(),
-            "content": format!(
-                "edited {} replacement(s) in {} using match_strategy={}",
-                if replace_all { matches.len() } else { 1 },
-                path.display(),
-                match_strategy.as_str()
-            ),
+            "content": diff_content.clone(),
             "metadata": {
                 "provider": "file_edit",
                 "path": path.display().to_string(),
                 "bytes": updated_bytes.len(),
-                "replacements": if replace_all { matches.len() } else { 1 },
-                "match_strategy": match_strategy.as_str()
+                "replacements": selected_matches.len(),
+                "match_strategy": match_strategy.as_str(),
+                "diff_bytes": diff_bytes,
+                "diff_truncated": diff_truncated,
+                "summary": format!(
+                    "edited {} replacement(s) in {} using match_strategy={}",
+                    selected_matches.len(),
+                    path.display(),
+                    match_strategy.as_str()
+                )
             }
         }]
     }))
@@ -3793,6 +3850,10 @@ mod tests {
             "hello agent IR\n"
         );
         assert_eq!(output["replacements"], json!(1));
+        assert_eq!(output["diff_truncated"], json!(false));
+        assert!(output["diff"].as_str().unwrap().contains("-AIR"));
+        assert!(output["diff"].as_str().unwrap().contains("+agent IR"));
+        assert_eq!(output["artifacts"][0]["content"], output["diff"]);
         assert_eq!(output["artifacts"][0]["kind"], json!("file_edit"));
         assert_eq!(tools.tool_capability("file.edit"), Some("file.write"));
         let _ = fs::remove_dir_all(dir);

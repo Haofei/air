@@ -24,7 +24,8 @@ The review agent uses:
 
 For editing agents, prefer the opencode-style tool split already available in `air-tools`:
 `file.read` for context, `file.edit` for exact-string changes that require a prior read by default
-and explicit whitespace-tolerant strategies for indentation drift,
+and explicit whitespace-tolerant strategies for indentation drift, with bounded diff output for
+audit,
 `file.patch` for reviewed multi-file unified diffs, and `file.write` for bounded file creation or
 explicit overwrites. Keep shell execution behind `command_run` aliases instead of giving the model
 a raw shell. `command_run` returns both raw logs and structured `diagnostics[]`, so repair loops can
