@@ -80,6 +80,10 @@
       "max_items": 8,
       "max_content_chars": 120
     },
+    "todo.read": {
+      "kind": "todo_read",
+      "capability": "task.progress"
+    },
     "test.run": {
       "kind": "command_run",
       "capability": "code.test",

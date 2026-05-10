@@ -365,6 +365,10 @@ enum ToolConfig {
         #[serde(default)]
         max_content_chars: Option<usize>,
     },
+    TodoRead {
+        #[serde(default)]
+        capability: Option<String>,
+    },
     CommandRun {
         #[serde(default)]
         capability: Option<String>,
@@ -401,6 +405,7 @@ impl ToolConfig {
             | ToolConfig::RepoSymbols { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
+            | ToolConfig::TodoRead { capability }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -437,6 +442,7 @@ pub struct ConfigTools {
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
     read_snapshots: BTreeMap<PathBuf, SystemTime>,
+    current_todos: Vec<Value>,
 }
 
 impl ConfigTools {
@@ -454,6 +460,7 @@ impl ConfigTools {
                 .unwrap_or_else(|| Path::new("."))
                 .to_path_buf(),
             read_snapshots: BTreeMap::new(),
+            current_todos: Vec::new(),
         })
     }
 
@@ -478,6 +485,7 @@ impl ConfigTools {
             approvals: BTreeMap::new(),
             config_dir: PathBuf::from("."),
             read_snapshots: BTreeMap::new(),
+            current_todos: Vec::new(),
         }
     }
 
@@ -899,6 +907,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     *max_content_chars,
                 )?;
             }
+            ToolConfig::TodoRead { .. } => {}
             ToolConfig::CommandRun {
                 cwd,
                 commands,
@@ -1340,12 +1349,23 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 max_items,
                 max_content_chars,
-            } => call_todo_write_tool(
-                name,
-                input,
-                max_items.unwrap_or(20),
-                max_content_chars.unwrap_or(200),
-            ),
+            } => {
+                let output = call_todo_write_tool(
+                    name,
+                    input,
+                    max_items.unwrap_or(20),
+                    max_content_chars.unwrap_or(200),
+                )?;
+                self.current_todos = output
+                    .get("todos")
+                    .and_then(Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                Ok(output)
+            }
+            ToolConfig::TodoRead { capability: _ } => {
+                Ok(call_todo_read_tool(name, &self.current_todos))
+            }
             ToolConfig::CommandRun {
                 capability: _,
                 cwd,
@@ -1382,6 +1402,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoSymbols { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
+            | ToolConfig::TodoRead { capability }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -4341,18 +4362,66 @@ fn call_todo_write_tool(
         )));
     }
 
-    let open_count = pending_count + in_progress_count;
-    let content = serde_json::to_string_pretty(&normalized).map_err(|error| {
-        RuntimeError::Provider(format!("tool {name} serialize todo list: {error}"))
-    })?;
-    Ok(json!({
-        "todos": normalized,
+    Ok(todo_list_output(
+        name,
+        "todo_write",
+        normalized,
+        TodoCounts {
+            pending: pending_count,
+            in_progress: in_progress_count,
+            completed: completed_count,
+            cancelled: cancelled_count,
+        },
+    ))
+}
+
+fn call_todo_read_tool(name: &str, current_todos: &[Value]) -> Value {
+    let counts = todo_counts(current_todos);
+    todo_list_output(name, "todo_read", current_todos.to_vec(), counts)
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TodoCounts {
+    pending: usize,
+    in_progress: usize,
+    completed: usize,
+    cancelled: usize,
+}
+
+fn todo_counts(todos: &[Value]) -> TodoCounts {
+    let mut counts = TodoCounts {
+        pending: 0,
+        in_progress: 0,
+        completed: 0,
+        cancelled: 0,
+    };
+    for todo in todos {
+        match todo
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "pending" => counts.pending += 1,
+            "in_progress" => counts.in_progress += 1,
+            "completed" => counts.completed += 1,
+            "cancelled" => counts.cancelled += 1,
+            _ => {}
+        }
+    }
+    counts
+}
+
+fn todo_list_output(name: &str, provider: &str, todos: Vec<Value>, counts: TodoCounts) -> Value {
+    let open_count = counts.pending + counts.in_progress;
+    let content = serde_json::to_string_pretty(&todos).unwrap_or_else(|_| "[]".to_string());
+    json!({
+        "todos": todos,
         "total": todos.len(),
         "open_count": open_count,
-        "pending_count": pending_count,
-        "in_progress_count": in_progress_count,
-        "completed_count": completed_count,
-        "cancelled_count": cancelled_count,
+        "pending_count": counts.pending,
+        "in_progress_count": counts.in_progress,
+        "completed_count": counts.completed,
+        "cancelled_count": counts.cancelled,
         "artifacts": [{
             "id": "todo:list",
             "kind": "todo_list",
@@ -4360,16 +4429,17 @@ fn call_todo_write_tool(
             "uri": "air://todos/current",
             "content": content,
             "metadata": {
-                "provider": "todo_write",
+                "provider": provider,
+                "tool": name,
                 "total": todos.len(),
                 "open_count": open_count,
-                "pending_count": pending_count,
-                "in_progress_count": in_progress_count,
-                "completed_count": completed_count,
-                "cancelled_count": cancelled_count
+                "pending_count": counts.pending,
+                "in_progress_count": counts.in_progress,
+                "completed_count": counts.completed,
+                "cancelled_count": counts.cancelled
             }
         }],
-    }))
+    })
 }
 
 fn required_object_string<'a>(
@@ -4485,6 +4555,65 @@ mod tests {
         assert_eq!(output["in_progress_count"], json!(1));
         assert_eq!(output["artifacts"][0]["kind"], json!("todo_list"));
         assert_eq!(tools.tool_capability("todo.write"), Some("task.progress"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn todo_read_returns_current_todo_list_after_write() {
+        let dir = temp_dir("air-tools-todo-read");
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "todo.write": {
+                  "kind": "todo_write",
+                  "capability": "task.progress"
+                },
+                "todo.read": {
+                  "kind": "todo_read",
+                  "capability": "task.progress"
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+        let empty = tools.call_tool("todo.read", &json!({})).unwrap();
+        assert_eq!(empty["total"], json!(0));
+        assert_eq!(empty["open_count"], json!(0));
+        assert_eq!(
+            empty["artifacts"][0]["metadata"]["provider"],
+            json!("todo_read")
+        );
+
+        tools
+            .call_tool(
+                "todo.write",
+                &json!({
+                    "todos": [
+                        {
+                            "id": "inspect",
+                            "content": "Inspect repository context",
+                            "status": "completed",
+                            "priority": "high"
+                        },
+                        {
+                            "id": "verify",
+                            "content": "Run verification",
+                            "status": "pending",
+                            "priority": "medium"
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+
+        let output = tools.call_tool("todo.read", &json!({})).unwrap();
+        assert_eq!(output["total"], json!(2));
+        assert_eq!(output["open_count"], json!(1));
+        assert_eq!(output["completed_count"], json!(1));
+        assert_eq!(output["todos"][1]["id"], json!("verify"));
+        assert_eq!(tools.tool_capability("todo.read"), Some("task.progress"));
         let _ = fs::remove_dir_all(dir);
     }
 

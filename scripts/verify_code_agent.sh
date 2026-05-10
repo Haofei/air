@@ -18,6 +18,7 @@ cargo test -q -p air-tools file_edit
 cargo test -q -p air-tools stale_read
 cargo test -q -p air-tools git_status
 cargo test -q -p air-tools todo_write
+cargo test -q -p air-tools todo_read
 cargo test -q -p air-tools repo_search
 cargo test -q -p air-tools repo_symbols
 cargo test -q -p air-tools repo_context

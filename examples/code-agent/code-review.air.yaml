@@ -54,8 +54,24 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, plan, search, list_files, inspect_symbols, search_repo, read_context, read_file, read_diff, read_status, run_tests, analyze, done, failed]
+    enum: [init, plan, search, list_files, inspect_symbols, search_repo, read_context, read_file, read_diff, read_status, run_tests, read_todos, analyze, done, failed]
   plan_status:
+    type: object
+    required: [todos, total, open_count, artifacts]
+    properties:
+      todos:
+        type: array
+        items: object
+      total: integer
+      open_count: integer
+      pending_count: integer
+      in_progress_count: integer
+      completed_count: integer
+      cancelled_count: integer
+      artifacts:
+        type: array
+        items: object
+  todo_snapshot:
     type: object
     required: [todos, total, open_count, artifacts]
     properties:
@@ -234,6 +250,9 @@ tools:
   - name: todo.write
     capability: task.progress
     timeout_ms: 10000
+  - name: todo.read
+    capability: task.progress
+    timeout_ms: 10000
   - name: web.search
     capability: network.search
     timeout_ms: 120000
@@ -265,7 +284,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 13
+  max_steps: 14
   terminal: [done, failed]
   rules:
     - id: init
@@ -491,6 +510,21 @@ workflow:
             max_attempts: 1
         - kind: set
           values:
+            phase: read_todos
+
+    - id: read_todos
+      when: phase == "read_todos"
+      actions:
+        - kind: tool_call
+          tool: todo.read
+          input:
+            literal: {}
+          output: todo_snapshot
+          timeout_seconds: 10
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
             phase: analyze
 
     - id: analyze
@@ -524,6 +558,8 @@ workflow:
                 ref: test_results
               plan_status:
                 ref: plan_status
+              todo_snapshot:
+                ref: todo_snapshot
           output: review
           timeout_seconds: 120
           retry:
@@ -539,7 +575,7 @@ workflow:
           output: review
 
 policy:
-  max_tool_calls: 12
+  max_tool_calls: 13
   timeout_seconds: 300
 
 observability:
