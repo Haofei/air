@@ -207,7 +207,7 @@ workflow:
               query:
                 ref: query
               mode:
-                literal: fixed
+                literal: smart
               max_matches:
                 literal: 40
           output: repo_search
@@ -226,7 +226,7 @@ workflow:
               query:
                 ref: query
               mode:
-                literal: fixed
+                literal: smart
               max_matches:
                 literal: 40
               max_files:

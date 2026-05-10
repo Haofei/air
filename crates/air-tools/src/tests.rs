@@ -2625,6 +2625,47 @@ fn repo_search_supports_explicit_regex_mode() {
 }
 
 #[test]
+fn repo_search_supports_smart_natural_language_queries() {
+    let dir = temp_dir("air-tools-repo-search-smart");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/math.js"),
+        "function sum(values) {\n  return values.reduce((total, value) => total + value, 0);\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.search",
+            &json!({"query": "refactor the sum fixture implementation to make it cleaner", "mode": "smart"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["mode"], json!("smart"));
+    assert!(output["effective_query"].as_str().unwrap().contains("sum"));
+    assert_eq!(output["matches"][0]["path"], json!("src/math.js"));
+    assert!(output["artifacts"][0]["metadata"]["effective_query"]
+        .as_str()
+        .unwrap()
+        .contains("sum"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_search_supports_bounded_per_call_max_matches() {
     let dir = temp_dir("air-tools-repo-search-max-matches");
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -2694,7 +2735,7 @@ fn repo_search_rejects_unknown_mode() {
 
     assert!(error
         .to_string()
-        .contains("input.mode must be fixed or regex"));
+        .contains("input.mode must be fixed, regex, or smart"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -2747,6 +2788,47 @@ fn repo_context_returns_nearby_code_snippets() {
         .contains("3: fn alpha() {}"));
     assert_eq!(output["artifacts"][0]["kind"], json!("code_context"));
     assert_eq!(tools.tool_capability("repo.context"), Some("code.read"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_context_supports_smart_natural_language_queries() {
+    let dir = temp_dir("air-tools-repo-context-smart");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/math.js"),
+        "line 1\nfunction sum(values) {\n  return values.reduce((total, value) => total + value, 0);\n}\nline 5\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.context": {
+                  "kind": "repo_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 5,
+                  "max_files": 2
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.context",
+            &json!({"query": "refactor the sum fixture implementation to make it cleaner", "mode": "smart"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["mode"], json!("smart"));
+    assert_eq!(output["snippets"][0]["path"], json!("src/math.js"));
+    assert!(output["snippets"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("function sum"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -2874,7 +2956,7 @@ fn repo_context_rejects_unknown_mode() {
 
     assert!(error
         .to_string()
-        .contains("input.mode must be fixed or regex"));
+        .contains("input.mode must be fixed, regex, or smart"));
     let _ = fs::remove_dir_all(dir);
 }
 

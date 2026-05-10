@@ -2939,11 +2939,12 @@ fn call_repo_search_tool(
 ) -> Result<Value, RuntimeError> {
     let query = required_input_string(name, input, "query")?;
     let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
-    if !matches!(mode, "fixed" | "regex") {
+    if !matches!(mode, "fixed" | "regex" | "smart") {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} input.mode must be fixed or regex"
+            "tool {name} input.mode must be fixed, regex, or smart"
         )));
     }
+    let effective_query = repo_effective_search_query(mode, query);
     let effective_max_matches =
         optional_bounded_usize_input(name, input, "max_matches", max_matches)?
             .unwrap_or(max_matches);
@@ -2961,7 +2962,10 @@ fn call_repo_search_tool(
     if mode == "fixed" {
         command.arg("--fixed-strings");
     }
-    command.arg(query);
+    if mode == "smart" {
+        command.arg("--ignore-case");
+    }
+    command.arg(&effective_query);
     if let Some(glob) = input.get("glob").and_then(Value::as_str) {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
@@ -3002,6 +3006,7 @@ fn call_repo_search_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
+        "effective_query": effective_query,
         "mode": mode,
         "matches": matches,
         "bytes": bytes,
@@ -3016,6 +3021,7 @@ fn call_repo_search_tool(
                 "provider": "repo_search",
                 "repo": repo.display().to_string(),
                 "query": query,
+                "effective_query": effective_query,
                 "mode": mode,
                 "paths": paths,
                 "max_matches": effective_max_matches,
@@ -3037,11 +3043,12 @@ fn call_repo_context_tool(
 ) -> Result<Value, RuntimeError> {
     let query = required_input_string(name, input, "query")?;
     let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
-    if !matches!(mode, "fixed" | "regex") {
+    if !matches!(mode, "fixed" | "regex" | "smart") {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} input.mode must be fixed or regex"
+            "tool {name} input.mode must be fixed, regex, or smart"
         )));
     }
+    let effective_query = repo_effective_search_query(mode, query);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
     let effective_max_matches =
@@ -3065,7 +3072,10 @@ fn call_repo_context_tool(
     if mode == "fixed" {
         command.arg("--fixed-strings");
     }
-    command.arg(query);
+    if mode == "smart" {
+        command.arg("--ignore-case");
+    }
+    command.arg(&effective_query);
     if let Some(glob) = input.get("glob").and_then(Value::as_str) {
         validate_git_pathspec(name, glob)?;
         command.arg("-g").arg(glob);
@@ -3154,6 +3164,7 @@ fn call_repo_context_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
+        "effective_query": effective_query,
         "mode": mode,
         "matches": matches,
         "snippets": snippets,
@@ -3169,6 +3180,7 @@ fn call_repo_context_tool(
                 "provider": "repo_context",
                 "repo": repo.display().to_string(),
                 "query": query,
+                "effective_query": effective_query,
                 "mode": mode,
                 "paths": paths,
                 "max_matches": effective_max_matches,
@@ -3179,6 +3191,71 @@ fn call_repo_context_tool(
             }
         }]
     }))
+}
+
+fn repo_effective_search_query(mode: &str, query: &str) -> String {
+    if mode != "smart" {
+        return query.to_string();
+    }
+    let terms = repo_smart_search_terms(query);
+    if terms.is_empty() {
+        return regex::escape(query);
+    }
+    format!(
+        r"\b(?:{})\b",
+        terms
+            .iter()
+            .map(|term| regex::escape(term))
+            .collect::<Vec<_>>()
+            .join("|")
+    )
+}
+
+fn repo_smart_search_terms(query: &str) -> Vec<String> {
+    const STOP_WORDS: &[&str] = &[
+        "about",
+        "after",
+        "again",
+        "agent",
+        "behavior",
+        "change",
+        "cleaner",
+        "code",
+        "does",
+        "file",
+        "from",
+        "have",
+        "implementation",
+        "into",
+        "make",
+        "need",
+        "preserve",
+        "preserving",
+        "refactor",
+        "should",
+        "task",
+        "test",
+        "that",
+        "the",
+        "this",
+        "while",
+        "with",
+    ];
+    let mut terms = Vec::new();
+    for raw in query.split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+    {
+        let term = raw.trim().to_ascii_lowercase();
+        if term.len() < 3 || STOP_WORDS.contains(&term.as_str()) {
+            continue;
+        }
+        if !terms.contains(&term) {
+            terms.push(term);
+        }
+        if terms.len() >= 16 {
+            break;
+        }
+    }
+    terms
 }
 
 fn call_repo_symbols_tool(
