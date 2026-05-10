@@ -2147,7 +2147,16 @@ enum EditMatchStrategy {
 
 impl EditMatchStrategy {
     fn from_input(tool_name: &str, input: &Value) -> Result<Self, RuntimeError> {
-        let Some(value) = optional_string_input(tool_name, input, "match_strategy")? else {
+        Self::from_labeled_input(tool_name, input, "input")
+    }
+
+    fn from_labeled_input(
+        tool_name: &str,
+        input: &Value,
+        label: &str,
+    ) -> Result<Self, RuntimeError> {
+        let Some(value) = optional_labeled_string_input(tool_name, input, label, "match_strategy")?
+        else {
             return Ok(Self::Exact);
         };
         match value {
@@ -2155,7 +2164,7 @@ impl EditMatchStrategy {
             "line_trimmed" => Ok(Self::LineTrimmed),
             "indentation_flexible" => Ok(Self::IndentationFlexible),
             _ => Err(RuntimeError::Provider(format!(
-                "tool {tool_name} input.match_strategy must be one of exact, line_trimmed, indentation_flexible"
+                "tool {tool_name} {label}.match_strategy must be one of exact, line_trimmed, indentation_flexible"
             ))),
         }
     }
@@ -2167,6 +2176,17 @@ impl EditMatchStrategy {
             Self::IndentationFlexible => "indentation_flexible",
         }
     }
+}
+
+const MAX_FILE_EDIT_OPERATIONS: usize = 20;
+
+#[derive(Debug, Clone)]
+struct FileEditOperation<'a> {
+    label: String,
+    old_string: &'a str,
+    new_string: &'a str,
+    replace_all: bool,
+    match_strategy: EditMatchStrategy,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2448,6 +2468,103 @@ fn call_file_write_tool(
     }))
 }
 
+fn parse_file_edit_operations<'a>(
+    name: &str,
+    input: &'a Value,
+    allow_replace_all: bool,
+) -> Result<Vec<FileEditOperation<'a>>, RuntimeError> {
+    let global_replace_all = optional_bool_input(name, input, "replace_all")?.unwrap_or(false);
+    if global_replace_all && !allow_replace_all {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.replace_all is true but allow_replace_all is false"
+        )));
+    }
+    let global_match_strategy = EditMatchStrategy::from_input(name, input)?;
+
+    if let Some(edits_value) = input.get("edits") {
+        if input.get("old_string").is_some() || input.get("new_string").is_some() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input must use either old_string/new_string or edits, not both"
+            )));
+        }
+        let edits = edits_value.as_array().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.edits must be an array"))
+        })?;
+        if edits.is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.edits must contain at least one edit"
+            )));
+        }
+        if edits.len() > MAX_FILE_EDIT_OPERATIONS {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.edits must contain at most {MAX_FILE_EDIT_OPERATIONS} edits"
+            )));
+        }
+        let mut operations = Vec::with_capacity(edits.len());
+        for (index, edit) in edits.iter().enumerate() {
+            let label = format!("input.edits[{index}]");
+            if !edit.is_object() {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} {label} must be an object"
+                )));
+            }
+            let old_string = required_labeled_string_input(name, edit, &label, "old_string")?;
+            let new_string = required_labeled_string_input(name, edit, &label, "new_string")?;
+            let replace_all = optional_labeled_bool_input(name, edit, &label, "replace_all")?
+                .unwrap_or(global_replace_all);
+            if replace_all && !allow_replace_all {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} {label}.replace_all is true but allow_replace_all is false"
+                )));
+            }
+            let match_strategy = if edit.get("match_strategy").is_some() {
+                EditMatchStrategy::from_labeled_input(name, edit, &label)?
+            } else {
+                global_match_strategy
+            };
+            validate_file_edit_operation(name, &label, old_string, new_string)?;
+            operations.push(FileEditOperation {
+                label,
+                old_string,
+                new_string,
+                replace_all,
+                match_strategy,
+            });
+        }
+        return Ok(operations);
+    }
+
+    let old_string = required_input_string(name, input, "old_string")?;
+    let new_string = required_input_string(name, input, "new_string")?;
+    validate_file_edit_operation(name, "input", old_string, new_string)?;
+    Ok(vec![FileEditOperation {
+        label: "input".to_string(),
+        old_string,
+        new_string,
+        replace_all: global_replace_all,
+        match_strategy: global_match_strategy,
+    }])
+}
+
+fn validate_file_edit_operation(
+    name: &str,
+    label: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Result<(), RuntimeError> {
+    if old_string.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} {label}.old_string must not be empty"
+        )));
+    }
+    if old_string == new_string {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} {label}.new_string must be different from {label}.old_string"
+        )));
+    }
+    Ok(())
+}
+
 fn call_file_edit_tool(
     name: &str,
     input: &Value,
@@ -2459,25 +2576,7 @@ fn call_file_edit_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
     validate_git_pathspec(name, input_path)?;
-    let old_string = required_input_string(name, input, "old_string")?;
-    let new_string = required_input_string(name, input, "new_string")?;
-    if old_string.is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.old_string must not be empty"
-        )));
-    }
-    if old_string == new_string {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.new_string must be different from input.old_string"
-        )));
-    }
-    let replace_all = optional_bool_input(name, input, "replace_all")?.unwrap_or(false);
-    if replace_all && !allow_replace_all {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.replace_all is true but allow_replace_all is false"
-        )));
-    }
-    let match_strategy = EditMatchStrategy::from_input(name, input)?;
+    let operations = parse_file_edit_operations(name, input, allow_replace_all)?;
 
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
     let candidate = base.join(input_path);
@@ -2493,30 +2592,45 @@ fn call_file_edit_tool(
 
     let content = fs::read_to_string(&path)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-    let matches = find_edit_matches(&content, old_string, match_strategy);
-    if matches.is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.old_string was not found with match_strategy={}",
-            match_strategy.as_str()
-        )));
-    }
-    if matches.len() > 1 && !replace_all {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
-            matches.len(),
-            match_strategy.as_str()
-        )));
+    let mut updated = content.clone();
+    let mut total_replacements = 0usize;
+    let mut diff = String::new();
+    let mut strategies = Vec::new();
+    for operation in &operations {
+        let matches = find_edit_matches(&updated, operation.old_string, operation.match_strategy);
+        if matches.is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} {}.old_string was not found with match_strategy={}",
+                operation.label,
+                operation.match_strategy.as_str()
+            )));
+        }
+        if matches.len() > 1 && !operation.replace_all {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} {}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
+                operation.label,
+                matches.len(),
+                operation.match_strategy.as_str()
+            )));
+        }
+        let selected_matches = selected_edit_matches(&matches, operation.replace_all);
+        diff.push_str(&edit_unified_diff(
+            input_path,
+            &updated,
+            &selected_matches,
+            operation.new_string,
+        ));
+        total_replacements += selected_matches.len();
+        strategies.push(operation.match_strategy.as_str());
+        updated = apply_selected_edit_matches(&updated, &selected_matches, operation.new_string);
     }
 
-    let selected_matches = selected_edit_matches(&matches, replace_all);
-    let updated = apply_selected_edit_matches(&content, &selected_matches, new_string);
     let updated_bytes = updated.as_bytes();
     if updated_bytes.len() > max_bytes {
         return Err(RuntimeError::Provider(format!(
             "tool {name} edited content exceeds max_bytes={max_bytes}"
         )));
     }
-    let diff = edit_unified_diff(input_path, &content, &selected_matches, new_string);
     let (diff_content, diff_truncated, diff_bytes) =
         bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
     fs::write(&path, updated_bytes)
@@ -2525,8 +2639,10 @@ fn call_file_edit_tool(
     Ok(json!({
         "path": path.display().to_string(),
         "bytes": updated_bytes.len(),
-        "replacements": selected_matches.len(),
-        "match_strategy": match_strategy.as_str(),
+        "replacements": total_replacements,
+        "edit_count": operations.len(),
+        "match_strategy": strategies[0],
+        "match_strategies": strategies,
         "diff": diff_content,
         "diff_truncated": diff_truncated,
         "artifacts": [{
@@ -2542,15 +2658,16 @@ fn call_file_edit_tool(
                 "provider": "file_edit",
                 "path": path.display().to_string(),
                 "bytes": updated_bytes.len(),
-                "replacements": selected_matches.len(),
-                "match_strategy": match_strategy.as_str(),
+                "replacements": total_replacements,
+                "edit_count": operations.len(),
+                "match_strategies": strategies,
                 "diff_bytes": diff_bytes,
                 "diff_truncated": diff_truncated,
                 "summary": format!(
-                    "edited {} replacement(s) in {} using match_strategy={}",
-                    selected_matches.len(),
+                    "edited {} replacement(s) across {} operation(s) in {}",
+                    total_replacements,
+                    operations.len(),
                     path.display(),
-                    match_strategy.as_str()
                 )
             }
         }]
@@ -4316,6 +4433,17 @@ fn required_input_string<'a>(
     })
 }
 
+fn required_labeled_string_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    label: &str,
+    field: &str,
+) -> Result<&'a str, RuntimeError> {
+    input.get(field).and_then(Value::as_str).ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} {label}.{field} must be a string"))
+    })
+}
+
 fn optional_string_input<'a>(
     tool_name: &str,
     input: &'a Value,
@@ -4326,6 +4454,20 @@ fn optional_string_input<'a>(
     };
     value.as_str().map(Some).ok_or_else(|| {
         RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+    })
+}
+
+fn optional_labeled_string_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    label: &str,
+    field: &str,
+) -> Result<Option<&'a str>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    value.as_str().map(Some).ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} {label}.{field} must be a string"))
     })
 }
 
@@ -4395,6 +4537,22 @@ fn optional_bool_input(
     };
     value.as_bool().map(Some).ok_or_else(|| {
         RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a boolean"))
+    })
+}
+
+fn optional_labeled_bool_input(
+    tool_name: &str,
+    input: &Value,
+    label: &str,
+    field: &str,
+) -> Result<Option<bool>, RuntimeError> {
+    let Some(value) = input.get(field) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "tool {tool_name} {label}.{field} must be a boolean"
+        ))
     })
 }
 
@@ -5562,6 +5720,123 @@ mod tests {
         assert_eq!(output["artifacts"][0]["content"], output["diff"]);
         assert_eq!(output["artifacts"][0]["kind"], json!("file_edit"));
         assert_eq!(tools.tool_capability("file.edit"), Some("file.write"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_applies_multiple_edits_after_read() {
+        let dir = temp_dir("air-tools-file-edit-multiple-ops");
+        fs::write(
+            dir.join("note.txt"),
+            "title: draft\nstatus: todo\nowner: unknown\n",
+        )
+        .unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let output = tools
+            .call_tool(
+                "file.edit",
+                &json!({
+                    "path": "note.txt",
+                    "edits": [
+                        {
+                            "old_string": "title: draft",
+                            "new_string": "title: ready"
+                        },
+                        {
+                            "old_string": "owner: unknown",
+                            "new_string": "owner: agent"
+                        }
+                    ]
+                }),
+            )
+            .unwrap();
+
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "title: ready\nstatus: todo\nowner: agent\n"
+        );
+        assert_eq!(output["edit_count"], json!(2));
+        assert_eq!(output["replacements"], json!(2));
+        assert_eq!(output["match_strategies"], json!(["exact", "exact"]));
+        assert!(output["diff"].as_str().unwrap().contains("-title: draft"));
+        assert!(output["diff"].as_str().unwrap().contains("+owner: agent"));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn file_edit_multi_edit_is_atomic_when_later_edit_fails() {
+        let dir = temp_dir("air-tools-file-edit-multiple-atomic");
+        fs::write(dir.join("note.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        let config_path = write_config(
+            &dir,
+            r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+        );
+        let mut tools = ConfigTools::from_file(config_path).unwrap();
+        tools
+            .call_tool("file.read", &json!({"path": "note.txt"}))
+            .unwrap();
+
+        let error = tools
+            .call_tool(
+                "file.edit",
+                &json!({
+                    "path": "note.txt",
+                    "edits": [
+                        {
+                            "old_string": "alpha",
+                            "new_string": "ALPHA"
+                        },
+                        {
+                            "old_string": "missing",
+                            "new_string": "MISSING"
+                        }
+                    ]
+                }),
+            )
+            .unwrap_err();
+
+        assert!(error
+            .to_string()
+            .contains("input.edits[1].old_string was not found"));
+        assert_eq!(
+            fs::read_to_string(dir.join("note.txt")).unwrap(),
+            "alpha\nbeta\ngamma\n"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
