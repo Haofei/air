@@ -511,7 +511,25 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "file.ops", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "file.ops", "diagnostic.context", "file.ops", "test.run", "git.diff"], tools
+diagnostic_context = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "diagnostic.context"
+)
+repair_decider = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+    and any(
+        observation.get("action") == "edit_validation_context"
+        for observation in event.get("input", {}).get("observations", [])
+    )
+)
+assert diagnostic_context["input"]["diagnostics"], diagnostic_context
+assert diagnostic_context["output"]["snippets"], diagnostic_context
+assert "examples/code-agent/edit-fixture/math.js" in diagnostic_context["output"]["snippets"][0]["path"], diagnostic_context
+assert repair_decider["input"]["verification_status"] == "unknown", repair_decider
 PY
 
 echo "[code-agent] edit loop collects diagnostic context after failed auto verify"

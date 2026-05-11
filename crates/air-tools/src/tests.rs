@@ -4831,6 +4831,53 @@ fn diagnostic_context_returns_source_snippets_for_command_diagnostics() {
 }
 
 #[test]
+fn diagnostic_context_returns_path_snippet_without_line() {
+    let dir = temp_dir("air-tools-diagnostic-context-path-only");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "first\nsecond\nthird\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "diagnostic.context": {
+                  "kind": "diagnostic_context",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "context_lines": 2,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "diagnostic.context",
+            &json!({
+                "diagnostics": [{
+                    "source": "file.ops",
+                    "severity": "error",
+                    "path": "src/lib.rs",
+                    "message": "old_string was not found"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["snippets"].as_array().unwrap().len(), 1);
+    assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
+    assert_eq!(output["snippets"][0]["start_line"], json!(1));
+    assert_eq!(output["snippets"][0]["end_line"], json!(3));
+    assert!(output["snippets"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("1: first"));
+    assert!(output["unreadable"].as_array().unwrap().is_empty());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn diagnostic_context_accepts_missing_diagnostics_as_empty_observation() {
     let dir = temp_dir("air-tools-diagnostic-context-empty");
     let config_path = write_config(

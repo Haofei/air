@@ -91,6 +91,10 @@ state:
     type: array
     items:
       type: object
+  edit_validation_context:
+    type: array
+    items:
+      type: object
   final_diff_result:
     type: array
     items:
@@ -997,6 +1001,43 @@ workflow:
                 ref: decision.tool_calls
               result:
                 ref: observation
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: diagnostic.context
+                  input:
+                    object:
+                      diagnostics:
+                        ref: observation[0].output.diagnostics
+                      context_lines:
+                        literal: 6
+          output: edit_validation_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: edit_validation_context
+              rationale:
+                literal: A file.ops edit failed validation, so AIR automatically collected source context around the diagnostic path before the next edit decision.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: diagnostic.context
+                      input:
+                        object:
+                          diagnostics:
+                            ref: observation[0].output.diagnostics
+                          context_lines:
+                            literal: 6
+              result:
+                ref: edit_validation_context
         - kind: set
           values:
             phase: choose

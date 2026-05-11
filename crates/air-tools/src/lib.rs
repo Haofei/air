@@ -3963,17 +3963,10 @@ fn call_diagnostic_context_tool(
             }));
             continue;
         };
-        let Some(line) = line
+        let line = line
             .and_then(|line| usize::try_from(line).ok())
             .filter(|line| *line > 0)
-        else {
-            unreadable.push(json!({
-                "diagnostic_index": index,
-                "path": path,
-                "reason": "missing positive line"
-            }));
-            continue;
-        };
+            .unwrap_or(1);
         let Some((absolute_path, relative_path)) = resolve_diagnostic_context_path(&repo, path)
         else {
             unreadable.push(json!({
