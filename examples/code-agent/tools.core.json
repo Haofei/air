@@ -163,7 +163,8 @@
         ]
       },
       "timeout_seconds": 30,
-      "max_bytes": 65536
+      "max_bytes": 65536,
+      "truncation_direction": "tail"
     }
   },
   "approvals": {

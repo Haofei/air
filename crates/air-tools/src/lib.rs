@@ -471,7 +471,24 @@ enum ToolConfig {
 
         #[serde(default)]
         max_bytes: Option<usize>,
+
+        #[serde(default)]
+        truncation_direction: Option<TruncationDirection>,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TruncationDirection {
+    Head,
+    Tail,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CommandRunOptions {
+    timeout_seconds: u64,
+    max_bytes: usize,
+    truncation_direction: TruncationDirection,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1290,6 +1307,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 parameters,
                 timeout_seconds,
                 max_bytes,
+                truncation_direction: _,
                 ..
             } => {
                 if cwd.as_os_str().is_empty() {
@@ -1995,14 +2013,18 @@ impl ToolProvider for ConfigTools {
                 parameters,
                 timeout_seconds,
                 max_bytes,
+                truncation_direction,
             } => call_command_run_tool(
                 name,
                 input,
                 &resolve_config_path(&self.config_dir, &cwd),
                 &commands,
                 &parameters,
-                timeout_seconds.unwrap_or(120),
-                max_bytes.unwrap_or(256 * 1024),
+                CommandRunOptions {
+                    timeout_seconds: timeout_seconds.unwrap_or(120),
+                    max_bytes: max_bytes.unwrap_or(256 * 1024),
+                    truncation_direction: truncation_direction.unwrap_or(TruncationDirection::Head),
+                },
             ),
         }
     }
@@ -4138,8 +4160,7 @@ fn call_command_run_tool(
     cwd: &Path,
     commands: &BTreeMap<String, Vec<String>>,
     parameters: &BTreeMap<String, CommandParameterRule>,
-    timeout_seconds: u64,
-    max_bytes: usize,
+    options: CommandRunOptions,
 ) -> Result<Value, RuntimeError> {
     let command_name = input
         .get("command")
@@ -4168,7 +4189,7 @@ fn call_command_run_tool(
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| RuntimeError::Provider(format!("tool {name} command run: {error}")))?;
-    let timeout = Duration::from_secs(timeout_seconds);
+    let timeout = Duration::from_secs(options.timeout_seconds);
     let started_at = std::time::Instant::now();
     loop {
         match child
@@ -4188,7 +4209,11 @@ fn call_command_run_tool(
                 let combined_text = String::from_utf8_lossy(&combined).to_string();
                 let diagnostics = extract_command_diagnostics(&combined_text, 50);
                 let diagnostics_count = diagnostics.len();
-                let (log, truncated, bytes) = bytes_to_limited_text(&combined, max_bytes);
+                let (log, truncated, bytes) = bytes_to_limited_text_with_direction(
+                    &combined,
+                    options.max_bytes,
+                    options.truncation_direction,
+                );
                 let full_log_path = if truncated {
                     Some(save_command_full_log(name, command_name, &cwd, &combined)?)
                 } else {
@@ -4237,7 +4262,8 @@ fn call_command_run_tool(
                 let _ = child.kill();
                 let _ = child.wait();
                 return Err(RuntimeError::Provider(format!(
-                    "tool {name} command {command_name} exceeded timeout_seconds={timeout_seconds}"
+                    "tool {name} command {command_name} exceeded timeout_seconds={}",
+                    options.timeout_seconds
                 )));
             }
             None => std::thread::sleep(Duration::from_millis(100)),
@@ -4963,11 +4989,21 @@ fn canonicalize_tool_path(
 }
 
 fn bytes_to_limited_text(bytes: &[u8], max_bytes: usize) -> (String, bool, usize) {
+    bytes_to_limited_text_with_direction(bytes, max_bytes, TruncationDirection::Head)
+}
+
+fn bytes_to_limited_text_with_direction(
+    bytes: &[u8],
+    max_bytes: usize,
+    direction: TruncationDirection,
+) -> (String, bool, usize) {
     let truncated = bytes.len() > max_bytes;
-    let limited = if truncated {
-        &bytes[..max_bytes]
-    } else {
+    let limited = if !truncated {
         bytes
+    } else if matches!(direction, TruncationDirection::Tail) {
+        &bytes[bytes.len() - max_bytes..]
+    } else {
+        &bytes[..max_bytes]
     };
     (
         String::from_utf8_lossy(limited).to_string(),

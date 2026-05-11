@@ -5131,6 +5131,42 @@ fn command_run_saves_full_log_when_truncated() {
 }
 
 #[test]
+fn command_run_can_tail_truncated_log_preview() {
+    let dir = temp_dir("air-tools-command-run-tail-log");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "tail_log": ["sh", "-c", "printf 'setup noise\\nERROR tail\\n'"]
+                  },
+                  "timeout_seconds": 10,
+                  "max_bytes": 11,
+                  "truncation_direction": "tail"
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("test.run", &json!({"command": "tail_log"}))
+        .unwrap();
+
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["log"], json!("ERROR tail\n"));
+    assert_eq!(
+        fs::read_to_string(output["full_log_path"].as_str().unwrap()).unwrap(),
+        "setup noise\nERROR tail\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_allows_empty_command_map_until_called() {
     let dir = temp_dir("air-tools-command-run-empty-command-map");
     let config_path = write_config(
