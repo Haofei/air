@@ -21,6 +21,8 @@ connect:
     to: edit.target_path
   - from: $input.target_search_pattern
     to: edit.target_search_pattern
+  - from: $input.target_symbol_query
+    to: edit.target_symbol_query
   - from: $input.related_files
     to: edit.related_files
   - from: $input.test_command

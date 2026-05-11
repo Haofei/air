@@ -1,3 +1,4 @@
+use crate::diagnostics::emit_diagnostics;
 use crate::models::ModelProviderChoice;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_json_object, read_run_plan_profile, resolve_profile_path};
@@ -285,9 +286,7 @@ pub(crate) fn run_plan_with_inputs_capture(
     };
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         std::process::exit(1);
     }
 
@@ -713,9 +712,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
     let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         std::process::exit(1);
     }
 

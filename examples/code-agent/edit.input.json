@@ -3,6 +3,7 @@
   "query": "edit fixture add function test",
   "target_path": "examples/code-agent/edit-fixture/math.js",
   "target_search_pattern": "edit|fixture|add|function|test",
+  "target_symbol_query": "",
   "related_files": [],
   "write_paths": ["examples/code-agent/edit-fixture/math.js"],
   "test_command": "edit_fixture_test",

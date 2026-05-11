@@ -9,6 +9,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tree_sitter::{Node, Parser};
 
 mod candidate_tools;
 mod file_tools;
@@ -3585,88 +3586,38 @@ fn call_repo_symbols_tool(
             .unwrap_or(max_symbols);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
-    let pattern = r"^\s*(pub\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+|const\s+|let\s+|var\s+)";
-    let mut command = Command::new("rg");
-    command.args([
-        "--line-number",
-        "--column",
-        "--with-filename",
-        "--no-heading",
-        "--color",
-        "never",
-        pattern,
-    ]);
-    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
+    let glob = input.get("glob").and_then(Value::as_str);
+    if let Some(glob) = glob {
         validate_git_pathspec(name, glob)?;
-        command.arg("-g").arg(glob);
     }
-    if !paths.is_empty() {
-        command.args(&paths);
-    }
-    let output = command
-        .current_dir(&repo)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo symbols: {error}")))?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} repo symbols failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let symbol_lines_by_path = repo_symbol_lines_by_path(&raw);
-    let mut total_lines_by_path = BTreeMap::new();
-    let mut symbols = Vec::new();
-    for line in raw.lines() {
-        let item = parse_rg_vimgrep_line(line);
-        let text = item["text"].as_str().unwrap_or_default();
-        let Some((kind, symbol_name)) = parse_symbol_declaration(text) else {
-            continue;
-        };
-        if !name_filters.is_empty() {
-            if !name_filters.contains(&symbol_name.to_ascii_lowercase()) {
-                continue;
-            }
-        } else if mode == "smart" {
-            if !smart_terms.is_empty()
-                && !repo_symbol_matches_any_term(&item, &symbol_name, text, &smart_terms)
-            {
-                continue;
-            }
-        } else if !query.is_empty()
-            && !symbol_name.to_lowercase().contains(&query)
-            && !item["path"]
-                .as_str()
-                .unwrap_or_default()
-                .to_lowercase()
-                .contains(&query)
-        {
-            continue;
-        }
-        let path = item["path"].as_str().unwrap_or_default();
-        let line = item["line"].as_u64().unwrap_or_default();
-        let end_line = repo_symbol_end_line(
+
+    let mut symbols = tree_sitter_rust_repo_symbols(
+        name,
+        &repo,
+        &paths,
+        glob,
+        &name_filters,
+        mode,
+        &query,
+        &smart_terms,
+        effective_max_symbols,
+    )?;
+    let rust_symbol_count = symbols.len();
+    if symbols.len() < effective_max_symbols {
+        symbols.extend(repo_symbols_rg(
             name,
             &repo,
-            path,
-            line,
-            text,
-            &symbol_lines_by_path,
-            &mut total_lines_by_path,
-        )?;
-        symbols.push(json!({
-            "path": item["path"],
-            "line": item["line"],
-            "end_line": end_line,
-            "column": item["column"],
-            "kind": kind,
-            "name": symbol_name,
-            "text": text.trim()
-        }));
-        if symbols.len() >= effective_max_symbols {
-            break;
-        }
+            &paths,
+            glob,
+            &name_filters,
+            mode,
+            &query,
+            &smart_terms,
+            effective_max_symbols - symbols.len(),
+            true,
+        )?);
     }
+
     let rendered = symbols
         .iter()
         .map(|symbol| {
@@ -3682,7 +3633,7 @@ fn call_repo_symbols_tool(
         .collect::<Vec<_>>()
         .join("\n");
     let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
-    let truncated = raw.lines().count() > symbols.len() || truncated_bytes;
+    let truncated = symbols.len() >= effective_max_symbols || truncated_bytes;
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": raw_query,
@@ -3708,10 +3659,322 @@ fn call_repo_symbols_tool(
                 "paths": paths,
                 "max_symbols": effective_max_symbols,
                 "bytes": bytes,
+                "rust_symbols": rust_symbol_count,
                 "truncated": truncated
             }
         }]
     }))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn repo_symbols_rg(
+    name: &str,
+    repo: &Path,
+    paths: &[String],
+    glob: Option<&str>,
+    name_filters: &BTreeSet<String>,
+    mode: &str,
+    query: &str,
+    smart_terms: &[String],
+    max_symbols: usize,
+    exclude_rust: bool,
+) -> Result<Vec<Value>, RuntimeError> {
+    let pattern = r"^\s*(pub\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+|const\s+|let\s+|var\s+)";
+    let mut command = Command::new("rg");
+    command.args([
+        "--line-number",
+        "--column",
+        "--with-filename",
+        "--no-heading",
+        "--color",
+        "never",
+        pattern,
+    ]);
+    if let Some(glob) = glob {
+        command.arg("-g").arg(glob);
+    }
+    if exclude_rust {
+        command.arg("-g").arg("!*.rs");
+    }
+    if !paths.is_empty() {
+        let fallback_paths = if exclude_rust {
+            paths
+                .iter()
+                .filter(|path| !path.ends_with(".rs"))
+                .collect::<Vec<_>>()
+        } else {
+            paths.iter().collect::<Vec<_>>()
+        };
+        if fallback_paths.is_empty() {
+            return Ok(Vec::new());
+        }
+        command.args(fallback_paths);
+    }
+    let output = command
+        .current_dir(repo)
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo symbols: {error}")))?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} repo symbols failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let raw = String::from_utf8_lossy(&output.stdout);
+    let symbol_lines_by_path = repo_symbol_lines_by_path(&raw);
+    let mut total_lines_by_path = BTreeMap::new();
+    let mut symbols = Vec::new();
+    for line in raw.lines() {
+        let item = parse_rg_vimgrep_line(line);
+        let text = item["text"].as_str().unwrap_or_default();
+        let Some((kind, symbol_name)) = parse_symbol_declaration(text) else {
+            continue;
+        };
+        if !name_filters.is_empty() {
+            if !name_filters.contains(&symbol_name.to_ascii_lowercase()) {
+                continue;
+            }
+        } else if mode == "smart" {
+            if !smart_terms.is_empty()
+                && !repo_symbol_matches_any_term(&item, &symbol_name, text, smart_terms)
+            {
+                continue;
+            }
+        } else if !query.is_empty()
+            && !symbol_name.to_lowercase().contains(query)
+            && !item["path"]
+                .as_str()
+                .unwrap_or_default()
+                .to_lowercase()
+                .contains(query)
+        {
+            continue;
+        }
+        let path = item["path"].as_str().unwrap_or_default();
+        let line = item["line"].as_u64().unwrap_or_default();
+        let end_line = repo_symbol_end_line(
+            name,
+            repo,
+            path,
+            line,
+            text,
+            &symbol_lines_by_path,
+            &mut total_lines_by_path,
+        )?;
+        symbols.push(json!({
+            "path": item["path"],
+            "line": item["line"],
+            "end_line": end_line,
+            "column": item["column"],
+            "kind": kind,
+            "name": symbol_name,
+            "text": text.trim()
+        }));
+        if symbols.len() >= max_symbols {
+            break;
+        }
+    }
+    Ok(symbols)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tree_sitter_rust_repo_symbols(
+    tool_name: &str,
+    repo: &Path,
+    paths: &[String],
+    glob: Option<&str>,
+    name_filters: &BTreeSet<String>,
+    mode: &str,
+    query: &str,
+    smart_terms: &[String],
+    max_symbols: usize,
+) -> Result<Vec<Value>, RuntimeError> {
+    if max_symbols == 0 {
+        return Ok(Vec::new());
+    }
+    let files = repo_rust_files(tool_name, repo, paths, glob)?;
+    if files.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut parser = Parser::new();
+    let language = tree_sitter_rust::LANGUAGE.into();
+    parser.set_language(&language).map_err(|error| {
+        RuntimeError::Provider(format!("tool {tool_name} rust parser: {error}"))
+    })?;
+
+    let mut symbols = Vec::new();
+    for path in files {
+        let absolute =
+            canonicalize_tool_path(tool_name, "repo.symbols rust path", &repo.join(&path))?;
+        if !absolute.starts_with(repo) || !absolute.is_file() {
+            continue;
+        }
+        let source = fs::read_to_string(&absolute).map_err(|error| {
+            RuntimeError::Provider(format!("tool {tool_name} repo symbols: {error}"))
+        })?;
+        let Some(tree) = parser.parse(&source, None) else {
+            continue;
+        };
+        collect_tree_sitter_rust_symbols(
+            tree.root_node(),
+            &path,
+            &source,
+            name_filters,
+            mode,
+            query,
+            smart_terms,
+            &mut symbols,
+            max_symbols,
+        );
+        if symbols.len() >= max_symbols {
+            break;
+        }
+    }
+    Ok(symbols)
+}
+
+fn repo_rust_files(
+    tool_name: &str,
+    repo: &Path,
+    paths: &[String],
+    glob: Option<&str>,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut command = Command::new("rg");
+    command.args(["--files", "--color", "never"]);
+    if let Some(glob) = glob {
+        command.arg("-g").arg(glob);
+    } else {
+        command.arg("-g").arg("*.rs");
+    }
+    if !paths.is_empty() {
+        command.args(paths);
+    }
+    let output = command.current_dir(repo).output().map_err(|error| {
+        RuntimeError::Provider(format!("tool {tool_name} repo symbols: {error}"))
+    })?;
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} repo symbols failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .filter(|line| line.ends_with(".rs"))
+        .map(ToString::to_string)
+        .collect())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_tree_sitter_rust_symbols(
+    node: Node<'_>,
+    path: &str,
+    source: &str,
+    name_filters: &BTreeSet<String>,
+    mode: &str,
+    query: &str,
+    smart_terms: &[String],
+    symbols: &mut Vec<Value>,
+    max_symbols: usize,
+) {
+    if symbols.len() >= max_symbols {
+        return;
+    }
+    if let Some(symbol) = tree_sitter_rust_symbol(node, path, source) {
+        if repo_symbol_value_matches(&symbol, name_filters, mode, query, smart_terms) {
+            symbols.push(symbol);
+            if symbols.len() >= max_symbols {
+                return;
+            }
+        }
+    }
+
+    let mut cursor = node.walk();
+    for child in node.children(&mut cursor) {
+        collect_tree_sitter_rust_symbols(
+            child,
+            path,
+            source,
+            name_filters,
+            mode,
+            query,
+            smart_terms,
+            symbols,
+            max_symbols,
+        );
+        if symbols.len() >= max_symbols {
+            break;
+        }
+    }
+}
+
+fn tree_sitter_rust_symbol(node: Node<'_>, path: &str, source: &str) -> Option<Value> {
+    let kind = match node.kind() {
+        "function_item" | "function_signature_item" => "function",
+        "struct_item" => "struct",
+        "enum_item" => "enum",
+        "trait_item" => "interface",
+        "impl_item" => "impl",
+        "type_item" => "type",
+        "const_item" | "static_item" => "variable",
+        _ => return None,
+    };
+    let name = if kind == "impl" {
+        let type_node = node.child_by_field_name("type")?;
+        rust_type_symbol_name(type_node.utf8_text(source.as_bytes()).ok()?.trim())?
+    } else {
+        node.child_by_field_name("name")?
+            .utf8_text(source.as_bytes())
+            .ok()?
+            .trim()
+            .to_string()
+    };
+    if name.is_empty() {
+        return None;
+    }
+    let start = node.start_position();
+    let end = node.end_position();
+    let text = source
+        .lines()
+        .nth(start.row)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    Some(json!({
+        "path": path,
+        "line": start.row + 1,
+        "end_line": end.row + 1,
+        "column": start.column + 1,
+        "kind": kind,
+        "name": name,
+        "text": text
+    }))
+}
+
+fn repo_symbol_value_matches(
+    symbol: &Value,
+    name_filters: &BTreeSet<String>,
+    mode: &str,
+    query: &str,
+    smart_terms: &[String],
+) -> bool {
+    let symbol_name = symbol["name"].as_str().unwrap_or_default();
+    if !name_filters.is_empty() {
+        return name_filters.contains(&symbol_name.to_ascii_lowercase());
+    }
+    let path = symbol["path"].as_str().unwrap_or_default().to_lowercase();
+    let name = symbol_name.to_lowercase();
+    match mode {
+        "smart" if smart_terms.is_empty() => true,
+        "smart" => {
+            let text = symbol["text"].as_str().unwrap_or_default().to_lowercase();
+            smart_terms
+                .iter()
+                .any(|term| path.contains(term) || name.contains(term) || text.contains(term))
+        }
+        _ => query.is_empty() || name.contains(query) || path.contains(query),
+    }
 }
 
 fn repo_symbol_lines_by_path(raw: &str) -> BTreeMap<String, Vec<u64>> {
@@ -3748,7 +4011,7 @@ fn repo_symbol_end_line(
     symbol_lines_by_path: &BTreeMap<String, Vec<u64>>,
     total_lines_by_path: &mut BTreeMap<String, u64>,
 ) -> Result<u64, RuntimeError> {
-    if parse_rust_impl_symbol_name(declaration_text.trim_start()).is_some() {
+    if is_rust_brace_block_declaration(path, declaration_text) {
         let absolute = canonicalize_tool_path(tool_name, "repo.symbols path", &repo.join(path))?;
         if absolute.starts_with(repo) && absolute.is_file() {
             let content = fs::read_to_string(&absolute).map_err(|error| {
@@ -3778,6 +4041,27 @@ fn repo_symbol_end_line(
     let total_lines = content.lines().count().max(1) as u64;
     total_lines_by_path.insert(path.to_string(), total_lines);
     Ok(total_lines.max(start_line))
+}
+
+fn is_rust_brace_block_declaration(path: &str, declaration_text: &str) -> bool {
+    if !path.ends_with(".rs") {
+        return false;
+    }
+    let trimmed = declaration_text.trim_start();
+    parse_rust_impl_symbol_name(trimmed).is_some()
+        || trimmed.starts_with("fn ")
+        || trimmed.starts_with("pub fn ")
+        || trimmed.starts_with("pub(crate) fn ")
+        || trimmed.starts_with("async fn ")
+        || trimmed.starts_with("pub async fn ")
+        || trimmed.starts_with("unsafe fn ")
+        || trimmed.starts_with("pub unsafe fn ")
+        || trimmed.starts_with("struct ")
+        || trimmed.starts_with("pub struct ")
+        || trimmed.starts_with("enum ")
+        || trimmed.starts_with("pub enum ")
+        || trimmed.starts_with("trait ")
+        || trimmed.starts_with("pub trait ")
 }
 
 fn rust_brace_block_end_line(content: &str, start_line: u64) -> Option<u64> {

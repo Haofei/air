@@ -112,6 +112,7 @@ pub(crate) fn build_input_with_pack(
             let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
             let target_search_pattern = code_search_pattern(&query);
+            let target_symbol_query = code_symbol_query(&query);
             let write_paths = edit_write_paths(target.as_ref(), &write);
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
@@ -119,6 +120,10 @@ pub(crate) fn build_input_with_pack(
             input.insert(
                 "target_search_pattern".to_string(),
                 Value::String(target_search_pattern),
+            );
+            input.insert(
+                "target_symbol_query".to_string(),
+                Value::String(target_symbol_query),
             );
             input.insert(
                 "target_path".to_string(),
@@ -282,6 +287,23 @@ pub(crate) fn path_ref_to_input_string(path: &Path) -> String {
 }
 
 pub(crate) fn code_search_pattern(query: &str) -> String {
+    let tokens = code_search_tokens(query);
+
+    if tokens.is_empty() {
+        "TODO_DO_NOT_MATCH_EMPTY_CODE_SEARCH_PATTERN".to_string()
+    } else {
+        tokens.join("|")
+    }
+}
+
+pub(crate) fn code_symbol_query(query: &str) -> String {
+    code_search_tokens(query)
+        .into_iter()
+        .find(|token| is_symbol_like_search_token(token))
+        .unwrap_or_default()
+}
+
+fn code_search_tokens(query: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
     for character in query.chars() {
@@ -296,13 +318,7 @@ pub(crate) fn code_search_pattern(query: &str) -> String {
         push_search_token(&mut tokens, &current);
     }
 
-    let tokens = select_search_tokens(tokens);
-
-    if tokens.is_empty() {
-        "TODO_DO_NOT_MATCH_EMPTY_CODE_SEARCH_PATTERN".to_string()
-    } else {
-        tokens.join("|")
-    }
+    select_search_tokens(tokens)
 }
 
 fn push_search_token(tokens: &mut Vec<String>, token: &str) {
@@ -352,6 +368,13 @@ fn search_token_rank(token: &str) -> u8 {
         rank = rank.saturating_add(4);
     }
     rank
+}
+
+fn is_symbol_like_search_token(token: &str) -> bool {
+    token.contains('_')
+        || token
+            .chars()
+            .any(|character| character.is_ascii_uppercase())
 }
 
 fn is_low_signal_search_token(token: &str) -> bool {

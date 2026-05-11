@@ -1,3 +1,4 @@
+use crate::diagnostics::emit_diagnostics;
 use crate::models::call_openai_model;
 use anyhow::Result;
 use serde_json::{json, Value};
@@ -74,9 +75,7 @@ pub(crate) fn plan_task(options: PlanOptions) -> Result<()> {
     normalize_planner_run_plan(&mut plan);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         eprintln!("generated run plan:\n{}", serde_yaml::to_string(&plan)?);
         anyhow::bail!("planner generated an invalid run plan");
     }

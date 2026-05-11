@@ -666,6 +666,8 @@ fn is_known_recipe_input_field(field: &str) -> bool {
             | "search_query"
             | "repo_query"
             | "required_terms"
+            | "target_symbol_query"
+            | "target_search_pattern"
             | "force_patch"
     )
 }

@@ -1795,6 +1795,17 @@ fn ensure_edit_task_defaults(input: &mut Map<String, Value>) {
                 Value::String(code_search_pattern(query)),
             );
         }
+        if !input.contains_key("target_symbol_query") {
+            let query = input
+                .get("query")
+                .or_else(|| input.get("task"))
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            input.insert(
+                "target_symbol_query".to_string(),
+                Value::String(crate::code_input::code_symbol_query(query)),
+            );
+        }
         input
             .entry("force_patch".to_string())
             .or_insert(Value::Bool(false));
@@ -2111,6 +2122,10 @@ mod tests {
             input["target_search_pattern"],
             Value::String("EchoTools|ToolProviderChoice|provider|module|air_tools".to_string())
         );
+        assert_eq!(
+            input["target_symbol_query"],
+            Value::String("EchoTools".to_string())
+        );
         assert_eq!(input["force_patch"], Value::Bool(true));
     }
 
@@ -2136,6 +2151,10 @@ mod tests {
             Value::String(
                 "stats|replay|specialize_run_plan|event_count|error_count|model_call_count|tool_call_count|final_output".to_string()
             )
+        );
+        assert_eq!(
+            input["target_symbol_query"],
+            Value::String("specialize_run_plan".to_string())
         );
     }
 
@@ -2193,6 +2212,7 @@ mod tests {
             input["target_search_pattern"],
             Value::String("edit|fixture|add|function|test".to_string())
         );
+        assert_eq!(input["target_symbol_query"], Value::String(String::new()));
         assert_eq!(
             input["test_command"],
             Value::String("edit_fixture_test".to_string())
@@ -2469,13 +2489,17 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_prefers_preflight_search_for_targeted_context() {
+    fn edit_loop_prefers_preflight_symbols_for_targeted_context() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        let symbol_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("preflight-target-symbols"))
+            .unwrap();
         let search_rule = rules
             .iter()
             .find(|rule| rule["id"].as_str() == Some("preflight-target-search"))
@@ -2486,27 +2510,59 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            search_rule["actions"][0]["input"]["array"][0]["object"]["tool"]["literal"],
-            serde_yaml::Value::String("file.search".to_string())
+            symbol_rule["actions"][0]["input"]["array"][0]["object"]["tool"]["literal"],
+            serde_yaml::Value::String("repo.symbols".to_string())
         );
         assert_eq!(
-            search_rule["actions"][0]["input"]["array"][0]["object"]["input"]["object"]["pattern"]
+            symbol_rule["actions"][0]["input"]["array"][0]["object"]["input"]["object"]["query"]
                 ["ref"],
-            serde_yaml::Value::String("target_search_pattern".to_string())
+            serde_yaml::Value::String("target_symbol_query".to_string())
+        );
+        assert_eq!(
+            symbol_rule["when"],
+            serde_yaml::Value::String(
+                "phase == \"preflight\" && target_path != \"\" && target_symbol_query != \"\""
+                    .to_string()
+            )
         );
         assert_eq!(
             search_rule["when"],
             serde_yaml::Value::String(
-                "phase == \"preflight\" && target_path != \"\" && target_search_pattern != \"\""
+                "phase == \"preflight\" && target_path != \"\" && target_symbol_query == \"\" && target_search_pattern != \"\""
                     .to_string()
             )
         );
         assert_eq!(
             read_rule["when"],
             serde_yaml::Value::String(
-                "phase == \"preflight\" && target_path != \"\" && target_search_pattern == \"\""
+                "phase == \"preflight\" && target_path != \"\" && target_symbol_query == \"\" && target_search_pattern == \"\""
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn edit_loop_scopes_auto_final_diff_to_write_paths() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let record_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("record-auto-verify-passed"))
+            .unwrap();
+        let diff_action = &record_rule["actions"][1];
+
+        assert_eq!(
+            diff_action["input"]["array"][0]["object"]["tool"]["literal"],
+            serde_yaml::Value::String("git.diff".to_string())
+        );
+        assert_eq!(
+            diff_action["input"]["array"][0]["object"]["input"]["object"]["paths"]["ref"],
+            serde_yaml::Value::String("write_paths".to_string())
         );
     }
 
