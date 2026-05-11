@@ -11,9 +11,6 @@ routing:
     - recipe: review
       when:
         any_present: [search_query, repo_query, required_terms]
-    - recipe: plan
-      when:
-        all_absent: [target]
     - recipe: explore
       fallback: true
 
@@ -27,20 +24,6 @@ recipes:
     completion:
       any:
         - exists: /exploration
-  - id: plan
-    default_profile: project-plan.air-profile.yaml
-    intent: "Ground an open-ended coding goal into a task graph, files, and acceptance checks."
-    input:
-      required: [task]
-      optional: [query]
-    completion:
-      any:
-        - equals:
-            path: /project/completed
-            value: true
-        - all:
-            - missing: /project/completed
-            - non_empty_array: /project_plan/tasks
   - id: explore
     default_profile: explore.air-profile.yaml
     intent: "Read-only repository exploration."
@@ -51,7 +34,7 @@ recipes:
       any:
         - exists: /exploration
   - id: review
-    default_profile: profile.air-profile.yaml
+    default_profile: review.air-profile.yaml
     intent: "Grounded code review with repository and external evidence."
     input:
       required: [task, target]

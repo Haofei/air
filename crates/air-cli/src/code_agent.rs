@@ -1,14 +1,12 @@
-use crate::code_budget::{
-    code_budget_limit_status, code_budget_limit_violation, code_budget_value_counts,
-    CodeBudgetLimits,
-};
-use crate::code_context::{default_context_budget_chars, truncate_for_context};
+use crate::code_budget::{code_budget_limit_status, code_budget_limit_violation, CodeBudgetLimits};
+#[cfg(test)]
+use crate::code_context::default_context_budget_chars;
 #[cfg(test)]
 use crate::code_input::build_input;
 pub(crate) use crate::code_input::CodeRecipe;
 use crate::code_input::{
-    build_input_with_pack, code_search_pattern, default_profile, path_ref_to_input_string,
-    path_to_input_string, recipe_name, resolve_recipe, CodeInputOptions,
+    build_input_with_pack, default_profile, path_ref_to_input_string, recipe_name, resolve_recipe,
+    CodeInputOptions,
 };
 #[cfg(test)]
 use crate::code_loop::{code_loop_feedback, code_loop_iteration_input};
@@ -18,30 +16,21 @@ use crate::code_pack::CodeAgentRouteFacts;
 use crate::code_pack::{
     load_code_agent_pack, CodeAgentInputFacts, CodeAgentPackContext, CodeAgentRouteDecision,
 };
-#[cfg(test)]
-use crate::code_project_acceptance::acceptance_checks;
-use crate::code_project_acceptance::{acceptance_checks_completed, run_acceptance_checks};
-use crate::code_project_context::{
-    code_project_artifacts, code_project_memory, push_project_artifact,
-};
-use crate::code_project_schedule::{
-    code_project_task_ids, code_project_task_schedule, CodeProjectScheduledTask,
-};
 use crate::code_session::{
     code_session_feedback, code_session_turn_id, code_session_turn_index,
-    code_session_workspace_revert, CodeSessionPart, CodeSessionPatchSet, CodeSessionRecovery,
-    CodeSessionState, CodeSessionTurn, CodeSessionTurnPack, CodeSessionTurnSummary,
-    CodeSessionTurnTime,
+    code_session_workspace_revert, CodeSessionPart, CodeSessionPatchSet, CodeSessionState,
+    CodeSessionTurn, CodeSessionTurnPack, CodeSessionTurnSummary, CodeSessionTurnTime,
 };
 use crate::explain::build_plan_explanation;
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
-use crate::run_plan::{run_plan, run_plan_capture, write_trace, RunPlanOptions};
-use crate::tools::ToolProviderChoice;
+use crate::run_plan::{run_plan, run_plan_capture, RunPlanOptions};
 use air_runtime::{read_trace_jsonl, TraceEvent, TraceStatus};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
+#[cfg(test)]
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -71,7 +60,6 @@ pub(crate) struct CodeOptions {
     pub(crate) log: bool,
     pub(crate) explain: bool,
     pub(crate) loop_enabled: bool,
-    pub(crate) execute_plan: bool,
     pub(crate) max_iterations: usize,
     pub(crate) max_estimated_model_calls: Option<usize>,
     pub(crate) max_estimated_tool_calls: Option<usize>,
@@ -114,7 +102,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         log,
         explain,
         loop_enabled,
-        execute_plan,
         max_iterations,
         max_estimated_model_calls,
         max_estimated_tool_calls,
@@ -182,12 +169,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         None => None,
     };
     if let Some(state) = session_state.as_ref() {
-        input = if execute_plan && recipe == CodeRecipe::Plan {
-            code_project_recovery_turn_input(&input, state)
-                .unwrap_or_else(|| code_session_turn_input(&input, &state.turns))
-        } else {
-            code_session_turn_input(&input, &state.turns)
-        };
+        input = code_session_turn_input(&input, &state.turns);
     }
 
     if explain {
@@ -199,20 +181,17 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             profile: &profile,
             input: &input,
             loop_enabled,
-            execute_plan,
             max_iterations,
             budget_limits,
         })?;
         return Ok(());
     }
 
-    if !execute_plan {
-        enforce_code_profile_budget_limits(
-            &profile,
-            if loop_enabled { max_iterations } else { 1 },
-            budget_limits,
-        )?;
-    }
+    enforce_code_profile_budget_limits(
+        &profile,
+        if loop_enabled { max_iterations } else { 1 },
+        budget_limits,
+    )?;
 
     let effective_trace_out = match (&session, &trace_out) {
         (Some(path), None) => Some(default_session_trace_path(
@@ -228,30 +207,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     }
 
     let session_input = input.clone();
-    let mut outputs = if execute_plan {
-        if recipe != CodeRecipe::Plan {
-            bail!("air code --execute-plan requires the resolved recipe to be plan");
-        }
-        let resume = session_state.as_ref().and_then(code_session_project_resume);
-        run_code_project(CodeProjectOptions {
-            plan_profile: profile.clone(),
-            pack: pack.clone(),
-            input,
-            model_config: model_config.clone(),
-            trace_out: effective_trace_out.clone(),
-            trace_redact,
-            trace_raw,
-            state_out: state_out.clone(),
-            checkpoint_out: checkpoint_out.clone(),
-            jit_cache: jit_cache.clone(),
-            parallel,
-            log,
-            tool_config: tool_config.clone(),
-            max_tasks: max_iterations,
-            budget_limits,
-            resume,
-        })?
-    } else if loop_enabled {
+    let outputs = if loop_enabled {
         run_code_loop(CodeLoopOptions {
             pack: pack.clone(),
             recipe,
@@ -313,17 +269,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         let state = session_state.get_or_insert_with(CodeSessionState::default);
         let turn_number = state.turns.len() + 1;
         let turn_id = code_session_turn_id(turn_number);
-        let recovery = code_session_recovery_for_outputs(
-            recipe,
-            execute_plan,
-            path,
-            turn_number,
-            &turn_id,
-            &outputs,
-        );
-        if let Some((recovery, _)) = recovery.as_ref() {
-            code_session_insert_recovery(&mut outputs, recovery)?;
-        }
         let turn_time = CodeSessionTurnTime::now();
         let trace_files =
             code_session_trace_files(effective_trace_out.as_ref(), loop_enabled, &outputs);
@@ -356,12 +301,9 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             summary,
             parts,
             patch_sets,
-            recovery: recovery.as_ref().map(|(recovery, _)| recovery.clone()),
+            recovery: None,
             outputs: outputs.clone(),
         });
-        if let Some((_, fork_path)) = recovery {
-            state.write(&fork_path)?;
-        }
         state.write(path)?;
     }
     serde_json::to_writer_pretty(std::io::stdout(), &outputs)?;
@@ -463,16 +405,6 @@ fn code_session_turn_pack(
     })
 }
 
-fn code_pack_metadata_value(
-    pack: &CodeAgentPackContext,
-    recipe: CodeRecipe,
-    active_profile: &Path,
-) -> Value {
-    code_session_turn_pack(pack, recipe, active_profile, None)
-        .and_then(|pack| serde_json::to_value(pack).ok())
-        .unwrap_or(Value::Null)
-}
-
 fn default_session_trace_path(session_path: &Path, turn_number: usize) -> PathBuf {
     let parent = session_path.parent().unwrap_or_else(|| Path::new(""));
     let stem = session_path
@@ -483,241 +415,6 @@ fn default_session_trace_path(session_path: &Path, turn_number: usize) -> PathBu
     parent
         .join(format!("{stem}.traces"))
         .join(format!("turn{turn_number}.trace.jsonl"))
-}
-
-fn default_session_recovery_fork_path(session_path: &Path, turn_number: usize) -> PathBuf {
-    let parent = session_path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = session_path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .filter(|value| !value.is_empty())
-        .unwrap_or("air-code-session");
-    parent
-        .join(format!("{stem}.forks"))
-        .join(format!("turn{turn_number}.failed.json"))
-}
-
-fn code_session_recovery_for_outputs(
-    recipe: CodeRecipe,
-    execute_plan: bool,
-    session_path: &Path,
-    turn_number: usize,
-    turn_id: &str,
-    outputs: &Value,
-) -> Option<(CodeSessionRecovery, PathBuf)> {
-    if recipe != CodeRecipe::Plan || !execute_plan {
-        return None;
-    }
-    let project = outputs.get("project")?;
-    let status = project.get("status").and_then(Value::as_str)?;
-    if status != "stopped" {
-        return None;
-    }
-
-    let fork_path = default_session_recovery_fork_path(session_path, turn_number);
-    let fork = path_ref_to_input_string(&fork_path);
-    let failed_execution = project
-        .get("executions")
-        .and_then(Value::as_array)
-        .and_then(|executions| executions.last())
-        .filter(|execution| {
-            !execution
-                .get("completed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        });
-    let failed_task_id = failed_execution
-        .and_then(|execution| execution.get("task_id").and_then(Value::as_str))
-        .map(str::to_string);
-    let failed_execution = failed_execution.map(code_project_failed_execution_summary);
-    let remaining_task_ids = project
-        .get("remaining_task_ids")
-        .and_then(Value::as_array)
-        .map(|ids| {
-            ids.iter()
-                .filter_map(Value::as_str)
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        })
-        .unwrap_or_default();
-    let recovery = CodeSessionRecovery {
-        reason: "project execution stopped before completion".to_string(),
-        status: status.to_string(),
-        fork: fork.clone(),
-        turn_id: turn_id.to_string(),
-        failed_task_id,
-        failed_execution,
-        remaining_task_ids,
-        workspace_revert_argv: vec![
-            "air".to_string(),
-            "code-session".to_string(),
-            fork,
-            "--revert-workspace-turn".to_string(),
-            turn_id.to_string(),
-            "--apply-workspace".to_string(),
-        ],
-    };
-    Some((recovery, fork_path))
-}
-
-fn code_project_failed_execution_summary(execution: &Value) -> Value {
-    let mut summary = Map::new();
-    for key in [
-        "task_id",
-        "title",
-        "recipe",
-        "depends_on",
-        "completed",
-        "error",
-    ] {
-        if let Some(value) = execution.get(key) {
-            summary.insert(key.to_string(), value.clone());
-        }
-    }
-    if let Some(acceptance) = execution.get("acceptance") {
-        summary.insert("acceptance".to_string(), acceptance.clone());
-    }
-    summary.insert(
-        "output_keys".to_string(),
-        Value::Array(
-            execution
-                .get("outputs")
-                .and_then(Value::as_object)
-                .map(|outputs| {
-                    outputs
-                        .keys()
-                        .map(|key| Value::String(key.clone()))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default(),
-        ),
-    );
-    Value::Object(summary)
-}
-
-fn code_session_insert_recovery(outputs: &mut Value, recovery: &CodeSessionRecovery) -> Result<()> {
-    let object = outputs
-        .as_object_mut()
-        .context("AIR code session recovery requires object outputs")?;
-    object.insert(
-        "recovery".to_string(),
-        serde_json::to_value(recovery).context("failed to serialize code session recovery")?,
-    );
-    if let Some(project) = object.get_mut("project").and_then(Value::as_object_mut) {
-        let artifacts = project
-            .entry("artifacts")
-            .or_insert_with(|| Value::Array(Vec::new()));
-        if let Some(artifacts) = artifacts.as_array_mut() {
-            let mut seen = artifacts
-                .iter()
-                .filter_map(|artifact| artifact.get("id").and_then(Value::as_str))
-                .map(str::to_string)
-                .collect::<HashSet<_>>();
-            push_project_artifact(
-                artifacts,
-                &mut seen,
-                json!({
-                    "id": format!("recovery-fork:{}", recovery.turn_id),
-                    "kind": "recovery_fork",
-                    "path": recovery.fork,
-                    "turn_id": recovery.turn_id,
-                    "failed_task_id": recovery.failed_task_id,
-                }),
-            );
-        }
-    }
-    Ok(())
-}
-
-fn code_session_project_resume(state: &CodeSessionState) -> Option<CodeProjectResume> {
-    let turn = code_session_latest_project_turn(state, "max_tasks_exhausted")?;
-    let project_plan = turn.outputs.get("project_plan")?.clone();
-    let executions = turn
-        .outputs
-        .pointer("/project/executions")
-        .and_then(Value::as_array)?
-        .iter()
-        .filter(|execution| {
-            execution
-                .get("completed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    if executions.is_empty() {
-        return None;
-    }
-    Some(CodeProjectResume {
-        turn_id: turn.id.clone(),
-        project_plan,
-        executions,
-    })
-}
-
-fn code_project_recovery_turn_input(
-    base_input: &Map<String, Value>,
-    state: &CodeSessionState,
-) -> Option<Map<String, Value>> {
-    let turn = code_session_latest_project_turn(state, "stopped")?;
-    let task = base_input.get("task").and_then(Value::as_str)?;
-    let mut input = code_session_turn_input(base_input, &state.turns);
-    let recovery = turn.outputs.get("recovery").or_else(|| {
-        turn.recovery
-            .as_ref()
-            .and_then(|_| turn.outputs.get("recovery"))
-    });
-    let failed_execution = recovery
-        .and_then(|recovery| recovery.get("failed_execution"))
-        .or_else(|| {
-            turn.outputs
-                .pointer("/project/executions")
-                .and_then(Value::as_array)
-                .and_then(|executions| executions.last())
-        });
-    let project = turn.outputs.get("project").cloned().unwrap_or(Value::Null);
-    let recovery_context = json!({
-        "failed_turn_id": turn.id,
-        "project_status": turn.outputs.pointer("/project/status").and_then(Value::as_str),
-        "failed_task_id": recovery.and_then(|recovery| recovery.get("failed_task_id")).cloned(),
-        "failed_execution": failed_execution.cloned(),
-        "remaining_task_ids": turn.outputs.pointer("/project/remaining_task_ids").cloned(),
-        "recovery_fork": recovery.and_then(|recovery| recovery.get("fork")).cloned(),
-        "workspace_revert_argv": recovery.and_then(|recovery| recovery.get("workspace_revert_argv")).cloned(),
-        "project": project,
-    });
-    input.insert(
-        "task".to_string(),
-        Value::String(format!(
-            "{task}\n\nAIR project recovery context from previous failed execution:\n{}",
-            serde_json::to_string_pretty(&recovery_context).unwrap_or_default()
-        )),
-    );
-    Some(input)
-}
-
-fn code_session_latest_project_turn<'a>(
-    state: &'a CodeSessionState,
-    expected_status: &str,
-) -> Option<&'a CodeSessionTurn> {
-    let turn = state.turns.iter().rev().find(|turn| {
-        turn.recipe == "plan"
-            && turn
-                .outputs
-                .pointer("/project/status")
-                .and_then(Value::as_str)
-                .is_some()
-    })?;
-    if turn
-        .outputs
-        .pointer("/project/status")
-        .and_then(Value::as_str)
-        == Some(expected_status)
-    {
-        Some(turn)
-    } else {
-        None
-    }
 }
 
 fn ensure_parent_dir(path: &Path) -> Result<()> {
@@ -1069,7 +766,6 @@ struct CodePrintExplainOptions<'a> {
     profile: &'a Path,
     input: &'a Map<String, Value>,
     loop_enabled: bool,
-    execute_plan: bool,
     max_iterations: usize,
     budget_limits: CodeBudgetLimits,
 }
@@ -1083,7 +779,6 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         profile,
         input,
         loop_enabled,
-        execute_plan,
         max_iterations,
         budget_limits,
     } = options;
@@ -1136,10 +831,6 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
         "loop": {
             "enabled": loop_enabled,
             "max_iterations": max_iterations
-        },
-        "project_execution": {
-            "enabled": execute_plan,
-            "max_tasks": if execute_plan { max_iterations } else { 0 }
         },
         "input": Value::Object(input.clone()),
     });
@@ -1214,728 +905,6 @@ fn is_workspace_write_capability(capability: &str) -> bool {
     matches!(capability, "file.write")
 }
 
-struct CodeProjectOptions {
-    plan_profile: PathBuf,
-    pack: CodeAgentPackContext,
-    input: Map<String, Value>,
-    model_config: Option<PathBuf>,
-    trace_out: Option<PathBuf>,
-    trace_redact: bool,
-    trace_raw: bool,
-    state_out: Option<PathBuf>,
-    checkpoint_out: Option<PathBuf>,
-    jit_cache: Option<PathBuf>,
-    parallel: bool,
-    log: bool,
-    tool_config: Option<PathBuf>,
-    max_tasks: usize,
-    budget_limits: CodeBudgetLimits,
-    resume: Option<CodeProjectResume>,
-}
-
-#[derive(Clone, Debug)]
-struct CodeProjectResume {
-    turn_id: String,
-    project_plan: Value,
-    executions: Vec<Value>,
-}
-
-fn run_code_project(options: CodeProjectOptions) -> Result<Value> {
-    if options.max_tasks == 0 {
-        bail!("air code --execute-plan requires --max-iterations to be greater than 0");
-    }
-
-    let mut trace_files = Vec::new();
-    let mut resumed_from_turn = None;
-    let (project_plan, mut executions, mut prior_executions) =
-        if let Some(resume) = options.resume.clone() {
-            if options.log {
-                eprintln!(
-                    "[air-code-project] step=resume from_turn={}",
-                    resume.turn_id
-                );
-            }
-            resumed_from_turn = Some(resume.turn_id);
-            (
-                resume.project_plan,
-                resume.executions.clone(),
-                resume.executions,
-            )
-        } else {
-            let plan_trace = options
-                .trace_out
-                .as_ref()
-                .map(|path| labeled_trace_path(path, "plan"));
-            if let Some(path) = plan_trace.as_ref() {
-                trace_files.push(path_ref_to_input_string(path));
-            }
-
-            if options.log {
-                eprintln!("[air-code-project] step=plan recipe=plan");
-            }
-            let plan_outputs = run_plan_capture(RunPlanOptions {
-                plan: None,
-                profile: Some(options.plan_profile.clone()),
-                store: None,
-                input: None,
-                input_values: Some(options.input.clone()),
-                model_config: options.model_config.clone(),
-                trace_out: plan_trace,
-                trace_redact: options.trace_redact,
-                trace_raw: options.trace_raw,
-                state_out: options
-                    .state_out
-                    .as_ref()
-                    .map(|path| labeled_trace_path(path, "plan")),
-                checkpoint_out: options
-                    .checkpoint_out
-                    .as_ref()
-                    .map(|path| labeled_trace_path(path, "plan")),
-                jit_cache: options.jit_cache.clone(),
-                parallel: options.parallel,
-                log: options.log,
-                example_tools: false,
-                tool_config: options.tool_config.clone(),
-            })?;
-            let project_plan = plan_outputs
-                .get("project_plan")
-                .cloned()
-                .context("project plan run did not return project_plan")?;
-            (project_plan, Vec::new(), Vec::new())
-        };
-    let tasks = project_plan
-        .get("tasks")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default();
-    let scheduled_tasks = match code_project_task_schedule(&tasks) {
-        Ok(schedule) => schedule,
-        Err(error) => {
-            return Ok(json!({
-                "project_plan": project_plan,
-                "project": {
-                    "status": "stopped",
-                    "completed": false,
-                    "max_tasks": options.max_tasks,
-                    "executed_tasks": 0,
-                    "remaining_task_ids": code_project_task_ids(&tasks),
-                    "budget": {
-                        "task_count": 0,
-                        "max_estimated_model_calls": 0,
-                        "max_estimated_tool_calls": 0,
-                        "tasks": [],
-                    },
-                    "remaining_budget": {
-                        "task_count": 0,
-                        "max_estimated_model_calls": 0,
-                        "max_estimated_tool_calls": 0,
-                        "tasks": [],
-                    },
-                    "budget_limit": code_budget_limit_status(
-                        0,
-                        0,
-                        options.budget_limits
-                    ),
-                    "memory": code_project_memory(&[]),
-                    "artifacts": code_project_artifacts(&trace_files, &[]),
-                    "acceptance": [],
-                    "executions": [{
-                        "completed": false,
-                        "error": error.to_string(),
-                    }],
-                },
-                "trace_files": trace_files,
-            }));
-        }
-    };
-    let scheduled_task_ids = scheduled_tasks
-        .iter()
-        .map(|task| Value::String(task.id.clone()))
-        .collect::<Vec<_>>();
-    let project_budget = code_project_budget_summary(&options.pack, &scheduled_tasks);
-    let task_budget_by_id = project_budget
-        .get("tasks")
-        .and_then(Value::as_array)
-        .map(|tasks| {
-            tasks
-                .iter()
-                .filter_map(|budget| {
-                    budget
-                        .get("task_id")
-                        .and_then(Value::as_str)
-                        .map(|id| (id.to_string(), budget.clone()))
-                })
-                .collect::<HashMap<_, _>>()
-        })
-        .unwrap_or_default();
-
-    let mut acceptance_events = Vec::new();
-    let mut acceptance_step = 0u32;
-    let mut acceptance_tools: Option<ToolProviderChoice> = None;
-    let mut completed = prior_executions_completed(&prior_executions);
-    let mut stopped = false;
-    let starting_execution_count = executions.len();
-    let completed_task_ids = prior_executions
-        .iter()
-        .filter(|execution| {
-            execution
-                .get("completed")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
-        .filter_map(|execution| execution.get("task_id").and_then(Value::as_str))
-        .collect::<HashSet<_>>();
-    let pending_tasks = scheduled_tasks
-        .iter()
-        .filter(|task| !completed_task_ids.contains(task.id.as_str()))
-        .collect::<Vec<_>>();
-    let pending_task_values = pending_tasks
-        .iter()
-        .map(|task| (*task).clone())
-        .collect::<Vec<_>>();
-    let remaining_budget = code_project_budget_summary(&options.pack, &pending_task_values);
-    let (remaining_model_calls, remaining_tool_calls) = code_budget_value_counts(&remaining_budget);
-    let budget_limit = code_budget_limit_status(
-        remaining_model_calls,
-        remaining_tool_calls,
-        options.budget_limits,
-    );
-    if budget_limit
-        .get("exceeded")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        let remaining_task_ids = pending_tasks
-            .iter()
-            .map(|task| Value::String(task.id.clone()))
-            .collect::<Vec<_>>();
-        return Ok(json!({
-            "project_plan": project_plan,
-            "project": {
-                "status": "budget_exceeded",
-                "completed": false,
-                "max_tasks": options.max_tasks,
-                "executed_tasks": executions.len(),
-                "executed_this_run": 0,
-                "resumed_from_turn": resumed_from_turn,
-                "scheduled_task_ids": scheduled_task_ids,
-                "remaining_task_ids": remaining_task_ids,
-                "budget": project_budget,
-                "remaining_budget": remaining_budget,
-                "budget_limit": budget_limit,
-                "memory": code_project_memory(&executions),
-                "artifacts": code_project_artifacts(&trace_files, &executions),
-                "acceptance": [],
-                "executions": executions,
-            },
-            "trace_files": trace_files,
-        }));
-    }
-    for (index, task) in pending_tasks.iter().take(options.max_tasks).enumerate() {
-        let task_number = starting_execution_count + index + 1;
-        let task_id = task.id.clone();
-        let title = task
-            .definition
-            .get("title")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        let recipe = match task_recipe(&task.definition) {
-            Ok(recipe) => recipe,
-            Err(error) => {
-                completed = false;
-                stopped = true;
-                executions.push(json!({
-                    "task_id": task_id,
-                    "title": title,
-                    "completed": false,
-                    "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
-                    "error": error.to_string(),
-                }));
-                break;
-            }
-        };
-        let Some(input) = task.definition.get("input").and_then(Value::as_object) else {
-            completed = false;
-            stopped = true;
-            executions.push(json!({
-                "task_id": task_id,
-                "title": title,
-                "recipe": recipe_name(recipe),
-                "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
-                "completed": false,
-                "error": "planned task is missing input object",
-            }));
-            break;
-        };
-        let task_input = code_project_task_input(input, &prior_executions);
-        let trace_path = options
-            .trace_out
-            .as_ref()
-            .map(|path| labeled_trace_path(path, &format!("task{task_number}")));
-        if let Some(path) = trace_path.as_ref() {
-            trace_files.push(path_ref_to_input_string(path));
-        }
-
-        if options.log {
-            eprintln!(
-                "[air-code-project] step=task index={} id={} recipe={}",
-                task_number,
-                task_id,
-                recipe_name(recipe)
-            );
-        }
-        let task_profile = default_profile(&options.pack, recipe)?;
-        let task_pack = code_pack_metadata_value(&options.pack, recipe, &task_profile);
-        let task_result = run_plan_capture(RunPlanOptions {
-            plan: None,
-            profile: Some(task_profile),
-            store: None,
-            input: None,
-            input_values: Some(task_input),
-            model_config: options.model_config.clone(),
-            trace_out: trace_path,
-            trace_redact: options.trace_redact,
-            trace_raw: options.trace_raw,
-            state_out: options
-                .state_out
-                .as_ref()
-                .map(|path| labeled_trace_path(path, &format!("task{task_number}"))),
-            checkpoint_out: options
-                .checkpoint_out
-                .as_ref()
-                .map(|path| labeled_trace_path(path, &format!("task{task_number}"))),
-            jit_cache: options.jit_cache.clone(),
-            parallel: options.parallel,
-            log: options.log,
-            example_tools: false,
-            tool_config: options.tool_config.clone(),
-        });
-        match task_result {
-            Ok(outputs) => {
-                let acceptance = run_acceptance_checks(
-                    &mut acceptance_tools,
-                    &options.plan_profile,
-                    options.tool_config.clone(),
-                    task.definition.get("acceptance"),
-                    &format!("task:{task_id}"),
-                    &mut acceptance_events,
-                    &mut acceptance_step,
-                )?;
-                let acceptance_completed = acceptance_checks_completed(&acceptance);
-                let task_completed =
-                    code_outputs_complete(&options.pack, recipe, &outputs)? && acceptance_completed;
-                completed &= task_completed;
-                let execution = json!({
-                    "task_id": task_id,
-                    "title": title,
-                    "recipe": recipe_name(recipe),
-                    "pack": task_pack,
-                    "depends_on": task.depends_on.clone(),
-                    "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
-                    "completed": task_completed,
-                    "acceptance": acceptance,
-                    "outputs": outputs,
-                });
-                prior_executions.push(execution.clone());
-                executions.push(execution);
-                if !task_completed {
-                    stopped = true;
-                    break;
-                }
-            }
-            Err(error) => {
-                completed = false;
-                stopped = true;
-                let execution = json!({
-                    "task_id": task_id,
-                    "title": title,
-                    "recipe": recipe_name(recipe),
-                    "pack": task_pack,
-                    "depends_on": task.depends_on.clone(),
-                    "budget": task_budget_by_id.get(&task_id).cloned().unwrap_or(Value::Null),
-                    "completed": false,
-                    "error": error.to_string(),
-                });
-                prior_executions.push(execution.clone());
-                executions.push(execution);
-                break;
-            }
-        }
-    }
-
-    let executed = executions.len();
-    let executed_this_run = executed.saturating_sub(starting_execution_count);
-    let project_acceptance = if !stopped && executed == scheduled_tasks.len() {
-        let acceptance = run_acceptance_checks(
-            &mut acceptance_tools,
-            &options.plan_profile,
-            options.tool_config.clone(),
-            project_plan.get("acceptance"),
-            "project",
-            &mut acceptance_events,
-            &mut acceptance_step,
-        )?;
-        completed &= acceptance_checks_completed(&acceptance);
-        acceptance
-    } else {
-        Vec::new()
-    };
-    if !acceptance_events.is_empty() {
-        if let Some(path) = options
-            .trace_out
-            .as_ref()
-            .map(|path| labeled_trace_path(path, "acceptance"))
-        {
-            write_trace(
-                &path,
-                &acceptance_events,
-                options.trace_redact || !options.trace_raw,
-            )?;
-            trace_files.push(path_ref_to_input_string(&path));
-        }
-    }
-    let executed_task_ids = executions
-        .iter()
-        .filter_map(|execution| execution.get("task_id").and_then(Value::as_str))
-        .collect::<HashSet<_>>();
-    let remaining_task_ids = scheduled_tasks
-        .iter()
-        .filter(|task| !executed_task_ids.contains(task.id.as_str()))
-        .map(|task| Value::String(task.id.clone()))
-        .collect::<Vec<_>>();
-    let status = if stopped {
-        "stopped"
-    } else if pending_tasks.len() > executed_this_run {
-        completed = false;
-        "max_tasks_exhausted"
-    } else if completed {
-        "completed"
-    } else {
-        "stopped"
-    };
-
-    Ok(json!({
-        "project_plan": project_plan,
-        "project": {
-            "status": status,
-            "completed": completed,
-            "max_tasks": options.max_tasks,
-            "executed_tasks": executed,
-            "executed_this_run": executed_this_run,
-            "resumed_from_turn": resumed_from_turn,
-            "scheduled_task_ids": scheduled_task_ids,
-            "remaining_task_ids": remaining_task_ids,
-            "budget": project_budget,
-            "remaining_budget": remaining_budget,
-            "budget_limit": budget_limit,
-            "memory": code_project_memory(&executions),
-            "artifacts": code_project_artifacts(&trace_files, &executions),
-            "acceptance": project_acceptance,
-            "executions": executions,
-        },
-        "trace_files": trace_files,
-    }))
-}
-
-fn task_recipe(task: &Value) -> Result<CodeRecipe> {
-    let name = task
-        .get("recipe")
-        .and_then(Value::as_str)
-        .context("planned task is missing recipe")?;
-    match name {
-        "explore" => Ok(CodeRecipe::Explore),
-        "review" => Ok(CodeRecipe::Review),
-        "edit" => Ok(CodeRecipe::Edit),
-        other => bail!("unsupported planned task recipe {other:?}"),
-    }
-}
-
-fn code_project_budget_summary(
-    pack: &CodeAgentPackContext,
-    tasks: &[CodeProjectScheduledTask],
-) -> Value {
-    let task_budgets = tasks
-        .iter()
-        .map(|task| code_project_task_budget(pack, task))
-        .collect::<Vec<_>>();
-    let max_estimated_model_calls = task_budgets
-        .iter()
-        .filter_map(|budget| budget.get("max_estimated_model_calls"))
-        .filter_map(Value::as_u64)
-        .sum::<u64>();
-    let max_estimated_tool_calls = task_budgets
-        .iter()
-        .filter_map(|budget| budget.get("max_estimated_tool_calls"))
-        .filter_map(Value::as_u64)
-        .sum::<u64>();
-
-    json!({
-        "task_count": tasks.len(),
-        "max_estimated_model_calls": max_estimated_model_calls,
-        "max_estimated_tool_calls": max_estimated_tool_calls,
-        "tasks": task_budgets,
-    })
-}
-
-fn code_project_task_budget(pack: &CodeAgentPackContext, task: &CodeProjectScheduledTask) -> Value {
-    let recipe = match task_recipe(&task.definition) {
-        Ok(recipe) => recipe,
-        Err(error) => {
-            return json!({
-                "task_id": task.id.clone(),
-                "depends_on": task.depends_on.clone(),
-                "error": error.to_string(),
-            });
-        }
-    };
-    let profile = match default_profile(pack, recipe) {
-        Ok(profile) => profile,
-        Err(error) => {
-            return json!({
-                "task_id": task.id.clone(),
-                "recipe": recipe_name(recipe),
-                "depends_on": task.depends_on.clone(),
-                "error": error.to_string(),
-            });
-        }
-    };
-    let pack = code_pack_metadata_value(pack, recipe, &profile);
-    let metadata_profile = code_profile_metadata_path(&profile);
-    match explain_metadata_for_profile(&metadata_profile) {
-        Ok(metadata) => json!({
-            "task_id": task.id.clone(),
-            "recipe": recipe_name(recipe),
-            "pack": pack,
-            "profile": path_ref_to_input_string(&profile),
-            "plan": path_ref_to_input_string(&metadata.plan),
-            "store": path_ref_to_input_string(&metadata.store),
-            "depends_on": task.depends_on.clone(),
-            "capabilities": metadata.capabilities,
-            "read_only": metadata.read_only,
-            "writes_workspace": metadata.writes_workspace,
-            "max_estimated_model_calls": metadata.max_estimated_model_calls,
-            "max_estimated_tool_calls": metadata.max_estimated_tool_calls,
-        }),
-        Err(error) => json!({
-            "task_id": task.id.clone(),
-            "recipe": recipe_name(recipe),
-            "pack": pack,
-            "profile": path_ref_to_input_string(&profile),
-            "depends_on": task.depends_on.clone(),
-            "error": error.to_string(),
-        }),
-    }
-}
-
-fn code_profile_metadata_path(profile: &Path) -> PathBuf {
-    if profile.is_absolute() || profile.exists() {
-        return profile.to_path_buf();
-    }
-    let workspace_profile = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../..")
-        .join(profile);
-    if workspace_profile.exists() {
-        workspace_profile
-    } else {
-        profile.to_path_buf()
-    }
-}
-
-fn prior_executions_completed(executions: &[Value]) -> bool {
-    executions.iter().all(|execution| {
-        execution
-            .get("completed")
-            .and_then(Value::as_bool)
-            .unwrap_or(false)
-    })
-}
-
-fn code_project_task_input(
-    base_input: &Map<String, Value>,
-    prior_executions: &[Value],
-) -> Map<String, Value> {
-    let mut input = normalized_code_project_task_paths(base_input);
-    ensure_edit_task_defaults(&mut input);
-    if prior_executions.is_empty() {
-        return input;
-    }
-    let task = input
-        .get("task")
-        .and_then(Value::as_str)
-        .unwrap_or("execute planned project task");
-    let memory = truncate_for_context(
-        &serde_json::to_string_pretty(&code_project_memory(prior_executions)).unwrap_or_default(),
-        default_context_budget_chars(),
-    );
-    let available_artifacts = truncate_for_context(
-        &serde_json::to_string_pretty(&code_project_artifacts(&[], prior_executions))
-            .unwrap_or_default(),
-        default_context_budget_chars(),
-    );
-    input.insert(
-        "task".to_string(),
-        Value::String(format!(
-            "{task}\n\nAIR project memory from previous tasks:\n{memory}\n\nAvailable project artifacts from previous tasks:\n{available_artifacts}"
-        )),
-    );
-    input
-}
-
-fn ensure_edit_task_defaults(input: &mut Map<String, Value>) {
-    if input.contains_key("target_path") {
-        if !input.contains_key("target_search_pattern") {
-            let query = input
-                .get("query")
-                .or_else(|| input.get("task"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            input.insert(
-                "target_search_pattern".to_string(),
-                Value::String(code_search_pattern(query)),
-            );
-        }
-        if !input.contains_key("target_symbol_query") {
-            let query = input
-                .get("query")
-                .or_else(|| input.get("task"))
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            input.insert(
-                "target_symbol_query".to_string(),
-                Value::String(crate::code_input::code_symbol_query(query)),
-            );
-        }
-        input
-            .entry("force_patch".to_string())
-            .or_insert(Value::Bool(false));
-    }
-}
-
-fn normalized_code_project_task_paths(base_input: &Map<String, Value>) -> Map<String, Value> {
-    let mut input = base_input.clone();
-    for field in ["target_path", "target_file"] {
-        normalize_file_target_field(&mut input, field);
-    }
-    input
-}
-
-fn normalize_file_target_field(input: &mut Map<String, Value>, field: &str) {
-    let Some(path) = input.get(field).and_then(Value::as_str) else {
-        return;
-    };
-    let Some(file) = preferred_file_for_target(Path::new(path)) else {
-        return;
-    };
-    input.insert(field.to_string(), Value::String(path_to_input_string(file)));
-}
-
-fn preferred_file_for_target(path: &Path) -> Option<PathBuf> {
-    if path.is_file() {
-        return None;
-    }
-    if !path.is_dir() {
-        return None;
-    }
-    preferred_file_in_directory(path)
-}
-
-fn preferred_file_in_directory(path: &Path) -> Option<PathBuf> {
-    for candidate in [
-        "lib.rs",
-        "main.rs",
-        "mod.rs",
-        "index.ts",
-        "index.tsx",
-        "index.js",
-        "index.jsx",
-        "index.html",
-        "README.md",
-        "Cargo.toml",
-        "package.json",
-    ] {
-        let candidate = path.join(candidate);
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-
-    let mut files = collect_candidate_files(path, 3, 64);
-    files.sort();
-    files.into_iter().next()
-}
-
-fn collect_candidate_files(path: &Path, max_depth: usize, max_files: usize) -> Vec<PathBuf> {
-    if max_depth == 0 || max_files == 0 {
-        return Vec::new();
-    }
-    let Ok(entries) = fs::read_dir(path) else {
-        return Vec::new();
-    };
-    let mut entries = entries.filter_map(|entry| entry.ok()).collect::<Vec<_>>();
-    entries.sort_by_key(|entry| entry.path());
-
-    let mut files = Vec::new();
-    for entry in entries {
-        let entry_path = entry.path();
-        if ignored_code_agent_path(&entry_path) {
-            continue;
-        }
-        if entry_path.is_file() && is_likely_code_agent_context_file(&entry_path) {
-            files.push(entry_path);
-            if files.len() >= max_files {
-                break;
-            }
-        } else if entry_path.is_dir() {
-            files.extend(collect_candidate_files(
-                &entry_path,
-                max_depth.saturating_sub(1),
-                max_files.saturating_sub(files.len()),
-            ));
-            if files.len() >= max_files {
-                break;
-            }
-        }
-    }
-    files
-}
-
-fn ignored_code_agent_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|name| name.to_str())
-        .is_some_and(|name| {
-            name.starts_with('.')
-                || matches!(
-                    name,
-                    "target" | "node_modules" | "dist" | "build" | "__pycache__"
-                )
-        })
-}
-
-fn is_likely_code_agent_context_file(path: &Path) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            matches!(
-                extension,
-                "rs" | "toml"
-                    | "yaml"
-                    | "yml"
-                    | "json"
-                    | "md"
-                    | "ts"
-                    | "tsx"
-                    | "js"
-                    | "jsx"
-                    | "py"
-                    | "go"
-                    | "java"
-                    | "html"
-                    | "css"
-            )
-        })
-}
-
 fn code_session_turn_input(
     base_input: &Map<String, Value>,
     previous_turns: &[CodeSessionTurn],
@@ -1958,21 +927,6 @@ fn code_session_turn_input(
     input
 }
 
-fn labeled_trace_path(path: &Path, label: &str) -> PathBuf {
-    let parent = path.parent().unwrap_or_else(|| Path::new(""));
-    let stem = path
-        .file_stem()
-        .and_then(|value| value.to_str())
-        .unwrap_or("air-code");
-    let extension = path.extension().and_then(|value| value.to_str());
-    let file_name = if let Some(extension) = extension {
-        format!("{stem}.{label}.{extension}")
-    } else {
-        format!("{stem}.{label}")
-    };
-    parent.join(file_name)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1982,7 +936,6 @@ mod tests {
         let pack = load_code_agent_pack(None).unwrap();
         let recipes = [
             CodeRecipe::Auto,
-            CodeRecipe::Plan,
             CodeRecipe::Explore,
             CodeRecipe::Review,
             CodeRecipe::Edit,
@@ -2159,6 +1112,52 @@ mod tests {
     }
 
     #[test]
+    fn edit_input_keeps_symbol_query_exact_for_multi_file_split_tasks() {
+        let input = build_input(CodeInputOptions {
+            task: "Split the repo_symbols implementation into a module".to_string(),
+            recipe: CodeRecipe::Edit,
+            target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
+            write: vec![PathBuf::from("crates/air-tools/src/repo_symbols.rs")],
+            test: Some("cargo_air_tools_repo_tests".to_string()),
+            query: Some("repo_symbols tree_sitter rg fallback module split".to_string()),
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["target_symbol_query"],
+            Value::String("repo_symbols".to_string())
+        );
+    }
+
+    #[test]
+    fn edit_input_does_not_broaden_when_extract_only_appears_inside_symbol_name() {
+        let input = build_input(CodeInputOptions {
+            task: "Relocate the extract_command_diagnostics parser helpers into command_diagnostics.rs".to_string(),
+            recipe: CodeRecipe::Edit,
+            target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
+            write: vec![PathBuf::from("crates/air-tools/src/command_diagnostics.rs")],
+            test: Some("cargo_air_tools_tests".to_string()),
+            query: Some("extract_command_diagnostics diagnostics parser helpers relocate".to_string()),
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["target_symbol_query"],
+            Value::String("extract_command_diagnostics".to_string())
+        );
+    }
+
+    #[test]
     fn edit_input_honors_force_patch() {
         let input = build_input(CodeInputOptions {
             task: "change provider".to_string(),
@@ -2268,14 +1267,14 @@ mod tests {
     }
 
     #[test]
-    fn auto_recipe_selects_plan_without_target() {
+    fn auto_recipe_selects_explore_without_target() {
         let input = build_input(CodeInputOptions {
-            task: "plan the next code-agent milestone".to_string(),
+            task: "understand the next code-agent milestone".to_string(),
             recipe: CodeRecipe::Auto,
             target: None,
             write: vec![],
             test: None,
-            query: Some("code agent project planning".to_string()),
+            query: Some("code agent repository exploration".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
@@ -2286,13 +1285,13 @@ mod tests {
 
         assert_eq!(
             input["task"],
-            Value::String("plan the next code-agent milestone".to_string())
+            Value::String("understand the next code-agent milestone".to_string())
         );
         assert_eq!(
             input["query"],
-            Value::String("code agent project planning".to_string())
+            Value::String("code agent repository exploration".to_string())
         );
-        assert!(input.get("target_path").is_none());
+        assert_eq!(input["target_path"], Value::String(String::new()));
     }
 
     #[test]
@@ -2489,6 +1488,51 @@ mod tests {
     }
 
     #[test]
+    fn targeted_symbol_choose_rule_hides_todos_and_broad_references() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let targeted_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose-targeted-symbol"))
+            .unwrap();
+        let allowed_tools = targeted_rule["actions"][0]["input"]["object"]["allowed_tools"]
+            ["array"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["literal"].as_str())
+            .collect::<HashSet<_>>();
+
+        for tool in ["repo.symbols", "file.read", "file.ops", "file.patch"] {
+            assert!(
+                allowed_tools.contains(tool),
+                "targeted symbol rule should expose {tool}"
+            );
+        }
+
+        for tool in [
+            "todo.write",
+            "todo.read",
+            "repo.references",
+            "repo.search",
+            "file.search",
+            "git.status",
+            "git.diff",
+            "test.run",
+        ] {
+            assert!(
+                !allowed_tools.contains(tool),
+                "targeted symbol rule should hide {tool}"
+            );
+        }
+    }
+
+    #[test]
     fn edit_loop_prefers_preflight_symbols_for_targeted_context() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
@@ -2538,6 +1582,70 @@ mod tests {
                 "phase == \"preflight\" && target_path != \"\" && target_symbol_query == \"\" && target_search_pattern == \"\""
                     .to_string()
             )
+        );
+    }
+
+    #[test]
+    fn edit_loop_forces_write_earlier_for_targeted_symbol_splits() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let targeted_force_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("force-write-after-targeted-explore-budget"))
+            .unwrap();
+
+        assert_eq!(
+            targeted_force_rule["when"],
+            serde_yaml::Value::String(
+                "phase == \"choose\" && target_symbol_query != \"\" && _air.model_calls >= 5 && verification_status != \"passed\""
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            targeted_force_rule["actions"][1]["input"]["object"]["allowed_tools"]["array"][0]
+                ["literal"],
+            serde_yaml::Value::String("file.ops".to_string())
+        );
+        assert_eq!(
+            targeted_force_rule["actions"][1]["input"]["object"]["allowed_tools"]["array"][1]
+                ["literal"],
+            serde_yaml::Value::String("file.patch".to_string())
+        );
+        assert_eq!(
+            targeted_force_rule["actions"][1]["input"]["object"]["observations"]["max_bytes"],
+            serde_yaml::Value::Number(24000.into())
+        );
+    }
+
+    #[test]
+    fn edit_loop_stops_after_empty_force_write_decision() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let force_empty_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("force-empty-action"))
+            .unwrap();
+
+        assert_eq!(
+            force_empty_rule["when"],
+            serde_yaml::Value::String(
+                "phase == \"force_act\" && decision.complete == false && decision.tool_calls == []"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            force_empty_rule["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("summarize".to_string())
         );
     }
 
@@ -2859,18 +1967,6 @@ mod tests {
             &json!({"edit": {"final_success": false}})
         )
         .unwrap());
-        assert!(code_outputs_complete(
-            &pack,
-            CodeRecipe::Plan,
-            &json!({"project_plan": {"tasks": [{"id": "t1"}]}})
-        )
-        .unwrap());
-        assert!(!code_outputs_complete(
-            &pack,
-            CodeRecipe::Plan,
-            &json!({"project_plan": {"tasks": []}})
-        )
-        .unwrap());
     }
 
     #[test]
@@ -2887,237 +1983,6 @@ mod tests {
             default_session_trace_path(Path::new("target/generated/code_session.json"), 3),
             PathBuf::from("target/generated/code_session.traces/turn3.trace.jsonl")
         );
-    }
-
-    #[test]
-    fn default_session_recovery_fork_path_uses_sibling_fork_directory() {
-        assert_eq!(
-            default_session_recovery_fork_path(Path::new("target/generated/code_session.json"), 3),
-            PathBuf::from("target/generated/code_session.forks/turn3.failed.json")
-        );
-    }
-
-    #[test]
-    fn project_recovery_only_for_stopped_execute_plan() {
-        let stopped = json!({
-            "project": {
-                "status": "stopped",
-                "remaining_task_ids": ["t2"],
-                "executions": [
-                    {
-                        "task_id": "t1",
-                        "title": "Failing task",
-                        "recipe": "explore",
-                        "completed": false,
-                        "acceptance": [{"id": "unit", "success": false}],
-                        "outputs": {"exploration": {"summary": "partial"}}
-                    }
-                ]
-            }
-        });
-        let recovery = code_session_recovery_for_outputs(
-            CodeRecipe::Plan,
-            true,
-            Path::new("target/generated/code_session.json"),
-            1,
-            "turn-000001",
-            &stopped,
-        )
-        .unwrap();
-
-        assert_eq!(recovery.0.status, "stopped");
-        assert_eq!(recovery.0.failed_task_id, Some("t1".to_string()));
-        assert_eq!(recovery.0.remaining_task_ids, vec!["t2"]);
-        assert_eq!(
-            recovery.0.failed_execution.as_ref().unwrap()["acceptance"][0]["id"],
-            Value::String("unit".to_string())
-        );
-        assert_eq!(
-            recovery.0.failed_execution.as_ref().unwrap()["output_keys"][0],
-            Value::String("exploration".to_string())
-        );
-        assert_eq!(
-            recovery.1,
-            PathBuf::from("target/generated/code_session.forks/turn1.failed.json")
-        );
-        assert!(code_session_recovery_for_outputs(
-            CodeRecipe::Plan,
-            true,
-            Path::new("target/generated/code_session.json"),
-            1,
-            "turn-000001",
-            &json!({"project": {"status": "max_tasks_exhausted"}}),
-        )
-        .is_none());
-        assert!(code_session_recovery_for_outputs(
-            CodeRecipe::Explore,
-            false,
-            Path::new("target/generated/code_session.json"),
-            1,
-            "turn-000001",
-            &stopped,
-        )
-        .is_none());
-    }
-
-    #[test]
-    fn session_project_resume_uses_latest_exhausted_plan_turn() {
-        let mut state = CodeSessionState::default();
-        state.append_turn(CodeSessionTurn {
-            id: "turn-000001".to_string(),
-            time: CodeSessionTurnTime::default(),
-            task: "run two tasks".to_string(),
-            requested_recipe: None,
-            recipe: "plan".to_string(),
-            profile: "profile".to_string(),
-            pack: None,
-            input: json!({}),
-            completed: false,
-            trace_files: Vec::new(),
-            summary: CodeSessionTurnSummary::default(),
-            parts: Vec::new(),
-            patch_sets: Vec::new(),
-            recovery: None,
-            outputs: json!({
-                "project_plan": {
-                    "tasks": [
-                        {"id": "t1", "depends_on": []},
-                        {"id": "t2", "depends_on": ["t1"]}
-                    ]
-                },
-                "project": {
-                    "status": "max_tasks_exhausted",
-                    "executions": [
-                        {"task_id": "t1", "completed": true},
-                        {"task_id": "bad", "completed": false}
-                    ]
-                }
-            }),
-        });
-
-        let resume = code_session_project_resume(&state).unwrap();
-
-        assert_eq!(resume.turn_id, "turn-000001");
-        assert_eq!(
-            resume.project_plan["tasks"][1]["id"],
-            Value::String("t2".to_string())
-        );
-        assert_eq!(resume.executions.len(), 1);
-        assert_eq!(
-            resume.executions[0]["task_id"],
-            Value::String("t1".to_string())
-        );
-    }
-
-    #[test]
-    fn session_project_resume_ignores_older_exhausted_after_newer_stopped() {
-        let mut state = CodeSessionState::default();
-        state.append_turn(CodeSessionTurn {
-            id: "turn-000001".to_string(),
-            time: CodeSessionTurnTime::default(),
-            task: "run two tasks".to_string(),
-            requested_recipe: None,
-            recipe: "plan".to_string(),
-            profile: "profile".to_string(),
-            pack: None,
-            input: json!({}),
-            completed: false,
-            trace_files: Vec::new(),
-            summary: CodeSessionTurnSummary::default(),
-            parts: Vec::new(),
-            patch_sets: Vec::new(),
-            recovery: None,
-            outputs: json!({
-                "project_plan": {"tasks": [{"id": "t1", "depends_on": []}]},
-                "project": {
-                    "status": "max_tasks_exhausted",
-                    "executions": [{"task_id": "t1", "completed": true}]
-                }
-            }),
-        });
-        state.append_turn(CodeSessionTurn {
-            id: "turn-000002".to_string(),
-            time: CodeSessionTurnTime::default(),
-            task: "failed recovery".to_string(),
-            requested_recipe: None,
-            recipe: "plan".to_string(),
-            profile: "profile".to_string(),
-            pack: None,
-            input: json!({}),
-            completed: false,
-            trace_files: Vec::new(),
-            summary: CodeSessionTurnSummary::default(),
-            parts: Vec::new(),
-            patch_sets: Vec::new(),
-            recovery: None,
-            outputs: json!({
-                "project": {
-                    "status": "stopped",
-                    "executions": [{"task_id": "fix", "completed": false}]
-                }
-            }),
-        });
-
-        assert!(code_session_project_resume(&state).is_none());
-        assert!(code_session_latest_project_turn(&state, "stopped").is_some());
-    }
-
-    #[test]
-    fn project_recovery_turn_input_adds_failed_execution_context() {
-        let mut input = Map::new();
-        input.insert(
-            "task".to_string(),
-            Value::String("continue project".to_string()),
-        );
-        input.insert(
-            "query".to_string(),
-            Value::String("project recovery".to_string()),
-        );
-        let mut state = CodeSessionState::default();
-        state.append_turn(CodeSessionTurn {
-            id: "turn-000001".to_string(),
-            time: CodeSessionTurnTime::default(),
-            task: "run project".to_string(),
-            requested_recipe: None,
-            recipe: "plan".to_string(),
-            profile: "profile".to_string(),
-            pack: None,
-            input: json!({}),
-            completed: false,
-            trace_files: Vec::new(),
-            summary: CodeSessionTurnSummary::default(),
-            parts: Vec::new(),
-            patch_sets: Vec::new(),
-            recovery: None,
-            outputs: json!({
-                "project": {
-                    "status": "stopped",
-                    "remaining_task_ids": ["t2"],
-                    "executions": [
-                        {
-                            "task_id": "t1",
-                            "completed": false,
-                            "error": "acceptance failed",
-                            "acceptance": [{"id": "unit", "success": false}]
-                        }
-                    ]
-                },
-                "recovery": {
-                    "failed_task_id": "t1",
-                    "fork": "target/generated/session.forks/turn1.failed.json",
-                    "workspace_revert_argv": ["air", "code-session"]
-                }
-            }),
-        });
-
-        let next = code_project_recovery_turn_input(&input, &state).unwrap();
-
-        let task = next["task"].as_str().unwrap();
-        assert!(task.starts_with("continue project"));
-        assert!(task.contains("AIR project recovery context from previous failed execution"));
-        assert!(task.contains("\"failed_task_id\": \"t1\""));
-        assert!(task.contains("\"remaining_task_ids\""));
-        assert!(task.contains("acceptance failed"));
     }
 
     #[test]
@@ -3332,286 +2197,6 @@ mod tests {
     }
 
     #[test]
-    fn project_task_input_appends_previous_task_outputs() {
-        let mut input = Map::new();
-        input.insert(
-            "task".to_string(),
-            Value::String("inspect the next file".to_string()),
-        );
-        input.insert(
-            "target_path".to_string(),
-            Value::String("src/lib.rs".to_string()),
-        );
-        let previous = vec![json!({
-            "task_id": "t1",
-            "completed": true,
-            "outputs": {
-                "exploration": {
-                    "summary": "found routing code",
-                    "artifacts": [{"id": "repo-search:routing", "kind": "repo_search"}]
-                }
-            }
-        })];
-
-        let next = code_project_task_input(&input, &previous);
-
-        assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
-        assert_eq!(
-            next["target_search_pattern"],
-            Value::String("inspect|the|next|file".to_string())
-        );
-        assert_eq!(next["force_patch"], Value::Bool(false));
-        let task = next["task"].as_str().unwrap();
-        assert!(task.contains("inspect the next file"));
-        assert!(task.contains("AIR project memory from previous tasks"));
-        assert!(task.contains("Available project artifacts from previous tasks"));
-        assert!(task.contains("found routing code"));
-        assert!(task.contains("repo-search:routing"));
-    }
-
-    #[test]
-    fn project_task_input_resolves_directory_targets_to_files() {
-        let dir = std::env::temp_dir().join(format!(
-            "air-code-project-dir-target-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        fs::create_dir_all(&dir).unwrap();
-        let lib = dir.join("lib.rs");
-        fs::write(&lib, "pub fn tool() {}\n").unwrap();
-
-        let mut input = Map::new();
-        input.insert(
-            "task".to_string(),
-            Value::String("explore tool".to_string()),
-        );
-        input.insert(
-            "target_path".to_string(),
-            Value::String(path_ref_to_input_string(&dir)),
-        );
-
-        let next = code_project_task_input(&input, &[]);
-
-        assert_eq!(
-            next["target_path"],
-            Value::String(path_ref_to_input_string(&lib))
-        );
-        assert_eq!(
-            next["target_search_pattern"],
-            Value::String("explore|tool".to_string())
-        );
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn project_task_input_preserves_explicit_target_search_pattern() {
-        let mut input = Map::new();
-        input.insert("task".to_string(), Value::String("fix it".to_string()));
-        input.insert(
-            "target_path".to_string(),
-            Value::String("src/lib.rs".to_string()),
-        );
-        input.insert(
-            "target_search_pattern".to_string(),
-            Value::String("ExplicitSymbol".to_string()),
-        );
-
-        let next = code_project_task_input(&input, &[]);
-
-        assert_eq!(
-            next["target_search_pattern"],
-            Value::String("ExplicitSymbol".to_string())
-        );
-    }
-
-    #[test]
-    fn project_task_input_preserves_explicit_force_patch() {
-        let mut input = Map::new();
-        input.insert("task".to_string(), Value::String("fix it".to_string()));
-        input.insert(
-            "target_path".to_string(),
-            Value::String("src/lib.rs".to_string()),
-        );
-        input.insert("force_patch".to_string(), Value::Bool(true));
-
-        let next = code_project_task_input(&input, &[]);
-
-        assert_eq!(next["force_patch"], Value::Bool(true));
-    }
-
-    #[test]
-    fn project_memory_extracts_stable_task_facts() {
-        let executions = vec![json!({
-            "task_id": "fix",
-            "title": "Fix math",
-            "recipe": "edit",
-            "depends_on": ["inspect"],
-            "completed": true,
-            "acceptance": [{"id": "unit", "success": true, "output": {"large": "omitted"}}],
-            "outputs": {
-                "edit": {
-                    "target_path": "examples/math.js",
-                    "final_success": true,
-                    "patch_applied": true,
-                    "workspace_changed_files": [{"path": "examples/math.js"}],
-                    "workspace_diff": {
-                        "bytes": 333,
-                        "truncated": false,
-                        "artifacts": [{"id": "git-diff:examples/math.js", "kind": "file_patch", "path": "examples/math.js"}]
-                    }
-                }
-            }
-        })];
-
-        let memory = code_project_memory(&executions);
-
-        assert_eq!(memory["task_count"], Value::from(1));
-        assert_eq!(memory["completed_task_count"], Value::from(1));
-        assert_eq!(
-            memory["changed_files"][0],
-            Value::String("examples/math.js".to_string())
-        );
-        assert_eq!(
-            memory["artifact_ids"][0],
-            Value::String("git-diff:examples/math.js".to_string())
-        );
-        assert_eq!(
-            memory["tasks"][0]["outputs"]["edit"]["final_success"],
-            Value::Bool(true)
-        );
-        assert_eq!(memory["tasks"][0]["acceptance"][0].get("output"), None);
-    }
-
-    #[test]
-    fn project_artifacts_index_traces_outputs_and_changed_files() {
-        let traces = vec![
-            "target/generated/project.trace.plan.jsonl".to_string(),
-            "target/generated/project.trace.task1.jsonl".to_string(),
-        ];
-        let executions = vec![json!({
-            "task_id": "fix",
-            "outputs": {
-                "edit": {
-                    "workspace_changed_files": [{"path": "examples/math.js"}],
-                    "workspace_diff": {
-                        "artifacts": [{"id": "git-diff:examples/math.js", "kind": "file_patch", "path": "examples/math.js"}]
-                    }
-                }
-            }
-        })];
-
-        let artifacts = code_project_artifacts(&traces, &executions);
-        let artifact_items = artifacts.as_array().unwrap();
-        let ids = artifact_items
-            .iter()
-            .filter_map(|artifact| artifact.get("id").and_then(Value::as_str))
-            .collect::<Vec<_>>();
-
-        assert!(ids.contains(&"trace:target/generated/project.trace.plan.jsonl"));
-        assert!(ids.contains(&"trace:target/generated/project.trace.task1.jsonl"));
-        assert!(ids.contains(&"git-diff:examples/math.js"));
-        assert!(ids.contains(&"changed-file:examples/math.js"));
-        let patch = artifact_items
-            .iter()
-            .find(|artifact| {
-                artifact.get("id").and_then(Value::as_str) == Some("git-diff:examples/math.js")
-            })
-            .unwrap();
-        assert_eq!(patch["task_id"], Value::String("fix".to_string()));
-    }
-
-    #[test]
-    fn project_task_schedule_respects_dependencies() {
-        let tasks = vec![
-            json!({
-                "id": "package",
-                "depends_on": ["build"],
-                "recipe": "explore",
-                "input": {}
-            }),
-            json!({
-                "id": "build",
-                "depends_on": ["plan"],
-                "recipe": "explore",
-                "input": {}
-            }),
-            json!({
-                "id": "plan",
-                "depends_on": [],
-                "recipe": "explore",
-                "input": {}
-            }),
-        ];
-
-        let schedule = code_project_task_schedule(&tasks).unwrap();
-        let ids = schedule
-            .iter()
-            .map(|task| task.id.as_str())
-            .collect::<Vec<_>>();
-
-        assert_eq!(ids, vec!["plan", "build", "package"]);
-    }
-
-    #[test]
-    fn project_budget_summary_reports_task_profiles_and_totals() {
-        let tasks = vec![
-            json!({
-                "id": "inspect",
-                "depends_on": [],
-                "recipe": "explore",
-                "input": {}
-            }),
-            json!({
-                "id": "fix",
-                "depends_on": ["inspect"],
-                "recipe": "edit",
-                "input": {}
-            }),
-        ];
-        let schedule = code_project_task_schedule(&tasks).unwrap();
-
-        let pack = load_code_agent_pack(None).unwrap();
-        let budget = code_project_budget_summary(&pack, &schedule);
-        let task_budgets = budget["tasks"].as_array().unwrap();
-        let model_total = task_budgets
-            .iter()
-            .map(|item| item["max_estimated_model_calls"].as_u64().unwrap())
-            .sum::<u64>();
-        let tool_total = task_budgets
-            .iter()
-            .map(|item| item["max_estimated_tool_calls"].as_u64().unwrap())
-            .sum::<u64>();
-
-        assert_eq!(budget["task_count"], Value::from(2));
-        assert_eq!(
-            budget["max_estimated_model_calls"],
-            Value::from(model_total)
-        );
-        assert_eq!(budget["max_estimated_tool_calls"], Value::from(tool_total));
-        assert_eq!(
-            task_budgets[0]["task_id"],
-            Value::String("inspect".to_string())
-        );
-        assert_eq!(
-            task_budgets[0]["recipe"],
-            Value::String("explore".to_string())
-        );
-        assert_eq!(task_budgets[1]["task_id"], Value::String("fix".to_string()));
-        assert_eq!(task_budgets[1]["recipe"], Value::String("edit".to_string()));
-        assert_eq!(
-            task_budgets[1]["depends_on"],
-            Value::Array(vec![Value::String("inspect".to_string())])
-        );
-        assert!(task_budgets[0]["read_only"].as_bool().unwrap());
-        assert!(task_budgets[1]["writes_workspace"].as_bool().unwrap());
-        assert!(model_total > 0);
-        assert!(tool_total > 0);
-    }
-
-    #[test]
     fn budget_limit_status_reports_exceeded_dimension() {
         let status = code_budget_limit_status(
             6,
@@ -3627,66 +2212,6 @@ mod tests {
         assert_eq!(status["tool_exceeded"], Value::Bool(false));
         assert_eq!(status["attempted_model_calls"], Value::from(6));
         assert_eq!(status["attempted_tool_calls"], Value::from(29));
-    }
-
-    #[test]
-    fn project_task_schedule_rejects_missing_dependency() {
-        let error = code_project_task_schedule(&[json!({
-            "id": "build",
-            "depends_on": ["plan"],
-            "recipe": "explore",
-            "input": {}
-        })])
-        .unwrap_err();
-
-        assert!(error.to_string().contains("depends on missing task"));
-    }
-
-    #[test]
-    fn project_task_schedule_rejects_cycles() {
-        let error = code_project_task_schedule(&[
-            json!({
-                "id": "a",
-                "depends_on": ["b"],
-                "recipe": "explore",
-                "input": {}
-            }),
-            json!({
-                "id": "b",
-                "depends_on": ["a"],
-                "recipe": "explore",
-                "input": {}
-            }),
-        ])
-        .unwrap_err();
-
-        assert!(error.to_string().contains("dependency cycle"));
-    }
-
-    #[test]
-    fn acceptance_checks_build_test_run_inputs() {
-        let checks = acceptance_checks(Some(&json!([
-            {
-                "id": "unit",
-                "command": "air_tools_filter",
-                "parameters": {"test_filter": "command_run"},
-                "expected": "command_run tests pass"
-            },
-            "legacy descriptive acceptance item"
-        ])));
-
-        assert_eq!(checks.len(), 1);
-        assert_eq!(checks[0].id, "unit");
-        assert_eq!(checks[0].command, "air_tools_filter");
-        assert_eq!(checks[0].expected, "command_run tests pass");
-        assert_eq!(
-            checks[0].input["command"],
-            Value::String("air_tools_filter".to_string())
-        );
-        assert_eq!(
-            checks[0].input["test_filter"],
-            Value::String("command_run".to_string())
-        );
     }
 
     #[test]
@@ -3750,15 +2275,15 @@ mod tests {
     fn session_parts_recover_model_from_start_event_when_completion_meta_is_truncated() {
         let events = vec![
             serde_json::from_value::<TraceEvent>(json!({
-                "agent": "planner",
+                "agent": "reviewer",
                 "step": 1,
-                "rule": "plan",
+                "rule": "analyze",
                 "action": "model_call_start",
                 "input": {},
                 "output": null,
                 "meta": {
-                    "model": "project_planner",
-                    "output": "project_plan",
+                    "model": "code_reviewer",
+                    "output": "review",
                     "timeout_seconds": 120
                 },
                 "status": "ok",
@@ -3766,12 +2291,12 @@ mod tests {
             }))
             .unwrap(),
             serde_json::from_value::<TraceEvent>(json!({
-                "agent": "planner",
+                "agent": "reviewer",
                 "step": 1,
-                "rule": "plan",
+                "rule": "analyze",
                 "action": "model_call",
                 "input": {},
-                "output": {"project_plan": {"summary": "large output omitted"}},
+                "output": {"review": {"summary": "large output omitted"}},
                 "meta": {"_air_truncated": true},
                 "status": "ok",
                 "error": null
@@ -3788,7 +2313,7 @@ mod tests {
                 .map(ToString::to_string);
         }
 
-        assert_eq!(part.model, Some("project_planner".to_string()));
+        assert_eq!(part.model, Some("code_reviewer".to_string()));
     }
 
     #[test]

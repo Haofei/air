@@ -142,6 +142,13 @@
       "context_lines": 4,
       "max_bytes": 65536
     },
+    "code.assert": {
+      "kind": "code_assert",
+      "capability": "code.read",
+      "base_dir": "../..",
+      "max_assertions": 12,
+      "max_bytes": 65536
+    },
     "git.diff": {
       "kind": "git_diff",
       "capability": "code.read",

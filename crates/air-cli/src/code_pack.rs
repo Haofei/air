@@ -86,8 +86,8 @@ mod tests {
             pack: CodeAgentPack {
                 routing: CodeAgentRouting::default(),
                 recipes: vec![CodeAgentPackRecipe {
-                    id: "plan".to_string(),
-                    default_profile: PathBuf::from("project-plan.air-profile.yaml"),
+                    id: "explore".to_string(),
+                    default_profile: PathBuf::from("explore.air-profile.yaml"),
                     intent: None,
                     input: CodeAgentRecipeInput::default(),
                     completion: None,
@@ -96,8 +96,8 @@ mod tests {
         };
 
         assert_eq!(
-            pack.default_profile_for_recipe("plan").unwrap(),
-            PathBuf::from("target/generated/custom-pack/project-plan.air-profile.yaml")
+            pack.default_profile_for_recipe("explore").unwrap(),
+            PathBuf::from("target/generated/custom-pack/explore.air-profile.yaml")
         );
     }
 
@@ -431,7 +431,7 @@ all:
             .unwrap();
 
         assert_eq!(decision.recipe, "explore");
-        assert_eq!(decision.route_index, 3);
+        assert_eq!(decision.route_index, 2);
         assert!(decision.fallback);
     }
 

@@ -100,7 +100,7 @@ cp "$fixture" "$backup"
 trap restore_fixture EXIT
 
 cargo run -q -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.yaml \
-  --model-config examples/code-agent/model-fixtures.fuzzy-line-trimmed.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.fuzzy-line-trimmed.json \
   --trace-out target/generated/code-agent-bench/fuzzy-line-trimmed.trace.jsonl \
   > target/generated/code-agent-bench/fuzzy-line-trimmed.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code-agent-bench/fuzzy-line-trimmed.post_test.log

@@ -3,7 +3,7 @@
     "web.search": {
       "kind": "playwright_search",
       "capability": "network.search",
-      "script_path": "../../scripts/playwright_search.cjs",
+      "script_path": "../../../scripts/playwright_search.cjs",
       "query_variants": [
         "{{query}} official docs",
         "{{query}} GitHub issues",
@@ -26,27 +26,27 @@
       "search_delay_ms": 500,
       "retry_count": 1,
       "fetch_pages": true,
-      "cache_dir": "../../target/generated/playwright_search_cache",
+      "cache_dir": "../../../target/generated/playwright_search_cache",
       "cache_ttl_seconds": 86400,
       "timeout_seconds": 120
     },
     "file.read": {
       "kind": "file_read",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "max_bytes": 32768
     },
     "file.read_many": {
       "kind": "file_read_many",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "max_files": 8,
       "max_bytes": 65536
     },
     "file.search": {
       "kind": "file_search",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "max_matches": 40,
       "max_context_lines": 2,
       "max_line_chars": 2000,
@@ -55,7 +55,7 @@
     "file.edit": {
       "kind": "file_edit",
       "capability": "file.write",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "require_read": true,
       "allow_replace_all": false,
       "max_bytes": 65536,
@@ -64,7 +64,7 @@
     "file.ops": {
       "kind": "file_ops",
       "capability": "file.write",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "require_read": true,
       "allow_new_files": true,
       "allow_overwrite": false,
@@ -76,27 +76,27 @@
     "repo.files": {
       "kind": "repo_files",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_files": 100
     },
     "repo.search": {
       "kind": "repo_search",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_matches": 80,
       "max_bytes": 65536
     },
     "repo.symbols": {
       "kind": "repo_symbols",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_symbols": 120,
       "max_bytes": 65536
     },
     "repo.references": {
       "kind": "repo_references",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_matches": 120,
       "max_files": 8,
       "context_lines": 4,
@@ -105,7 +105,7 @@
     "repo.context": {
       "kind": "repo_context",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_matches": 80,
       "max_files": 8,
       "context_lines": 8,
@@ -114,14 +114,21 @@
     "git.diff": {
       "kind": "git_diff",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_bytes": 65536
     },
     "git.status": {
       "kind": "git_status",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_files": 200
+    },
+    "code.assert": {
+      "kind": "code_assert",
+      "capability": "code.read",
+      "base_dir": "../../..",
+      "max_assertions": 12,
+      "max_bytes": 65536
     },
     "todo.write": {
       "kind": "todo_write",
@@ -148,7 +155,7 @@
     "test.run": {
       "kind": "command_run",
       "capability": "code.test",
-      "cwd": "../..",
+      "cwd": "../../..",
       "commands": {
         "air_tools": ["cargo", "test", "-q", "-p", "air-tools"],
         "air_tools_filter": ["cargo", "test", "-q", "-p", "air-tools", "{{test_filter}}"]

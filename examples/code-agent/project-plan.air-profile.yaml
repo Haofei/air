@@ -1,5 +1,0 @@
-plan: code-project-plan.air-plan.yaml
-store: module-store.air-store.yaml
-input_file: project-plan.input.json
-model_config: model-fixtures.json
-tool_config: tools.json

@@ -84,17 +84,3 @@ pub(crate) fn code_budget_limit_violation(
         tool_exceeded,
     )))
 }
-
-pub(crate) fn code_budget_value_counts(budget: &Value) -> (usize, usize) {
-    let model_calls = budget
-        .get("max_estimated_model_calls")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0);
-    let tool_calls = budget
-        .get("max_estimated_tool_calls")
-        .and_then(Value::as_u64)
-        .and_then(|value| usize::try_from(value).ok())
-        .unwrap_or(0);
-    (model_calls, tool_calls)
-}

@@ -388,12 +388,11 @@ passed through semantic compaction or adapter layers and wants to validate again
 `source_ids`. Existing modules without artifact-producing tools continue to run without citation
 enforcement.
 
-The `examples/code-agent` workflows show four coding-agent patterns: plan agents turn open goals
-into bounded task graphs and acceptance checks; explore agents answer repository questions without
-write capability; review agents search external references, inspect repository context, run one
-allowlisted verification command, and cite exact artifact ids; edit agents use a bounded loop over
-declared tools such as `repo.search`, `file.search`, `file.ops`, `test.run`, browser audit tools,
-and `git.diff` to make constrained changes and verify them.
+The `examples/code-agent` workflows show three coding-agent patterns: explore agents answer
+repository questions without write capability; review agents search external references, inspect
+repository context, run one allowlisted verification command, and cite exact artifact ids; edit
+agents use a bounded loop over declared tools such as `repo.search`, `file.search`, `file.ops`,
+`test.run`, browser audit tools, and `git.diff` to make constrained changes and verify them.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 

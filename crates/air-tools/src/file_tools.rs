@@ -139,7 +139,6 @@ pub(super) fn call_file_read_tool(
                 .and_then(|name| name.to_str())
                 .unwrap_or_else(|| path.to_str().unwrap_or("file")),
             "uri": path.display().to_string(),
-            "content": content.clone(),
             "metadata": {
                 "provider": "file_read",
                 "path": path.display().to_string(),

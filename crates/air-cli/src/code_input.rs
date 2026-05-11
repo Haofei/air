@@ -10,8 +10,6 @@ use std::path::{Path, PathBuf};
 pub(crate) enum CodeRecipe {
     /// Select a recipe from typed flags, preferring read-only exploration when ambiguous.
     Auto,
-    /// Project-level planning with a task graph, evidence, and acceptance criteria.
-    Plan,
     /// Read-only repository exploration and planning.
     Explore,
     /// Grounded code review with repository and external evidence.
@@ -71,12 +69,6 @@ pub(crate) fn build_input_with_pack(
 
     match recipe {
         CodeRecipe::Auto => unreachable!("auto recipe is resolved before building input"),
-        CodeRecipe::Plan => {
-            let mut input = Map::new();
-            input.insert("task".to_string(), Value::String(task.clone()));
-            input.insert("query".to_string(), Value::String(query.unwrap_or(task)));
-            Ok(input)
-        }
         CodeRecipe::Explore => {
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
@@ -112,8 +104,10 @@ pub(crate) fn build_input_with_pack(
             let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
             let target_search_pattern = code_search_pattern(&query);
-            let target_symbol_query = code_symbol_query(&query);
             let write_paths = edit_write_paths(target.as_ref(), &write);
+            let target_symbol_query = code_symbol_query(&query);
+            let acceptance_assertions =
+                edit_acceptance_assertions(target.as_ref(), &write_paths, &target_symbol_query);
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
             input.insert("query".to_string(), Value::String(query));
@@ -131,6 +125,7 @@ pub(crate) fn build_input_with_pack(
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("write_paths".to_string(), path_array(write_paths));
+            input.insert("acceptance_assertions".to_string(), acceptance_assertions);
             input.insert("test_command".to_string(), Value::String(test));
             input.insert("force_patch".to_string(), Value::Bool(force_patch));
             Ok(input)
@@ -151,6 +146,34 @@ fn edit_write_paths(target: Option<&PathBuf>, write: &[PathBuf]) -> Vec<PathBuf>
         }
     }
     paths
+}
+
+fn edit_acceptance_assertions(
+    target: Option<&PathBuf>,
+    write_paths: &[PathBuf],
+    target_symbol_query: &str,
+) -> Value {
+    let Some(target) = target else {
+        return Value::Array(Vec::new());
+    };
+    if target_symbol_query.trim().is_empty() {
+        return Value::Array(Vec::new());
+    }
+    let Some(destination) = write_paths.iter().find(|path| *path != target) else {
+        return Value::Array(Vec::new());
+    };
+    Value::Array(vec![
+        serde_json::json!({
+            "kind": "symbol_absent",
+            "path": path_ref_to_input_string(target),
+            "name": target_symbol_query,
+        }),
+        serde_json::json!({
+            "kind": "symbol_present",
+            "path": path_ref_to_input_string(destination),
+            "name": target_symbol_query,
+        }),
+    ])
 }
 
 fn required_path(value: Option<PathBuf>, flag: &str, recipe: CodeRecipe) -> Result<PathBuf> {
@@ -174,7 +197,6 @@ pub(crate) fn default_profile(pack: &CodeAgentPackContext, recipe: CodeRecipe) -
 pub(crate) fn recipe_name(recipe: CodeRecipe) -> &'static str {
     match recipe {
         CodeRecipe::Auto => "auto",
-        CodeRecipe::Plan => "plan",
         CodeRecipe::Explore => "explore",
         CodeRecipe::Review => "review",
         CodeRecipe::Edit => "edit",
@@ -252,7 +274,6 @@ fn resolve_recipe_name(
 fn recipe_from_name(recipe: &str) -> Option<CodeRecipe> {
     match recipe {
         "auto" => Some(CodeRecipe::Auto),
-        "plan" => Some(CodeRecipe::Plan),
         "explore" => Some(CodeRecipe::Explore),
         "review" => Some(CodeRecipe::Review),
         "edit" => Some(CodeRecipe::Edit),
@@ -406,4 +427,44 @@ fn is_low_signal_search_token(token: &str) -> bool {
             | "plan"
             | "add"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn edit_input_derives_split_acceptance_assertions() {
+        let input = build_input(CodeInputOptions {
+            task: "split context tool".to_string(),
+            recipe: CodeRecipe::Edit,
+            target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
+            write: vec![PathBuf::from("crates/air-tools/src/context_tools.rs")],
+            test: Some("cargo_air_tools_tests".to_string()),
+            query: Some("call_context_measure_tool".to_string()),
+            related: Vec::new(),
+            search_query: None,
+            repo_query: None,
+            required_terms: Vec::new(),
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input.get("acceptance_assertions").unwrap(),
+            &json!([
+                {
+                    "kind": "symbol_absent",
+                    "path": "crates/air-tools/src/lib.rs",
+                    "name": "call_context_measure_tool"
+                },
+                {
+                    "kind": "symbol_present",
+                    "path": "crates/air-tools/src/context_tools.rs",
+                    "name": "call_context_measure_tool"
+                }
+            ])
+        );
+    }
 }

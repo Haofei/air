@@ -19,12 +19,13 @@ comparison point:
 
 The public recipes are:
 
-- `plan`: turn an open coding goal into bounded tasks, files, dependencies, and acceptance checks.
 - `explore`: read-only repository exploration.
 - `review`: grounded review over repository, diff, test, and optional search evidence.
 - `edit`: the only workspace-writing primitive. The model chooses one declared tool per turn; AIR executes it, appends the observation, enforces capability/budget policy, and records the trace.
 
 `edit` covers bug fixes, behavior-preserving changes, small feature edits, and bounded file creation. Those are task intents, not separate agent primitives. A target file is useful but optional for explicit edit runs; when omitted, the loop must discover and read the file before any write.
+
+Top-level files are the public entrypoints. `fixtures/` contains deterministic model configs, alternate tool configs, and internal verification variants used by tests and dogfood scripts.
 
 ## Explore
 
@@ -46,7 +47,7 @@ It runs as:
 init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 ```
 
-The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `file.read`, `file.search`, `file.ops`, `file.patch`, `test.run`, and `git.diff`.
+The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `file.read`, `file.search`, `file.ops`, `file.patch`, `code.assert`, `test.run`, and `git.diff`.
 
 `tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind `test.run` aliases for workspace tests, clippy, the code-agent gate, backend conformance, and bounded package/test-filter runs.
 
@@ -61,6 +62,7 @@ When `test.run` output is truncated (`output.truncated == true`), the full log i
 When `file.ops` `edit` validation fails (e.g. `old_string` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `old_string` does not match but one of its lines is present, the diagnostic includes an `old_string_anchor` line for a precise retry location.
 
 The edit loop runs `candidate.validate` automatically during preflight when `target_path` and `test_command` are known, catching misconfigured paths or disallowed commands before any edit attempt.
+Use `code.assert` for structural postconditions that tests may not prove directly, such as `symbol_absent` in the original file and `symbol_present` in a new split module.
 
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 
@@ -87,6 +89,17 @@ Run the deterministic fixture:
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
 cargo run -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.yaml --log
 ```
+
+## Review
+
+Run the default review profile:
+
+```bash
+cargo run -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
+cargo run -p air-cli -- run-plan --profile examples/code-agent/review.air-profile.yaml --log
+```
+
+The default review example stays simple: one bounded review module, deterministic local search tools, and a single profile. Browser-backed search and composed review variants remain under `fixtures/` for internal verification.
 
 Run through the user-facing wrapper:
 

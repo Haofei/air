@@ -7,10 +7,9 @@ cd "$ROOT"
 mkdir -p target/generated
 
 echo "[code-agent] validate current primitive recipes"
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/project-plan.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/dynamic-explore.air-profile.yaml
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/fixtures/dynamic-explore.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.self.air-profile.yaml
 
@@ -37,7 +36,7 @@ max_matches = re.search(r"max_matches:\s*\n\s+literal:\s*(\d+)", preflight.group
 assert context_lines and int(context_lines.group(1)) <= 2, context_lines.group(0) if context_lines else None
 assert max_matches and int(max_matches.group(1)) <= 8, max_matches.group(0) if max_matches else None
 
-choose = re.search(r"- id:\s*choose(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+choose = re.search(r"- id:\s*choose\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
 assert choose, "missing choose rule"
 observations_window = re.search(
     r"observations:\s*\n\s+take_last_within_bytes:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)\s*\n\s+max_bytes:\s*(\d+)",
@@ -48,6 +47,20 @@ assert int(observations_window.group(1)) == 30, observations_window.group(0)
 assert int(observations_window.group(2)) == 200000, (
     observations_window.group(0) if observations_window else None
 )
+
+targeted_force = re.search(r"- id:\s*force-write-after-targeted-explore-budget\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert targeted_force, "missing targeted force-write rule"
+targeted_window = re.search(
+    r"observations:\s*\n\s+take_last_within_bytes:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)\s*\n\s+max_bytes:\s*(\d+)",
+    targeted_force.group("body"),
+)
+assert targeted_window, "targeted force-write rule must use byte-bounded observation history"
+assert int(targeted_window.group(1)) <= 4, targeted_window.group(0)
+assert int(targeted_window.group(2)) <= 24000, targeted_window.group(0)
+
+force_empty = re.search(r"- id:\s*force-empty-action\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert force_empty, "missing force-empty-action rule"
+assert re.search(r"phase:\s*summarize", force_empty.group("body")), force_empty.group("body")
 
 config = json.loads(Path("examples/bigmodel-openai-compatible.json").read_text())
 for model in ("code_edit_decider", "code_edit_summarizer"):
@@ -65,9 +78,9 @@ for tool in ("file.ops", "file.patch"):
 
 for path in (
     "examples/code-agent/tools.json",
-    "examples/code-agent/tools.core.json",
+    "examples/code-agent/fixtures/tools.core.json",
     "examples/code-agent/tools.self.json",
-    "examples/code-agent/tools.playwright.json",
+    "examples/code-agent/fixtures/tools.playwright.json",
 ):
     tools = json.loads(Path(path).read_text())["tools"]
     file_search = tools["file.search"]
@@ -227,12 +240,14 @@ tool_schemas = decider_start["input"]["tool_schemas"]
 assert "repo.files" in tool_schemas, tool_schemas
 assert "repo.symbols" in tool_schemas, tool_schemas
 assert "file.ops" in tool_schemas, tool_schemas
+assert "code.assert" in tool_schemas, tool_schemas
 assert "candidate.validate" in tool_schemas, tool_schemas
 assert "test.run" in tool_schemas, tool_schemas
 assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
 assert "names" in tool_schemas["repo.symbols"]["optional"], tool_schemas["repo.symbols"]
 assert "max_changed_lines" in tool_schemas["file.ops"]["optional"], tool_schemas["file.ops"]
 assert "max_changed_lines" in tool_schemas["file.patch"]["optional"], tool_schemas["file.patch"]
+assert "assertions" in tool_schemas["code.assert"]["required"], tool_schemas["code.assert"]
 assert "candidate" in tool_schemas["candidate.validate"]["required"], tool_schemas["candidate.validate"]
 assert "package" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
 assert "test_filter" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
@@ -241,9 +256,31 @@ PY
 echo "[code-agent] edit loop searches truncated manual test logs"
 "${PYTHON:-python3}" - <<'PY'
 import json
+from pathlib import Path
 
-with open("examples/code-agent/tools.core.json", encoding="utf-8") as handle:
+source_path = Path("examples/code-agent/fixtures/tools.core.json")
+with open(source_path, encoding="utf-8") as handle:
     config = json.load(handle)
+
+source_dir = source_path.parent.resolve()
+
+def absolutize_tool_paths(value):
+    if isinstance(value, dict):
+        return {
+            key: (
+                str((source_dir / item).resolve())
+                if key in {"base_dir", "repo_dir", "cwd", "script_path", "cache_dir"}
+                and isinstance(item, str)
+                and not Path(item).is_absolute()
+                else absolutize_tool_paths(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [absolutize_tool_paths(item) for item in value]
+    return value
+
+config = absolutize_tool_paths(config)
 config["tools"]["test.run"]["max_bytes"] = 8
 config["tools"]["test.run"]["truncation_direction"] = "tail"
 with open("target/generated/tools.truncated-manual-test.json", "w", encoding="utf-8") as handle:
@@ -259,7 +296,7 @@ trap restore_edit_truncated_manual_test_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.json \
   --tool-config target/generated/tools.truncated-manual-test.json \
   --trace-out target/generated/code_agent_edit_truncated_manual_test.trace.jsonl \
   > target/generated/code_agent_edit_truncated_manual_test.output.json
@@ -308,9 +345,9 @@ restore_edit_targetless_fixture() {
 trap restore_edit_targetless_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/edit.targetless.input.json \
-  --model-config examples/code-agent/model-fixtures.targetless.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --input examples/code-agent/fixtures/edit.targetless.input.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.targetless.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_targetless.trace.jsonl \
   > target/generated/code_agent_edit_targetless.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_targetless.post_test.log
@@ -378,8 +415,8 @@ trap restore_edit_path_error_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.path-error.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.path-error.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_path_error.trace.jsonl \
   > target/generated/code_agent_edit_path_error.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_path_error.post_test.log
@@ -439,8 +476,8 @@ trap restore_edit_batch_error_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.batch-error.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.batch-error.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_batch_error.trace.jsonl \
   > target/generated/code_agent_edit_batch_error.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_batch_error.post_test.log
@@ -492,8 +529,8 @@ trap restore_edit_validation_failed_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.validation-failed.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.validation-failed.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_validation_failed.trace.jsonl \
   > target/generated/code_agent_edit_validation_failed.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_validation_failed.post_test.log
@@ -578,8 +615,8 @@ trap restore_edit_candidate_validate_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.candidate-validate.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.candidate-validate.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_candidate_validate.trace.jsonl \
   > target/generated/code_agent_edit_candidate_validate.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_candidate_validate.post_test.log
@@ -643,8 +680,8 @@ trap restore_edit_auto_verify_failed_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.auto-verify-failed.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.auto-verify-failed.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_auto_verify_failed.trace.jsonl \
   > target/generated/code_agent_edit_auto_verify_failed.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_auto_verify_failed.post_test.log
@@ -708,9 +745,31 @@ PY
 echo "[code-agent] edit loop searches truncated auto verify logs"
 "${PYTHON:-python3}" - <<'PY'
 import json
+from pathlib import Path
 
-with open("examples/code-agent/tools.core.json", encoding="utf-8") as handle:
+source_path = Path("examples/code-agent/fixtures/tools.core.json")
+with open(source_path, encoding="utf-8") as handle:
     config = json.load(handle)
+
+source_dir = source_path.parent.resolve()
+
+def absolutize_tool_paths(value):
+    if isinstance(value, dict):
+        return {
+            key: (
+                str((source_dir / item).resolve())
+                if key in {"base_dir", "repo_dir", "cwd", "script_path", "cache_dir"}
+                and isinstance(item, str)
+                and not Path(item).is_absolute()
+                else absolutize_tool_paths(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [absolutize_tool_paths(item) for item in value]
+    return value
+
+config = absolutize_tool_paths(config)
 config["tools"]["test.run"]["max_bytes"] = 8
 config["tools"]["test.run"]["truncation_direction"] = "tail"
 with open("target/generated/tools.truncated-auto-verify.json", "w", encoding="utf-8") as handle:
@@ -726,7 +785,7 @@ trap restore_edit_truncated_auto_verify_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.auto-verify-failed.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.auto-verify-failed.json \
   --tool-config target/generated/tools.truncated-auto-verify.json \
   --trace-out target/generated/code_agent_edit_truncated_auto_verify.trace.jsonl \
   > target/generated/code_agent_edit_truncated_auto_verify.output.json
@@ -783,8 +842,8 @@ trap restore_edit_write_path_error_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.write-path-error.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.write-path-error.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_write_path_repair.trace.jsonl \
   > target/generated/code_agent_edit_write_path_repair.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_write_path_repair.post_test.log
@@ -840,8 +899,8 @@ trap restore_edit_premature_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
   --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.premature-complete.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.premature-complete.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_premature.trace.jsonl \
   > target/generated/code_agent_edit_premature.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_premature.post_test.log
@@ -936,9 +995,9 @@ restore_edit_patch_fixture() {
 trap restore_edit_patch_fixture EXIT
 cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
   --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/edit.patch.input.json \
-  --model-config examples/code-agent/model-fixtures.patch.json \
-  --tool-config examples/code-agent/tools.core.json \
+  --input examples/code-agent/fixtures/edit.patch.input.json \
+  --model-config examples/code-agent/fixtures/model-fixtures.patch.json \
+  --tool-config examples/code-agent/fixtures/tools.core.json \
   --trace-out target/generated/code_agent_edit_patch.trace.jsonl \
   > target/generated/code_agent_edit_patch.output.json
 node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_patch.post_test.log

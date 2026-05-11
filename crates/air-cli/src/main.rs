@@ -5,9 +5,6 @@ mod code_context;
 mod code_input;
 mod code_loop;
 mod code_pack;
-mod code_project_acceptance;
-mod code_project_context;
-mod code_project_schedule;
 mod code_session;
 mod diagnostics;
 mod explain;
@@ -152,11 +149,7 @@ enum Command {
         #[arg(long = "loop")]
         loop_enabled: bool,
 
-        /// After a project plan, execute up to --max-iterations planned tasks through their declared AIR recipes.
-        #[arg(long, conflicts_with = "loop_enabled")]
-        execute_plan: bool,
-
-        /// Maximum iterations for --loop, or maximum planned tasks for --execute-plan.
+        /// Maximum iterations for --loop.
         #[arg(long, default_value_t = 3)]
         max_iterations: usize,
 
@@ -561,7 +554,6 @@ fn main() -> Result<()> {
             log,
             explain,
             loop_enabled,
-            execute_plan,
             max_iterations,
             max_estimated_model_calls,
             max_estimated_tool_calls,
@@ -592,7 +584,6 @@ fn main() -> Result<()> {
             log,
             explain,
             loop_enabled,
-            execute_plan,
             max_iterations,
             max_estimated_model_calls,
             max_estimated_tool_calls,
@@ -1364,11 +1355,6 @@ mod tests {
 
         for (task, expected_id, expected_source) in [
             (
-                "Plan a project-level task graph with milestones and acceptance criteria.",
-                "code.project_plan_recipe@0.1.0",
-                "recipe",
-            ),
-            (
                 "Review the command_run implementation for safety, provenance, and diagnostics.",
                 "code.review_with_std_context@0.1.0",
                 "recipe",
@@ -1864,14 +1850,15 @@ mod tests {
     }
 
     #[test]
-    fn code_command_accepts_project_execution_flags() {
+    fn code_command_accepts_budget_flags() {
         let cli = Cli::try_parse_from([
             "air",
             "code",
-            "plan and execute the next project milestone",
+            "review command_run budget usage",
             "--recipe",
-            "plan",
-            "--execute-plan",
+            "review",
+            "--target",
+            "crates/air-tools/src/lib.rs",
             "--max-iterations",
             "2",
             "--max-estimated-model-calls",
@@ -1883,7 +1870,6 @@ mod tests {
 
         let Command::Code {
             recipe,
-            execute_plan,
             max_iterations,
             max_estimated_model_calls,
             max_estimated_tool_calls,
@@ -1893,8 +1879,7 @@ mod tests {
             panic!("expected code command");
         };
 
-        assert_eq!(recipe, CodeRecipe::Plan);
-        assert!(execute_plan);
+        assert_eq!(recipe, CodeRecipe::Review);
         assert_eq!(max_iterations, 2);
         assert_eq!(max_estimated_model_calls, Some(8));
         assert_eq!(max_estimated_tool_calls, Some(24));

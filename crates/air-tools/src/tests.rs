@@ -133,6 +133,184 @@ fn todo_read_returns_current_todo_list_after_write() {
 }
 
 #[test]
+fn todo_write_accepts_items_alias() {
+    let dir = temp_dir("air-tools-todo-write-items-alias");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "todo.write": {
+                  "kind": "todo_write",
+                  "capability": "task.progress",
+                  "max_items": 4,
+                  "max_content_chars": 80
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "todo.write",
+            &json!({
+                "items": [
+                    {
+                        "id": "inspect",
+                        "content": "Inspect repository context",
+                        "status": "completed",
+                        "priority": "high"
+                    },
+                    {
+                        "id": "split",
+                        "content": "Split the repo symbols helpers",
+                        "status": "in_progress",
+                        "priority": "high"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["total"], json!(2));
+    assert_eq!(output["in_progress_count"], json!(1));
+    assert_eq!(output["todos"][1]["id"], json!("split"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn todo_write_stringifies_numeric_ids() {
+    let dir = temp_dir("air-tools-todo-write-numeric-id");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "todo.write": {
+                  "kind": "todo_write",
+                  "capability": "task.progress",
+                  "max_items": 4,
+                  "max_content_chars": 80
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "todo.write",
+            &json!({
+                "todos": [
+                    {
+                        "id": 1,
+                        "content": "Inspect repository context",
+                        "status": "completed",
+                        "priority": "high"
+                    },
+                    {
+                        "id": 2,
+                        "content": "Split the repo symbols helpers",
+                        "status": "in_progress",
+                        "priority": "high"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["total"], json!(2));
+    assert_eq!(output["todos"][0]["id"], json!("1"));
+    assert_eq!(output["todos"][1]["id"], json!("2"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn code_assert_validates_symbols_and_file_patterns() {
+    let dir = temp_dir("air-tools-code-assert");
+    fs::write(
+        dir.join("source.rs"),
+        "pub fn kept_symbol() {}\npub fn moved_symbol() {}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("dest.rs"), "pub fn moved_symbol() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "code.assert": {
+                  "kind": "code_assert",
+                  "capability": "code.read",
+                  "base_dir": ".",
+                  "max_assertions": 8
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "code.assert",
+            &json!({
+                "assertions": [
+                    {"kind": "symbol_present", "path": "dest.rs", "name": "moved_symbol"},
+                    {"kind": "symbol_absent", "path": "source.rs", "name": "missing_symbol"},
+                    {"kind": "file_contains", "path": "source.rs", "pattern": "kept_symbol"},
+                    {"kind": "file_not_contains", "path": "dest.rs", "pattern": "kept_symbol"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["passed"], json!(true));
+    assert_eq!(output["failed_count"], json!(0));
+    assert_eq!(output["assertions"][0]["matches"][0]["line"], json!(1));
+    assert_eq!(output["artifacts"][0]["kind"], json!("code_assert"));
+    assert_eq!(tools.tool_capability("code.assert"), Some("code.read"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn code_assert_reports_failed_postconditions_without_provider_error() {
+    let dir = temp_dir("air-tools-code-assert-failed");
+    fs::write(dir.join("source.rs"), "pub fn still_here() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "code.assert": {
+                  "kind": "code_assert",
+                  "capability": "code.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "code.assert",
+            &json!({
+                "assertions": [
+                    {"kind": "symbol_absent", "path": "source.rs", "name": "still_here"},
+                    {"kind": "command_passes", "command": "cargo_test", "result": {"command": "cargo_test", "success": true}}
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["passed"], json!(false));
+    assert_eq!(output["failed_count"], json!(1));
+    assert_eq!(
+        output["assertions"][0]["message"],
+        json!("symbol still_here is still present in source.rs")
+    );
+    assert_eq!(output["assertions"][1]["passed"], json!(true));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn context_measure_triggers_when_payload_crosses_threshold() {
     let dir = temp_dir("air-tools-context-measure");
     let config_path = write_config(

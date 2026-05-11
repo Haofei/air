@@ -6,14 +6,6 @@ imports:
   - ../../modules/std/module-store.air-store.yaml
 
 modules:
-  code.project_plan@0.1.0:
-    path: examples/code-agent/code-project-plan.air.yaml
-    kind: composite
-    visibility: public
-    description: "Read-only project planning subagent that creates a grounded task graph, file plan, and acceptance checks before implementation."
-    tags: [coding, project_plan, task_graph, acceptance, provenance]
-    covers: [project_planning, task_graph, acceptance_criteria, source_grounding, coding_milestone_planning]
-    priority: 130
   code.explore@0.1.0:
     path: examples/code-agent/code-explore.air.yaml
     kind: composite
@@ -23,7 +15,7 @@ modules:
     covers: [code_exploration, repository_question_answering, documentation_lookup, source_grounding]
     priority: 110
   code.dynamic_explore@0.1.0:
-    path: examples/code-agent/code-dynamic-explore.air.yaml
+    path: examples/code-agent/fixtures/code-dynamic-explore.air.yaml
     kind: composite
     visibility: public
     description: "Read-only plan-act-observe code exploration where the model selects among declared tools through governed AIR tool_dispatch."
@@ -39,7 +31,7 @@ modules:
     covers: [code_review, documentation_lookup, diff_review, grounded_recommendations]
     priority: 100
   code.review_gather@0.1.0:
-    path: examples/code-agent/code-review-gather.air.yaml
+    path: examples/code-agent/fixtures/code-review-gather.air.yaml
     kind: primitive
     visibility: internal
     description: "Gather bounded code-review evidence before shared context compaction."
@@ -47,7 +39,7 @@ modules:
     covers: [code_review_evidence, documentation_lookup, diff_review, test_evidence]
     priority: 70
   code.review_analyze@0.1.0:
-    path: examples/code-agent/code-review-analyze.air.yaml
+    path: examples/code-agent/fixtures/code-review-analyze.air.yaml
     kind: primitive
     visibility: internal
     description: "Analyze a standard AIR context object into grounded code-review findings."
@@ -64,33 +56,6 @@ modules:
     priority: 80
 
 recipes:
-  - id: code.project_plan_recipe@0.1.0
-    visibility: public
-    description: "Project planning workflow: gather repository and external evidence, then return a structured task graph with files and acceptance checks."
-    tags: [coding, project_plan, task_graph, acceptance, provenance]
-    covers: [project_planning, task_graph, acceptance_criteria, source_grounding, coding_milestone_planning]
-    priority: 170
-    plan:
-      plan:
-        name: code-project-plan-recipe
-        version: 0.1.0
-      requires:
-        capabilities: [task.progress, network.search, code.read]
-      nodes:
-        - id: plan
-          module: code.project_plan@0.1.0
-      entry: plan
-      connect:
-        - from: $input.task
-          to: plan.task
-        - from: $input.query
-          to: plan.query
-      outputs:
-        project_plan: plan.project_plan
-      decisions:
-        - id: use-project-plan-recipe
-          rationale: "Use the high-level project planning component so the code agent starts with a grounded task graph instead of jumping directly into file edits."
-          selected: [code.project_plan_recipe@0.1.0]
   - id: code.edit_loop@0.1.0
     visibility: public
     description: "Core coding-agent edit loop for known target/test tasks: repeatedly choose bounded tools, apply constrained file operations, and verify."

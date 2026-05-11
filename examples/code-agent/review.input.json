@@ -5,7 +5,7 @@
   "required_terms": ["playwright"],
   "target_file": "scripts/playwright_search.cjs",
   "related_files": [
-    "examples/code-agent/tools.playwright.json",
+    "examples/code-agent/fixtures/tools.playwright.json",
     "scripts/playwright_search_fixture_test.cjs"
   ]
 }

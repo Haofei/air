@@ -1,5 +1,5 @@
 plan: code-dynamic-explore.air-plan.yaml
-store: module-store.air-store.yaml
+store: ../module-store.air-store.yaml
 input_file: dynamic-explore.input.json
 model_config: model-fixtures.dynamic.json
 tool_config: tools.core.json

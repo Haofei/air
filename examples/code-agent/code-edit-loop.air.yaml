@@ -15,6 +15,9 @@ inputs:
   write_paths:
     type: array
     items: string
+  acceptance_assertions:
+    type: array
+    items: object
   test_command: string
   force_patch: boolean
 
@@ -48,8 +51,11 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, preflight, preflight_candidate, choose, act, force_act, post_act, post_verify, summarize, done, failed]
+    enum: [init, preflight, preflight_candidate, choose, act, force_act, post_act, post_verify, post_accept, summarize, done, failed]
   observations:
+    type: array
+    items: object
+  edit_evidence:
     type: array
     items: object
   verification_status:
@@ -97,6 +103,10 @@ state:
     items:
       type: object
   final_diff_result:
+    type: array
+    items:
+      type: object
+  acceptance_assert_result:
     type: array
     items:
       type: object
@@ -171,6 +181,9 @@ tools:
   - name: diagnostic.context
     capability: code.read
     timeout_ms: 10000
+  - name: code.assert
+    capability: code.read
+    timeout_ms: 10000
   - name: candidate.validate
     capability: code.read
     timeout_ms: 10000
@@ -198,6 +211,7 @@ workflow:
         - kind: set
           values:
             observations: []
+            edit_evidence: []
             verification_status: unknown
             phase: preflight
 
@@ -217,7 +231,7 @@ workflow:
                       query:
                         ref: target_symbol_query
                       max_symbols:
-                        literal: 8
+                        literal: 16
           output: initial_target_context
           max_calls: 1
           timeout_seconds: 120
@@ -441,8 +455,8 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 30
-                max_bytes: 200000
+                max_items: 3
+                max_bytes: 40000
               final_decision:
                 literal:
                   complete: false
@@ -493,8 +507,15 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 30
-                max_bytes: 200000
+                max_items: 3
+                max_bytes: 24000
+              edit_evidence:
+                take_last_within_bytes:
+                  ref: edit_evidence
+                max_items: 8
+                max_bytes: 60000
+              initial_target_context:
+                ref: initial_target_context
               verification_status:
                 ref: verification_status
               runtime:
@@ -523,7 +544,7 @@ workflow:
               tool_policy:
                 literal:
                   mode: "Exploration budget is exhausted. Read/search tools are not allowed in this decision."
-                  write: "If the edit is possible from the observed line ranges, call exactly one write tool: file.ops or file.patch. Do not ask for more context."
+                  write: "Use edit_evidence and initial_target_context as the stable source context. If the edit is possible from those line ranges, call exactly one write tool: file.ops or file.patch. Do not ask for more context."
                   finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
           output: decision
           timeout_seconds: 180
@@ -533,8 +554,211 @@ workflow:
           values:
             phase: force_act
 
+    - id: force-write-after-targeted-explore-budget
+      when: phase == "choose" && target_symbol_query != "" && _air.model_calls >= 5 && verification_status != "passed"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: targeted_exploration_budget_reached
+              rationale:
+                literal: AIR has reached the bounded exploration budget for this targeted symbol split. Further helper discovery is disabled for the next decision; write the split using the gathered ranges or return complete only if no edit is needed.
+              requested:
+                array: []
+              result:
+                object:
+                  runtime:
+                    ref: _air
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              write_paths:
+                ref: write_paths
+              test_command:
+                ref: test_command
+              force_patch:
+                ref: force_patch
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_items: 4
+                max_bytes: 24000
+              edit_evidence:
+                take_last_within_bytes:
+                  ref: edit_evidence
+                max_items: 8
+                max_bytes: 60000
+              initial_target_context:
+                ref: initial_target_context
+              verification_status:
+                ref: verification_status
+              runtime:
+                ref: _air
+              allowed_tools:
+                array:
+                  - literal: file.ops
+                  - literal: file.patch
+              tool_schemas:
+                literal:
+                  file.ops:
+                    required:
+                      operations: "array; each item must be one of: {kind:'edit', path, old_string, new_string}; {kind:'replace_lines', path, start_line, end_line, new_string}; {kind:'write', path, content}"
+                    optional:
+                      path: "default repo-relative path for all operations"
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected from write_paths; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+                      match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
+                  file.patch:
+                    required: {patch: "unified diff"}
+                    optional:
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected from write_paths; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+              tool_policy:
+                literal:
+                  mode: "Targeted split exploration is exhausted. Read/search tools are not allowed in this decision."
+                  write: "Use edit_evidence and initial_target_context as the stable source context. Write the split now with exactly one write tool: file.ops or file.patch."
+                  finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: force_act
+
+    - id: choose-targeted-symbol
+      when: phase == "choose" && target_symbol_query != ""
+      actions:
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              target_search_pattern:
+                ref: target_search_pattern
+              target_symbol_query:
+                ref: target_symbol_query
+              related_files:
+                ref: related_files
+              write_paths:
+                ref: write_paths
+              test_command:
+                ref: test_command
+              force_patch:
+                ref: force_patch
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_items: 12
+                max_bytes: 50000
+              edit_evidence:
+                take_last_within_bytes:
+                  ref: edit_evidence
+                max_items: 8
+                max_bytes: 60000
+              verification_status:
+                ref: verification_status
+              runtime:
+                ref: _air
+              allowed_tools:
+                array:
+                  - literal: repo.symbols
+                  - literal: file.read
+                  - literal: file.read_many
+                  - literal: file.ops
+                  - literal: file.patch
+                  - literal: diagnostic.context
+                  - literal: code.assert
+                  - literal: candidate.validate
+              tool_schemas:
+                literal:
+                  repo.symbols:
+                    required: {}
+                    optional:
+                      query: "symbol/name filter"
+                      names: "array of exact symbol names; use this to fetch several function ranges in one call"
+                      path: "repo-relative scope"
+                      max_symbols: "bounded result limit"
+                  file.read:
+                    required: {path: "repo-relative file path"}
+                    optional:
+                      start_line: "1-based start line"
+                      end_line: "1-based end line"
+                      lines: "single line or start-end range"
+                      line_numbers: "boolean"
+                      max_bytes: "bounded byte limit"
+                  file.read_many:
+                    required: {files: "array of paths or objects with path"}
+                    optional:
+                      max_bytes_per_file: "bounded byte limit"
+                      line_numbers: "boolean"
+                  file.ops:
+                    required:
+                      operations: "array; each item must be one of: {kind:'edit', path, old_string, new_string}; {kind:'replace_lines', path, start_line, end_line, new_string}; {kind:'write', path, content}"
+                    optional:
+                      path: "default repo-relative path for all operations"
+                      kind: "default operation kind"
+                      edits: "operations alias using the same operation shapes"
+                      ops: "operations alias using the same operation shapes"
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected from write_paths; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+                      match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
+                  file.patch:
+                    required: {patch: "unified diff"}
+                    optional:
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected from write_paths; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+                  diagnostic.context:
+                    required: {}
+                    optional:
+                      diagnostics: "array of diagnostic objects"
+                      path: "repo-relative scope"
+                  code.assert:
+                    required:
+                      assertions: "array of postconditions; kinds: symbol_present, symbol_absent, file_contains, file_not_contains, command_passes"
+                    optional:
+                      checks: "alias for assertions"
+                  candidate.validate:
+                    required:
+                      candidate: "{target_path, test_command, related_files?}; checks paths and allowlisted validation commands before committing to an edit route"
+                    optional: {}
+              tool_policy:
+                literal:
+                  mode: "This is a targeted symbol edit or split. Todo tools and broad reference scans are disabled; work from the exact symbol ranges already observed."
+                  paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
+                  read_first: "Read only the exact target range and, at most, one additional helper range that will move with the target before writing."
+                  small_steps: "Choose one to four tool calls per turn. Do not request whole large files. Do not expand into repo.references, repo.files, repo.search, or helper archaeology. After exact target ranges are known, either write next or read the single remaining helper range required for that write."
+                  edits: "Use file.ops with kind=edit or replace_lines for localized moves and module wiring changes. Use file.patch only when force_patch is true or a patch is strictly clearer. If a turn includes file.ops or file.patch, keep that turn to one write-focused call."
+                  verify: "Do not run test.run before the first write in this targeted split route. For code splits, include code.assert in the same batch as the write when you can express the postcondition, for example symbol_absent in the source file and symbol_present in the destination file. AIR will run test.run after the write path completes."
+                  finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: act
+
     - id: choose
-      when: phase == "choose"
+      when: phase == "choose" && target_symbol_query == ""
       actions:
         - kind: model_call
           model: code_edit_decider
@@ -582,6 +806,7 @@ workflow:
                   - literal: file.ops
                   - literal: file.patch
                   - literal: diagnostic.context
+                  - literal: code.assert
                   - literal: candidate.validate
                   - literal: git.status
                   - literal: git.diff
@@ -589,7 +814,7 @@ workflow:
               tool_schemas:
                 literal:
                   todo.write:
-                    required: {items: "array of short todo items"}
+                    required: {todos: "array of todo objects shaped {id, content, status, priority}"}
                     optional: {merge: "boolean"}
                   todo.read:
                     required: {}
@@ -672,6 +897,11 @@ workflow:
                     optional:
                       diagnostics: "array of diagnostic objects"
                       path: "repo-relative scope"
+                  code.assert:
+                    required:
+                      assertions: "array of postconditions; kinds: symbol_present, symbol_absent, file_contains, file_not_contains, command_passes"
+                    optional:
+                      checks: "alias for assertions"
                   candidate.validate:
                     required:
                       candidate: "{target_path, test_command, related_files?}; checks paths and allowlisted validation commands before committing to an edit route"
@@ -692,14 +922,14 @@ workflow:
                       args: "accepted alias object for parameters, but prefer top-level fields"
               tool_policy:
                 literal:
-                  plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
-                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, and repo.references for call sites before broad edits."
+                  plan: "Use todo.write/read only when the task clearly spans multiple files or repeated verification cycles. Skip todo tools for single-file edits and targeted splits."
+                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, and repo.references only when call sites are the single missing fact before a write."
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
-                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files. For function moves, call repo.symbols once with names:[...] to get start/end lines, then read exact function ranges instead of rediscovering boundaries repeatedly. After the exact target ranges and module wiring are known, the next turn must either write or name the single missing blocking fact."
+                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search calls only when they unblock the same immediate write. Do not request whole large files. For function moves and splits, call repo.symbols once with names:[...] to get start/end lines, then read exact function ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target symbol ranges, the next turn must either write or read at most one additional helper range that will move with the target; do not expand into broad repo.references or helper archaeology."
                   edits: "Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, moved blocks, or ranges over roughly 40 changed lines, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
                   tests: "Use test.run with the supplied allowlisted test_command only. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
-                  verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
+                  verify: "Before complete=true, normally choose code.assert for structural postconditions, plus test.run and git.diff so the final summary can prove the outcome. For code splits, assert symbol_absent in the source file and symbol_present in the destination file."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
           timeout_seconds: 180
@@ -725,10 +955,10 @@ workflow:
               result:
                 object:
                   error:
-                    literal: The force-write decision returned no write tool calls. AIR will ask once more with the preserved observation window instead of reading more files.
+                    literal: The force-write decision returned no write tool calls. AIR stops instead of returning to exploration, because the targeted write budget has already been exhausted.
         - kind: set
           values:
-            phase: choose
+            phase: summarize
 
     - id: force-act
       when: phase == "force_act" && decision.complete == false
@@ -1012,8 +1242,135 @@ workflow:
             verification_status: failed
             phase: choose
 
+    - id: record-auto-verify-passed-with-assertions
+      when: phase == "post_verify" && auto_verify_result[0].output.success == true && acceptance_assertions != []
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify_passed
+              rationale:
+                literal: Automatically ran the allowlisted validation after the workspace edit and it passed.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: test.run
+                      input:
+                        object:
+                          command:
+                            ref: test_command
+              result:
+                ref: auto_verify_result
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: code.assert
+                  input:
+                    object:
+                      assertions:
+                        ref: acceptance_assertions
+          output: acceptance_assert_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: acceptance_assertions_observed
+              rationale:
+                literal: Automatically checked structural postconditions after validation passed so a code split cannot complete solely because tests passed.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: code.assert
+                      input:
+                        object:
+                          assertions:
+                            ref: acceptance_assertions
+              result:
+                ref: acceptance_assert_result
+        - kind: set
+          values:
+            phase: post_accept
+
+    - id: record-acceptance-assertions-failed
+      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == false
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: acceptance_assertions_failed
+              rationale:
+                literal: Structural postconditions failed even though tests passed; fix the code split before completion.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: code.assert
+                      input:
+                        object:
+                          assertions:
+                            ref: acceptance_assertions
+              result:
+                ref: acceptance_assert_result
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: record-acceptance-assertions-passed
+      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == true
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: git.diff
+                  input:
+                    object:
+                      paths:
+                        ref: write_paths
+          output: final_diff_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: final_diff_observed
+              rationale:
+                literal: Automatically captured the workspace diff after validation passed so the summary can cite the audited patch.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: git.diff
+                      input:
+                        object:
+                          paths:
+                            ref: write_paths
+              result:
+                ref: final_diff_result
+        - kind: set
+          values:
+            verification_status: passed
+            phase: summarize
+
     - id: record-auto-verify-passed
-      when: phase == "post_verify" && auto_verify_result[0].output.success == true
+      when: phase == "post_verify" && auto_verify_result[0].output.success == true && acceptance_assertions == []
       actions:
         - kind: append
           target: observations
@@ -1188,6 +1545,44 @@ workflow:
                     ref: observation[0].tool
                   failed_input:
                     ref: observation[0].input
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-file-read-evidence
+      when: phase == "post_act" && observation[0].tool == "file.read" && observation[0].status == "ok"
+      actions:
+        - kind: append
+          target: edit_evidence
+          value:
+            object:
+              action:
+                literal: file_read_evidence
+              rationale:
+                literal: Preserved a successful file.read result as stable edit evidence so later bounded or forced write decisions keep the exact line-numbered source context even when general observations are compacted.
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: record-file-read-many-evidence
+      when: phase == "post_act" && observation[0].tool == "file.read_many" && observation[0].status == "ok"
+      actions:
+        - kind: append
+          target: edit_evidence
+          value:
+            object:
+              action:
+                literal: file_read_many_evidence
+              rationale:
+                literal: Preserved a successful file.read_many result as stable edit evidence so later bounded or forced write decisions keep source context even when general observations are compacted.
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
         - kind: set
           values:
             phase: choose

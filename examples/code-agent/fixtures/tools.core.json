@@ -35,20 +35,20 @@
     "repo.files": {
       "kind": "repo_files",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_files": 100
     },
     "repo.search": {
       "kind": "repo_search",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_matches": 80,
       "max_bytes": 65536
     },
     "repo.context": {
       "kind": "repo_context",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_matches": 80,
       "max_files": 8,
       "context_lines": 8,
@@ -57,14 +57,14 @@
     "repo.symbols": {
       "kind": "repo_symbols",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_symbols": 120,
       "max_bytes": 65536
     },
     "repo.references": {
       "kind": "repo_references",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_matches": 120,
       "max_files": 8,
       "context_lines": 4,
@@ -73,20 +73,20 @@
     "file.read": {
       "kind": "file_read",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "max_bytes": 32768
     },
     "file.read_many": {
       "kind": "file_read_many",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "max_files": 4,
       "max_bytes": 65536
     },
     "file.search": {
       "kind": "file_search",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "max_matches": 40,
       "max_context_lines": 2,
       "max_line_chars": 2000,
@@ -95,7 +95,7 @@
     "file.edit": {
       "kind": "file_edit",
       "capability": "file.write",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "require_read": true,
       "allow_replace_all": false,
       "max_bytes": 65536,
@@ -104,7 +104,7 @@
     "file.ops": {
       "kind": "file_ops",
       "capability": "file.write",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "require_read": true,
       "allow_new_files": true,
       "allow_overwrite": false,
@@ -116,7 +116,7 @@
     "file.patch": {
       "kind": "file_patch",
       "capability": "file.write",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "require_read": true,
       "allow_new_files": false,
       "allow_delete_files": false,
@@ -127,15 +127,22 @@
     "diagnostic.context": {
       "kind": "diagnostic_context",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_diagnostics": 10,
       "context_lines": 4,
+      "max_bytes": 65536
+    },
+    "code.assert": {
+      "kind": "code_assert",
+      "capability": "code.read",
+      "base_dir": "../../..",
+      "max_assertions": 12,
       "max_bytes": 65536
     },
     "candidate.validate": {
       "kind": "candidate_validate",
       "capability": "code.read",
-      "base_dir": "../..",
+      "base_dir": "../../..",
       "allowed_test_commands": [
         "edit_fixture_test"
       ]
@@ -143,19 +150,19 @@
     "git.status": {
       "kind": "git_status",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_files": 200
     },
     "git.diff": {
       "kind": "git_diff",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": "../../..",
       "max_bytes": 65536
     },
     "test.run": {
       "kind": "command_run",
       "capability": "code.test",
-      "cwd": "../..",
+      "cwd": "../../..",
       "commands": {
         "edit_fixture_test": [
           "node",

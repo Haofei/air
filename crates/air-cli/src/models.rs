@@ -407,6 +407,14 @@ mod tests {
             edit_prompt.contains("byte-for-byte"),
             "code_edit_decider prompt must require exact path copying"
         );
+        assert!(
+            edit_prompt.contains("skip todo tools for single-file refactors and targeted splits"),
+            "code_edit_decider prompt must avoid todo churn on targeted refactors"
+        );
+        assert!(
+            edit_prompt.contains("do not do broad helper archaeology"),
+            "code_edit_decider prompt must discourage over-exploration on targeted splits"
+        );
         let summarize_prompt = config
             .models
             .get("code_edit_summarizer")
@@ -425,11 +433,10 @@ mod tests {
     fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
         let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
         for relative in [
-            "examples/code-agent/code-dynamic-explore.air.yaml",
+            "examples/code-agent/fixtures/code-dynamic-explore.air.yaml",
             "examples/code-agent/code-edit-loop.air.yaml",
             "examples/code-agent/code-explore.air.yaml",
-            "examples/code-agent/code-project-plan.air.yaml",
-            "examples/code-agent/code-review-analyze.air.yaml",
+            "examples/code-agent/fixtures/code-review-analyze.air.yaml",
             "examples/code-agent/code-review.air.yaml",
         ] {
             let module = air_parser::parse_air_file(root.join(relative)).unwrap();
