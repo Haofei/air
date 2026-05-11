@@ -1305,6 +1305,18 @@ def _air_enforce_repeated_tool_policy(
     tool_history.append({"tool": tool_name, "input": input_value})
 
 
+def _air_runtime_context(step: int, max_steps: int) -> dict[str, Any]:
+    remaining_steps = max(0, int(max_steps) - int(step))
+    return {
+        "step": int(step),
+        "step_number": int(step) + 1,
+        "max_steps": int(max_steps),
+        "remaining_steps": remaining_steps,
+        "is_last_step": remaining_steps <= 1,
+        "is_last_action_step": remaining_steps <= 2,
+    }
+
+
 def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, Any]:
     module = MODULES[module_id]
     workflow = module["workflow"]
@@ -1318,6 +1330,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
     tool_history: list[dict[str, Any]] = []
 
     for step in range(workflow["max_steps"]):
+        local_state["_air"] = _air_runtime_context(step, workflow["max_steps"])
         phase = local_state.get("phase")
         rule = next((candidate for candidate in rules if _air_condition_matches(local_state, outputs, candidate["when"])), None)
         if rule is None:
@@ -2368,6 +2381,8 @@ mod tests {
         assert!(code.contains("def _air_emit_trace"));
         assert!(code.contains("AIR_TRACE"));
         assert!(code.contains("model_call_start"));
+        assert!(code.contains("def _air_runtime_context"));
+        assert!(code.contains("local_state[\"_air\"] = _air_runtime_context"));
         assert!(code.contains("dynamic_fanout"));
         assert!(!code.contains("def _air_phase"));
     }

@@ -2283,6 +2283,65 @@ fn rejects_expression_path_missing_nested_schema_field() {
     );
 }
 
+#[test]
+fn runtime_context_is_available_to_conditions_and_expressions() {
+    let module = load_agent("tests/agents/runtime-context.air.yaml");
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: SchemaModels {
+            extract: valid_extracted(),
+            score: valid_score(),
+            report: valid_report(),
+        },
+    };
+
+    let result = vm.run(&module, State::new()).unwrap();
+
+    assert_eq!(result.outputs["answer"]["step_number"], json!(1));
+    assert_eq!(result.outputs["answer"]["remaining_steps"], json!(1));
+    assert_eq!(result.outputs["answer"]["is_last_action_step"], json!(true));
+}
+
+#[test]
+fn verifier_rejects_unknown_runtime_context_path() {
+    let mut module = load_agent("tests/agents/runtime-context.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    workflow.rules[0].when = "phase == \"init\" && _air.not_a_field == true".to_string();
+
+    let report = air_verify::verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR094"),
+        "expected AIR094, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn verifier_rejects_schema_fields_that_shadow_runtime_context() {
+    let mut module = load_agent("tests/agents/runtime-context.air.yaml");
+    module.state.insert(
+        "_air".to_string(),
+        air_core::TypeSpec::Shorthand(air_core::PrimitiveType::Object),
+    );
+
+    let report = air_verify::verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR095"),
+        "expected AIR095, got {:?}",
+        report.diagnostics
+    );
+}
+
 fn valid_vm() -> Vm<SchemaTools, SchemaModels> {
     Vm {
         tools: SchemaTools,

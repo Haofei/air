@@ -864,6 +864,18 @@ function compactJsonValueWithBudget(value, remaining) {
   return value;
 }
 
+function runtimeContext(step, maxSteps) {
+  const remainingSteps = Math.max(0, Number(maxSteps) - Number(step));
+  return {
+    step: Number(step),
+    step_number: Number(step) + 1,
+    max_steps: Number(maxSteps),
+    remaining_steps: remainingSteps,
+    is_last_step: remainingSteps <= 1,
+    is_last_action_step: remainingSteps <= 2,
+  };
+}
+
 async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
   const module = MODULES[moduleId];
   const workflow = module.workflow;
@@ -875,6 +887,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
   const toolHistory = [];
 
   for (let step = 0; step < workflow.max_steps; step += 1) {
+    localState._air = runtimeContext(step, workflow.max_steps);
     const currentPhase = localState.phase;
     const rule = workflow.rules.find((candidate) => conditionMatches(localState, outputs, candidate.when));
     if (!rule) throw new Error(`no rule matched module=${moduleId} phase=${currentPhase}`);
@@ -1729,6 +1742,8 @@ mod tests {
         assert!(code.contains("status: 'error'"));
         assert!(code.contains("is not declared by module"));
         assert!(code.contains("tool: '<invalid>'"));
+        assert!(code.contains("function runtimeContext"));
+        assert!(code.contains("localState._air = runtimeContext"));
     }
 
     #[test]

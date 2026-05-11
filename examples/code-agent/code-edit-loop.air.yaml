@@ -276,6 +276,55 @@ workflow:
           values:
             phase: choose
 
+    - id: summarize-at-step-limit
+      when: phase == "choose" && _air.is_last_action_step == true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: step_budget_reached
+              rationale:
+                literal: The AIR state-machine step budget is nearly exhausted. Stop tool use and produce an audited summary with completed work, remaining work, and verification state.
+              requested:
+                array: []
+              result:
+                object:
+                  runtime:
+                    ref: _air
+                  verification_status:
+                    ref: verification_status
+        - kind: model_call
+          model: code_edit_summarizer
+          input:
+            object:
+              task:
+                ref: task
+              target_path:
+                ref: target_path
+              write_paths:
+                ref: write_paths
+              test_command:
+                ref: test_command
+              force_patch:
+                ref: force_patch
+              observations:
+                ref: observations
+              final_decision:
+                literal:
+                  complete: false
+                  rationale: Step budget reached before verified completion.
+              runtime:
+                ref: _air
+          output: edit
+          timeout_seconds: 90
+          retry:
+            max_attempts: 2
+        - kind: set
+          values:
+            phase: done
+
     - id: choose
       when: phase == "choose"
       actions:
@@ -303,6 +352,8 @@ workflow:
                 ref: observations
               verification_status:
                 ref: verification_status
+              runtime:
+                ref: _air
               allowed_tools:
                 array:
                   - literal: todo.write

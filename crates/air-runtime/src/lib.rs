@@ -559,6 +559,10 @@ where
         let module_started_at = Instant::now();
 
         for step in 0..workflow.max_steps {
+            state.insert(
+                "_air".to_string(),
+                runtime_context(step, workflow.max_steps),
+            );
             let phase = state
                 .get("phase")
                 .and_then(Value::as_str)
@@ -612,6 +616,40 @@ where
                             rule: &rule.id,
                         };
                         self.execute_action(&mut context, action)?;
+                    }
+                    if workflow.terminal.iter().any(|terminal| {
+                        state
+                            .get("phase")
+                            .and_then(Value::as_str)
+                            .is_some_and(|phase| phase == terminal)
+                    }) {
+                        if let Some(terminal_rule) = workflow.rules.iter().find(|candidate| {
+                            candidate.id != rule.id
+                                && condition_matches(&state, &outputs, &candidate.when)
+                                    .unwrap_or(false)
+                        }) {
+                            for action in &terminal_rule.actions {
+                                if !matches!(action, StateAction::Return { .. }) {
+                                    continue;
+                                }
+                                let mut context = ExecutionContext {
+                                    module,
+                                    state: &mut state,
+                                    outputs: &mut outputs,
+                                    trace: &mut trace,
+                                    observer: &mut observer,
+                                    model_calls: &mut model_calls,
+                                    tool_calls: &mut tool_calls,
+                                    tool_history: &mut tool_history,
+                                    artifact_registry: &mut artifact_registry,
+                                    module_started_at,
+                                    step,
+                                    rule: &terminal_rule.id,
+                                };
+                                self.execute_action(&mut context, action)?;
+                            }
+                        }
+                        return Ok(RunResult { outputs, trace });
                     }
                     break;
                 }
@@ -2552,6 +2590,18 @@ fn read_field<'a>(
         .get(field)
         .or_else(|| outputs.get(field))
         .ok_or_else(|| RuntimeError::MissingField(field.to_string()))
+}
+
+fn runtime_context(step: u32, max_steps: u32) -> Value {
+    let remaining_steps = max_steps.saturating_sub(step);
+    json!({
+        "step": step,
+        "step_number": step.saturating_add(1),
+        "max_steps": max_steps,
+        "remaining_steps": remaining_steps,
+        "is_last_step": remaining_steps <= 1,
+        "is_last_action_step": remaining_steps <= 2,
+    })
 }
 
 fn resolve_input(state: &State, outputs: &State, input: &InputSpec) -> Result<Value, RuntimeError> {

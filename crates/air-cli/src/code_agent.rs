@@ -2701,6 +2701,52 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_exposes_runtime_budget_and_summarizes_at_step_limit() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        let rule_ids = rules
+            .iter()
+            .filter_map(|rule| rule["id"].as_str())
+            .collect::<Vec<_>>();
+        let step_limit = rule_ids
+            .iter()
+            .position(|id| *id == "summarize-at-step-limit")
+            .unwrap();
+        let choose = rule_ids.iter().position(|id| *id == "choose").unwrap();
+        let choose_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose"))
+            .unwrap();
+        let step_limit_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("summarize-at-step-limit"))
+            .unwrap();
+
+        assert!(
+            step_limit < choose,
+            "step-limit guard must run before the normal decider can choose more tools"
+        );
+        assert_eq!(
+            choose_rule["actions"][0]["input"]["object"]["runtime"]["ref"],
+            serde_yaml::Value::String("_air".to_string())
+        );
+        assert_eq!(
+            step_limit_rule["when"],
+            serde_yaml::Value::String(
+                "phase == \"choose\" && _air.is_last_action_step == true".to_string()
+            )
+        );
+        assert_eq!(
+            step_limit_rule["actions"][1]["input"]["object"]["runtime"]["ref"],
+            serde_yaml::Value::String("_air".to_string())
+        );
+    }
+
+    #[test]
     fn completion_detection_matches_recipe_outputs() {
         let pack = load_code_agent_pack(None).unwrap();
         assert!(code_outputs_complete(

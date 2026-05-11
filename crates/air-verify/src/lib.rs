@@ -54,6 +54,12 @@ impl Verifier {
 
     fn verify_schema(&mut self, label: &str, schema: &air_core::SchemaMap) {
         for (field, spec) in schema {
+            if field == "_air" {
+                self.error(
+                    "AIR095",
+                    format!("{label}.{field} uses reserved AIR runtime context field _air"),
+                );
+            }
             self.verify_type_spec(&format!("{label}.{field}"), spec);
         }
     }
@@ -766,6 +772,10 @@ impl Verifier {
             return;
         }
 
+        if field == "_air" {
+            return;
+        }
+
         if !(module.inputs.contains_key(field)
             || module.outputs.contains_key(field)
             || module.state.contains_key(field))
@@ -907,6 +917,10 @@ impl Verifier {
             );
             return;
         };
+        if root == "_air" {
+            self.verify_runtime_context_path(rule_id, label, &segments);
+            return;
+        }
         self.verify_state_ref(rule_id, label, root, module);
         let Some(mut spec) = module_field_type(module, root) else {
             return;
@@ -934,6 +948,42 @@ impl Verifier {
                 return;
             };
             spec = next;
+        }
+    }
+
+    fn verify_runtime_context_path(&mut self, rule_id: &str, label: &str, segments: &[String]) {
+        if segments.len() == 1 {
+            return;
+        }
+        if segments.len() > 2 {
+            self.error(
+                "AIR094",
+                format!(
+                    "{label} in rule {rule_id} references unknown nested path {}",
+                    segments.join(".")
+                ),
+            );
+            return;
+        }
+        let Some(field) = segments.get(1) else {
+            return;
+        };
+        if !matches!(
+            field.as_str(),
+            "step"
+                | "step_number"
+                | "max_steps"
+                | "remaining_steps"
+                | "is_last_step"
+                | "is_last_action_step"
+        ) {
+            self.error(
+                "AIR094",
+                format!(
+                    "{label} in rule {rule_id} references unknown nested path {}",
+                    segments.join(".")
+                ),
+            );
         }
     }
 
