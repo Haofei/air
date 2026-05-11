@@ -2136,10 +2136,18 @@ fn old_string_anchor_line(content: &str, old_string: &str) -> Option<usize> {
             if trimmed.is_empty() {
                 return None;
             }
-            content
+            let matches = content
                 .lines()
-                .position(|content_line| content_line.trim() == trimmed)
-                .map(|index| (index + 1, trimmed.len()))
+                .enumerate()
+                .filter_map(|(index, content_line)| {
+                    (content_line.trim() == trimmed).then_some(index + 1)
+                })
+                .collect::<Vec<_>>();
+            if matches.len() == 1 {
+                Some((matches[0], trimmed.len()))
+            } else {
+                None
+            }
         })
         .max_by_key(|(_, len)| *len)
         .map(|(line, _)| line)
