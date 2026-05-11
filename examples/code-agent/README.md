@@ -58,6 +58,8 @@ The edit loop receives the current step budget through the `_air` runtime contex
 
 When `test.run` output is truncated (`output.truncated == true`), the full log is written to the path reported in `output.full_log_path`. Use `file.search` or a narrow `file.read` range on that path to inspect hidden lines instead of re-running only to recover truncated output.
 
+When `file.ops` `edit` validation fails (e.g. `old_string` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `old_string` does not match but one of its lines is present, the diagnostic includes an `old_string_anchor` line for a precise retry location.
+
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 
 ```bash
