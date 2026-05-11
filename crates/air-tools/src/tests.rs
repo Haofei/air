@@ -5217,6 +5217,11 @@ fn command_run_full_log_path_can_be_searched_by_file_search() {
 
     assert_eq!(search["match_count"], json!(1));
     assert_eq!(search["matches"][0]["line"], json!("ERROR searchable tail"));
+    let expected_log_dir = dir.canonicalize().unwrap().join(".air").join("tool-output");
+    assert!(
+        Path::new(full_log_path).starts_with(&expected_log_dir),
+        "full_log_path should be under .air/tool-output, got: {full_log_path}"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
