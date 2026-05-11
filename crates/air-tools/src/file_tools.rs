@@ -1603,6 +1603,7 @@ pub(super) fn call_file_ops_tool(
                 let (effective_match_strategy, matches) =
                     find_edit_matches(&current, old_string, match_strategy);
                 if matches.is_empty() {
+                    let anchor_line = old_string_anchor_line(&current, old_string);
                     return Ok(file_ops_failure_output(
                         name,
                         &base,
@@ -1621,7 +1622,8 @@ pub(super) fn call_file_ops_tool(
                             ),
                         )
                         .with_match_strategy(match_strategy.as_str())
-                        .with_match_count(0),
+                        .with_match_count(0)
+                        .with_anchor_line(anchor_line),
                     ));
                 }
                 if matches.len() > 1 && !replace_all {
@@ -2056,6 +2058,8 @@ struct FileOpsDiagnostic {
     match_strategy: Option<String>,
     effective_match_strategy: Option<String>,
     match_count: Option<usize>,
+    line: Option<usize>,
+    line_source: Option<String>,
 }
 
 impl FileOpsDiagnostic {
@@ -2077,6 +2081,8 @@ impl FileOpsDiagnostic {
             match_strategy: None,
             effective_match_strategy: None,
             match_count: None,
+            line: None,
+            line_source: None,
         }
     }
 
@@ -2095,6 +2101,14 @@ impl FileOpsDiagnostic {
         self
     }
 
+    fn with_anchor_line(mut self, line: Option<usize>) -> Self {
+        if let Some(line) = line {
+            self.line = Some(line);
+            self.line_source = Some("old_string_anchor".to_string());
+        }
+        self
+    }
+
     fn into_json(self, source: &str) -> Value {
         json!({
             "source": source,
@@ -2107,9 +2121,28 @@ impl FileOpsDiagnostic {
             "field": self.field,
             "match_strategy": self.match_strategy,
             "effective_match_strategy": self.effective_match_strategy,
-            "match_count": self.match_count
+            "match_count": self.match_count,
+            "line": self.line,
+            "line_source": self.line_source
         })
     }
+}
+
+fn old_string_anchor_line(content: &str, old_string: &str) -> Option<usize> {
+    old_string
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            content
+                .lines()
+                .position(|content_line| content_line.trim() == trimmed)
+                .map(|index| (index + 1, trimmed.len()))
+        })
+        .max_by_key(|(_, len)| *len)
+        .map(|(line, _)| line)
 }
 
 fn resolve_file_ops_write_path(

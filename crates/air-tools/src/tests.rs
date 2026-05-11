@@ -2484,6 +2484,62 @@ fn file_ops_is_atomic_when_later_operation_fails() {
 }
 
 #[test]
+fn file_ops_old_string_not_found_reports_anchor_line() {
+    let dir = temp_dir("air-tools-file-ops-anchor-line");
+    fs::write(dir.join("note.txt"), "alpha\nbeta\ngamma\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "edit",
+                    "path": "note.txt",
+                    "old_string": "wrong beta\ngamma",
+                    "new_string": "fixed beta\ngamma"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["diagnostics"][0]["field"], json!("old_string"));
+    assert_eq!(output["diagnostics"][0]["match_count"], json!(0));
+    assert_eq!(output["diagnostics"][0]["line"], json!(3));
+    assert_eq!(
+        output["diagnostics"][0]["line_source"],
+        json!("old_string_anchor")
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "alpha\nbeta\ngamma\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_ops_existing_write_without_overwrite_returns_structured_diagnostic() {
     let dir = temp_dir("air-tools-file-ops-write-existing-diagnostic");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
