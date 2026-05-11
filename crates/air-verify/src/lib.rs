@@ -584,6 +584,7 @@ impl Verifier {
                 output,
                 timeout_seconds,
                 max_calls,
+                allowed_tools,
                 write_scope,
                 retry,
                 ..
@@ -603,6 +604,16 @@ impl Verifier {
                             "tool_batch_dispatch action in rule {rule_id} max_calls must be at least 1"
                         ),
                     );
+                }
+                for tool in allowed_tools {
+                    if !tools_by_name.contains_key(tool.as_str()) {
+                        self.error(
+                            "AIR098",
+                            format!(
+                                "tool_batch_dispatch action in rule {rule_id} allowed_tools references unknown tool {tool}"
+                            ),
+                        );
+                    }
                 }
                 self.verify_input_spec(rule_id, "tool_batch_dispatch input", input, module);
                 if let Some(write_scope) = write_scope {
@@ -791,9 +802,7 @@ impl Verifier {
         for group in condition.split("||") {
             for clause in group.split("&&") {
                 let clause = clause.trim();
-                let Some((left, right)) =
-                    clause.split_once("==").or_else(|| clause.split_once("!="))
-                else {
+                let Some((left, _operator, right)) = split_condition_clause(clause) else {
                     self.error(
                         "AIR086",
                         format!(
@@ -913,6 +922,29 @@ impl Verifier {
                     );
                 }
                 self.verify_expr(rule_id, label, take_last, module);
+            }
+            air_core::Expr::TakeLastWithinBytes {
+                take_last_within_bytes,
+                max_items,
+                max_bytes,
+            } => {
+                if *max_items == 0 {
+                    self.error(
+                        "AIR096",
+                        format!(
+                            "{label} in rule {rule_id} take_last_within_bytes.max_items must be at least 1"
+                        ),
+                    );
+                }
+                if *max_bytes == 0 {
+                    self.error(
+                        "AIR097",
+                        format!(
+                            "{label} in rule {rule_id} take_last_within_bytes.max_bytes must be at least 1"
+                        ),
+                    );
+                }
+                self.verify_expr(rule_id, label, take_last_within_bytes, module);
             }
         }
     }
@@ -1079,6 +1111,8 @@ fn is_known_runtime_context_field(field: &str) -> bool {
             | "step_number"
             | "max_steps"
             | "remaining_steps"
+            | "model_calls"
+            | "tool_calls"
             | "is_last_step"
             | "is_last_action_step"
     )
@@ -1140,6 +1174,15 @@ fn condition_clause_may_match_phase(clause: &str, phase: &str) -> bool {
     };
 
     (expected_phase == phase) == expected_equal
+}
+
+fn split_condition_clause(clause: &str) -> Option<(&str, &'static str, &str)> {
+    for operator in [">=", "<=", "==", "!=", ">", "<"] {
+        if let Some((left, right)) = clause.split_once(operator) {
+            return Some((left, operator, right));
+        }
+    }
+    None
 }
 
 fn parse_condition_literal(raw: &str) -> Option<serde_json::Value> {

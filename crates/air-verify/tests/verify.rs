@@ -68,6 +68,23 @@ fn accepts_array_index_paths_in_conditions() {
 }
 
 #[test]
+fn accepts_runtime_context_numeric_conditions() {
+    let mut module = parse_air_file("../../tests/agents/expr-input.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    workflow.rules[1].when = r#"phase == "call" && _air.model_calls >= 0"#.to_string();
+
+    let report = verify(&module);
+
+    assert!(
+        report.is_success(),
+        "expected success, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_append_actions_to_state_arrays() {
     let module = parse_air_file("../../tests/agents/append-evidence.air.yaml").unwrap();
     let report = verify(&module);
@@ -313,6 +330,49 @@ fn rejects_zero_length_truncate_expression() {
             .iter()
             .any(|diagnostic| diagnostic.code == "AIR090"),
         "expected AIR090, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
+fn rejects_zero_budget_take_last_within_bytes_expression() {
+    let mut module = parse_air_file("../../tests/agents/expr-input.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let air_core::StateAction::ModelCall { input, .. } = &mut workflow.rules[1].actions[0] else {
+        panic!("expected model call");
+    };
+    let air_core::InputSpec::Expr(air_core::Expr::Object { object }) = input else {
+        panic!("expected object input");
+    };
+    object.insert(
+        "bad".to_string(),
+        air_core::Expr::TakeLastWithinBytes {
+            take_last_within_bytes: Box::new(air_core::Expr::Ref {
+                reference: "notes".to_string(),
+            }),
+            max_items: 0,
+            max_bytes: 0,
+        },
+    );
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR096"),
+        "expected AIR096, got {:?}",
+        report.diagnostics
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR097"),
+        "expected AIR097, got {:?}",
         report.diagnostics
     );
 }

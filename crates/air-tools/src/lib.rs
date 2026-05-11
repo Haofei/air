@@ -3554,6 +3554,11 @@ fn call_repo_symbols_tool(
         .and_then(Value::as_str)
         .unwrap_or_default()
         .trim();
+    let names = repo_symbol_names_input(name, input)?;
+    let name_filters = names
+        .iter()
+        .map(|name| name.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
     let mode = optional_string_input(name, input, "mode")?.unwrap_or("fixed");
     if !matches!(mode, "fixed" | "smart") {
         return Err(RuntimeError::Provider(format!(
@@ -3568,6 +3573,8 @@ fn call_repo_symbols_tool(
     };
     let effective_query = if mode == "smart" {
         smart_terms.join("|")
+    } else if !names.is_empty() {
+        names.join("|")
     } else {
         query.clone()
     };
@@ -3605,6 +3612,8 @@ fn call_repo_symbols_tool(
         )));
     }
     let raw = String::from_utf8_lossy(&output.stdout);
+    let symbol_lines_by_path = repo_symbol_lines_by_path(&raw);
+    let mut total_lines_by_path = BTreeMap::new();
     let mut symbols = Vec::new();
     for line in raw.lines() {
         let item = parse_rg_vimgrep_line(line);
@@ -3612,7 +3621,11 @@ fn call_repo_symbols_tool(
         let Some((kind, symbol_name)) = parse_symbol_declaration(text) else {
             continue;
         };
-        if mode == "smart" {
+        if !name_filters.is_empty() {
+            if !name_filters.contains(&symbol_name.to_ascii_lowercase()) {
+                continue;
+            }
+        } else if mode == "smart" {
             if !smart_terms.is_empty()
                 && !repo_symbol_matches_any_term(&item, &symbol_name, text, &smart_terms)
             {
@@ -3628,9 +3641,20 @@ fn call_repo_symbols_tool(
         {
             continue;
         }
+        let path = item["path"].as_str().unwrap_or_default();
+        let line = item["line"].as_u64().unwrap_or_default();
+        let end_line = repo_symbol_end_line(
+            name,
+            &repo,
+            path,
+            line,
+            &symbol_lines_by_path,
+            &mut total_lines_by_path,
+        )?;
         symbols.push(json!({
             "path": item["path"],
             "line": item["line"],
+            "end_line": end_line,
             "column": item["column"],
             "kind": kind,
             "name": symbol_name,
@@ -3659,6 +3683,7 @@ fn call_repo_symbols_tool(
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": raw_query,
+        "names": names,
         "effective_query": effective_query,
         "mode": mode,
         "symbols": symbols,
@@ -3674,6 +3699,7 @@ fn call_repo_symbols_tool(
                 "provider": "repo_symbols",
                 "repo": repo.display().to_string(),
                 "query": raw_query,
+                "names": names,
                 "effective_query": effective_query,
                 "mode": mode,
                 "paths": paths,
@@ -3683,6 +3709,60 @@ fn call_repo_symbols_tool(
             }
         }]
     }))
+}
+
+fn repo_symbol_lines_by_path(raw: &str) -> BTreeMap<String, Vec<u64>> {
+    let mut lines_by_path: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+    for line in raw.lines() {
+        let item = parse_rg_vimgrep_line(line);
+        let text = item["text"].as_str().unwrap_or_default();
+        if parse_symbol_declaration(text).is_none() {
+            continue;
+        }
+        let path = item["path"].as_str().unwrap_or_default();
+        let line = item["line"].as_u64().unwrap_or_default();
+        if path.is_empty() || line == 0 {
+            continue;
+        }
+        lines_by_path
+            .entry(path.to_string())
+            .or_default()
+            .push(line);
+    }
+    for lines in lines_by_path.values_mut() {
+        lines.sort_unstable();
+        lines.dedup();
+    }
+    lines_by_path
+}
+
+fn repo_symbol_end_line(
+    tool_name: &str,
+    repo: &Path,
+    path: &str,
+    start_line: u64,
+    symbol_lines_by_path: &BTreeMap<String, Vec<u64>>,
+    total_lines_by_path: &mut BTreeMap<String, u64>,
+) -> Result<u64, RuntimeError> {
+    let Some(lines) = symbol_lines_by_path.get(path) else {
+        return Ok(start_line);
+    };
+    if let Some(next_line) = lines.iter().copied().find(|line| *line > start_line) {
+        return Ok(next_line.saturating_sub(1).max(start_line));
+    }
+    if let Some(total_lines) = total_lines_by_path.get(path) {
+        return Ok((*total_lines).max(start_line));
+    }
+    let absolute = canonicalize_tool_path(tool_name, "repo.symbols path", &repo.join(path))?;
+    if !absolute.starts_with(repo) || !absolute.is_file() {
+        return Ok(start_line);
+    }
+    let content = fs::read_to_string(&absolute).map_err(|error| {
+        RuntimeError::Provider(format!("tool {tool_name} repo symbols: {error}"))
+    })?;
+    let total_lines = content.lines().count().max(1) as u64;
+    total_lines_by_path.insert(path.to_string(), total_lines);
+    Ok(total_lines.max(start_line))
 }
 
 fn repo_symbol_matches_any_term(
@@ -3697,6 +3777,35 @@ fn repo_symbol_matches_any_term(
     terms
         .iter()
         .any(|term| path.contains(term) || name.contains(term) || text.contains(term))
+}
+
+fn repo_symbol_names_input(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {
+    let Some(raw_names) = input.get("names") else {
+        return Ok(Vec::new());
+    };
+    let raw_names = raw_names.as_array().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.names must be an array"))
+    })?;
+    let mut names = Vec::new();
+    for name in raw_names {
+        let name = name.as_str().ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "tool {tool_name} input.names entries must be strings"
+            ))
+        })?;
+        if name.trim().is_empty() {
+            continue;
+        }
+        if !is_identifier_like(name) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} input.names entries must be identifier-like tokens"
+            )));
+        }
+        names.push(name.to_string());
+    }
+    names.sort();
+    names.dedup();
+    Ok(names)
 }
 
 fn parse_symbol_declaration(line: &str) -> Option<(&'static str, String)> {

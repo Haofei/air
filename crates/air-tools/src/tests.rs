@@ -4689,8 +4689,97 @@ fn repo_symbols_returns_lightweight_symbol_map() {
     assert_eq!(output["symbols"].as_array().unwrap().len(), 1);
     assert_eq!(output["symbols"][0]["kind"], json!("struct"));
     assert_eq!(output["symbols"][0]["name"], json!("Alpha"));
+    assert_eq!(output["symbols"][0]["line"], json!(1));
+    assert_eq!(output["symbols"][0]["end_line"], json!(1));
     assert_eq!(output["artifacts"][0]["kind"], json!("repo_symbols"));
     assert_eq!(tools.tool_capability("repo.symbols"), Some("code.read"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_symbols_reports_symbol_end_lines() {
+    let dir = temp_dir("air-tools-repo-symbols-end-lines");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn alpha() {\n  beta();\n}\n\nfn beta() {\n  gamma();\n}\n\nfn gamma() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.symbols", &json!({"path": "src/lib.rs"}))
+        .unwrap();
+
+    let symbols = output["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 3);
+    assert_eq!(symbols[0]["name"], json!("alpha"));
+    assert_eq!(symbols[0]["line"], json!(1));
+    assert_eq!(symbols[0]["end_line"], json!(4));
+    assert_eq!(symbols[1]["name"], json!("beta"));
+    assert_eq!(symbols[1]["line"], json!(5));
+    assert_eq!(symbols[1]["end_line"], json!(8));
+    assert_eq!(symbols[2]["name"], json!("gamma"));
+    assert_eq!(symbols[2]["line"], json!(9));
+    assert_eq!(symbols[2]["end_line"], json!(9));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_symbols_accepts_multiple_exact_names() {
+    let dir = temp_dir("air-tools-repo-symbols-names");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn alpha() {}\nfn beta() {}\nfn gamma() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.symbols",
+            &json!({"path": "src/lib.rs", "names": ["gamma", "alpha"]}),
+        )
+        .unwrap();
+
+    assert_eq!(output["names"], json!(["alpha", "gamma"]));
+    let symbols = output["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 2);
+    assert_eq!(symbols[0]["name"], json!("alpha"));
+    assert_eq!(symbols[0]["line"], json!(1));
+    assert_eq!(symbols[0]["end_line"], json!(1));
+    assert_eq!(symbols[1]["name"], json!("gamma"));
+    assert_eq!(symbols[1]["line"], json!(3));
+    assert_eq!(symbols[1]["end_line"], json!(3));
     let _ = fs::remove_dir_all(dir);
 }
 

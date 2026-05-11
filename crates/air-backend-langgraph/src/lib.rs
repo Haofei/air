@@ -301,6 +301,30 @@ def _air_take_last(value: Any, max_items: int) -> list[Any]:
     return value[-max_items:]
 
 
+def _air_take_last_within_bytes(value: Any, max_items: int, max_bytes: int) -> list[Any]:
+    if not isinstance(value, list):
+        raise RuntimeError("take_last_within_bytes expression expected an array value")
+    if max_items <= 0:
+        raise RuntimeError("take_last_within_bytes max_items must be at least 1")
+    if max_bytes <= 0:
+        raise RuntimeError("take_last_within_bytes max_bytes must be at least 1")
+    selected = []
+    selected_bytes = 0
+    for item in reversed(value[-max_items:]):
+        raw = json.dumps(item)
+        candidate = item
+        candidate_bytes = len(raw.encode("utf-8"))
+        if selected_bytes + candidate_bytes > max_bytes:
+            candidate = {"_air_truncated": True}
+            candidate_bytes = len(json.dumps(candidate).encode("utf-8"))
+        if selected_bytes + candidate_bytes > max_bytes:
+            continue
+        selected_bytes += candidate_bytes
+        selected.append(candidate)
+    selected.reverse()
+    return selected
+
+
 def _air_read_path(local_state: dict[str, Any], outputs: dict[str, Any], path: str) -> Any:
     merged = dict(local_state)
     merged.update(outputs)
@@ -877,6 +901,30 @@ def _air_take_last(value: Any, max_items: int) -> list[Any]:
     return value[-max_items:]
 
 
+def _air_take_last_within_bytes(value: Any, max_items: int, max_bytes: int) -> list[Any]:
+    if not isinstance(value, list):
+        raise RuntimeError("take_last_within_bytes expression expected an array value")
+    if max_items <= 0:
+        raise RuntimeError("take_last_within_bytes max_items must be at least 1")
+    if max_bytes <= 0:
+        raise RuntimeError("take_last_within_bytes max_bytes must be at least 1")
+    selected = []
+    selected_bytes = 0
+    for item in reversed(value[-max_items:]):
+        raw = json.dumps(item)
+        candidate = item
+        candidate_bytes = len(raw.encode("utf-8"))
+        if selected_bytes + candidate_bytes > max_bytes:
+            candidate = {"_air_truncated": True}
+            candidate_bytes = len(json.dumps(candidate).encode("utf-8"))
+        if selected_bytes + candidate_bytes > max_bytes:
+            continue
+        selected_bytes += candidate_bytes
+        selected.append(candidate)
+    selected.reverse()
+    return selected
+
+
 def call_model(name: str, input_value: Any) -> Any:
     raise NotImplementedError(f"model provider is not wired: {name}")
 
@@ -931,6 +979,12 @@ def _air_eval_expr(local_state: dict[str, Any], outputs: dict[str, Any], expr: A
             value = _air_eval_expr(local_state, outputs, expr["truncate"])
             raw = value if isinstance(value, str) else json.dumps(value)
             return raw[:expr["max_chars"]]
+        if "take_last" in expr:
+            value = _air_eval_expr(local_state, outputs, expr["take_last"])
+            return _air_take_last(value, expr["max_items"])
+        if "take_last_within_bytes" in expr:
+            value = _air_eval_expr(local_state, outputs, expr["take_last_within_bytes"])
+            return _air_take_last_within_bytes(value, expr["max_items"], expr["max_bytes"])
     return expr
 
 
@@ -938,7 +992,8 @@ def _air_looks_like_expr(value: Any) -> bool:
     return (
         isinstance(value, dict)
         and len(value) == 1
-        and next(iter(value)) in {"ref", "path", "literal", "object", "array", "template", "truncate"}
+        and next(iter(value))
+        in {"ref", "path", "literal", "object", "array", "template", "truncate", "take_last", "take_last_within_bytes"}
     )
 
 
@@ -2153,6 +2208,16 @@ fn expr_code(expr: &Expr) -> Result<String, LangGraphBackendError> {
             "_air_take_last({value}, {max_items})",
             value = expr_code(take_last)?,
             max_items = max_items
+        )),
+        Expr::TakeLastWithinBytes {
+            take_last_within_bytes,
+            max_items,
+            max_bytes,
+        } => Ok(format!(
+            "_air_take_last_within_bytes({value}, {max_items}, {max_bytes})",
+            value = expr_code(take_last_within_bytes)?,
+            max_items = max_items,
+            max_bytes = max_bytes
         )),
     }
 }

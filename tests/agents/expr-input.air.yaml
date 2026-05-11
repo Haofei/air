@@ -62,6 +62,11 @@ workflow:
                 take_last:
                   ref: notes
                 max_items: 2
+              recent_notes_budgeted:
+                take_last_within_bytes:
+                  ref: notes
+                max_items: 3
+                max_bytes: 16
           output: response
           timeout_seconds: 30
           retry:

@@ -111,7 +111,7 @@
       "allow_replace_all": false,
       "max_files": 6,
       "max_bytes": 262144,
-      "max_changed_lines": 240
+      "max_changed_lines": 1000
     },
     "file.patch": {
       "kind": "file_patch",
@@ -122,7 +122,7 @@
       "allow_delete_files": false,
       "max_files": 2,
       "max_bytes": 65536,
-      "max_changed_lines": 240
+      "max_changed_lines": 1000
     },
     "diagnostic.context": {
       "kind": "diagnostic_context",

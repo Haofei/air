@@ -144,6 +144,12 @@ pub enum RuntimeError {
     #[error("tool_batch_dispatch containing approval-required capability {capability} must be isolated: attempted {attempted} calls")]
     ToolBatchDispatchApprovalIsolation { capability: String, attempted: u32 },
 
+    #[error("tool_batch_dispatch selected tool {tool}, but allowed_tools only permits {allowed_tools:?}")]
+    ToolBatchDispatchToolNotAllowed {
+        tool: String,
+        allowed_tools: Vec<String>,
+    },
+
     #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
     ModelCallLimitExceeded { limit: u32, attempted: u32 },
 
@@ -561,7 +567,7 @@ where
         for step in 0..workflow.max_steps {
             state.insert(
                 "_air".to_string(),
-                runtime_context(step, workflow.max_steps),
+                runtime_context(step, workflow.max_steps, model_calls, tool_calls),
             );
             let phase = state
                 .get("phase")
@@ -741,6 +747,15 @@ where
                         schema,
                         retry.as_ref(),
                     );
+                    let attempt_input_bytes = json_value_size_bytes(&attempt_input);
+                    let model_meta_args = ModelCallMetaArgs {
+                        model,
+                        attempt,
+                        max_attempts,
+                        output,
+                        timeout_seconds: *timeout_seconds,
+                        input_bytes: attempt_input_bytes,
+                    };
                     if let Some(limit) = context.module.policy.max_model_calls {
                         let attempted = *context.model_calls + 1;
                         if attempted > limit {
@@ -749,15 +764,7 @@ where
                                 "model_call",
                                 Some(attempt_input),
                                 None,
-                                Some(model_call_result_meta(
-                                    model,
-                                    attempt,
-                                    max_attempts,
-                                    output,
-                                    *timeout_seconds,
-                                    0,
-                                    false,
-                                )),
+                                Some(model_call_result_meta(&model_meta_args, 0, false)),
                                 Err(error.to_string()),
                             );
                             return Err(error);
@@ -768,13 +775,7 @@ where
                         "model_call_start",
                         Some(attempt_input.clone()),
                         None,
-                        Some(model_call_meta(
-                            model,
-                            attempt,
-                            max_attempts,
-                            output,
-                            *timeout_seconds,
-                        )),
+                        Some(model_call_meta(&model_meta_args)),
                         Ok(()),
                     );
                     let attempt_started_at = Instant::now();
@@ -792,11 +793,7 @@ where
                                 Some(attempt_input),
                                 None,
                                 Some(model_call_result_meta(
-                                    model,
-                                    attempt,
-                                    max_attempts,
-                                    output,
-                                    *timeout_seconds,
+                                    &model_meta_args,
                                     attempt_started_at.elapsed().as_millis(),
                                     !is_final_attempt,
                                 )),
@@ -819,11 +816,7 @@ where
                             Some(attempt_input),
                             Some(result),
                             Some(model_call_result_meta(
-                                model,
-                                attempt,
-                                max_attempts,
-                                output,
-                                *timeout_seconds,
+                                &model_meta_args,
                                 attempt_started_at.elapsed().as_millis(),
                                 !is_final_attempt,
                             )),
@@ -846,11 +839,7 @@ where
                                     Some(attempt_input),
                                     Some(error.value),
                                     Some(model_call_result_meta(
-                                        model,
-                                        attempt,
-                                        max_attempts,
-                                        output,
-                                        *timeout_seconds,
+                                        &model_meta_args,
                                         attempt_started_at.elapsed().as_millis(),
                                         !is_final_attempt,
                                     )),
@@ -875,11 +864,7 @@ where
                             Some(attempt_input),
                             Some(result),
                             Some(model_call_result_meta(
-                                model,
-                                attempt,
-                                max_attempts,
-                                output,
-                                *timeout_seconds,
+                                &model_meta_args,
                                 attempt_started_at.elapsed().as_millis(),
                                 !is_final_attempt,
                             )),
@@ -897,11 +882,7 @@ where
                         Some(attempt_input),
                         context.state.get(output).cloned(),
                         Some(model_call_result_meta(
-                            model,
-                            attempt,
-                            max_attempts,
-                            output,
-                            *timeout_seconds,
+                            &model_meta_args,
                             attempt_started_at.elapsed().as_millis(),
                             false,
                         )),
@@ -960,6 +941,7 @@ where
                 output,
                 timeout_seconds,
                 max_calls,
+                allowed_tools,
                 write_scope,
                 retry,
                 on_error,
@@ -977,6 +959,7 @@ where
                         output,
                         timeout_seconds: *timeout_seconds,
                         max_calls: *max_calls,
+                        allowed_tools,
                         retry,
                         on_error: *on_error,
                     },
@@ -1222,6 +1205,7 @@ where
             output,
             timeout_seconds,
             max_calls,
+            allowed_tools,
             retry,
             on_error,
         } = batch;
@@ -1320,6 +1304,26 @@ where
             };
             let tool_input =
                 apply_write_scope_to_tool_input(&tool, tool_input, write_scope.as_ref())?;
+            if let Err(error) = validate_batch_allowed_tool(&tool, allowed_tools) {
+                let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
+                insert_batch_item_meta(&mut meta, index);
+                context.push_event_with_meta(
+                    "tool_batch_dispatch_item",
+                    Some(tool_input.clone()),
+                    None,
+                    Some(meta),
+                    Err(error.to_string()),
+                );
+                if on_error == ToolErrorMode::Observe {
+                    results.push(tool_batch_error_observation(
+                        &tool,
+                        &tool_input,
+                        &error.to_string(),
+                    ));
+                    continue;
+                }
+                return Err(error);
+            }
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
                 insert_batch_item_meta(&mut meta, index);
@@ -2128,6 +2132,16 @@ fn enforce_approval_required_batch_isolation(
     Ok(())
 }
 
+fn validate_batch_allowed_tool(tool: &str, allowed_tools: &[String]) -> Result<(), RuntimeError> {
+    if allowed_tools.is_empty() || allowed_tools.iter().any(|allowed| allowed == tool) {
+        return Ok(());
+    }
+    Err(RuntimeError::ToolBatchDispatchToolNotAllowed {
+        tool: tool.to_string(),
+        allowed_tools: allowed_tools.to_vec(),
+    })
+}
+
 fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeError> {
     let Some(object) = dispatch.as_object() else {
         return Err(RuntimeError::SchemaViolation(
@@ -2398,6 +2412,7 @@ struct ToolBatchExecution<'a> {
     output: &'a str,
     timeout_seconds: u64,
     max_calls: u32,
+    allowed_tools: &'a [String],
     retry: &'a Option<RetryPolicy>,
     on_error: ToolErrorMode,
 }
@@ -2482,34 +2497,40 @@ fn action_timeout_error(
     })
 }
 
-fn model_call_meta(
-    model: &str,
+struct ModelCallMetaArgs<'a> {
+    model: &'a str,
     attempt: u32,
     max_attempts: u32,
-    output: &str,
+    output: &'a str,
     timeout_seconds: u64,
-) -> Value {
+    input_bytes: usize,
+}
+
+fn model_call_meta(args: &ModelCallMetaArgs<'_>) -> Value {
     serde_json::json!({
-        "model": model,
-        "attempt": attempt,
-        "max_attempts": max_attempts,
-        "output": output,
-        "timeout_seconds": timeout_seconds,
+        "model": args.model,
+        "attempt": args.attempt,
+        "max_attempts": args.max_attempts,
+        "output": args.output,
+        "timeout_seconds": args.timeout_seconds,
+        "input_bytes": args.input_bytes,
     })
 }
 
 fn model_call_result_meta(
-    model: &str,
-    attempt: u32,
-    max_attempts: u32,
-    output: &str,
-    timeout_seconds: u64,
+    args: &ModelCallMetaArgs<'_>,
     elapsed_ms: u128,
     will_retry: bool,
 ) -> Value {
-    let mut meta = model_call_meta(model, attempt, max_attempts, output, timeout_seconds);
+    let mut meta = model_call_meta(args);
     insert_result_meta(&mut meta, elapsed_ms, will_retry);
     meta
+}
+
+fn json_value_size_bytes(value: &Value) -> usize {
+    serde_json::to_vec(value)
+        .map(|value| value.len())
+        .unwrap_or(0)
 }
 
 fn tool_call_meta(args: ToolCallMeta<'_>) -> Value {
@@ -2607,13 +2628,15 @@ fn read_field<'a>(
         .ok_or_else(|| RuntimeError::MissingField(field.to_string()))
 }
 
-fn runtime_context(step: u32, max_steps: u32) -> Value {
+fn runtime_context(step: u32, max_steps: u32, model_calls: u32, tool_calls: u32) -> Value {
     let remaining_steps = max_steps.saturating_sub(step);
     json!({
         "step": step,
         "step_number": step.saturating_add(1),
         "max_steps": max_steps,
         "remaining_steps": remaining_steps,
+        "model_calls": model_calls,
+        "tool_calls": tool_calls,
         "is_last_step": remaining_steps <= 1,
         "is_last_action_step": remaining_steps <= 2,
     })
@@ -2654,7 +2677,15 @@ fn looks_like_expr(value: &Value) -> bool {
     object.keys().next().is_some_and(|key| {
         matches!(
             key.as_str(),
-            "ref" | "path" | "literal" | "object" | "array" | "template" | "truncate"
+            "ref"
+                | "path"
+                | "literal"
+                | "object"
+                | "array"
+                | "template"
+                | "truncate"
+                | "take_last"
+                | "take_last_within_bytes"
         )
     })
 }
@@ -2690,6 +2721,15 @@ fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, Runti
             take_last,
             max_items,
         } => take_last_value(&eval_expr(state, outputs, take_last)?, *max_items),
+        Expr::TakeLastWithinBytes {
+            take_last_within_bytes,
+            max_items,
+            max_bytes,
+        } => take_last_within_bytes_value(
+            &eval_expr(state, outputs, take_last_within_bytes)?,
+            *max_items,
+            *max_bytes,
+        ),
     }
 }
 
@@ -2765,6 +2805,45 @@ fn take_last_value(value: &Value, max_items: usize) -> Result<Value, RuntimeErro
     Ok(Value::Array(values[start..].to_vec()))
 }
 
+fn take_last_within_bytes_value(
+    value: &Value,
+    max_items: usize,
+    max_bytes: usize,
+) -> Result<Value, RuntimeError> {
+    if max_items == 0 {
+        return Err(RuntimeError::Provider(
+            "take_last_within_bytes max_items must be at least 1".to_string(),
+        ));
+    }
+    if max_bytes == 0 {
+        return Err(RuntimeError::Provider(
+            "take_last_within_bytes max_bytes must be at least 1".to_string(),
+        ));
+    }
+    let Some(values) = value.as_array() else {
+        return Err(RuntimeError::Provider(
+            "take_last_within_bytes expression expected an array value".to_string(),
+        ));
+    };
+    let mut selected = Vec::new();
+    let mut selected_bytes = 0usize;
+    for value in values.iter().rev().take(max_items) {
+        let mut candidate = value.clone();
+        let mut candidate_bytes = json_value_size_bytes(&candidate);
+        if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
+            candidate = compact_trace_payload(value);
+            candidate_bytes = json_value_size_bytes(&candidate);
+        }
+        if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
+            continue;
+        }
+        selected_bytes = selected_bytes.saturating_add(candidate_bytes);
+        selected.push(candidate);
+    }
+    selected.reverse();
+    Ok(Value::Array(selected))
+}
+
 fn event(
     module: &AirModule,
     step: u32,
@@ -2820,17 +2899,41 @@ fn condition_clause_matches(
     outputs: &State,
     clause: &str,
 ) -> Result<bool, RuntimeError> {
-    let (left, right, expected_equal) = if let Some((left, right)) = clause.split_once("==") {
-        (left, right, true)
-    } else if let Some((left, right)) = clause.split_once("!=") {
-        (left, right, false)
-    } else {
+    let Some((left, operator, right)) = split_condition_clause(clause) else {
         return Err(RuntimeError::UnsupportedCondition(clause.to_string()));
     };
 
     let actual = read_path(state, outputs, left.trim())?;
     let expected = parse_condition_literal(right.trim())?;
-    Ok((actual == &expected) == expected_equal)
+    match operator {
+        "==" => Ok(actual == &expected),
+        "!=" => Ok(actual != &expected),
+        ">" | ">=" | "<" | "<=" => {
+            let Some(actual) = actual.as_f64() else {
+                return Err(RuntimeError::UnsupportedCondition(clause.to_string()));
+            };
+            let Some(expected) = expected.as_f64() else {
+                return Err(RuntimeError::UnsupportedCondition(clause.to_string()));
+            };
+            Ok(match operator {
+                ">" => actual > expected,
+                ">=" => actual >= expected,
+                "<" => actual < expected,
+                "<=" => actual <= expected,
+                _ => unreachable!(),
+            })
+        }
+        _ => Err(RuntimeError::UnsupportedCondition(clause.to_string())),
+    }
+}
+
+fn split_condition_clause(clause: &str) -> Option<(&str, &'static str, &str)> {
+    for operator in [">=", "<=", "==", "!=", ">", "<"] {
+        if let Some((left, right)) = clause.split_once(operator) {
+            return Some((left, operator, right));
+        }
+    }
+    None
 }
 
 fn parse_condition_literal(raw: &str) -> Result<Value, RuntimeError> {
@@ -2911,6 +3014,35 @@ mod tests {
             read_path(&state, &outputs, "observation.0.status").unwrap(),
             &json!("ok")
         );
+    }
+
+    #[test]
+    fn condition_matches_numeric_runtime_context_comparisons() {
+        let mut state = State::new();
+        state.insert(
+            "_air".to_string(),
+            json!({
+                "model_calls": 8,
+                "tool_calls": 12,
+            }),
+        );
+        let outputs = State::new();
+
+        assert!(condition_matches(&state, &outputs, "_air.model_calls >= 8").unwrap());
+        assert!(condition_matches(&state, &outputs, "_air.tool_calls < 20").unwrap());
+        assert!(!condition_matches(&state, &outputs, "_air.model_calls > 8").unwrap());
+    }
+
+    #[test]
+    fn validates_batch_allowed_tools() {
+        assert!(validate_batch_allowed_tool("file.ops", &["file.ops".to_string()]).is_ok());
+
+        let error =
+            validate_batch_allowed_tool("file.read", &["file.ops".to_string()]).unwrap_err();
+        assert!(matches!(
+            error,
+            RuntimeError::ToolBatchDispatchToolNotAllowed { .. }
+        ));
     }
 
     #[test]

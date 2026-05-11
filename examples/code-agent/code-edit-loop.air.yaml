@@ -47,7 +47,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, preflight, preflight_candidate, choose, act, post_act, post_verify, summarize, done, failed]
+    enum: [init, preflight, preflight_candidate, choose, act, force_act, post_act, post_verify, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -392,9 +392,10 @@ workflow:
               force_patch:
                 ref: force_patch
               observations:
-                take_last:
+                take_last_within_bytes:
                   ref: observations
-                max_items: 8
+                max_items: 20
+                max_bytes: 120000
               final_decision:
                 literal:
                   complete: false
@@ -408,6 +409,81 @@ workflow:
         - kind: set
           values:
             phase: done
+
+    - id: force-write-after-explore-budget
+      when: phase == "choose" && _air.model_calls >= 8 && verification_status != "passed"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: exploration_budget_reached
+              rationale:
+                literal: AIR has reached the bounded exploration budget for this edit. Further read/search tools are disabled for the next decision; either make a write-focused change or return complete only if no edit is needed.
+              requested:
+                array: []
+              result:
+                object:
+                  runtime:
+                    ref: _air
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              write_paths:
+                ref: write_paths
+              test_command:
+                ref: test_command
+              force_patch:
+                ref: force_patch
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_items: 20
+                max_bytes: 120000
+              verification_status:
+                ref: verification_status
+              runtime:
+                ref: _air
+              allowed_tools:
+                array:
+                  - literal: file.ops
+                  - literal: file.patch
+              tool_schemas:
+                literal:
+                  file.ops:
+                    required:
+                      operations: "array; each item must be one of: {kind:'edit', path, old_string, new_string}; {kind:'replace_lines', path, start_line, end_line, new_string}; {kind:'write', path, content}"
+                    optional:
+                      path: "default repo-relative path for all operations"
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected from write_paths; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+                  file.patch:
+                    required: {patch: "unified diff"}
+                    optional:
+                      dry_run: "boolean"
+                      allowed_paths: "automatically injected from write_paths; do not override"
+                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+              tool_policy:
+                literal:
+                  mode: "Exploration budget is exhausted. Read/search tools are not allowed in this decision."
+                  write: "If the edit is possible from the observed line ranges, call exactly one write tool: file.ops or file.patch. Do not ask for more context."
+                  finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: force_act
 
     - id: choose
       when: phase == "choose"
@@ -433,9 +509,10 @@ workflow:
               force_patch:
                 ref: force_patch
               observations:
-                take_last:
+                take_last_within_bytes:
                   ref: observations
-                max_items: 8
+                max_items: 20
+                max_bytes: 120000
               verification_status:
                 ref: verification_status
               runtime:
@@ -493,6 +570,7 @@ workflow:
                     required: {}
                     optional:
                       query: "symbol/name filter"
+                      names: "array of exact symbol names; use this to fetch several function ranges in one call"
                       path: "repo-relative scope"
                       max_symbols: "bounded result limit"
                   repo.references:
@@ -564,11 +642,11 @@ workflow:
               tool_policy:
                 literal:
                   plan: "Use todo.write/read to track multi-step edits, especially when a task touches several files or requires repeated verification."
-                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions, and repo.references for call sites before broad edits."
+                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, and repo.references for call sites before broad edits."
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
-                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files."
-                  edits: "Use file.ops with kind=edit old_string/new_string for anchored insertions or wording changes, especially in docs. Use kind=replace_lines only when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call."
+                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files. For function moves, call repo.symbols once with names:[...] to get start/end lines, then read exact function ranges instead of rediscovering boundaries repeatedly. After the exact target ranges and module wiring are known, the next turn must either write or name the single missing blocking fact."
+                  edits: "Use file.ops with kind=edit old_string/new_string for anchored insertions or wording changes, especially in docs. Use kind=replace_lines only when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
                   tests: "Use test.run with the supplied allowlisted test_command only. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
@@ -579,6 +657,58 @@ workflow:
         - kind: set
           values:
             phase: act
+
+    - id: force-empty-action
+      when: phase == "force_act" && decision.complete == false && decision.tool_calls == []
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: forced_write_empty
+              rationale:
+                path: decision.rationale
+              requested:
+                array: []
+              result:
+                object:
+                  error:
+                    literal: The force-write decision returned no write tool calls. AIR will ask once more with the preserved observation window instead of reading more files.
+        - kind: set
+          values:
+            phase: choose
+
+    - id: force-act
+      when: phase == "force_act" && decision.complete == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            path: decision.tool_calls
+          write_scope:
+            ref: write_paths
+          output: observation
+          max_calls: 1
+          allowed_tools:
+            - file.ops
+            - file.patch
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: forced_write_dispatch
+              rationale:
+                path: decision.rationale
+              requested:
+                path: decision.tool_calls
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: post_act
 
     - id: act
       when: phase == "act" && decision.complete == false
@@ -1167,7 +1297,7 @@ workflow:
             phase: choose
 
     - id: block-complete-without-passed-verification
-      when: phase == "act" && decision.complete == true && verification_status != "passed"
+      when: phase == "act" && decision.complete == true && verification_status != "passed" || phase == "force_act" && decision.complete == true && verification_status != "passed"
       actions:
         - kind: append
           target: observations
@@ -1188,7 +1318,7 @@ workflow:
             phase: choose
 
     - id: summarize
-      when: phase == "summarize" || phase == "act" && decision.complete == true && verification_status == "passed"
+      when: phase == "summarize" || phase == "act" && decision.complete == true && verification_status == "passed" || phase == "force_act" && decision.complete == true && verification_status == "passed"
       actions:
         - kind: model_call
           model: code_edit_summarizer
@@ -1205,9 +1335,10 @@ workflow:
               force_patch:
                 ref: force_patch
               observations:
-                take_last:
+                take_last_within_bytes:
                   ref: observations
-                max_items: 8
+                max_items: 20
+                max_bytes: 120000
               final_decision:
                 ref: decision
           output: edit

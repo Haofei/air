@@ -144,6 +144,9 @@ pub enum StateAction {
         max_calls: u32,
 
         #[serde(default)]
+        allowed_tools: Vec<String>,
+
+        #[serde(default)]
         write_scope: Option<InputSpec>,
 
         #[serde(default)]
@@ -206,6 +209,11 @@ pub enum Expr {
     TakeLast {
         take_last: Box<Expr>,
         max_items: usize,
+    },
+    TakeLastWithinBytes {
+        take_last_within_bytes: Box<Expr>,
+        max_items: usize,
+        max_bytes: usize,
     },
 }
 

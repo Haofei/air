@@ -40,10 +40,12 @@ assert max_matches and int(max_matches.group(1)) <= 8, max_matches.group(0) if m
 choose = re.search(r"- id:\s*choose(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
 assert choose, "missing choose rule"
 observations_window = re.search(
-    r"observations:\s*\n\s+take_last:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)",
+    r"observations:\s*\n\s+take_last_within_bytes:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)\s*\n\s+max_bytes:\s*(\d+)",
     choose.group("body"),
 )
-assert observations_window and int(observations_window.group(1)) <= 8, (
+assert observations_window, "choose rule must use byte-bounded observation history"
+assert int(observations_window.group(1)) <= 20, observations_window.group(0)
+assert int(observations_window.group(2)) <= 120000, (
     observations_window.group(0) if observations_window else None
 )
 
@@ -55,7 +57,7 @@ for model in ("code_edit_decider", "code_edit_summarizer"):
 self_tools = json.loads(Path("examples/code-agent/tools.self.json").read_text())
 for tool in ("file.ops", "file.patch"):
     max_changed_lines = self_tools["tools"][tool].get("max_changed_lines")
-    assert max_changed_lines is not None and max_changed_lines >= 200, (tool, max_changed_lines)
+    assert max_changed_lines is not None and max_changed_lines >= 800, (tool, max_changed_lines)
 
 for path in (
     "examples/code-agent/tools.json",
@@ -219,10 +221,12 @@ decider_start = next(
 )
 tool_schemas = decider_start["input"]["tool_schemas"]
 assert "repo.files" in tool_schemas, tool_schemas
+assert "repo.symbols" in tool_schemas, tool_schemas
 assert "file.ops" in tool_schemas, tool_schemas
 assert "candidate.validate" in tool_schemas, tool_schemas
 assert "test.run" in tool_schemas, tool_schemas
 assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
+assert "names" in tool_schemas["repo.symbols"]["optional"], tool_schemas["repo.symbols"]
 assert "max_changed_lines" in tool_schemas["file.ops"]["optional"], tool_schemas["file.ops"]
 assert "max_changed_lines" in tool_schemas["file.patch"]["optional"], tool_schemas["file.patch"]
 assert "candidate" in tool_schemas["candidate.validate"]["required"], tool_schemas["candidate.validate"]

@@ -572,7 +572,8 @@ fn evaluates_composable_input_expressions() {
             "tags": ["customer", "billing"],
             "message": "double charge / please fix billing",
             "short_message": "double charge",
-            "recent_notes": ["second", "third"]
+            "recent_notes": ["second", "third"],
+            "recent_notes_budgeted": ["second", "third"]
         })
     );
 }
@@ -2029,6 +2030,7 @@ fn notifies_observer_as_actions_complete() {
         .expect("model_call_start meta");
     assert_eq!(start_meta["model"], json!("extractor"));
     assert_eq!(start_meta["attempt"], json!(1));
+    assert!(start_meta["input_bytes"].as_u64().unwrap() > 0);
 
     let complete_meta = result
         .trace
@@ -2038,6 +2040,7 @@ fn notifies_observer_as_actions_complete() {
         .expect("model_call meta");
     assert_eq!(complete_meta["model"], json!("extractor"));
     assert_eq!(complete_meta["will_retry"], json!(false));
+    assert_eq!(complete_meta["input_bytes"], start_meta["input_bytes"]);
     assert!(complete_meta.get("elapsed_ms").is_some());
 }
 
