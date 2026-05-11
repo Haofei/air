@@ -5167,6 +5167,60 @@ fn command_run_can_tail_truncated_log_preview() {
 }
 
 #[test]
+fn command_run_full_log_path_can_be_searched_by_file_search() {
+    let dir = temp_dir("air-tools-command-run-search-full-log");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "long_log": ["sh", "-c", "printf 'setup noise\\nERROR searchable tail\\n'"]
+                  },
+                  "timeout_seconds": 10,
+                  "max_bytes": 8,
+                  "truncation_direction": "tail"
+                },
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8,
+                  "max_context_lines": 2,
+                  "max_line_chars": 200,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let command = tools
+        .call_tool("test.run", &json!({"command": "long_log"}))
+        .unwrap();
+    assert_eq!(command["truncated"], json!(true));
+    let full_log_path = command["full_log_path"].as_str().unwrap();
+
+    let search = tools
+        .call_tool(
+            "file.search",
+            &json!({
+                "path": full_log_path,
+                "pattern": "ERROR searchable tail",
+                "context_lines": 1
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(search["match_count"], json!(1));
+    assert_eq!(search["matches"][0]["line"], json!("ERROR searchable tail"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_allows_empty_command_map_until_called() {
     let dir = temp_dir("air-tools-command-run-empty-command-map");
     let config_path = write_config(
