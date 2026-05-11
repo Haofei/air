@@ -69,6 +69,7 @@ pub(crate) struct ReplayOptions {
     pub(crate) store: Option<PathBuf>,
     pub(crate) output: Option<PathBuf>,
     pub(crate) identity_out: Option<PathBuf>,
+    pub(crate) stats: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1015,6 +1016,7 @@ pub(crate) fn replay(options: ReplayOptions) -> Result<()> {
         store,
         output,
         identity_out,
+        stats,
     } = options;
     let events = read_trace_jsonl(trace)?;
     if specialize_run_plan {
@@ -1036,6 +1038,8 @@ pub(crate) fn replay(options: ReplayOptions) -> Result<()> {
                 serde_json::to_string_pretty(&specialization.cache_identity)?,
             )?;
         }
+    } else if stats {
+        println!("{}", serde_json::to_string_pretty(&replay_stats(&events)?)?);
     } else {
         let output = replay_outputs(&events)?;
         println!("{}", serde_json::to_string_pretty(&output)?);
@@ -1043,10 +1047,62 @@ pub(crate) fn replay(options: ReplayOptions) -> Result<()> {
     Ok(())
 }
 
+fn replay_stats(events: &[TraceEvent]) -> Result<Value> {
+    let final_output = replay_outputs(events)?;
+    Ok(json!({
+        "event_count": events.len(),
+        "error_count": events.iter().filter(|event| event.status == TraceStatus::Error).count(),
+        "model_call_count": events.iter().filter(|event| event.action == "model_call").count(),
+        "tool_call_count": events.iter().filter(|event| is_tool_call_event(event)).count(),
+        "final_output": final_output,
+    }))
+}
+
+fn is_tool_call_event(event: &TraceEvent) -> bool {
+    matches!(
+        event.action.as_str(),
+        "tool_call" | "tool_dispatch" | "tool_batch_dispatch_item"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use air_runtime::TraceStatus;
+
+    fn trace_event(action: &str, status: TraceStatus) -> TraceEvent {
+        let error = (status == TraceStatus::Error).then(|| "failed".to_string());
+        TraceEvent {
+            agent: "agent".to_string(),
+            step: 0,
+            rule: "rule".to_string(),
+            action: action.to_string(),
+            input: None,
+            output: None,
+            meta: None,
+            status,
+            error,
+        }
+    }
+
+    #[test]
+    fn replay_stats_counts_trace_events() {
+        let mut output = serde_json::Map::new();
+        output.insert("ok".to_string(), json!(true));
+        let events = vec![
+            trace_event("model_call", TraceStatus::Ok),
+            trace_event("tool_dispatch", TraceStatus::Error),
+            trace_event("tool_batch_dispatch_item", TraceStatus::Ok),
+            system_return_event(output),
+        ];
+
+        let stats = replay_stats(&events).unwrap();
+
+        assert_eq!(stats["event_count"], json!(4));
+        assert_eq!(stats["error_count"], json!(1));
+        assert_eq!(stats["model_call_count"], json!(1));
+        assert_eq!(stats["tool_call_count"], json!(2));
+        assert_eq!(stats["final_output"], json!({"ok": true}));
+    }
 
     #[test]
     fn observer_writes_incremental_trace_file() {

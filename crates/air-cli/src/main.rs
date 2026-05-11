@@ -475,6 +475,10 @@ enum Command {
         /// Optional cache identity JSON output path for specialized traces.
         #[arg(long)]
         identity_out: Option<PathBuf>,
+
+        /// Print trace statistics and final output as JSON.
+        #[arg(long)]
+        stats: bool,
     },
     /// Lower an AIR module to a backend target.
     #[command(hide = true)]
@@ -748,12 +752,14 @@ fn main() -> Result<()> {
             store,
             output,
             identity_out,
+            stats,
         } => replay(ReplayOptions {
             trace,
             specialize_run_plan,
             store,
             output,
             identity_out,
+            stats,
         }),
         Command::Lower {
             file,
@@ -2312,6 +2318,7 @@ modules:
             specialize_run_plan: true,
             store: Some(store_path.clone()),
             identity_out: Some(identity_path.clone()),
+            stats: false,
         })
         .unwrap();
 
@@ -2396,6 +2403,7 @@ modules:
             specialize_run_plan: true,
             store: Some(store_path.clone()),
             identity_out: Some(identity_path.clone()),
+            stats: false,
         })
         .unwrap();
 
