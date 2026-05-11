@@ -1,3 +1,4 @@
 /target/
+.air/tool-output/
 .venv/
 node_modules/

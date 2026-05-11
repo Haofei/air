@@ -5085,6 +5085,52 @@ fn command_run_accepts_test_command_alias() {
 }
 
 #[test]
+fn command_run_saves_full_log_when_truncated() {
+    let dir = temp_dir("air-tools-command-run-truncated-log");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test.run": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "long_log": ["sh", "-c", "printf 'line-one\\nline-two\\nline-three\\n'"]
+                  },
+                  "timeout_seconds": 10,
+                  "max_bytes": 12
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("test.run", &json!({"command": "long_log"}))
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["log"], json!("line-one\nlin"));
+    let full_log_path = output["full_log_path"].as_str().unwrap();
+    assert!(full_log_path.ends_with(".log"), "{full_log_path}");
+    assert_eq!(
+        fs::read_to_string(full_log_path).unwrap(),
+        "line-one\nline-two\nline-three\n"
+    );
+    assert!(output["truncation_hint"]
+        .as_str()
+        .unwrap()
+        .contains("Full command output saved to"));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["full_log_path"],
+        json!(full_log_path)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_allows_empty_command_map_until_called() {
     let dir = temp_dir("air-tools-command-run-empty-command-map");
     let config_path = write_config(

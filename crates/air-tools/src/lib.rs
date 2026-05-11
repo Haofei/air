@@ -4189,6 +4189,16 @@ fn call_command_run_tool(
                 let diagnostics = extract_command_diagnostics(&combined_text, 50);
                 let diagnostics_count = diagnostics.len();
                 let (log, truncated, bytes) = bytes_to_limited_text(&combined, max_bytes);
+                let full_log_path = if truncated {
+                    Some(save_command_full_log(name, command_name, &cwd, &combined)?)
+                } else {
+                    None
+                };
+                let truncation_hint = full_log_path.as_ref().map(|path| {
+                    format!(
+                        "The command output was truncated. Full command output saved to: {path}. Use file.search or file.read with a narrow range to inspect specific sections."
+                    )
+                });
                 return Ok(json!({
                     "command": command_name,
                     "argv": argv,
@@ -4199,6 +4209,8 @@ fn call_command_run_tool(
                     "diagnostics": diagnostics,
                     "bytes": bytes,
                     "truncated": truncated,
+                    "full_log_path": full_log_path.clone(),
+                    "truncation_hint": truncation_hint.clone(),
                     "artifacts": [{
                         "id": format!("command-run:{}:{}", cwd.display(), command_name),
                         "kind": "test_log",
@@ -4214,7 +4226,9 @@ fn call_command_run_tool(
                             "success": status.success(),
                             "diagnostics_count": diagnostics_count,
                             "bytes": bytes,
-                            "truncated": truncated
+                            "truncated": truncated,
+                            "full_log_path": full_log_path,
+                            "truncation_hint": truncation_hint
                         }
                     }]
                 }));
@@ -4228,6 +4242,58 @@ fn call_command_run_tool(
             }
             None => std::thread::sleep(Duration::from_millis(100)),
         }
+    }
+}
+
+fn save_command_full_log(
+    name: &str,
+    command_name: &str,
+    cwd: &Path,
+    combined: &[u8],
+) -> Result<String, RuntimeError> {
+    let output_dir = cwd.join(".air").join("tool-output");
+    fs::create_dir_all(&output_dir).map_err(|error| {
+        RuntimeError::Provider(format!(
+            "tool {name} command {command_name} create output dir: {error}"
+        ))
+    })?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| {
+            RuntimeError::Provider(format!(
+                "tool {name} command {command_name} timestamp: {error}"
+            ))
+        })?
+        .as_millis();
+    let filename = format!(
+        "{}-{timestamp}.log",
+        sanitize_command_output_filename(command_name)
+    );
+    let path = output_dir.join(filename);
+    fs::write(&path, combined).map_err(|error| {
+        RuntimeError::Provider(format!(
+            "tool {name} command {command_name} write full log: {error}"
+        ))
+    })?;
+    Ok(path.display().to_string())
+}
+
+fn sanitize_command_output_filename(command_name: &str) -> String {
+    let sanitized = command_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+                ch
+            } else {
+                '-'
+            }
+        })
+        .collect::<String>();
+    let trimmed = sanitized.trim_matches('-');
+    if trimmed.is_empty() {
+        "command".to_string()
+    } else {
+        trimmed.to_string()
     }
 }
 
