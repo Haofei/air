@@ -3585,7 +3585,7 @@ fn call_repo_symbols_tool(
             .unwrap_or(max_symbols);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input)?;
-    let pattern = r"^\s*(pub\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+)*(fn|function|def|class|struct|enum|trait|interface|type|const|let|var)\s+[A-Za-z_$][A-Za-z0-9_$]*";
+    let pattern = r"^\s*(pub\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+|const\s+|let\s+|var\s+)";
     let mut command = Command::new("rg");
     command.args([
         "--line-number",
@@ -3650,6 +3650,7 @@ fn call_repo_symbols_tool(
             &repo,
             path,
             line,
+            text,
             &symbol_lines_by_path,
             &mut total_lines_by_path,
         )?;
@@ -3743,9 +3744,21 @@ fn repo_symbol_end_line(
     repo: &Path,
     path: &str,
     start_line: u64,
+    declaration_text: &str,
     symbol_lines_by_path: &BTreeMap<String, Vec<u64>>,
     total_lines_by_path: &mut BTreeMap<String, u64>,
 ) -> Result<u64, RuntimeError> {
+    if parse_rust_impl_symbol_name(declaration_text.trim_start()).is_some() {
+        let absolute = canonicalize_tool_path(tool_name, "repo.symbols path", &repo.join(path))?;
+        if absolute.starts_with(repo) && absolute.is_file() {
+            let content = fs::read_to_string(&absolute).map_err(|error| {
+                RuntimeError::Provider(format!("tool {tool_name} repo symbols: {error}"))
+            })?;
+            if let Some(end_line) = rust_brace_block_end_line(&content, start_line) {
+                return Ok(end_line.max(start_line));
+            }
+        }
+    }
     let Some(lines) = symbol_lines_by_path.get(path) else {
         return Ok(start_line);
     };
@@ -3765,6 +3778,30 @@ fn repo_symbol_end_line(
     let total_lines = content.lines().count().max(1) as u64;
     total_lines_by_path.insert(path.to_string(), total_lines);
     Ok(total_lines.max(start_line))
+}
+
+fn rust_brace_block_end_line(content: &str, start_line: u64) -> Option<u64> {
+    let start_index = start_line.checked_sub(1)? as usize;
+    let mut depth = 0usize;
+    let mut saw_open = false;
+    for (offset, line) in content.lines().enumerate().skip(start_index) {
+        for character in line.chars() {
+            match character {
+                '{' => {
+                    depth += 1;
+                    saw_open = true;
+                }
+                '}' if saw_open => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(offset as u64 + 1);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 fn repo_symbol_matches_any_term(
@@ -3811,6 +3848,10 @@ fn repo_symbol_names_input(tool_name: &str, input: &Value) -> Result<Vec<String>
 }
 
 fn parse_symbol_declaration(line: &str) -> Option<(&'static str, String)> {
+    let trimmed = line.trim_start();
+    if let Some(name) = parse_rust_impl_symbol_name(trimmed) {
+        return Some(("impl", name));
+    }
     let mut tokens = line
         .trim_start()
         .split(|character: char| character.is_whitespace() || character == '(' || character == '<')
@@ -3839,6 +3880,68 @@ fn parse_symbol_declaration(line: &str) -> Option<(&'static str, String)> {
         })
         .to_string();
     (!name.is_empty()).then_some((kind, name))
+}
+
+fn parse_rust_impl_symbol_name(line: &str) -> Option<String> {
+    let mut text = line;
+    for modifier in ["pub ", "unsafe "] {
+        if let Some(rest) = text.strip_prefix(modifier) {
+            text = rest.trim_start();
+        }
+    }
+    let rest = text.strip_prefix("impl")?.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    let rest = strip_rust_generics_prefix(rest).trim_start();
+    let target = if let Some((_, target)) = rest.rsplit_once(" for ") {
+        target
+    } else {
+        rest
+    };
+    rust_type_symbol_name(target)
+}
+
+fn strip_rust_generics_prefix(text: &str) -> &str {
+    let Some(rest) = text.strip_prefix('<') else {
+        return text;
+    };
+    let mut depth = 1usize;
+    for (index, character) in rest.char_indices() {
+        match character {
+            '<' => depth += 1,
+            '>' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return &rest[index + character.len_utf8()..];
+                }
+            }
+            _ => {}
+        }
+    }
+    text
+}
+
+fn rust_type_symbol_name(text: &str) -> Option<String> {
+    let cleaned = text
+        .trim_start()
+        .trim_start_matches('&')
+        .trim_start_matches("mut ")
+        .trim_start();
+    let token = cleaned
+        .split(|character: char| {
+            character.is_whitespace()
+                || character == '<'
+                || character == '{'
+                || character == '('
+                || character == ';'
+        })
+        .next()?;
+    let segment = token.rsplit("::").next().unwrap_or(token);
+    let name = segment
+        .trim_matches(|character: char| !(character.is_ascii_alphanumeric() || character == '_'))
+        .to_string();
+    (!name.is_empty()).then_some(name)
 }
 
 fn call_repo_references_tool(
@@ -3914,7 +4017,9 @@ fn call_repo_references_tool(
         let path = item["path"].as_str().unwrap_or_default().to_string();
         let line_number = item["line"].as_u64().unwrap_or_default() as usize;
         let definition_kind = parse_symbol_declaration(text)
-            .and_then(|(kind, declaration)| (declaration == symbol).then_some(kind));
+            .and_then(|(kind, declaration)| {
+                (kind != "impl" && declaration == symbol).then_some(kind)
+            });
         let reference = json!({
             "path": item["path"],
             "line": item["line"],

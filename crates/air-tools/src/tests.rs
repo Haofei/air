@@ -4998,6 +4998,61 @@ fn repo_symbols_reports_symbol_end_lines() {
 }
 
 #[test]
+fn repo_symbols_reports_rust_impl_blocks_for_type_names() {
+    let dir = temp_dir("air-tools-repo-symbols-rust-impl");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "pub struct Alpha {}\n\nimpl Alpha {\n  pub fn new() -> Self { Self {} }\n}\n\nimpl std::fmt::Display for Alpha {\n  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { todo!() }\n}\n\nimpl<T> Alpha<T> {\n  fn generic(&self) {}\n}\n\nfn beta() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.symbols",
+            &json!({"path": "src/lib.rs", "names": ["Alpha"]}),
+        )
+        .unwrap();
+
+    let symbols = output["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 4);
+    assert_eq!(symbols[0]["kind"], json!("struct"));
+    assert_eq!(symbols[0]["name"], json!("Alpha"));
+    assert_eq!(symbols[1]["kind"], json!("impl"));
+    assert_eq!(symbols[1]["name"], json!("Alpha"));
+    assert_eq!(symbols[1]["line"], json!(3));
+    assert_eq!(symbols[1]["end_line"], json!(5));
+    assert_eq!(symbols[2]["kind"], json!("impl"));
+    assert_eq!(symbols[2]["name"], json!("Alpha"));
+    assert_eq!(symbols[2]["line"], json!(7));
+    assert_eq!(symbols[2]["end_line"], json!(9));
+    assert_eq!(symbols[3]["kind"], json!("impl"));
+    assert_eq!(symbols[3]["name"], json!("Alpha"));
+    assert_eq!(symbols[3]["line"], json!(11));
+    assert_eq!(symbols[3]["end_line"], json!(13));
+    assert!(output["artifacts"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("impl Alpha"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_symbols_accepts_multiple_exact_names() {
     let dir = temp_dir("air-tools-repo-symbols-names");
     fs::create_dir_all(dir.join("src")).unwrap();

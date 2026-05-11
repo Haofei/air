@@ -44,8 +44,8 @@ observations_window = re.search(
     choose.group("body"),
 )
 assert observations_window, "choose rule must use byte-bounded observation history"
-assert int(observations_window.group(1)) <= 20, observations_window.group(0)
-assert int(observations_window.group(2)) <= 120000, (
+assert int(observations_window.group(1)) == 30, observations_window.group(0)
+assert int(observations_window.group(2)) == 200000, (
     observations_window.group(0) if observations_window else None
 )
 

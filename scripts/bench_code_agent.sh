@@ -82,8 +82,52 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == [
+    "file.search",
+    "candidate.validate",
+    "test.run",
+    "file.read",
+    "file.ops",
+    "test.run",
+    "git.diff",
+], tools
 assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
+PY
+
+echo "[code-agent-bench] fuzzy edit fallback"
+backup="$(mktemp)"
+cp "$fixture" "$backup"
+trap restore_fixture EXIT
+
+cargo run -q -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.yaml \
+  --model-config examples/code-agent/model-fixtures.fuzzy-line-trimmed.json \
+  --trace-out target/generated/code-agent-bench/fuzzy-line-trimmed.trace.jsonl \
+  > target/generated/code-agent-bench/fuzzy-line-trimmed.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code-agent-bench/fuzzy-line-trimmed.post_test.log
+restore_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code-agent-bench/fuzzy-line-trimmed.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code-agent-bench/fuzzy-line-trimmed.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+file_ops = [
+    event
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.ops"
+]
+assert len(file_ops) == 1, file_ops
+assert file_ops[0]["input"]["match_strategy"] == "auto", file_ops[0]
+assert file_ops[0]["output"]["match_strategies"] == ["line_trimmed"], file_ops[0]
+assert file_ops[0]["output"]["applied"] is True, file_ops[0]
 PY
 
 echo "[code-agent-bench] ok"

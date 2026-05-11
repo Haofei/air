@@ -1,0 +1,59 @@
+{
+  "fixtures": {
+    "code_edit_decider": {
+      "$sequence": [
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.read",
+              "input": {
+                "path": "examples/code-agent/edit-fixture/math.js",
+                "line_numbers": true,
+                "max_bytes": 20000
+              }
+            }
+          ],
+          "rationale": "Read the target before applying a bounded fuzzy edit."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "file.ops",
+              "input": {
+                "match_strategy": "auto",
+                "operations": [
+                  {
+                    "kind": "edit",
+                    "path": "examples/code-agent/edit-fixture/math.js",
+                    "old_string": "function add(a, b) {\nreturn a - b;\n}",
+                    "new_string": "function add(a, b) {\n  return a + b;\n}"
+                  }
+                ]
+              }
+            }
+          ],
+          "rationale": "Use an old_string with missing indentation so exact matching fails and AIR must fall back to line_trimmed."
+        }
+      ]
+    },
+    "code_edit_summarizer": {
+      "initial_success": false,
+      "final_success": true,
+      "patch_applied": true,
+      "changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "workspace_changed_files": [
+        "examples/code-agent/edit-fixture/math.js"
+      ],
+      "preexisting_changed_files": [],
+      "workspace_diff": {
+        "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
+      },
+      "rationale": "The code-agent edit loop applied a file.ops edit through match_strategy=auto and verified the fixture test.",
+      "observations": []
+    }
+  }
+}

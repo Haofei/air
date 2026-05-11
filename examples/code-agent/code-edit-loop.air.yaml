@@ -394,8 +394,8 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 20
-                max_bytes: 120000
+                max_items: 30
+                max_bytes: 200000
               final_decision:
                 literal:
                   complete: false
@@ -446,8 +446,8 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 20
-                max_bytes: 120000
+                max_items: 30
+                max_bytes: 200000
               verification_status:
                 ref: verification_status
               runtime:
@@ -512,8 +512,8 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 20
-                max_bytes: 120000
+                max_items: 30
+                max_bytes: 200000
               verification_status:
                 ref: verification_status
               runtime:
@@ -648,7 +648,7 @@ workflow:
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
                   small_steps: "Choose one to four tool calls per turn. Batch independent read/search/todo calls when useful. Do not request whole large files. For function moves, call repo.symbols once with names:[...] to get start/end lines, then read exact function ranges instead of rediscovering boundaries repeatedly. After the exact target ranges and module wiring are known, the next turn must either write or name the single missing blocking fact."
-                  edits: "Use file.ops with kind=edit old_string/new_string for anchored insertions or wording changes, especially in docs. Use kind=replace_lines only when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
+                  edits: "Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, moved blocks, or ranges over roughly 40 changed lines, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
                   tests: "Use test.run with the supplied allowlisted test_command only. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
@@ -1339,8 +1339,8 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 20
-                max_bytes: 120000
+                max_items: 30
+                max_bytes: 200000
               final_decision:
                 ref: decision
           output: edit
