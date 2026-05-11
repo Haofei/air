@@ -69,7 +69,7 @@ recipes:
     intent: "Run the unified bounded code edit loop over an allowlisted test; target may be known or discovered before writing."
     input:
       required: [task, test]
-      optional: [query, target, write, related, force_patch]
+      optional: [query, target, write, related, force_patch, target_search_pattern, target_symbol_query]
     completion:
       any:
         - equals:

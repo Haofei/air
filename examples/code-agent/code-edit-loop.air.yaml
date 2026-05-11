@@ -8,6 +8,7 @@ inputs:
   query: string
   target_path: string
   target_search_pattern: string
+  target_symbol_query: string
   related_files:
     type: array
     items: string
@@ -200,8 +201,54 @@ workflow:
             verification_status: unknown
             phase: preflight
 
+    - id: preflight-target-symbols
+      when: phase == "preflight" && target_path != "" && target_symbol_query != ""
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: repo.symbols
+                  input:
+                    object:
+                      path:
+                        ref: target_path
+                      query:
+                        ref: target_symbol_query
+                      max_symbols:
+                        literal: 8
+          output: initial_target_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: initial_target_symbols
+              rationale:
+                literal: Deterministically locate target symbols before the first model decision so Rust edits start from AST-derived function ranges instead of broad text search.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: repo.symbols
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+                          query:
+                            ref: target_symbol_query
+              result:
+                ref: initial_target_context
+        - kind: set
+          values:
+            phase: preflight_candidate
+
     - id: preflight-target-search
-      when: phase == "preflight" && target_path != "" && target_search_pattern != ""
+      when: phase == "preflight" && target_path != "" && target_symbol_query == "" && target_search_pattern != ""
       actions:
         - kind: tool_batch_dispatch
           input:
@@ -249,7 +296,7 @@ workflow:
             phase: preflight_candidate
 
     - id: preflight-target-read
-      when: phase == "preflight" && target_path != "" && target_search_pattern == ""
+      when: phase == "preflight" && target_path != "" && target_symbol_query == "" && target_search_pattern == ""
       actions:
         - kind: tool_batch_dispatch
           input:
@@ -501,6 +548,8 @@ workflow:
                 ref: target_path
               target_search_pattern:
                 ref: target_search_pattern
+              target_symbol_query:
+                ref: target_symbol_query
               related_files:
                 ref: related_files
               write_paths:
@@ -992,7 +1041,9 @@ workflow:
                   tool:
                     literal: git.diff
                   input:
-                    literal: {}
+                    object:
+                      paths:
+                        ref: write_paths
           output: final_diff_result
           max_calls: 1
           timeout_seconds: 120
@@ -1011,7 +1062,9 @@ workflow:
                       tool:
                         literal: git.diff
                       input:
-                        literal: {}
+                        object:
+                          paths:
+                            ref: write_paths
               result:
                 ref: final_diff_result
         - kind: set
@@ -1330,6 +1383,8 @@ workflow:
                 ref: task
               target_path:
                 ref: target_path
+              target_symbol_query:
+                ref: target_symbol_query
               write_paths:
                 ref: write_paths
               test_command:

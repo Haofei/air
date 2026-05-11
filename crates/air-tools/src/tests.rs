@@ -4987,13 +4987,53 @@ fn repo_symbols_reports_symbol_end_lines() {
     assert_eq!(symbols.len(), 3);
     assert_eq!(symbols[0]["name"], json!("alpha"));
     assert_eq!(symbols[0]["line"], json!(1));
-    assert_eq!(symbols[0]["end_line"], json!(4));
+    assert_eq!(symbols[0]["end_line"], json!(3));
     assert_eq!(symbols[1]["name"], json!("beta"));
     assert_eq!(symbols[1]["line"], json!(5));
-    assert_eq!(symbols[1]["end_line"], json!(8));
+    assert_eq!(symbols[1]["end_line"], json!(7));
     assert_eq!(symbols[2]["name"], json!("gamma"));
     assert_eq!(symbols[2]["line"], json!(9));
     assert_eq!(symbols[2]["end_line"], json!(9));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_symbols_reports_multiline_rust_function_body_end_line() {
+    let dir = temp_dir("air-tools-repo-symbols-multiline-fn-end-lines");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn alpha(\n  value: usize,\n) -> usize {\n  let next = value + 1;\n  next\n}\n\nfn beta() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.symbols",
+            &json!({"path": "src/lib.rs", "names": ["alpha"]}),
+        )
+        .unwrap();
+
+    let symbols = output["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0]["name"], json!("alpha"));
+    assert_eq!(symbols[0]["line"], json!(1));
+    assert_eq!(symbols[0]["end_line"], json!(6));
     let _ = fs::remove_dir_all(dir);
 }
 

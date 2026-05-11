@@ -1,4 +1,3 @@
-use air_core::Severity;
 use air_runtime::{system_return_event, Vm};
 mod code_agent;
 mod code_budget;
@@ -10,6 +9,7 @@ mod code_project_acceptance;
 mod code_project_context;
 mod code_project_schedule;
 mod code_session;
+mod diagnostics;
 mod explain;
 mod models;
 mod planner;
@@ -17,6 +17,7 @@ mod profile;
 mod run_plan;
 mod tools;
 use crate::code_agent::{code, code_session, CodeOptions, CodeRecipe, CodeSessionOptions};
+use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -785,13 +786,7 @@ fn validate_system(file: PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    for diagnostic in &report.diagnostics {
-        let severity = match diagnostic.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        eprintln!("{severity}[{}]: {}", diagnostic.code, diagnostic.message);
-    }
+    emit_diagnostics(&report.diagnostics);
 
     if report.is_success() {
         Ok(())
@@ -833,13 +828,7 @@ fn validate_plan(options: ValidatePlanOptions) -> Result<()> {
     let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
 
-    for diagnostic in &report.diagnostics {
-        let severity = match diagnostic.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        eprintln!("{severity}[{}]: {}", diagnostic.code, diagnostic.message);
-    }
+    emit_diagnostics(&report.diagnostics);
 
     if report.is_success() {
         if explain {
@@ -863,13 +852,7 @@ fn validate(file: PathBuf) -> Result<()> {
         return Ok(());
     }
 
-    for diagnostic in &report.diagnostics {
-        let severity = match diagnostic.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        eprintln!("{severity}[{}]: {}", diagnostic.code, diagnostic.message);
-    }
+    emit_diagnostics(&report.diagnostics);
 
     if report.is_success() {
         Ok(())
@@ -892,9 +875,7 @@ fn run(
     let module = air_parser::parse_air_file(&file)?;
     let report = air_verify::verify(&module);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         std::process::exit(1);
     }
 
@@ -973,9 +954,7 @@ fn run_system(
     let base_dir = module_base_dir_for_modules(&system.modules)?;
     let report = air_linker::validate_system(&system, &base_dir);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         std::process::exit(1);
     }
 
@@ -1057,9 +1036,7 @@ fn lower(file: PathBuf, backend: LowerBackend, output: Option<PathBuf>) -> Resul
     let module = air_parser::parse_air_file(&file)?;
     let report = air_verify::verify(&module);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         std::process::exit(1);
     }
 
@@ -1090,9 +1067,7 @@ fn lower_plan(
     let base_dir = module_base_dir_for_store_path(&store, &store_path);
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
-        for diagnostic in &report.diagnostics {
-            eprintln!("error[{}]: {}", diagnostic.code, diagnostic.message);
-        }
+        emit_diagnostics(&report.diagnostics);
         std::process::exit(1);
     }
 
