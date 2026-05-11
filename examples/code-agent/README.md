@@ -2,6 +2,21 @@
 
 This example keeps the coding agent close to AIR's own design rule: small primitives, explicit policy, and auditable traces.
 
+## Development Rule
+
+Code-agent work follows opencode-style practices as a standing requirement, not as an optional
+comparison point:
+
+- Start from a real or deterministic failing run, preferably with a trace, before adding behavior.
+- Check how opencode handles the same class of problem when the issue is tool feedback, repeated
+  calls, model formatting variance, context growth, step limits, or edit verification.
+- Add the smallest AIR primitive or tool behavior that preserves the generic IR. Do not add
+  task-shaped agent modes such as separate repair/refactor/build primitives.
+- Use TDD: add the failing fixture or contract test first, then implement, then run the code-agent
+  gate.
+- Keep the final evidence inspectable: trace stats, model/tool call sequence, verification command,
+  and any remaining limitation should be visible from the run output or checked artifacts.
+
 The public recipes are:
 
 - `plan`: turn an open coding goal into bounded tasks, files, dependencies, and acceptance checks.
