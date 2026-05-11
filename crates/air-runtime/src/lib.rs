@@ -2686,6 +2686,10 @@ fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, Runti
             &eval_expr(state, outputs, truncate)?,
             *max_chars,
         ))),
+        Expr::TakeLast {
+            take_last,
+            max_items,
+        } => take_last_value(&eval_expr(state, outputs, take_last)?, *max_items),
     }
 }
 
@@ -2749,6 +2753,16 @@ fn value_to_template_string(value: &Value) -> String {
 fn truncate_value(value: &Value, max_chars: usize) -> String {
     let raw = value_to_template_string(value);
     raw.chars().take(max_chars).collect()
+}
+
+fn take_last_value(value: &Value, max_items: usize) -> Result<Value, RuntimeError> {
+    let Some(values) = value.as_array() else {
+        return Err(RuntimeError::Provider(
+            "take_last expression expected an array value".to_string(),
+        ));
+    };
+    let start = values.len().saturating_sub(max_items);
+    Ok(Value::Array(values[start..].to_vec()))
 }
 
 fn event(

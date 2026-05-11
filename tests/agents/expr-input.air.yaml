@@ -10,6 +10,9 @@ inputs:
     properties:
       customer_issue: string
       product_area: string
+  notes:
+    type: array
+    items: string
 
 outputs:
   response: object
@@ -55,6 +58,10 @@ workflow:
                 truncate:
                   template: "{{extracted.customer_issue}} / {{text}}"
                 max_chars: 13
+              recent_notes:
+                take_last:
+                  ref: notes
+                max_items: 2
           output: response
           timeout_seconds: 30
           retry:

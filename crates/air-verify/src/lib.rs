@@ -902,6 +902,18 @@ impl Verifier {
                 }
                 self.verify_expr(rule_id, label, truncate, module);
             }
+            air_core::Expr::TakeLast {
+                take_last,
+                max_items,
+            } => {
+                if *max_items == 0 {
+                    self.error(
+                        "AIR095",
+                        format!("{label} in rule {rule_id} take_last.max_items must be at least 1"),
+                    );
+                }
+                self.verify_expr(rule_id, label, take_last, module);
+            }
         }
     }
 

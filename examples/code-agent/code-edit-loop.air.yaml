@@ -216,9 +216,9 @@ workflow:
                       pattern:
                         ref: target_search_pattern
                       context_lines:
-                        literal: 8
+                        literal: 2
                       max_matches:
-                        literal: 20
+                        literal: 8
           output: initial_target_context
           max_calls: 1
           timeout_seconds: 120
@@ -230,7 +230,7 @@ workflow:
               action:
                 literal: initial_target_search
               rationale:
-                literal: Deterministically search target_path before the first model decision so large files start from narrow, task-relevant context.
+                literal: Deterministically search target_path before the first model decision with bounded context so large files start from narrow, task-relevant evidence.
               requested:
                 array:
                   - object:
@@ -392,7 +392,9 @@ workflow:
               force_patch:
                 ref: force_patch
               observations:
-                ref: observations
+                take_last:
+                  ref: observations
+                max_items: 8
               final_decision:
                 literal:
                   complete: false
@@ -400,7 +402,7 @@ workflow:
               runtime:
                 ref: _air
           output: edit
-          timeout_seconds: 90
+          timeout_seconds: 180
           retry:
             max_attempts: 2
         - kind: set
@@ -431,7 +433,9 @@ workflow:
               force_patch:
                 ref: force_patch
               observations:
-                ref: observations
+                take_last:
+                  ref: observations
+                max_items: 8
               verification_status:
                 ref: verification_status
               runtime:
@@ -569,7 +573,7 @@ workflow:
                   verify: "Before complete=true, normally choose test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
-          timeout_seconds: 90
+          timeout_seconds: 180
           retry:
             max_attempts: 4
         - kind: set
@@ -1201,11 +1205,13 @@ workflow:
               force_patch:
                 ref: force_patch
               observations:
-                ref: observations
+                take_last:
+                  ref: observations
+                max_items: 8
               final_decision:
                 ref: decision
           output: edit
-          timeout_seconds: 90
+          timeout_seconds: 180
           retry:
             max_attempts: 2
         - kind: set

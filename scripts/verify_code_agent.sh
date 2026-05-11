@@ -14,6 +14,65 @@ cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/profile.a
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.self.air-profile.yaml
 
+echo "[code-agent] real-model timeout budget checks"
+"${PYTHON:-python3}" - <<'PY'
+import json
+import re
+from pathlib import Path
+
+module = Path("examples/code-agent/code-edit-loop.air.yaml").read_text()
+timeouts = []
+for model in ("code_edit_decider", "code_edit_summarizer"):
+    for match in re.finditer(rf"model:\s*{model}\b(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S):
+        timeout_match = re.search(r"timeout_seconds:\s*(\d+)", match.group("body"))
+        if timeout_match:
+            timeouts.append(int(timeout_match.group(1)))
+assert timeouts, "missing code edit model_call timeouts"
+assert min(timeouts) >= 180, timeouts
+
+preflight = re.search(r"- id:\s*preflight-target-search(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert preflight, "missing preflight-target-search rule"
+context_lines = re.search(r"context_lines:\s*\n\s+literal:\s*(\d+)", preflight.group("body"))
+max_matches = re.search(r"max_matches:\s*\n\s+literal:\s*(\d+)", preflight.group("body"))
+assert context_lines and int(context_lines.group(1)) <= 2, context_lines.group(0) if context_lines else None
+assert max_matches and int(max_matches.group(1)) <= 8, max_matches.group(0) if max_matches else None
+
+choose = re.search(r"- id:\s*choose(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert choose, "missing choose rule"
+observations_window = re.search(
+    r"observations:\s*\n\s+take_last:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)",
+    choose.group("body"),
+)
+assert observations_window and int(observations_window.group(1)) <= 8, (
+    observations_window.group(0) if observations_window else None
+)
+
+config = json.loads(Path("examples/bigmodel-openai-compatible.json").read_text())
+for model in ("code_edit_decider", "code_edit_summarizer"):
+    timeout = config["models"][model].get("request_timeout_seconds")
+    assert timeout is not None and timeout >= 180, (model, timeout)
+
+self_tools = json.loads(Path("examples/code-agent/tools.self.json").read_text())
+for tool in ("file.ops", "file.patch"):
+    max_changed_lines = self_tools["tools"][tool].get("max_changed_lines")
+    assert max_changed_lines is not None and max_changed_lines >= 200, (tool, max_changed_lines)
+
+for path in (
+    "examples/code-agent/tools.json",
+    "examples/code-agent/tools.core.json",
+    "examples/code-agent/tools.self.json",
+    "examples/code-agent/tools.playwright.json",
+):
+    tools = json.loads(Path(path).read_text())["tools"]
+    file_search = tools["file.search"]
+    assert file_search.get("max_matches") <= 40, (path, file_search.get("max_matches"))
+    assert file_search.get("max_context_lines") <= 2, (
+        path,
+        file_search.get("max_context_lines"),
+    )
+    assert file_search.get("max_bytes") <= 32768, (path, file_search.get("max_bytes"))
+PY
+
 echo "[code-agent] pack and model schema tests"
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
 cargo test -q -p air-cli pack_validation_rejects

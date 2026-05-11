@@ -293,6 +293,14 @@ def _air_template(state: dict[str, Any], template: str) -> str:
     return rendered + rest
 
 
+def _air_take_last(value: Any, max_items: int) -> list[Any]:
+    if not isinstance(value, list):
+        raise RuntimeError("take_last expression expected an array value")
+    if max_items <= 0:
+        raise RuntimeError("take_last max_items must be at least 1")
+    return value[-max_items:]
+
+
 def _air_read_path(local_state: dict[str, Any], outputs: dict[str, Any], path: str) -> Any:
     merged = dict(local_state)
     merged.update(outputs)
@@ -859,6 +867,14 @@ def _air_template(state: dict[str, Any], template: str) -> str:
         path, rest = rest.split("}}", 1)
         rendered += str(_air_get_path(state, path.strip()))
     return rendered + rest
+
+
+def _air_take_last(value: Any, max_items: int) -> list[Any]:
+    if not isinstance(value, list):
+        raise RuntimeError("take_last expression expected an array value")
+    if max_items <= 0:
+        raise RuntimeError("take_last max_items must be at least 1")
+    return value[-max_items:]
 
 
 def call_model(name: str, input_value: Any) -> Any:
@@ -2129,6 +2145,14 @@ fn expr_code(expr: &Expr) -> Result<String, LangGraphBackendError> {
             "(str({value}) if isinstance({value}, str) else json.dumps({value}))[:{max_chars}]",
             value = expr_code(truncate)?,
             max_chars = max_chars
+        )),
+        Expr::TakeLast {
+            take_last,
+            max_items,
+        } => Ok(format!(
+            "_air_take_last({value}, {max_items})",
+            value = expr_code(take_last)?,
+            max_items = max_items
         )),
     }
 }

@@ -557,6 +557,7 @@ fn evaluates_composable_input_expressions() {
                         "product_area": "billing"
                     }),
                 ),
+                ("notes".to_string(), json!(["first", "second", "third"])),
             ]),
         )
         .unwrap();
@@ -570,7 +571,8 @@ fn evaluates_composable_input_expressions() {
             "kind": "triage",
             "tags": ["customer", "billing"],
             "message": "double charge / please fix billing",
-            "short_message": "double charge"
+            "short_message": "double charge",
+            "recent_notes": ["second", "third"]
         })
     );
 }

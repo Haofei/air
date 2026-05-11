@@ -47,8 +47,8 @@
       "kind": "file_search",
       "capability": "file.read",
       "base_dir": "../..",
-      "max_matches": 100,
-      "max_context_lines": 8,
+      "max_matches": 40,
+      "max_context_lines": 2,
       "max_line_chars": 2000,
       "max_bytes": 32768
     },

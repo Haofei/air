@@ -203,6 +203,10 @@ pub enum Expr {
         truncate: Box<Expr>,
         max_chars: usize,
     },
+    TakeLast {
+        take_last: Box<Expr>,
+        max_items: usize,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -87,10 +87,10 @@
       "kind": "file_search",
       "capability": "file.read",
       "base_dir": "../..",
-      "max_matches": 100,
-      "max_context_lines": 120,
+      "max_matches": 40,
+      "max_context_lines": 2,
       "max_line_chars": 2000,
-      "max_bytes": 262144
+      "max_bytes": 32768
     },
     "file.edit": {
       "kind": "file_edit",
@@ -111,7 +111,7 @@
       "allow_replace_all": false,
       "max_files": 6,
       "max_bytes": 262144,
-      "max_changed_lines": 80
+      "max_changed_lines": 240
     },
     "file.patch": {
       "kind": "file_patch",
@@ -122,7 +122,7 @@
       "allow_delete_files": false,
       "max_files": 2,
       "max_bytes": 65536,
-      "max_changed_lines": 80
+      "max_changed_lines": 240
     },
     "diagnostic.context": {
       "kind": "diagnostic_context",
