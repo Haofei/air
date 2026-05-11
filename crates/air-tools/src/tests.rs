@@ -1995,6 +1995,61 @@ fn file_ops_replace_lines_edits_large_files_without_full_file_payload() {
 }
 
 #[test]
+fn file_ops_replace_lines_preserves_following_line_when_replacement_has_no_newline() {
+    let dir = temp_dir("air-tools-file-ops-replace-lines-line-ending");
+    fs::write(
+        dir.join("math.js"),
+        "function add(a, b) {\n  return a - b;\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.ops": {
+                  "kind": "file_ops",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_files": 2,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "math.js"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.ops",
+            &json!({
+                "operations": [{
+                    "kind": "replace_lines",
+                    "path": "math.js",
+                    "start_line": 2,
+                    "end_line": 2,
+                    "new_string": "  return a + b;"
+                }]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(
+        fs::read_to_string(dir.join("math.js")).unwrap(),
+        "function add(a, b) {\n  return a + b;\n}\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_ops_accepts_single_operation_shorthand() {
     let dir = temp_dir("air-tools-file-ops-shorthand");
     fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();

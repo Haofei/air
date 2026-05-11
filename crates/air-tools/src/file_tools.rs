@@ -1740,13 +1740,14 @@ pub(super) fn call_file_ops_tool(
                 };
                 let old_string = &current[line_match.start..line_match.end];
                 validate_file_edit_operation(name, &label, old_string, new_string)?;
+                let replacement = replace_lines_replacement(old_string, new_string);
                 diff.push_str(&edit_unified_diff(
                     &input_path,
                     &current,
                     &[line_match],
-                    new_string,
+                    &replacement,
                 ));
-                let updated = apply_selected_edit_matches(&current, &[line_match], new_string);
+                let updated = apply_selected_edit_matches(&current, &[line_match], &replacement);
                 if updated.len() > options.max_bytes {
                     return Ok(file_ops_failure_output(
                         name,
@@ -2034,6 +2035,14 @@ fn line_range_edit_match(content: &str, start_line: usize, end_line: usize) -> O
         start: lines[start_line - 1].start,
         end,
     })
+}
+
+fn replace_lines_replacement(old_string: &str, new_string: &str) -> String {
+    if old_string.ends_with('\n') && !new_string.ends_with('\n') {
+        format!("{new_string}\n")
+    } else {
+        new_string.to_string()
+    }
 }
 
 #[derive(Debug, Clone)]
