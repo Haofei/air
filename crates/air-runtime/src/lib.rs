@@ -1547,9 +1547,24 @@ fn model_result_for_output_schema(
                     return Ok(parsed);
                 }
             }
+            let error = provider_content_wrapper_schema_error(&value, error);
             Err(ModelOutputSchemaError { value, error })
         }
     }
+}
+
+fn provider_content_wrapper_schema_error(value: &Value, error: RuntimeError) -> RuntimeError {
+    let Some(content) = value
+        .as_object()
+        .and_then(|object| object.get("content"))
+        .and_then(Value::as_str)
+    else {
+        return error;
+    };
+    let preview = content.chars().take(160).collect::<String>();
+    RuntimeError::SchemaViolation(format!(
+        "{error}; invalid structured model output: content wrappers are not part of the declared AIR output interface. Return the required JSON object directly. If more information is needed, encode that need using the declared fields instead of prose. content_preview={preview:?}"
+    ))
 }
 
 fn model_content_json_candidates(value: &Value) -> Vec<Value> {
@@ -2771,6 +2786,20 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0]["patch"], json!("diff"));
+    }
+
+    #[test]
+    fn content_wrapper_schema_error_gives_structured_retry_feedback() {
+        let error = provider_content_wrapper_schema_error(
+            &json!({"content": "I need to read more files before deciding."}),
+            RuntimeError::SchemaViolation("decision.complete missing required field".to_string()),
+        );
+        let message = error.to_string();
+
+        assert!(message.contains("invalid structured model output"));
+        assert!(message.contains("declared AIR output interface"));
+        assert!(message.contains("Return the required JSON object directly"));
+        assert!(message.contains("content_preview="));
     }
 
     #[test]
