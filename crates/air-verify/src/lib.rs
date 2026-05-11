@@ -968,15 +968,7 @@ impl Verifier {
         let Some(field) = segments.get(1) else {
             return;
         };
-        if !matches!(
-            field.as_str(),
-            "step"
-                | "step_number"
-                | "max_steps"
-                | "remaining_steps"
-                | "is_last_step"
-                | "is_last_action_step"
-        ) {
+        if !is_known_runtime_context_field(field) {
             self.error(
                 "AIR094",
                 format!(
@@ -1066,6 +1058,18 @@ impl Verifier {
     fn error(&mut self, code: &'static str, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::error(code, message));
     }
+}
+
+fn is_known_runtime_context_field(field: &str) -> bool {
+    matches!(
+        field,
+        "step"
+            | "step_number"
+            | "max_steps"
+            | "remaining_steps"
+            | "is_last_step"
+            | "is_last_action_step"
+    )
 }
 
 fn enum_values(spec: Option<&TypeSpec>) -> Option<BTreeSet<String>> {
