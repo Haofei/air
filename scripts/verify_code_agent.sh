@@ -454,6 +454,78 @@ tools = [
 assert tools == ["file.search", "file.ops", "file.ops", "test.run", "git.diff"], tools
 PY
 
+echo "[code-agent] edit loop collects diagnostic context after failed auto verify"
+edit_auto_verify_failed_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_auto_verify_failed_backup"
+restore_edit_auto_verify_failed_fixture() {
+  cp "$edit_auto_verify_failed_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_auto_verify_failed_backup"
+}
+trap restore_edit_auto_verify_failed_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.auto-verify-failed.json \
+  --tool-config examples/code-agent/tools.core.json \
+  --trace-out target/generated/code_agent_edit_auto_verify_failed.trace.jsonl \
+  > target/generated/code_agent_edit_auto_verify_failed.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_auto_verify_failed.post_test.log
+restore_edit_auto_verify_failed_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_auto_verify_failed.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_auto_verify_failed.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+tools = [
+    event.get("meta", {}).get("tool")
+    for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+]
+assert tools == [
+    "file.search",
+    "file.ops",
+    "test.run",
+    "diagnostic.context",
+    "file.ops",
+    "test.run",
+    "git.diff",
+], tools
+failed_verify = next(
+    event for event in events
+    if event.get("rule") == "record-auto-verify-failed-output"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "auto_verify_failed"
+)
+diagnostic_context = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "diagnostic.context"
+)
+repair_decider = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+    and any(
+        observation.get("action") == "auto_verify_diagnostic_context"
+        for observation in event.get("input", {}).get("observations", [])
+    )
+)
+assert failed_verify["input"]["result"][0]["output"]["success"] is False, failed_verify
+assert diagnostic_context["input"]["diagnostics"], diagnostic_context
+assert diagnostic_context["output"]["snippets"], diagnostic_context
+assert "examples/code-agent/edit-fixture/math.js" in diagnostic_context["output"]["snippets"][0]["path"], diagnostic_context
+assert repair_decider["input"]["verification_status"] == "failed", repair_decider
+PY
+
 echo "[code-agent] edit loop repairs single allowed write path"
 edit_write_path_error_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_write_path_error_backup"
