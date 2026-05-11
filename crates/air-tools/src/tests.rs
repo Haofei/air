@@ -3162,7 +3162,10 @@ fn file_edit_rejects_unknown_match_strategy() {
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("input.match_strategy"));
+    let error_str = error.to_string();
+    assert!(error_str.contains("input.match_strategy"));
+    assert!(error_str.contains("block_anchor"));
+    assert!(error_str.contains("multi_occurrence"));
     let _ = fs::remove_dir_all(dir);
 }
 

@@ -769,65 +769,64 @@ fn require_fresh_read(
     Ok(())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum EditMatchStrategy {
-    Auto,
-    Exact,
-    LineTrimmed,
-    BlockAnchor,
-    WhitespaceNormalized,
-    IndentationFlexible,
-    EscapeNormalized,
-    TrimmedBoundary,
-    ContextAware,
-    MultiOccurrence,
+macro_rules! define_edit_match_strategies {
+    ($($variant:ident => $name:literal),* $(,)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+        enum EditMatchStrategy {
+            Auto,
+            $($variant),*
+        }
+
+        impl EditMatchStrategy {
+            fn from_input(tool_name: &str, input: &Value) -> Result<Self, RuntimeError> {
+                Self::from_labeled_input(tool_name, input, "input")
+            }
+
+            fn from_labeled_input(
+                tool_name: &str,
+                input: &Value,
+                label: &str,
+            ) -> Result<Self, RuntimeError> {
+                let Some(value) = optional_labeled_string_input(tool_name, input, label, "match_strategy")?
+                else {
+                    return Ok(Self::Exact);
+                };
+                match value {
+                    "auto" => Ok(Self::Auto),
+                    $($name => Ok(Self::$variant),)*
+                    _ => {
+                        let valid = ["auto", $($name),*].join(", ");
+                        Err(RuntimeError::Provider(format!(
+                            "tool {tool_name} {label}.match_strategy must be one of {valid}"
+                        )))
+                    }
+                }
+            }
+
+            fn as_str(self) -> &'static str {
+                match self {
+                    Self::Auto => "auto",
+                    $(Self::$variant => $name,)*
+                }
+            }
+
+            fn concrete_strategies() -> &'static [EditMatchStrategy] {
+                &[$(EditMatchStrategy::$variant),*]
+            }
+        }
+    }
 }
 
-impl EditMatchStrategy {
-    fn from_input(tool_name: &str, input: &Value) -> Result<Self, RuntimeError> {
-        Self::from_labeled_input(tool_name, input, "input")
-    }
-
-    fn from_labeled_input(
-        tool_name: &str,
-        input: &Value,
-        label: &str,
-    ) -> Result<Self, RuntimeError> {
-        let Some(value) = optional_labeled_string_input(tool_name, input, label, "match_strategy")?
-        else {
-            return Ok(Self::Exact);
-        };
-        match value {
-            "auto" => Ok(Self::Auto),
-            "exact" => Ok(Self::Exact),
-            "line_trimmed" => Ok(Self::LineTrimmed),
-            "block_anchor" => Ok(Self::BlockAnchor),
-            "whitespace_normalized" => Ok(Self::WhitespaceNormalized),
-            "indentation_flexible" => Ok(Self::IndentationFlexible),
-            "escape_normalized" => Ok(Self::EscapeNormalized),
-            "trimmed_boundary" => Ok(Self::TrimmedBoundary),
-            "context_aware" => Ok(Self::ContextAware),
-            "multi_occurrence" => Ok(Self::MultiOccurrence),
-            _ => Err(RuntimeError::Provider(format!(
-                "tool {tool_name} {label}.match_strategy must be one of auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, multi_occurrence"
-            ))),
-        }
-    }
-
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Exact => "exact",
-            Self::LineTrimmed => "line_trimmed",
-            Self::BlockAnchor => "block_anchor",
-            Self::WhitespaceNormalized => "whitespace_normalized",
-            Self::IndentationFlexible => "indentation_flexible",
-            Self::EscapeNormalized => "escape_normalized",
-            Self::TrimmedBoundary => "trimmed_boundary",
-            Self::ContextAware => "context_aware",
-            Self::MultiOccurrence => "multi_occurrence",
-        }
-    }
+define_edit_match_strategies! {
+    Exact => "exact",
+    LineTrimmed => "line_trimmed",
+    BlockAnchor => "block_anchor",
+    WhitespaceNormalized => "whitespace_normalized",
+    IndentationFlexible => "indentation_flexible",
+    EscapeNormalized => "escape_normalized",
+    TrimmedBoundary => "trimmed_boundary",
+    ContextAware => "context_aware",
+    MultiOccurrence => "multi_occurrence",
 }
 
 const MAX_FILE_EDIT_OPERATIONS: usize = 20;
@@ -854,17 +853,7 @@ fn find_edit_matches(
 ) -> (EditMatchStrategy, Vec<EditMatch>) {
     if strategy == EditMatchStrategy::Auto {
         let mut first_non_empty = None;
-        for candidate in [
-            EditMatchStrategy::Exact,
-            EditMatchStrategy::LineTrimmed,
-            EditMatchStrategy::BlockAnchor,
-            EditMatchStrategy::WhitespaceNormalized,
-            EditMatchStrategy::IndentationFlexible,
-            EditMatchStrategy::EscapeNormalized,
-            EditMatchStrategy::TrimmedBoundary,
-            EditMatchStrategy::ContextAware,
-            EditMatchStrategy::MultiOccurrence,
-        ] {
+        for &candidate in EditMatchStrategy::concrete_strategies() {
             let matches = find_edit_matches_with_strategy(content, old_string, candidate);
             if matches.is_empty() {
                 continue;
