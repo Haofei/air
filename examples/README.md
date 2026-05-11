@@ -63,10 +63,10 @@ cargo run -p air-cli -- run-plan examples/context-compact/context-compact.air-pl
 
 ## Shared Provider Config
 
-`bigmodel-openai-compatible.json` is a sample OpenAI-compatible model config. Set the referenced environment variable before running examples with real model calls:
+`bigmodel-openai-compatible.json` is a sample OpenAI-compatible model config. `air` auto-loads a repository-root `.env` before real model calls:
 
-```bash
-export BIGMODEL_API_KEY=...
-export BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-export BIGMODEL_MODEL=GLM-5.1
+```dotenv
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+OPENAI_MODEL=GLM-5.1
 ```

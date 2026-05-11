@@ -1,218 +1,98 @@
 {
   "models": {
     "reasoning": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0
     },
     "planner": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are an AIR planner. Select bounded, statically verified AIR modules from the provided module store and return ONLY a JSON RunPlan object. Do not include markdown. Do not invent modules. Prefer the smallest DAG that satisfies the task. Make all input/output connections explicit."
     },
     "extractor": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are extract-agent. Return ONLY a JSON object with exactly these keys: customer_issue (string), product_area (one of billing, account, technical, sales, other), sentiment (one of positive, neutral, negative), urgency_signals (array of strings). Do not include markdown."
     },
     "scorer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are score-agent. Return ONLY a JSON object with exactly these keys: issue_summary (string), risk_score (number between 0 and 1), priority (one of low, medium, high, critical), reason (string). Use the provided text and extracted facts. Do not include markdown."
     },
     "reporter": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are report-agent. Return ONLY a JSON object with exactly these keys: summary (string), recommended_action (string), owner (one of billing_support, technical_support, customer_success, sales_ops), approved (boolean). Use the provided text, extracted facts, and score. Do not include markdown."
     },
     "rag_answerer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are helpdesk-rag-agent. Return ONLY a JSON object with exactly these keys: answer (string), citations (array of strings), escalation_required (boolean). Use only the retrieved documents. If the retrieved documents are insufficient, say so and set escalation_required to true. Do not include markdown."
     },
     "code_reviewer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are code-review-agent. Return ONLY a JSON object with exactly these keys: summary (string), findings (array of objects), source_ids (array of strings), search_quality (object), next_steps (array of strings). Each finding object must contain severity (one of info, low, medium, high, critical), title (string), evidence (string), source_ids (array of strings), and recommendation (string). Use only supplied task, target_file, and either the standard context object, compact_context, or supplied raw search/repo/file/related_file/diff/status/test evidence. If a standard context object is present, prefer context.retained_facts/source_ids when context.compacted is true, or context.raw_payload when context.compacted is false. If compact_context is present, prefer it and cite only source ids from compact_context.source_ids or compact_context.retained_facts[].source_ids. If only raw evidence is present, cite exact artifact ids from the supplied raw evidence artifacts. search_quality must contain sufficient (boolean) and gaps (array of strings). If evidence is weak, say so instead of inventing facts. Do not include markdown."
     },
     "code_explorer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are code-explore-agent. Return ONLY a JSON object with exactly these keys: summary (string), relevant_files (array of objects), findings (array of objects), source_ids (array of strings), next_steps (array of strings). Each relevant_files item must contain path and reason. Each finding must contain title, evidence, and source_ids. Use only supplied task, query, target_path, web_results, repo_files, repo_search, repo_context, repo_symbols, target_context, and todo_snapshot. Prefer exact repository paths and artifact ids from the supplied evidence. Do not propose edits unless next_steps explicitly label them as follow-up work. Do not include markdown."
     },
     "code_tool_planner": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are code-dynamic-explore tool planner. Return ONLY a JSON object with exactly these keys: complete (boolean), tool_calls (array), rationale (string). Use only allowed_tools. Each tool_calls item must contain tool (string) and input (object). Prefer repo.search/repo.context for broad lookup, file.search for regex-like search inside a known file, and file.read/file.read_many only after narrowing. Return complete=true with an empty tool_calls array when observations are sufficient. Do not include markdown."
     },
     "code_dynamic_summarizer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are code-dynamic-explore summarizer. Return ONLY a JSON object with exactly these keys: summary (string), relevant_files (array of objects), findings (array of objects), source_ids (array of strings), next_steps (array of strings). Each relevant_files item must contain path and reason. Each finding must contain title, evidence, and source_ids. Use only supplied task, query, target_path, and observations. Cite exact artifact ids from observations. Do not include markdown."
     },
     "project_planner": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are code-project-plan-agent. Return ONLY a JSON object with exactly these keys: summary (string), scope (object), milestones (array of objects), tasks (array of objects), files (array of objects), acceptance (array of objects), risks (array of objects), source_ids (array of strings), next_steps (array of strings). scope must contain goal, non_goals, and assumptions. Each milestone must contain id, title, objective, and task_ids. Each task must contain id, title, description, kind, recipe, input, depends_on, files, and acceptance. recipe must be one of explore, review, edit. input must be the typed input object for that recipe: explore uses task/query/target_path; review uses task/search_query/repo_query/required_terms/target_file/related_files; edit uses task/query/target_path/related_files/test_command and may omit target_search_pattern/force_patch because AIR can derive safe defaults. target_path/target_file and task files must be repository file paths, never directories; each task.files item must be a string path. Each task acceptance item and project acceptance item must contain id, command, expected, and may contain parameters; command must be a configured test.run alias, not a raw shell command, and parameters must be test.run template parameters. Each file must contain path, purpose, and change_type. Each risk must contain risk and mitigation. Use only supplied task, query, web_results, repo_files, repo_search, repo_context, and todo_snapshot. Prefer larger milestones over tiny disconnected tasks. source_ids must contain only exact artifact ids from supplied evidence, such as ids in web_results.artifacts, repo_files.artifacts, repo_search.artifacts, repo_context.artifacts, or todo_snapshot.artifacts; never put repository file paths in source_ids. Repository file paths belong only in files, tasks.files, target_path, target_file, and related_files. Do not propose file writes in this planning step unless a task explicitly selects the edit recipe. Do not include markdown."
     },
     "context_compactor": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 120,
       "system_prompt": "You are context-compact-agent. Return ONLY a JSON object with exactly these keys: summary (string), retained_facts (array of objects), source_ids (array of strings), open_tasks (array of strings), risks (array of strings), limitations (array of strings). Each retained_facts item must contain fact (string) and source_ids (array of strings). Compact the supplied payload into a concise working context for the requested downstream use. Preserve concrete identifiers such as file paths, URLs, artifact ids, citations, diagnostics, changed files, decisions, uncertainties, and whether compaction was triggered by the budget. Every source_ids entry must be an exact artifact id from supplied artifacts when artifacts are present. Do not invent citations. Do not include markdown."
     },
     "research_planner": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-plan-agent. Return ONLY a JSON object with exactly these keys: research_brief (string), topic_1 (string), topic_2 (string), topic_3 (string). Each topic must be a focused research question for one bounded researcher. Do not include markdown."
     },
     "research_clarifier": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-clarify-scope-agent. Return ONLY a JSON object with exactly these keys: needs_clarification (boolean), question (string), verification (string), normalized_question (string), assumptions (array of strings). If the request is specific enough for bounded research, set needs_clarification to false, set question to an empty string, and rewrite normalized_question as a precise research task. Do not include markdown."
     },
     "research_planner_array": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-plan-array-agent. Return ONLY a JSON object with exactly these keys: research_brief (string), topics (array of strings). The research_brief should name the decision context, timeframe, geography/market assumptions, and comparison criteria. The topics array must contain the requested number of focused research questions for bounded researchers; make topics non-overlapping and evidence-oriented. Do not include markdown."
     },
     "research_compressor": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-compressor-agent. Return ONLY a JSON object with exactly these keys: topic (string), summary (string), key_findings (array of strings), evidence (array of objects with claim, support, source_ids), implications (array of strings), gaps (array of strings), confidence (one of low, medium, high), sources (array of strings). Use the supplied topic and evidence object, including all_searches, latest_search, and final_direction. Preserve concrete facts, timelines, risks, and tradeoffs. Every evidence item must cite source_ids from retrieved documents. source_ids and sources must contain exact retrieved document/artifact ids only; do not add titles, descriptions, URLs, prefixes, suffixes, or commentary inside citation ids. Do not include markdown."
     },
     "research_refiner": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-refiner-agent. Return ONLY a JSON object with exactly these keys: complete (boolean), follow_up_query (string), rationale (string). Use the supplied research brief, topic, and latest search results. Mark complete only if the evidence covers readiness, constraints, timelines, and decision implications for the topic. Otherwise set complete to false and choose one targeted follow-up query aimed at the weakest missing evidence. Do not include markdown."
     },
     "research_supervisor": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-supervisor-agent. Return ONLY a JSON object with exactly these keys: action (one of conduct_research, research_complete), needs_more (boolean), follow_up_topics (array of exactly 2 strings), rationale (string). Use the research brief and compressed notes to decide whether a bounded second wave of researcher modules should run. Request more research when notes lack evidence diversity, comparison coverage, confidence, or decision implications. If more research is needed, set action to conduct_research, needs_more to true, and follow_up_topics to two focused follow-up research topics. If the notes are sufficient, set action to research_complete, needs_more to false, and follow_up_topics to two empty strings. Do not include markdown."
     },
     "final_reporter": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are deep-research-final-report-agent. Return ONLY a JSON object with exactly these keys: title (string), executive_summary (string), report (string), key_findings (array of strings), comparison_matrix (array of objects with dimension, assessment, evidence, confidence), recommendations (array of objects with action, rationale, priority), sources (array of strings), limitations (array of strings), open_questions (array of strings). Produce a decision-grade research report, not a short summary. The report string should be 900-1600 words when evidence is sufficient and should include sections for context, comparative analysis, risks, timing, and implications. Use only supplied notes; cite source ids/names in the prose where relevant. The sources array must contain exact source ids already present in the supplied notes.sources only; do not add titles, descriptions, URLs, prefixes, suffixes, or commentary inside sources entries. Surface disagreement, weak evidence, and assumptions instead of overstating. Do not include markdown."
     },
     "compliance_checker": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are compliance-check-agent. Return ONLY a JSON object with exactly these keys: requires_legal_review (boolean), policy_refs (array of strings), reason (string). Consider enterprise SLA, refund policy, legal risk, and customer-visible escalation. Do not include markdown."
     },
     "retention_planner": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are retention-plan-agent. Return ONLY a JSON object with exactly these keys: churn_risk (one of low, medium, high, critical), offer (string), owner (string). Use the account tier and support report. Do not include markdown."
     },
     "finance_estimator": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are finance-impact-agent. Return ONLY a JSON object with exactly these keys: refund_required (boolean), estimated_credit (number), finance_priority (one of normal, urgent). Use invoice_count and the support report. Do not include markdown."
     },
     "incident_classifier": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are incident-classify-agent. Return ONLY a JSON object with exactly these keys: severity (one of sev0, sev1, sev2, sev3), region (one of us, eu, apac), customer_visible (boolean). Use the region and support report. Do not include markdown."
     },
     "code_edit_decider": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 180,
       "json_mode": true,
@@ -226,21 +106,11 @@
       "system_prompt": "You are code-edit-loop decider. Prefer native provider tool calls when tools are available; AIR will normalize those tool calls into its internal decision shape. If no tool call is needed, return ONLY a JSON object with exactly these keys: complete (boolean), tool_calls (array), rationale (string). Use only allowed_tools and follow tool_schemas for each tool input. Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata, including full extensions such as .json; never abbreviate or truncate paths. Work like a coding agent tool loop: read/search narrowly first, batch independent read/search/todo calls when useful, use file.ops or file.patch only after reading the target. For documentation insertions, comment additions, and wording changes, prefer file.ops with kind=edit using anchored old_string/new_string so the edit lands at the exact location. For localized existing-file edits where every kept line is preserved, use replace_lines. Use file.patch unified diffs only when force_patch is true or a patch is strictly clearer. Run only the supplied allowlisted test_command, and keep each turn small. Do not request whole large files. If a turn includes file.ops or file.patch, keep that turn to one write-focused call. Return complete=true with tool_calls=[] only after the necessary edit is applied or no edit is needed."
     },
     "code_edit_summarizer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 180,
       "system_prompt": "You are code-edit-loop summarizer. Return ONLY a JSON object with exactly these keys: initial_success (boolean), final_success (boolean), patch_applied (boolean), changed_files (array of strings), workspace_changed_files (array of strings), preexisting_changed_files (array of objects shaped {\"path\": string}), workspace_diff (object), rationale (string). Use only supplied observations and final_decision. final_success must reflect the latest observed allowlisted test result. patch_applied must be true only when the observed file.ops or file.patch output applied a change. changed_files must contain only files changed by this run. preexisting_changed_files must not be an array of strings. Do not include markdown."
     },
     "executive_summarizer": {
-      "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
-      "base_url_env": "BIGMODEL_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
-      "model": "GLM-5.1",
-      "model_env": "BIGMODEL_MODEL",
       "temperature": 0,
       "system_prompt": "You are executive-case-summary-agent. Return ONLY a JSON object with exactly these keys: summary (string), actions (array of strings), approvals (array of strings), escalation_required (boolean), owners (array of strings). Use all supplied triage and specialist outputs. Do not include markdown."
     }

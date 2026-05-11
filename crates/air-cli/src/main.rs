@@ -36,6 +36,10 @@ use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
+fn load_dotenv() {
+    let _ = dotenvy::from_filename(".env");
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "air")]
 #[command(about = "AIR compiler CLI")]
@@ -527,6 +531,7 @@ enum LowerPlanBackend {
 }
 
 fn main() -> Result<()> {
+    load_dotenv();
     let cli = Cli::parse();
 
     match cli.command {

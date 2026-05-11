@@ -15,10 +15,15 @@ The native VM is the conformance runtime. Generated backends preserve AIR's chec
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 
-export BIGMODEL_API_KEY=...
-export BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-export BIGMODEL_MODEL=GLM-5.1
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+```
+
+`air` auto-loads a repository-root `.env`. Put real provider settings there:
+
+```dotenv
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+OPENAI_MODEL=GLM-5.1
 ```
 
 The profile points to:
@@ -216,10 +221,7 @@ AIR uses OpenAI-compatible model config for real model calls:
   "models": {
     "rag_answerer": {
       "base_url": "https://example.com/v1",
-      "base_url_env": "OPENAI_BASE_URL",
-      "api_key_env": "BIGMODEL_API_KEY",
       "model": "example-model",
-      "model_env": "OPENAI_MODEL",
       "temperature": 0,
       "request_timeout_seconds": 120,
       "json_mode": true,
@@ -262,12 +264,15 @@ Fixture models return the configured JSON for a model alias and still go through
 validation, trace, timeout, and retry handling. They are intended for orchestration tests, not for
 quality evaluation.
 
-Run with:
+Run with a matching `.env`:
+
+```dotenv
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://example.com/v1
+OPENAI_MODEL=example-model
+```
 
 ```bash
-export BIGMODEL_API_KEY=...
-export OPENAI_BASE_URL=https://example.com/v1
-export OPENAI_MODEL=example-model
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 ```
 

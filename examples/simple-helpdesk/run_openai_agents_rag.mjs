@@ -14,6 +14,26 @@ function readJson(path) {
   return JSON.parse(fs.readFileSync(path, 'utf8'));
 }
 
+function loadDotEnv(path = '.env') {
+  if (!fs.existsSync(path)) return;
+  const source = fs.readFileSync(path, 'utf8');
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+
 function parseArgs(argv) {
   const args = {
     input: 'examples/simple-helpdesk/input.json',
@@ -38,12 +58,13 @@ function configureOpenAICompatible(modelConfig, alias) {
   const model = modelConfig.models?.[alias];
   if (!model) throw new Error(`unknown model alias ${alias}`);
 
-  const apiKey = process.env[model.api_key_env];
-  if (!apiKey) throw new Error(`environment variable ${model.api_key_env} is not set`);
+  const apiKeyEnv = model.api_key_env || 'OPENAI_API_KEY';
+  const apiKey = process.env[apiKeyEnv];
+  if (!apiKey) throw new Error(`environment variable ${apiKeyEnv} is not set`);
   const baseURL = model.base_url_env && process.env[model.base_url_env]
     ? process.env[model.base_url_env]
-    : model.base_url;
-  if (!baseURL) throw new Error('model must declare base_url or base_url_env');
+    : process.env.OPENAI_BASE_URL || model.base_url;
+  if (!baseURL) throw new Error('model must declare base_url or OPENAI_BASE_URL');
 
   setTracingDisabled(true);
   setOpenAIAPI('chat_completions');
@@ -59,8 +80,9 @@ function configureOpenAICompatible(modelConfig, alias) {
 
 function modelName(model) {
   if (model.model_env && process.env[model.model_env]) return process.env[model.model_env];
+  if (process.env.OPENAI_MODEL) return process.env.OPENAI_MODEL;
   if (model.model) return model.model;
-  throw new Error('model must declare model or model_env');
+  throw new Error('model must declare model or OPENAI_MODEL');
 }
 
 function makeDocsSearchTool(toolConfig) {
@@ -121,6 +143,7 @@ function parseJsonish(value) {
 }
 
 async function main() {
+  loadDotEnv();
   const args = parseArgs(process.argv);
   const input = readJson(args.input);
   const modelConfig = readJson(args.modelConfig);

@@ -63,10 +63,15 @@ Run the small packaged example first:
 cargo build
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 
-export BIGMODEL_API_KEY=...
-export BIGMODEL_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-export BIGMODEL_MODEL=GLM-5.1
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+```
+
+`air` now auto-loads a repository-root `.env`. Put provider settings there:
+
+```dotenv
+OPENAI_API_KEY=...
+OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+OPENAI_MODEL=GLM-5.1
 ```
 
 The profile packages a RunPlan, module store, input, model config, and tool config. It is the recommended shape for user-facing AIR apps.
@@ -81,7 +86,7 @@ The repository intentionally keeps examples focused:
 | `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, parallel execution, and backend lowering |
 | `examples/code-agent/` | Bounded coding workflow with planning, exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
 
-The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json`.
+The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json` and defaults to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
 
 ## What An Agent Looks Like
 

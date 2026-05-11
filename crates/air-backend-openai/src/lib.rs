@@ -10,6 +10,10 @@ use std::time::Duration;
 use thiserror::Error;
 use tokio::runtime::{Builder, Runtime};
 
+const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
+const DEFAULT_OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
+const DEFAULT_OPENAI_MODEL_ENV: &str = "OPENAI_MODEL";
+
 struct ChatCompletionBody {
     body: Value,
     tool_name_map: BTreeMap<String, String>,
@@ -26,7 +30,8 @@ pub struct OpenAiModelConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub base_url_env: Option<String>,
-    pub api_key_env: String,
+    #[serde(default)]
+    pub api_key_env: Option<String>,
     #[serde(default)]
     pub model: String,
     #[serde(default)]
@@ -102,12 +107,6 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
         if alias.trim().is_empty() {
             return Err(invalid_config(path, "models contains an empty alias"));
         }
-        if model.base_url.is_none() && model.base_url_env.is_none() {
-            return Err(invalid_config(
-                path,
-                format!("models.{alias} must declare base_url or base_url_env"),
-            ));
-        }
         if let Some(base_url) = &model.base_url {
             validate_base_url(path, alias, base_url)?;
         }
@@ -119,16 +118,10 @@ fn validate_config(path: &Path, config: &OpenAiCompatibleConfig) -> Result<(), O
                 ));
             }
         }
-        if model.api_key_env.trim().is_empty() {
+        if matches!(model.api_key_env.as_deref(), Some(value) if value.trim().is_empty()) {
             return Err(invalid_config(
                 path,
                 format!("models.{alias}.api_key_env must not be empty"),
-            ));
-        }
-        if model.model.trim().is_empty() && model.model_env.is_none() {
-            return Err(invalid_config(
-                path,
-                format!("models.{alias} must declare model or model_env"),
             ));
         }
         if let Some(model_env) = &model.model_env {
@@ -233,11 +226,12 @@ impl OpenAiCompatibleModelProvider {
             .models
             .get(name)
             .ok_or_else(|| RuntimeError::Provider(format!("unknown model alias {name}")))?;
-        let api_key = std::env::var(&model_config.api_key_env).map_err(|_| {
-            RuntimeError::Provider(format!(
-                "environment variable {} is not set",
-                model_config.api_key_env
-            ))
+        let api_key_env = model_config
+            .api_key_env
+            .as_deref()
+            .unwrap_or(DEFAULT_OPENAI_API_KEY_ENV);
+        let api_key = std::env::var(api_key_env).map_err(|_| {
+            RuntimeError::Provider(format!("environment variable {api_key_env} is not set"))
         })?;
         let base_url = resolve_base_url(model_config)?;
         let model_name = resolve_model_name(model_config)?;
@@ -308,10 +302,21 @@ fn resolve_base_url(model_config: &OpenAiModelConfig) -> Result<String, RuntimeE
             Err(error) => return Err(provider_error(error)),
         }
     }
-    model_config
-        .base_url
-        .clone()
-        .ok_or_else(|| RuntimeError::Provider("model base_url is not configured".to_string()))
+    match std::env::var(DEFAULT_OPENAI_BASE_URL_ENV) {
+        Ok(value) if !value.trim().is_empty() => return Ok(value),
+        Ok(_) => {
+            return Err(RuntimeError::Provider(format!(
+                "environment variable {DEFAULT_OPENAI_BASE_URL_ENV} is empty"
+            )));
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(provider_error(error)),
+    }
+    model_config.base_url.clone().ok_or_else(|| {
+        RuntimeError::Provider(
+            "model base_url is not configured; set OPENAI_BASE_URL or model.base_url".to_string(),
+        )
+    })
 }
 
 fn resolve_model_name(model_config: &OpenAiModelConfig) -> Result<String, RuntimeError> {
@@ -327,11 +332,21 @@ fn resolve_model_name(model_config: &OpenAiModelConfig) -> Result<String, Runtim
             Err(error) => return Err(provider_error(error)),
         }
     }
+    match std::env::var(DEFAULT_OPENAI_MODEL_ENV) {
+        Ok(value) if !value.trim().is_empty() => return Ok(value),
+        Ok(_) => {
+            return Err(RuntimeError::Provider(format!(
+                "environment variable {DEFAULT_OPENAI_MODEL_ENV} is empty"
+            )));
+        }
+        Err(std::env::VarError::NotPresent) => {}
+        Err(error) => return Err(provider_error(error)),
+    }
     if !model_config.model.trim().is_empty() {
         return Ok(model_config.model.clone());
     }
     Err(RuntimeError::Provider(
-        "model name is not configured".to_string(),
+        "model name is not configured; set OPENAI_MODEL or model.model".to_string(),
     ))
 }
 
@@ -776,7 +791,7 @@ mod tests {
               "models": {
                 "planner": {
                   "base_url": "open.bigmodel.cn/api/coding/paas/v4",
-                  "api_key_env": "BIGMODEL_API_KEY",
+                  "api_key_env": "OPENAI_API_KEY",
                   "model": "GLM-5.1"
                 }
               }
@@ -902,7 +917,7 @@ mod tests {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
             model: "gpt-5.1".to_string(),
             model_env: None,
             temperature: None,
@@ -925,7 +940,7 @@ mod tests {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
             model: "gpt-5.1".to_string(),
             model_env: None,
             temperature: None,
@@ -1099,7 +1114,7 @@ mod tests {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
             model: "glm-5.1".to_string(),
             model_env: None,
             temperature: None,
@@ -1227,27 +1242,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_config_file_requires_base_url_or_env() {
-        let path = temp_file_path("air-model-config-missing-base-url", "json");
+    fn parse_config_file_accepts_default_openai_env_contract() {
+        let path = temp_file_path("air-model-config-default-openai-env", "json");
         fs::write(
             &path,
             r#"{
               "models": {
                 "planner": {
-                  "api_key_env": "OPENAI_API_KEY",
-                  "model": "gpt-5.1"
+                  "temperature": 0
                 }
               }
             }"#,
         )
         .unwrap();
 
-        let error = parse_config_file(&path).unwrap_err();
+        let config = parse_config_file(&path).unwrap();
         let _ = fs::remove_file(&path);
-        let message = error.to_string();
 
-        assert!(message.contains("models.planner"));
-        assert!(message.contains("base_url or base_url_env"));
+        assert_eq!(config.models["planner"].api_key_env, None);
+        assert_eq!(config.models["planner"].base_url_env, None);
+        assert_eq!(config.models["planner"].model, "");
+        assert_eq!(config.models["planner"].temperature, Some(0.0));
     }
 
     #[test]
@@ -1258,7 +1273,7 @@ mod tests {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: Some(env_name.clone()),
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
             model: "gpt-5.1".to_string(),
             model_env: None,
             temperature: None,
@@ -1278,6 +1293,32 @@ mod tests {
     }
 
     #[test]
+    fn resolve_base_url_uses_default_openai_base_url_env() {
+        std::env::set_var(DEFAULT_OPENAI_BASE_URL_ENV, "https://runtime.example/v1");
+
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: None,
+            model: "gpt-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: None,
+        };
+
+        assert_eq!(
+            resolve_base_url(&config).unwrap(),
+            "https://runtime.example/v1"
+        );
+        std::env::remove_var(DEFAULT_OPENAI_BASE_URL_ENV);
+    }
+
+    #[test]
     fn resolve_model_name_prefers_env_over_literal_model() {
         let env_name = format!("AIR_TEST_MODEL_{}", std::process::id());
         std::env::set_var(&env_name, "runtime-model");
@@ -1285,7 +1326,7 @@ mod tests {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
-            api_key_env: "OPENAI_API_KEY".to_string(),
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
             model: "configured-model".to_string(),
             model_env: Some(env_name.clone()),
             temperature: None,
@@ -1299,6 +1340,29 @@ mod tests {
 
         assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");
         std::env::remove_var(env_name);
+    }
+
+    #[test]
+    fn resolve_model_name_uses_default_openai_model_env() {
+        std::env::set_var(DEFAULT_OPENAI_MODEL_ENV, "runtime-model");
+
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: None,
+            model: "configured-model".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: None,
+        };
+
+        assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");
+        std::env::remove_var(DEFAULT_OPENAI_MODEL_ENV);
     }
 
     #[test]
