@@ -285,7 +285,7 @@ pub(crate) fn code_search_pattern(query: &str) -> String {
     let mut tokens = Vec::new();
     let mut current = String::new();
     for character in query.chars() {
-        if character == '_' || character.is_ascii_alphanumeric() {
+        if character == '_' || character == '-' || character.is_ascii_alphanumeric() {
             current.push(character);
         } else if !current.is_empty() {
             push_search_token(&mut tokens, &current);
@@ -296,6 +296,8 @@ pub(crate) fn code_search_pattern(query: &str) -> String {
         push_search_token(&mut tokens, &current);
     }
 
+    let tokens = select_search_tokens(tokens);
+
     if tokens.is_empty() {
         "TODO_DO_NOT_MATCH_EMPTY_CODE_SEARCH_PATTERN".to_string()
     } else {
@@ -304,8 +306,81 @@ pub(crate) fn code_search_pattern(query: &str) -> String {
 }
 
 fn push_search_token(tokens: &mut Vec<String>, token: &str) {
-    if token.len() < 3 || tokens.iter().any(|existing| existing == token) {
+    let token = token.trim_matches('-').replace('-', "_");
+    if token.len() < 3 || tokens.iter().any(|existing| existing == &token) {
         return;
     }
-    tokens.push(token.to_string());
+    tokens.push(token);
+}
+
+fn select_search_tokens(tokens: Vec<String>) -> Vec<String> {
+    const MAX_SEARCH_TOKENS: usize = 8;
+    if tokens.len() <= MAX_SEARCH_TOKENS {
+        return tokens;
+    }
+
+    let mut ranked = tokens
+        .into_iter()
+        .enumerate()
+        .map(|(index, token)| {
+            let rank = search_token_rank(&token);
+            (index, rank, token)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by_key(|(index, rank, _)| (*rank, *index));
+    ranked.truncate(MAX_SEARCH_TOKENS);
+    ranked.sort_by_key(|(index, _, _)| *index);
+    ranked
+        .into_iter()
+        .map(|(_, _, token)| token)
+        .collect::<Vec<_>>()
+}
+
+fn search_token_rank(token: &str) -> u8 {
+    let mut rank: u8 =
+        if token.contains('_') || token.chars().any(|character| character.is_uppercase()) {
+            0
+        } else if token.len() >= 8 {
+            1
+        } else if token.len() >= 5 {
+            2
+        } else {
+            3
+        };
+
+    if is_low_signal_search_token(token) {
+        rank = rank.saturating_add(4);
+    }
+    rank
+}
+
+fn is_low_signal_search_token(token: &str) -> bool {
+    matches!(
+        token.to_ascii_lowercase().as_str(),
+        "the"
+            | "and"
+            | "when"
+            | "with"
+            | "that"
+            | "this"
+            | "should"
+            | "only"
+            | "instead"
+            | "hidden"
+            | "option"
+            | "print"
+            | "json"
+            | "final"
+            | "output"
+            | "keep"
+            | "existing"
+            | "behavior"
+            | "unchanged"
+            | "omitted"
+            | "set"
+            | "not"
+            | "run"
+            | "plan"
+            | "add"
+    )
 }

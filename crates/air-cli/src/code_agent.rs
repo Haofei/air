@@ -2109,9 +2109,34 @@ mod tests {
 
         assert_eq!(
             input["target_search_pattern"],
-            Value::String("EchoTools|ToolProviderChoice|provider|module|air|tools".to_string())
+            Value::String("EchoTools|ToolProviderChoice|provider|module|air_tools".to_string())
         );
         assert_eq!(input["force_patch"], Value::Bool(true));
+    }
+
+    #[test]
+    fn edit_input_prefers_high_signal_code_search_pattern_tokens() {
+        let input = build_input(CodeInputOptions {
+            task: "Add a hidden --stats option to air replay. When --stats is set and --specialize-run-plan is not set, replay should print JSON with event_count, error_count, model_call_count, tool_call_count, and final_output instead of only the final output.".to_string(),
+            recipe: CodeRecipe::Edit,
+            target: Some(PathBuf::from("crates/air-cli/src/run_plan.rs")),
+            write: vec![],
+            test: Some("cargo_test_package_filter".to_string()),
+            query: None,
+            related: vec![],
+            search_query: None,
+            repo_query: None,
+            required_terms: vec![],
+            force_patch: false,
+        })
+        .unwrap();
+
+        assert_eq!(
+            input["target_search_pattern"],
+            Value::String(
+                "stats|replay|specialize_run_plan|event_count|error_count|model_call_count|tool_call_count|final_output".to_string()
+            )
+        );
     }
 
     #[test]
