@@ -529,6 +529,7 @@ repair_decider = next(
 assert diagnostic_context["input"]["diagnostics"], diagnostic_context
 assert diagnostic_context["output"]["snippets"], diagnostic_context
 assert "examples/code-agent/edit-fixture/math.js" in diagnostic_context["output"]["snippets"][0]["path"], diagnostic_context
+assert diagnostic_context["output"]["snippets"][0]["path_only_diagnostic_indexes"] == [0], diagnostic_context
 assert repair_decider["input"]["verification_status"] == "unknown", repair_decider
 PY
 

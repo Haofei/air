@@ -4869,6 +4869,10 @@ fn diagnostic_context_returns_path_snippet_without_line() {
     assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
     assert_eq!(output["snippets"][0]["start_line"], json!(1));
     assert_eq!(output["snippets"][0]["end_line"], json!(3));
+    assert_eq!(
+        output["snippets"][0]["path_only_diagnostic_indexes"],
+        json!([0])
+    );
     assert!(output["snippets"][0]["content"]
         .as_str()
         .unwrap()

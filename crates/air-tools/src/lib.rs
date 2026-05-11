@@ -3967,6 +3967,11 @@ fn call_diagnostic_context_tool(
             .and_then(|line| usize::try_from(line).ok())
             .filter(|line| *line > 0)
             .unwrap_or(1);
+        let line_defaulted = diagnostic
+            .get("line")
+            .and_then(Value::as_u64)
+            .and_then(|line| usize::try_from(line).ok())
+            .is_none_or(|line| line == 0);
         let Some((absolute_path, relative_path)) = resolve_diagnostic_context_path(&repo, path)
         else {
             unreadable.push(json!({
@@ -4025,9 +4030,13 @@ fn call_diagnostic_context_tool(
                 total_lines,
                 lines: Vec::new(),
                 diagnostic_indexes: Vec::new(),
+                path_only_diagnostic_indexes: Vec::new(),
             });
         file.lines.push(line);
         file.diagnostic_indexes.push(index);
+        if line_defaulted {
+            file.path_only_diagnostic_indexes.push(index);
+        }
     }
 
     let mut snippets = Vec::new();
@@ -4053,6 +4062,11 @@ fn call_diagnostic_context_tool(
                     (*line >= start_line && *line <= end_line).then_some(*index)
                 })
                 .collect::<Vec<_>>();
+            let path_only_diagnostic_indexes = diagnostic_indexes
+                .iter()
+                .copied()
+                .filter(|index| file.path_only_diagnostic_indexes.contains(index))
+                .collect::<Vec<_>>();
             truncated |= content_truncated;
             if !rendered.is_empty() {
                 rendered.push_str("\n\n");
@@ -4067,6 +4081,7 @@ fn call_diagnostic_context_tool(
                 "end_line": end_line,
                 "content": limited_content,
                 "diagnostic_indexes": diagnostic_indexes,
+                "path_only_diagnostic_indexes": path_only_diagnostic_indexes,
                 "truncated": content_truncated
             }));
             if content_truncated {
@@ -4118,6 +4133,7 @@ struct DiagnosticContextFile {
     total_lines: usize,
     lines: Vec<usize>,
     diagnostic_indexes: Vec<usize>,
+    path_only_diagnostic_indexes: Vec<usize>,
 }
 
 fn resolve_diagnostic_context_path(
