@@ -2539,6 +2539,48 @@ mod tests {
     }
 
     #[test]
+    fn edit_loop_collects_diagnostic_context_after_failed_auto_verify() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("record-auto-verify-failed-output"))
+            .unwrap();
+        let actions = rule["actions"].as_sequence().unwrap();
+        let diagnostic_dispatch = actions
+            .iter()
+            .position(|action| action["kind"].as_str() == Some("tool_batch_dispatch"))
+            .unwrap();
+        let set_phase = actions
+            .iter()
+            .position(|action| action["kind"].as_str() == Some("set"))
+            .unwrap();
+        let tool = &actions[diagnostic_dispatch]["input"]["array"][0]["object"];
+
+        assert!(
+            diagnostic_dispatch < set_phase,
+            "diagnostic context should be collected before returning to the model repair step"
+        );
+        assert_eq!(
+            tool["tool"]["literal"],
+            serde_yaml::Value::String("diagnostic.context".to_string())
+        );
+        assert_eq!(
+            tool["input"]["object"]["diagnostics"]["ref"],
+            serde_yaml::Value::String("auto_verify_result[0].output.diagnostics".to_string())
+        );
+        assert_eq!(
+            actions[diagnostic_dispatch + 1]["value"]["object"]["action"]["literal"],
+            serde_yaml::Value::String("auto_verify_diagnostic_context".to_string())
+        );
+    }
+
+    #[test]
     fn edit_loop_handles_edit_validation_failures_before_continue() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")

@@ -79,6 +79,10 @@ state:
     type: array
     items:
       type: object
+  auto_verify_diagnostic_context:
+    type: array
+    items:
+      type: object
   final_diff_result:
     type: array
     items:
@@ -608,6 +612,43 @@ workflow:
                             ref: test_command
               result:
                 ref: auto_verify_result
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: diagnostic.context
+                  input:
+                    object:
+                      diagnostics:
+                        ref: auto_verify_result[0].output.diagnostics
+                      context_lines:
+                        literal: 6
+          output: auto_verify_diagnostic_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify_diagnostic_context
+              rationale:
+                literal: Automatically collected source context around validation diagnostics before the next repair decision so fixes can target the failing scope instead of broad searching.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: diagnostic.context
+                      input:
+                        object:
+                          diagnostics:
+                            ref: auto_verify_result[0].output.diagnostics
+                          context_lines:
+                            literal: 6
+              result:
+                ref: auto_verify_diagnostic_context
         - kind: set
           values:
             verification_status: failed
