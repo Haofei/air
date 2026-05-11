@@ -166,6 +166,9 @@ tools:
   - name: diagnostic.context
     capability: code.read
     timeout_ms: 10000
+  - name: candidate.validate
+    capability: code.read
+    timeout_ms: 10000
   - name: git.status
     capability: code.read
     timeout_ms: 10000
@@ -385,6 +388,7 @@ workflow:
                   - literal: file.ops
                   - literal: file.patch
                   - literal: diagnostic.context
+                  - literal: candidate.validate
                   - literal: git.status
                   - literal: git.diff
                   - literal: test.run
@@ -472,6 +476,10 @@ workflow:
                     optional:
                       diagnostics: "array of diagnostic objects"
                       path: "repo-relative scope"
+                  candidate.validate:
+                    required:
+                      candidate: "{target_path, test_command, related_files?}; checks paths and allowlisted validation commands before committing to an edit route"
+                    optional: {}
                   git.status:
                     required: {}
                     optional: {}
