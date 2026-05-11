@@ -646,6 +646,7 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
             output.push_str(
                 "        raise ValueError(\"tool_dispatch input.tool must be a string\")\n",
             );
+            output.push_str("    tool_name, _requested_tool = _air_normalize_model_selected_tool_name(AIR_MODULE, tool_name)\n");
             output.push_str("    tool_input = dispatch_value.get(\"input\", {})\n");
             output.push_str("    result_value = call_tool(tool_name, tool_input)\n");
             output.push_str(&format!(
@@ -703,6 +704,7 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
             } else {
                 output.push_str("            raise error\n");
             }
+            output.push_str("        tool_name, _requested_tool = _air_normalize_model_selected_tool_name(AIR_MODULE, tool_name)\n");
             output.push_str("        tool_input = _air_apply_write_scope(tool_name, dispatch_value.get(\"input\", {}), write_scope_value)\n");
             output.push_str("        if not any(tool.get(\"name\") == tool_name for tool in AIR_MODULE.get(\"tools\", [])):\n");
             output.push_str("            error = RuntimeError(f\"tool {tool_name} is not declared by module {AIR_MODULE.get('agent', {}).get('name', '<unknown>')}\")\n");
@@ -1101,6 +1103,8 @@ def _air_action_meta(action: dict[str, Any], elapsed_ms: int | None = None, atte
         meta["model"] = action["model"]
     if action.get("tool") is not None:
         meta["tool"] = action["tool"]
+    if action.get("requested_tool") is not None:
+        meta["requested_tool"] = action["requested_tool"]
     if action.get("output") is not None:
         meta["output"] = action["output"]
     if action.get("timeout_seconds") is not None:
@@ -1227,6 +1231,15 @@ def _air_validate_tool_capability(module: dict[str, Any], action: dict[str, Any]
         )
 
 
+def _air_normalize_model_selected_tool_name(module: dict[str, Any], tool_name: str) -> tuple[str, str | None]:
+    if any(tool.get("name") == tool_name for tool in module.get("tools", [])):
+        return tool_name, None
+    normalized = tool_name.lower()
+    if normalized != tool_name and any(tool.get("name") == normalized for tool in module.get("tools", [])):
+        return normalized, tool_name
+    return tool_name, None
+
+
 def _air_enforce_approval_required_batch_isolation(module: dict[str, Any], batch_value: list[Any]) -> None:
     if len(batch_value) <= 1:
         return
@@ -1235,6 +1248,8 @@ def _air_enforce_approval_required_batch_isolation(module: dict[str, Any], batch
         return
     for dispatch_value in batch_value:
         tool_name = dispatch_value.get("tool") if isinstance(dispatch_value, dict) else None
+        if isinstance(tool_name, str):
+            tool_name, _ = _air_normalize_model_selected_tool_name(module, tool_name)
         tool_spec = next((tool for tool in module.get("tools", []) if tool.get("name") == tool_name), None)
         capability = tool_spec.get("capability") if tool_spec is not None else None
         if capability in required:
@@ -1402,18 +1417,21 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                 dispatch_value = _air_eval_input(local_state, outputs, action["input"])
                 if not isinstance(dispatch_value, dict) or not isinstance(dispatch_value.get("tool"), str):
                     raise ValueError("tool_dispatch input.tool must be a string")
+                tool_name, requested_tool = _air_normalize_model_selected_tool_name(module, dispatch_value["tool"])
                 dispatched_action = dict(action)
-                dispatched_action["tool"] = dispatch_value["tool"]
+                dispatched_action["tool"] = tool_name
+                if requested_tool is not None:
+                    dispatched_action["requested_tool"] = requested_tool
                 try:
                     _air_validate_tool_capability(module, dispatched_action)
                 except Exception as error:
-                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", meta={"tool": dispatch_value["tool"]}, error=str(error))
+                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", meta=_air_action_meta(dispatched_action), error=str(error))
                     raise
                 input_value = dispatch_value.get("input", {})
                 try:
-                    _air_enforce_repeated_tool_policy(module, tool_history, dispatch_value["tool"], input_value)
+                    _air_enforce_repeated_tool_policy(module, tool_history, tool_name, input_value)
                 except Exception as error:
-                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", input_value=input_value, meta={"tool": dispatch_value["tool"]}, error=str(error))
+                    _air_emit_trace(module_id, step, rule_id, "tool_dispatch", "error", input_value=input_value, meta=_air_action_meta(dispatched_action), error=str(error))
                     raise
                 retry_policy = action.get("retry") or {}
                 max_attempts = max(1, int(retry_policy.get("max_attempts", 1)))
@@ -1428,7 +1446,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                     _air_emit_trace(module_id, step, rule_id, "tool_dispatch_start", "ok", input_value=input_value, meta=_air_action_meta(dispatched_action, attempt=attempt, max_attempts=max_attempts))
                     result_value = None
                     try:
-                        result_value = call_tool(dispatch_value["tool"], input_value)
+                        result_value = call_tool(tool_name, input_value)
                         _air_check_action_timeout("tool_dispatch", action["timeout_seconds"], action_started_at)
                         _air_validate_output(module, action["output"], result_value)
                     except Exception as error:
@@ -1466,22 +1484,29 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                             batch_outputs.append({"tool": "<invalid>", "input": {}, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error), "requested": dispatch_value}})
                             continue
                         raise error
+                    tool_name, requested_tool = _air_normalize_model_selected_tool_name(module, dispatch_value["tool"])
                     dispatched_action = dict(action)
-                    dispatched_action["tool"] = dispatch_value["tool"]
+                    dispatched_action["tool"] = tool_name
+                    if requested_tool is not None:
+                        dispatched_action["requested_tool"] = requested_tool
                     try:
                         _air_validate_tool_capability(module, dispatched_action)
                     except Exception as error:
-                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", meta={"tool": dispatch_value["tool"], "index": index}, error=str(error))
+                        meta = _air_action_meta(dispatched_action)
+                        meta["index"] = index
+                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", meta=meta, error=str(error))
                         if observe_errors and "is not declared by module" in str(error):
                             input_value = dispatch_value.get("input", {})
-                            batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
+                            batch_outputs.append({"tool": tool_name, "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
                             continue
                         raise
                     input_value = dispatch_value.get("input", {})
                     try:
-                        _air_enforce_repeated_tool_policy(module, tool_history, dispatch_value["tool"], input_value)
+                        _air_enforce_repeated_tool_policy(module, tool_history, tool_name, input_value)
                     except Exception as error:
-                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, meta={"tool": dispatch_value["tool"], "index": index}, error=str(error))
+                        meta = _air_action_meta(dispatched_action)
+                        meta["index"] = index
+                        _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, meta=meta, error=str(error))
                         raise
                     for attempt in range(1, max_attempts + 1):
                         limit = module.get("policy", {}).get("max_tool_calls")
@@ -1498,7 +1523,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                         _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item_start", "ok", input_value=input_value, meta=meta)
                         result_value = None
                         try:
-                            result_value = call_tool(dispatch_value["tool"], input_value)
+                            result_value = call_tool(tool_name, input_value)
                             _air_check_action_timeout("tool_batch_dispatch_item", action["timeout_seconds"], action_started_at)
                         except Exception as error:
                             elapsed_ms = int((time.monotonic() - action_started_at) * 1000)
@@ -1507,7 +1532,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                             _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, output_value=locals().get("result_value"), meta=meta, error=str(error))
                             if attempt == max_attempts:
                                 if observe_errors:
-                                    batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
+                                    batch_outputs.append({"tool": tool_name, "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
                                     break
                                 raise
                             continue
@@ -1515,7 +1540,7 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                         meta = _air_action_meta(dispatched_action, elapsed_ms=elapsed_ms, attempt=attempt, max_attempts=max_attempts, will_retry=False)
                         meta["index"] = index
                         _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "ok", input_value=input_value, output_value=result_value, meta=meta)
-                        batch_outputs.append({"tool": dispatch_value["tool"], "input": input_value, "status": "ok", "output": result_value})
+                        batch_outputs.append({"tool": tool_name, "input": input_value, "status": "ok", "output": result_value})
                         break
                 try:
                     _air_validate_output(module, action["output"], batch_outputs)
@@ -2249,6 +2274,7 @@ mod tests {
         let code = lower_module(&module).unwrap();
 
         assert!(code.contains("tool_name = dispatch_value.get(\"tool\")"));
+        assert!(code.contains("_air_normalize_model_selected_tool_name"));
         assert!(code.contains("result_value = call_tool(tool_name, tool_input)"));
         assert!(code.contains("tool_dispatch input.tool must be a string"));
     }
@@ -2266,6 +2292,7 @@ mod tests {
         assert!(code.contains("tool_batch_dispatch max_calls exceeded"));
         assert!(code.contains("approval-required capability"));
         assert!(code.contains("_air_enforce_approval_required_batch_isolation"));
+        assert!(code.contains("requested_tool"));
         assert!(code.contains("call_tool(tool_name, tool_input)"));
         assert!(code.contains("\"output\": result_value"));
     }

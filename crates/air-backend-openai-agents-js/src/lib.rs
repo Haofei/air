@@ -461,7 +461,10 @@ function enforceApprovalRequiredBatchIsolation(module, batchValue) {
     return;
   }
   for (const dispatchValue of batchValue) {
-    const toolName = dispatchValue && typeof dispatchValue === 'object' && !Array.isArray(dispatchValue) ? dispatchValue.tool : undefined;
+    let toolName = dispatchValue && typeof dispatchValue === 'object' && !Array.isArray(dispatchValue) ? dispatchValue.tool : undefined;
+    if (typeof toolName === 'string') {
+      toolName = normalizeModelSelectedToolName(module, toolName).toolName;
+    }
     const toolSpec = (module.tools ?? []).find((tool) => tool.name === toolName);
     const capability = toolSpec?.capability;
     if (capability && required.includes(capability)) {
@@ -759,6 +762,7 @@ function actionMeta(action, { elapsedMs, attempt, maxAttempts, willRetry } = {})
   const meta = {};
   if (action.model != null) meta.model = action.model;
   if (action.tool != null) meta.tool = action.tool;
+  if (action.requested_tool != null) meta.requested_tool = action.requested_tool;
   if (action.output != null) meta.output = action.output;
   if (action.timeout_seconds != null) meta.timeout_seconds = action.timeout_seconds;
   if (elapsedMs != null) meta.elapsed_ms = elapsedMs;
@@ -766,6 +770,17 @@ function actionMeta(action, { elapsedMs, attempt, maxAttempts, willRetry } = {})
   if (maxAttempts != null) meta.max_attempts = maxAttempts;
   if (willRetry != null) meta.will_retry = willRetry;
   return meta;
+}
+
+function normalizeModelSelectedToolName(module, toolName) {
+  if ((module.tools ?? []).some((tool) => tool.name === toolName)) {
+    return { toolName, requestedTool: undefined };
+  }
+  const normalized = toolName.toLowerCase();
+  if (normalized !== toolName && (module.tools ?? []).some((tool) => tool.name === normalized)) {
+    return { toolName: normalized, requestedTool: toolName };
+  }
+  return { toolName, requestedTool: undefined };
 }
 
 function checkModuleTimeout(module, startedAt) {
@@ -958,18 +973,20 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         if (!dispatchValue || typeof dispatchValue !== 'object' || Array.isArray(dispatchValue) || typeof dispatchValue.tool !== 'string') {
           throw new Error('tool_dispatch input.tool must be a string');
         }
-        const dispatchedAction = { ...action, tool: dispatchValue.tool };
+        const normalized = normalizeModelSelectedToolName(module, dispatchValue.tool);
+        const dispatchedAction = { ...action, tool: normalized.toolName };
+        if (normalized.requestedTool != null) dispatchedAction.requested_tool = normalized.requestedTool;
         try {
           validateToolCapability(module, dispatchedAction, toolConfig);
         } catch (error) {
-          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', meta: { tool: dispatchValue.tool }, error: String(error?.message ?? error) });
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', meta: actionMeta(dispatchedAction), error: String(error?.message ?? error) });
           throw error;
         }
         const inputValue = dispatchValue.input ?? {};
         try {
-          enforceRepeatedToolPolicy(module, toolHistory, dispatchValue.tool, inputValue);
+          enforceRepeatedToolPolicy(module, toolHistory, normalized.toolName, inputValue);
         } catch (error) {
-          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', input: inputValue, meta: { tool: dispatchValue.tool }, error: String(error?.message ?? error) });
+          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch', status: 'error', input: inputValue, meta: actionMeta(dispatchedAction), error: String(error?.message ?? error) });
           throw error;
         }
         const maxAttempts = Math.max(1, Number(action.retry?.max_attempts ?? 1));
@@ -985,7 +1002,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
           emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_dispatch_start', status: 'ok', input: inputValue, meta: actionMeta(dispatchedAction, { attempt, maxAttempts }) });
           let resultValue;
           try {
-            resultValue = await callTool(toolConfig, dispatchValue.tool, inputValue);
+            resultValue = await callTool(toolConfig, normalized.toolName, inputValue);
             checkActionTimeout('tool_dispatch', action.timeout_seconds, actionStartedAt);
             validateOutput(module, action.output, resultValue);
             localState[action.output] = resultValue;
@@ -1027,23 +1044,25 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
             }
             throw error;
           }
-          const dispatchedAction = { ...action, tool: dispatchValue.tool };
-          const inputValue = applyWriteScope(dispatchValue.tool, dispatchValue.input ?? {}, writeScope);
+          const normalized = normalizeModelSelectedToolName(module, dispatchValue.tool);
+          const dispatchedAction = { ...action, tool: normalized.toolName };
+          if (normalized.requestedTool != null) dispatchedAction.requested_tool = normalized.requestedTool;
+          const inputValue = applyWriteScope(normalized.toolName, dispatchValue.input ?? {}, writeScope);
           try {
             validateToolCapability(module, dispatchedAction, toolConfig);
           } catch (error) {
-            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', meta: { tool: dispatchValue.tool, index }, error: String(error?.message ?? error) });
+            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', meta: { ...actionMeta(dispatchedAction), index }, error: String(error?.message ?? error) });
             if (observeErrors && String(error?.message ?? error).includes('is not declared by module')) {
               const message = String(error?.message ?? error);
-              batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
+              batchOutputs.push({ tool: normalized.toolName, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
               continue;
             }
             throw error;
           }
           try {
-            enforceRepeatedToolPolicy(module, toolHistory, dispatchValue.tool, inputValue);
+            enforceRepeatedToolPolicy(module, toolHistory, normalized.toolName, inputValue);
           } catch (error) {
-            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', input: inputValue, meta: { tool: dispatchValue.tool, index }, error: String(error?.message ?? error) });
+            emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', input: inputValue, meta: { ...actionMeta(dispatchedAction), index }, error: String(error?.message ?? error) });
             throw error;
           }
           for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1058,17 +1077,17 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
             emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item_start', status: 'ok', input: inputValue, meta: { ...actionMeta(dispatchedAction, { attempt, maxAttempts }), index } });
             let resultValue;
             try {
-              resultValue = await callTool(toolConfig, dispatchValue.tool, inputValue);
+              resultValue = await callTool(toolConfig, normalized.toolName, inputValue);
               checkActionTimeout('tool_batch_dispatch_item', action.timeout_seconds, actionStartedAt);
               emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'ok', input: inputValue, output: resultValue, meta: { ...actionMeta(dispatchedAction, { elapsedMs: Date.now() - actionStartedAt, attempt, maxAttempts, willRetry: false }), index } });
-              batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, status: 'ok', output: resultValue });
+              batchOutputs.push({ tool: normalized.toolName, input: inputValue, status: 'ok', output: resultValue });
               break;
             } catch (error) {
               emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', input: inputValue, output: resultValue, meta: { ...actionMeta(dispatchedAction, { elapsedMs: Date.now() - actionStartedAt, attempt, maxAttempts, willRetry: attempt !== maxAttempts }), index }, error: String(error?.message ?? error) });
               if (attempt === maxAttempts) {
                 if (observeErrors) {
                   const message = String(error?.message ?? error);
-                  batchOutputs.push({ tool: dispatchValue.tool, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
+                  batchOutputs.push({ tool: normalized.toolName, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
                   break;
                 }
                 throw error;
@@ -1688,7 +1707,8 @@ mod tests {
 
         assert!(code.contains("action.kind === 'tool_dispatch'"));
         assert!(code.contains("tool_dispatch input.tool must be a string"));
-        assert!(code.contains("await callTool(toolConfig, dispatchValue.tool, inputValue)"));
+        assert!(code.contains("function normalizeModelSelectedToolName"));
+        assert!(code.contains("await callTool(toolConfig, normalized.toolName, inputValue)"));
         assert!(code.contains("action: 'tool_dispatch_start'"));
     }
 
@@ -1704,6 +1724,7 @@ mod tests {
         assert!(code.contains("approval-required capability"));
         assert!(code.contains("tool_batch_dispatch_item_start"));
         assert!(code.contains("batchOutputs.push"));
+        assert!(code.contains("requested_tool"));
         assert!(code.contains("const observeErrors = action.on_error === 'observe'"));
         assert!(code.contains("status: 'error'"));
         assert!(code.contains("is not declared by module"));

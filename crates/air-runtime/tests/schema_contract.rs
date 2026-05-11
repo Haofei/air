@@ -158,6 +158,20 @@ impl ModelProvider for ToolArgsDispatchModels {
     }
 }
 
+struct UppercaseDispatchModels;
+
+impl ModelProvider for UppercaseDispatchModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "dispatcher");
+        Ok(json!({
+            "tool": "DOCS.SEARCH",
+            "input": {
+                "query": input["text"]
+            }
+        }))
+    }
+}
+
 struct UnsafeDispatchModels;
 
 impl ModelProvider for UnsafeDispatchModels {
@@ -785,6 +799,31 @@ fn dispatches_common_tool_args_tool_shape() {
 }
 
 #[test]
+fn dispatch_normalizes_model_selected_tool_name_case() {
+    let module = load_agent("tests/agents/tool-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: UppercaseDispatchModels,
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("typed agent ir"))]),
+        )
+        .unwrap();
+
+    assert_eq!(result.outputs["result"]["query"], json!("typed agent ir"));
+    assert_eq!(result.outputs["result"]["call"], json!(1));
+    assert!(result.trace.iter().any(|event| {
+        event.action == "tool_dispatch"
+            && event.meta.as_ref().is_some_and(|meta| {
+                meta["tool"] == "docs.search" && meta["requested_tool"] == "DOCS.SEARCH"
+            })
+    }));
+}
+
+#[test]
 fn rejects_model_selected_undeclared_tool_dispatch() {
     let module = load_agent("tests/agents/tool-dispatch.air.yaml");
     let mut vm = Vm {
@@ -1055,6 +1094,43 @@ fn tool_batch_dispatch_can_observe_undeclared_tools() {
         result.outputs["observations"][1]["output"]["query"],
         json!("good")
     );
+}
+
+#[test]
+fn tool_batch_dispatch_normalizes_tool_name_case() {
+    let module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "DOCS.SEARCH", "input": {"query": "alpha"}},
+                {"tool": "docs.search", "input": {"query": "beta"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 2);
+    assert_eq!(
+        result.outputs["observations"][0]["tool"],
+        json!("docs.search")
+    );
+    assert_eq!(
+        result.outputs["observations"][0]["output"]["query"],
+        json!("alpha")
+    );
+    assert!(result.trace.iter().any(|event| {
+        event.action == "tool_batch_dispatch_item"
+            && event.meta.as_ref().is_some_and(|meta| {
+                meta["tool"] == "docs.search" && meta["requested_tool"] == "DOCS.SEARCH"
+            })
+    }));
 }
 
 #[test]

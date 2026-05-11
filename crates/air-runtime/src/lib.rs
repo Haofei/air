@@ -886,6 +886,7 @@ where
                     ToolExecution {
                         action_name: "tool_call",
                         tool,
+                        requested_tool: None,
                         input,
                         output,
                         timeout_seconds: *timeout_seconds,
@@ -901,11 +902,14 @@ where
             } => {
                 let dispatch = resolve_input(context.state, context.outputs, input)?;
                 let (tool, tool_input) = resolve_tool_dispatch(&dispatch)?;
+                let (tool, requested_tool) =
+                    normalize_model_selected_tool_name(context.module, tool);
                 self.execute_tool_call(
                     context,
                     ToolExecution {
                         action_name: "tool_dispatch",
                         tool: &tool,
+                        requested_tool: requested_tool.as_deref(),
                         input: tool_input,
                         output,
                         timeout_seconds: *timeout_seconds,
@@ -1034,6 +1038,7 @@ where
         let ToolExecution {
             action_name,
             tool,
+            requested_tool,
             input,
             output,
             timeout_seconds,
@@ -1045,7 +1050,7 @@ where
                 action_name,
                 None,
                 None,
-                Some(json!({"tool": tool})),
+                Some(tool_error_meta(tool, requested_tool)),
                 Err(error.to_string()),
             );
             return Err(error);
@@ -1057,6 +1062,14 @@ where
             .unwrap_or(1)
             .max(1);
         for attempt in 1..=max_attempts {
+            let meta_args = ToolCallMeta {
+                tool,
+                requested_tool,
+                attempt,
+                max_attempts,
+                output,
+                timeout_seconds,
+            };
             if let Some(limit) = context.module.policy.max_tool_calls {
                 let attempted = *context.tool_calls + 1;
                 if attempted > limit {
@@ -1065,15 +1078,7 @@ where
                         action_name,
                         Some(input),
                         None,
-                        Some(tool_call_result_meta(
-                            tool,
-                            attempt,
-                            max_attempts,
-                            output,
-                            timeout_seconds,
-                            0,
-                            false,
-                        )),
+                        Some(tool_call_result_meta(meta_args, 0, false)),
                         Err(error.to_string()),
                     );
                     return Err(error);
@@ -1084,13 +1089,7 @@ where
                 &format!("{action_name}_start"),
                 Some(input.clone()),
                 None,
-                Some(tool_call_meta(
-                    tool,
-                    attempt,
-                    max_attempts,
-                    output,
-                    timeout_seconds,
-                )),
+                Some(tool_call_meta(meta_args)),
                 Ok(()),
             );
             let attempt_started_at = Instant::now();
@@ -1107,11 +1106,7 @@ where
                         Some(input.clone()),
                         None,
                         Some(tool_call_result_meta(
-                            tool,
-                            attempt,
-                            max_attempts,
-                            output,
-                            timeout_seconds,
+                            meta_args,
                             attempt_started_at.elapsed().as_millis(),
                             !is_final_attempt,
                         )),
@@ -1132,11 +1127,7 @@ where
                     Some(input.clone()),
                     Some(result),
                     Some(tool_call_result_meta(
-                        tool,
-                        attempt,
-                        max_attempts,
-                        output,
-                        timeout_seconds,
+                        meta_args,
                         attempt_started_at.elapsed().as_millis(),
                         !is_final_attempt,
                     )),
@@ -1154,11 +1145,7 @@ where
                     Some(input.clone()),
                     Some(result),
                     Some(tool_call_result_meta(
-                        tool,
-                        attempt,
-                        max_attempts,
-                        output,
-                        timeout_seconds,
+                        meta_args,
                         attempt_started_at.elapsed().as_millis(),
                         !is_final_attempt,
                     )),
@@ -1171,15 +1158,8 @@ where
             }
             let artifact_ids = register_artifacts(context.artifact_registry, &result);
             context.state.insert(output.to_string(), result);
-            let mut meta = tool_call_result_meta(
-                tool,
-                attempt,
-                max_attempts,
-                output,
-                timeout_seconds,
-                attempt_started_at.elapsed().as_millis(),
-                false,
-            );
+            let mut meta =
+                tool_call_result_meta(meta_args, attempt_started_at.elapsed().as_millis(), false);
             insert_artifact_result_meta(&mut meta, &artifact_ids);
             context.push_event_with_meta(
                 action_name,
@@ -1238,6 +1218,10 @@ where
         let resolved_dispatches = dispatch_items
             .iter()
             .filter_map(|(_, dispatch)| dispatch.as_ref().ok().cloned())
+            .map(|(tool, input)| {
+                let (tool, _) = normalize_model_selected_tool_name(context.module, tool);
+                (tool, input)
+            })
             .collect::<Vec<_>>();
         if let Err(error) = enforce_approval_required_batch_isolation(
             context.module,
@@ -1272,8 +1256,12 @@ where
             .max(1);
         let mut results = Vec::new();
         for (index, (raw_dispatch, dispatch)) in dispatch_items.into_iter().enumerate() {
-            let (tool, tool_input) = match dispatch {
-                Ok(dispatch) => dispatch,
+            let (tool, tool_input, requested_tool) = match dispatch {
+                Ok((tool, input)) => {
+                    let (tool, requested_tool) =
+                        normalize_model_selected_tool_name(context.module, tool);
+                    (tool, input, requested_tool)
+                }
                 Err(error) => {
                     context.push_event_with_meta(
                         "tool_batch_dispatch_item",
@@ -1295,11 +1283,13 @@ where
             let tool_input =
                 apply_write_scope_to_tool_input(&tool, tool_input, write_scope.as_ref())?;
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
+                let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
+                insert_batch_item_meta(&mut meta, index);
                 context.push_event_with_meta(
                     "tool_batch_dispatch_item",
                     Some(tool_input.clone()),
                     None,
-                    Some(json!({"tool": tool, "index": index})),
+                    Some(meta),
                     Err(error.to_string()),
                 );
                 if on_error == ToolErrorMode::Observe
@@ -1317,19 +1307,19 @@ where
             enforce_repeated_tool_policy(context, "tool_batch_dispatch_item", &tool, &tool_input)?;
             let mut item_output = None;
             for attempt in 1..=max_attempts {
+                let meta_args = ToolCallMeta {
+                    tool: &tool,
+                    requested_tool: requested_tool.as_deref(),
+                    attempt,
+                    max_attempts,
+                    output,
+                    timeout_seconds,
+                };
                 if let Some(limit) = context.module.policy.max_tool_calls {
                     let attempted = *context.tool_calls + 1;
                     if attempted > limit {
                         let error = RuntimeError::ToolCallLimitExceeded { limit, attempted };
-                        let mut meta = tool_call_result_meta(
-                            &tool,
-                            attempt,
-                            max_attempts,
-                            output,
-                            timeout_seconds,
-                            0,
-                            false,
-                        );
+                        let mut meta = tool_call_result_meta(meta_args, 0, false);
                         insert_batch_item_meta(&mut meta, index);
                         context.push_event_with_meta(
                             "tool_batch_dispatch_item",
@@ -1342,8 +1332,7 @@ where
                     }
                 }
                 *context.tool_calls += 1;
-                let mut start_meta =
-                    tool_call_meta(&tool, attempt, max_attempts, output, timeout_seconds);
+                let mut start_meta = tool_call_meta(meta_args);
                 insert_batch_item_meta(&mut start_meta, index);
                 context.push_event_with_meta(
                     "tool_batch_dispatch_item_start",
@@ -1362,11 +1351,7 @@ where
                     Err(error) => {
                         let is_final_attempt = attempt == max_attempts;
                         let mut meta = tool_call_result_meta(
-                            &tool,
-                            attempt,
-                            max_attempts,
-                            output,
-                            timeout_seconds,
+                            meta_args,
                             attempt_started_at.elapsed().as_millis(),
                             !is_final_attempt,
                         );
@@ -1399,11 +1384,7 @@ where
                 ) {
                     let is_final_attempt = attempt == max_attempts;
                     let mut meta = tool_call_result_meta(
-                        &tool,
-                        attempt,
-                        max_attempts,
-                        output,
-                        timeout_seconds,
+                        meta_args,
                         attempt_started_at.elapsed().as_millis(),
                         !is_final_attempt,
                     );
@@ -1431,11 +1412,7 @@ where
 
                 let artifact_ids = register_artifacts(context.artifact_registry, &result);
                 let mut meta = tool_call_result_meta(
-                    &tool,
-                    attempt,
-                    max_attempts,
-                    output,
-                    timeout_seconds,
+                    meta_args,
                     attempt_started_at.elapsed().as_millis(),
                     false,
                 );
@@ -2127,6 +2104,25 @@ fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeErr
     Ok((tool.to_string(), input))
 }
 
+fn normalize_model_selected_tool_name(
+    module: &AirModule,
+    tool: String,
+) -> (String, Option<String>) {
+    if module.tools.iter().any(|candidate| candidate.name == tool) {
+        return (tool, None);
+    }
+    let normalized = tool.to_ascii_lowercase();
+    if normalized != tool
+        && module
+            .tools
+            .iter()
+            .any(|candidate| candidate.name == normalized)
+    {
+        return (normalized, Some(tool));
+    }
+    (tool, None)
+}
+
 fn resolve_tool_batch_dispatch_items(
     batch: &Value,
 ) -> Result<Vec<ResolvedToolBatchItem>, RuntimeError> {
@@ -2336,6 +2332,7 @@ struct ToolCallRecord {
 struct ToolExecution<'a> {
     action_name: &'a str,
     tool: &'a str,
+    requested_tool: Option<&'a str>,
     input: Value,
     output: &'a str,
     timeout_seconds: u64,
@@ -2350,6 +2347,16 @@ struct ToolBatchExecution<'a> {
     max_calls: u32,
     retry: &'a Option<RetryPolicy>,
     on_error: ToolErrorMode,
+}
+
+#[derive(Clone, Copy)]
+struct ToolCallMeta<'a> {
+    tool: &'a str,
+    requested_tool: Option<&'a str>,
+    attempt: u32,
+    max_attempts: u32,
+    output: &'a str,
+    timeout_seconds: u64,
 }
 
 impl ExecutionContext<'_> {
@@ -2452,34 +2459,40 @@ fn model_call_result_meta(
     meta
 }
 
-fn tool_call_meta(
-    tool: &str,
-    attempt: u32,
-    max_attempts: u32,
-    output: &str,
-    timeout_seconds: u64,
-) -> Value {
-    serde_json::json!({
-        "tool": tool,
-        "attempt": attempt,
-        "max_attempts": max_attempts,
-        "output": output,
-        "timeout_seconds": timeout_seconds,
-    })
+fn tool_call_meta(args: ToolCallMeta<'_>) -> Value {
+    let mut meta = serde_json::json!({
+        "tool": args.tool,
+        "attempt": args.attempt,
+        "max_attempts": args.max_attempts,
+        "output": args.output,
+        "timeout_seconds": args.timeout_seconds,
+    });
+    insert_requested_tool_meta(&mut meta, args.requested_tool);
+    meta
 }
 
-fn tool_call_result_meta(
-    tool: &str,
-    attempt: u32,
-    max_attempts: u32,
-    output: &str,
-    timeout_seconds: u64,
-    elapsed_ms: u128,
-    will_retry: bool,
-) -> Value {
-    let mut meta = tool_call_meta(tool, attempt, max_attempts, output, timeout_seconds);
+fn tool_call_result_meta(args: ToolCallMeta<'_>, elapsed_ms: u128, will_retry: bool) -> Value {
+    let mut meta = tool_call_meta(args);
     insert_result_meta(&mut meta, elapsed_ms, will_retry);
     meta
+}
+
+fn tool_error_meta(tool: &str, requested_tool: Option<&str>) -> Value {
+    let mut meta = json!({ "tool": tool });
+    insert_requested_tool_meta(&mut meta, requested_tool);
+    meta
+}
+
+fn insert_requested_tool_meta(meta: &mut Value, requested_tool: Option<&str>) {
+    let Some(requested_tool) = requested_tool else {
+        return;
+    };
+    if let Value::Object(object) = meta {
+        object.insert(
+            "requested_tool".to_string(),
+            Value::String(requested_tool.to_string()),
+        );
+    }
 }
 
 fn approval_meta(approval_for: &[String], decision: &ApprovalDecision) -> Value {
