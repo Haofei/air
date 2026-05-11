@@ -56,6 +56,8 @@ The default edit budget is sized for real bounded coding work rather than a smok
 
 The edit loop receives the current step budget through the `_air` runtime context. When the state-machine step budget is nearly exhausted, the model summarizes instead of choosing more tools, ensuring the loop closes cleanly within its allocated budget.
 
+When `test.run` output is truncated (`output.truncated == true`), the full log is written to the path reported in `output.full_log_path`. Use `file.search` or a narrow `file.read` range on that path to inspect hidden lines instead of re-running only to recover truncated output.
+
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 
 ```bash
