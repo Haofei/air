@@ -12,14 +12,14 @@
                   {
                     "kind": "edit",
                     "path": "examples/code-agent/edit-fixture/math.js",
-                    "old_string": "return a * b;",
+                    "old_string": "wrong prefix\nreturn a - b;",
                     "new_string": "return a + b;"
                   }
                 ]
               }
             }
           ],
-          "rationale": "Intentionally use an old_string that is not present so AIR records edit_validation_failed."
+          "rationale": "Intentionally use an old_string that does not match as a whole but contains an anchor line, so AIR records edit_validation_failed with precise diagnostic context."
         },
         {
           "complete": false,
@@ -57,7 +57,7 @@
       "workspace_diff": {
         "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
       },
-      "rationale": "AIR recorded edit_validation_failed for a non-matching old_string, then the loop retried with exact replace_lines bounds, revalidated, and inspected the diff.",
+      "rationale": "AIR recorded edit_validation_failed for a non-matching old_string, collected anchor-line diagnostic context, then the loop retried with exact replace_lines bounds, revalidated, and inspected the diff.",
       "observations": []
     }
   }
