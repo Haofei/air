@@ -87,6 +87,10 @@ state:
     type: array
     items:
       type: object
+  manual_test_full_log_context:
+    type: array
+    items:
+      type: object
   final_diff_result:
     type: array
     items:
@@ -804,8 +808,79 @@ workflow:
             verification_status: passed
             phase: summarize
 
+    - id: record-manual-test-failed-output-truncated
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.truncated == true
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: diagnostic.context
+                  input:
+                    object:
+                      diagnostics:
+                        ref: observation[0].output.diagnostics
+                      context_lines:
+                        literal: 6
+              - object:
+                  tool:
+                    literal: file.search
+                  input:
+                    object:
+                      path:
+                        ref: observation[0].output.full_log_path
+                      pattern:
+                        literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
+                      context_lines:
+                        literal: 3
+                      max_matches:
+                        literal: 20
+          output: manual_test_full_log_context
+          max_calls: 2
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: manual_test_full_log_context
+              rationale:
+                literal: A manual validation run failed with truncated output, so AIR searched the persisted full_log_path and collected diagnostic context before the next repair decision.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: diagnostic.context
+                      input:
+                        object:
+                          diagnostics:
+                            ref: observation[0].output.diagnostics
+                          context_lines:
+                            literal: 6
+                  - object:
+                      tool:
+                        literal: file.search
+                      input:
+                        object:
+                          path:
+                            ref: observation[0].output.full_log_path
+                          pattern:
+                            literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
+                          context_lines:
+                            literal: 3
+                          max_matches:
+                            literal: 20
+              result:
+                ref: manual_test_full_log_context
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
     - id: record-manual-test-failed-output
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.truncated != true
       actions:
         - kind: set
           values:

@@ -157,6 +157,66 @@ assert "package" in tool_schemas["test.run"]["optional"], tool_schemas["test.run
 assert "test_filter" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
 PY
 
+echo "[code-agent] edit loop searches truncated manual test logs"
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("examples/code-agent/tools.core.json", encoding="utf-8") as handle:
+    config = json.load(handle)
+config["tools"]["test.run"]["max_bytes"] = 8
+config["tools"]["test.run"]["truncation_direction"] = "tail"
+with open("target/generated/tools.truncated-manual-test.json", "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
+edit_truncated_manual_test_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_truncated_manual_test_backup"
+restore_edit_truncated_manual_test_fixture() {
+  cp "$edit_truncated_manual_test_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_truncated_manual_test_backup"
+}
+trap restore_edit_truncated_manual_test_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.json \
+  --tool-config target/generated/tools.truncated-manual-test.json \
+  --trace-out target/generated/code_agent_edit_truncated_manual_test.trace.jsonl \
+  > target/generated/code_agent_edit_truncated_manual_test.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_truncated_manual_test.post_test.log
+restore_edit_truncated_manual_test_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_truncated_manual_test.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_truncated_manual_test.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+manual_failed = next(
+    event for event in events
+    if event.get("rule") == "record-manual-test-failed-output-truncated"
+    and event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.search"
+)
+assert manual_failed["input"]["path"], manual_failed
+assert manual_failed["output"]["match_count"] >= 1, manual_failed
+repair_decider = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+    and any(
+        observation.get("action") == "manual_test_full_log_context"
+        for observation in event.get("input", {}).get("observations", [])
+    )
+)
+assert repair_decider["input"]["verification_status"] == "failed", repair_decider
+PY
+
 echo "[code-agent] targetless edit loop offline run"
 edit_targetless_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_targetless_backup"
