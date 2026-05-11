@@ -373,6 +373,12 @@ mod tests {
             .and_then(|model| model.system_prompt.as_deref())
             .unwrap_or_default()
             .to_lowercase();
+        let edit_config = config.models.get("code_edit_decider").unwrap();
+        assert_eq!(
+            edit_config.native_tool_calls,
+            Some(true),
+            "code_edit_decider should use native provider tool calls instead of prompt-only JSON tool selection"
+        );
         assert!(
             !edit_prompt.contains("exactly these keys: patch"),
             "code_edit_decider prompt must not require the old patch-only schema"
@@ -390,16 +396,8 @@ mod tests {
             "code_edit_decider prompt must tell models to follow tool_schemas"
         );
         assert!(
-            edit_prompt.contains("bare tool_calls object"),
-            "code_edit_decider prompt must forbid bare tool_calls wrappers"
-        );
-        assert!(
-            edit_prompt.contains("\"content\""),
-            "code_edit_decider prompt must forbid provider-style content wrappers"
-        );
-        assert!(
-            edit_prompt.contains("read/search tool_calls"),
-            "code_edit_decider prompt must convert information needs into tool calls"
+            edit_prompt.contains("native provider tool calls"),
+            "code_edit_decider prompt must prefer native provider tool calls"
         );
         assert!(
             edit_prompt.contains("full extensions such as .json"),

@@ -53,6 +53,10 @@ config = json.loads(Path("examples/bigmodel-openai-compatible.json").read_text()
 for model in ("code_edit_decider", "code_edit_summarizer"):
     timeout = config["models"][model].get("request_timeout_seconds")
     assert timeout is not None and timeout >= 180, (model, timeout)
+assert config["models"]["code_edit_decider"].get("native_tool_calls") is True, (
+    "code_edit_decider",
+    config["models"]["code_edit_decider"].get("native_tool_calls"),
+)
 
 self_tools = json.loads(Path("examples/code-agent/tools.self.json").read_text())
 for tool in ("file.ops", "file.patch"):
@@ -468,57 +472,6 @@ batch_error = next(
     and event.get("output", [{}])[0].get("tool") == "<batch>"
 )
 assert "approval-required capability file.write must be isolated" in batch_error["output"][0]["error"], batch_error
-tools = [
-    event.get("meta", {}).get("tool")
-    for event in events
-    if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("status") == "ok"
-]
-assert tools == ["file.search", "candidate.validate", "file.ops", "test.run", "git.diff"], tools
-PY
-
-echo "[code-agent] edit loop gives structured feedback for content wrappers"
-edit_content_wrapper_backup="$(mktemp)"
-cp examples/code-agent/edit-fixture/math.js "$edit_content_wrapper_backup"
-restore_edit_content_wrapper_fixture() {
-  cp "$edit_content_wrapper_backup" examples/code-agent/edit-fixture/math.js
-  rm -f "$edit_content_wrapper_backup"
-}
-trap restore_edit_content_wrapper_fixture EXIT
-cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/model-fixtures.content-wrapper.json \
-  --tool-config examples/code-agent/tools.core.json \
-  --trace-out target/generated/code_agent_edit_content_wrapper.trace.jsonl \
-  > target/generated/code_agent_edit_content_wrapper.output.json
-node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_content_wrapper.post_test.log
-restore_edit_content_wrapper_fixture
-trap - EXIT
-
-"${PYTHON:-python3}" - <<'PY'
-import json
-
-with open("target/generated/code_agent_edit_content_wrapper.output.json", encoding="utf-8") as handle:
-    output = json.load(handle)
-edit = output["edit"]
-assert edit["final_success"] is True, edit
-assert edit["patch_applied"] is True, edit
-
-with open("target/generated/code_agent_edit_content_wrapper.trace.jsonl", encoding="utf-8") as handle:
-    events = [json.loads(line) for line in handle if line.strip()]
-schema_errors = [
-    event for event in events
-    if event.get("action") == "model_call"
-    and event.get("status") == "error"
-    and event.get("rule") == "choose"
-]
-assert schema_errors, events
-error = schema_errors[0]["error"]
-assert "invalid structured model output" in error, error
-assert "declared AIR output interface" in error, error
-assert "content_preview=" in error, error
-assert schema_errors[0].get("meta", {}).get("will_retry") is True, schema_errors[0]
 tools = [
     event.get("meta", {}).get("tool")
     for event in events

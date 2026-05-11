@@ -1,12 +1,19 @@
 use air_runtime::{sanitize_trace_text, ModelProvider, RuntimeError, TraceWriteOptions};
-use reqwest::blocking::Client;
+use async_openai::{config::OpenAIConfig, Client as OpenAiClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
+use tokio::runtime::{Builder, Runtime};
+
+struct ChatCompletionBody {
+    body: Value,
+    tool_name_map: BTreeMap<String, String>,
+}
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OpenAiCompatibleConfig {
@@ -42,6 +49,9 @@ pub struct OpenAiModelConfig {
 
     #[serde(default)]
     pub extra_body: Option<Value>,
+
+    #[serde(default)]
+    pub native_tool_calls: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -196,14 +206,20 @@ fn invalid_config(path: &Path, message: impl Into<String>) -> OpenAiConfigError 
 #[derive(Clone)]
 pub struct OpenAiCompatibleModelProvider {
     config: OpenAiCompatibleConfig,
-    client: Client,
+    runtime: Arc<Runtime>,
 }
 
 impl OpenAiCompatibleModelProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, RuntimeError> {
-        let client = Client::builder().build().map_err(provider_error)?;
+        let runtime = Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(provider_error)?;
 
-        Ok(Self { config, client })
+        Ok(Self {
+            config,
+            runtime: Arc::new(runtime),
+        })
     }
 
     fn call_model_with_request_timeout(
@@ -224,60 +240,22 @@ impl OpenAiCompatibleModelProvider {
             ))
         })?;
         let base_url = resolve_base_url(model_config)?;
-        let url = chat_completions_url(&base_url);
         let model_name = resolve_model_name(model_config)?;
         let content = input_to_content(input)?;
-
-        let mut messages = Vec::new();
-        if let Some(system_prompt) = &model_config.system_prompt {
-            messages.push(json!({
-                "role": "system",
-                "content": system_prompt
-            }));
-        }
-        messages.push(json!({
-            "role": "user",
-            "content": content
-        }));
-
-        let mut body = json!({
-            "model": model_name,
-            "messages": messages
-        });
-
-        if let Some(extra_body) = &model_config.extra_body {
-            merge_extra_body(&mut body, extra_body);
-        }
-        if let Some(temperature) = model_config.temperature {
-            body["temperature"] = json!(temperature);
-        }
-        if let Some(response_format) = resolved_response_format(model_config) {
-            body["response_format"] = response_format;
-        }
+        let request = build_chat_completion_body(model_config, model_name, content, input)?;
 
         let request_timeout =
             effective_request_timeout(model_config.request_timeout_seconds, action_timeout);
+        let client = openai_client(api_key, &base_url);
 
-        let response = self
-            .client
-            .post(url)
-            .timeout(request_timeout)
-            .bearer_auth(api_key)
-            .json(&body)
-            .send()
-            .map_err(provider_error)?;
+        let response = self.runtime.block_on(async {
+            tokio::time::timeout(request_timeout, client.chat().create_byot(request.body))
+                .await
+                .map_err(|_| provider_timeout_error("chat/completions", request_timeout))?
+                .map_err(provider_error)
+        })?;
 
-        let status = response.status();
-        let response_text = response.text().map_err(provider_error)?;
-        if !status.is_success() {
-            return Err(provider_http_error(
-                "chat/completions",
-                status,
-                &response_text,
-            ));
-        }
-
-        parse_chat_completion_content(&response_text)
+        parse_chat_completion_content(&response, &request.tool_name_map)
     }
 }
 
@@ -297,7 +275,14 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
 }
 
 fn provider_error(error: impl std::fmt::Display) -> RuntimeError {
-    RuntimeError::Provider(error.to_string())
+    RuntimeError::Provider(sanitize_provider_error_text(&error.to_string()))
+}
+
+fn provider_timeout_error(operation: &str, timeout: Duration) -> RuntimeError {
+    RuntimeError::Provider(format!(
+        "{operation} timed out after {}s",
+        timeout.as_secs()
+    ))
 }
 
 fn effective_request_timeout(
@@ -308,22 +293,6 @@ fn effective_request_timeout(
     action_timeout
         .map(|timeout| timeout.min(configured_timeout))
         .unwrap_or(configured_timeout)
-}
-
-fn provider_http_error(
-    operation: &str,
-    status: reqwest::StatusCode,
-    response_text: &str,
-) -> RuntimeError {
-    let body = sanitize_trace_text(
-        response_text,
-        &TraceWriteOptions {
-            redact_sensitive: true,
-            max_string_chars: Some(2048),
-            max_event_bytes: None,
-        },
-    );
-    RuntimeError::Provider(format!("{operation} failed with status {status}: {body}"))
 }
 
 fn resolve_base_url(model_config: &OpenAiModelConfig) -> Result<String, RuntimeError> {
@@ -366,8 +335,189 @@ fn resolve_model_name(model_config: &OpenAiModelConfig) -> Result<String, Runtim
     ))
 }
 
-fn chat_completions_url(base_url: &str) -> String {
-    format!("{}/chat/completions", base_url.trim_end_matches('/'))
+fn openai_client(api_key: String, base_url: &str) -> OpenAiClient<OpenAIConfig> {
+    let config = OpenAIConfig::new()
+        .with_api_key(api_key)
+        .with_api_base(base_url.trim_end_matches('/'));
+    OpenAiClient::with_config(config)
+}
+
+fn build_chat_completion_body(
+    model_config: &OpenAiModelConfig,
+    model_name: String,
+    content: String,
+    input: &Value,
+) -> Result<ChatCompletionBody, RuntimeError> {
+    let mut messages = Vec::new();
+    if let Some(system_prompt) = &model_config.system_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": system_prompt
+        }));
+    }
+    messages.push(json!({
+        "role": "user",
+        "content": content
+    }));
+
+    let mut body = json!({
+        "model": model_name,
+        "messages": messages
+    });
+
+    if let Some(extra_body) = &model_config.extra_body {
+        merge_extra_body(&mut body, extra_body);
+    }
+    if let Some(temperature) = model_config.temperature {
+        body["temperature"] = json!(temperature);
+    }
+    if let Some(response_format) = resolved_response_format(model_config) {
+        body["response_format"] = response_format;
+    }
+
+    let tool_name_map = if model_config.native_tool_calls == Some(true) {
+        attach_native_tool_calls(&mut body, input)?
+    } else {
+        BTreeMap::new()
+    };
+
+    Ok(ChatCompletionBody {
+        body,
+        tool_name_map,
+    })
+}
+
+fn attach_native_tool_calls(
+    body: &mut Value,
+    input: &Value,
+) -> Result<BTreeMap<String, String>, RuntimeError> {
+    let Some(allowed_tools) = input.get("allowed_tools").and_then(Value::as_array) else {
+        return Ok(BTreeMap::new());
+    };
+    let tool_schemas = input.get("tool_schemas").and_then(Value::as_object);
+    let mut tools = Vec::new();
+    let mut tool_name_map = BTreeMap::new();
+    let mut used_names = BTreeMap::new();
+
+    for tool in allowed_tools {
+        let Some(original_name) = tool.as_str() else {
+            continue;
+        };
+        if original_name.trim().is_empty() {
+            continue;
+        }
+
+        let safe_name = safe_openai_tool_name(original_name, &mut used_names);
+        tool_name_map.insert(safe_name.clone(), original_name.to_string());
+        let schema = tool_schemas.and_then(|schemas| schemas.get(original_name));
+        tools.push(json!({
+            "type": "function",
+            "function": {
+                "name": safe_name,
+                "description": native_tool_description(original_name, schema),
+                "parameters": native_tool_parameters(schema),
+                "strict": false
+            }
+        }));
+    }
+
+    if tools.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let Some(body) = body.as_object_mut() else {
+        return Err(RuntimeError::Provider(
+            "chat completion request body is not a JSON object".to_string(),
+        ));
+    };
+    body.insert("tools".to_string(), Value::Array(tools));
+    body.insert("tool_choice".to_string(), json!("auto"));
+
+    Ok(tool_name_map)
+}
+
+fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize>) -> String {
+    let mut base = original
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if base.is_empty() {
+        base.push_str("tool");
+    }
+    if base.len() > 64 {
+        base.truncate(64);
+    }
+
+    let count = used_names.entry(base.clone()).or_insert(0);
+    let name = if *count == 0 {
+        base
+    } else {
+        let suffix = format!("__{}", *count);
+        let max_base_len = 64usize.saturating_sub(suffix.len());
+        format!("{}{}", &base[..base.len().min(max_base_len)], suffix)
+    };
+    *count += 1;
+    name
+}
+
+fn native_tool_description(original_name: &str, schema: Option<&Value>) -> String {
+    let Some(schema) = schema else {
+        return format!("AIR tool {original_name}");
+    };
+    let mut parts = vec![format!("AIR tool {original_name}")];
+    if let Some(required) = schema.get("required") {
+        parts.push(format!("required: {}", compact_json(required)));
+    }
+    if let Some(optional) = schema.get("optional") {
+        parts.push(format!("optional: {}", compact_json(optional)));
+    }
+    parts.join("; ")
+}
+
+fn native_tool_parameters(schema: Option<&Value>) -> Value {
+    let mut properties = serde_json::Map::new();
+    let mut required_names = Vec::new();
+    if let Some(schema) = schema {
+        if let Some(required) = schema.get("required").and_then(Value::as_object) {
+            for (name, description) in required {
+                required_names.push(Value::String(name.clone()));
+                properties.insert(
+                    name.clone(),
+                    json!({"description": schema_description(description)}),
+                );
+            }
+        }
+        if let Some(optional) = schema.get("optional").and_then(Value::as_object) {
+            for (name, description) in optional {
+                properties
+                    .entry(name.clone())
+                    .or_insert_with(|| json!({"description": schema_description(description)}));
+            }
+        }
+    }
+    json!({
+        "type": "object",
+        "properties": properties,
+        "required": required_names,
+        "additionalProperties": true
+    })
+}
+
+fn schema_description(value: &Value) -> String {
+    value
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(|| compact_json(value))
+}
+
+fn compact_json(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
 fn resolved_response_format(model_config: &OpenAiModelConfig) -> Option<Value> {
@@ -396,8 +546,14 @@ fn input_to_content(input: &Value) -> Result<String, RuntimeError> {
     }
 }
 
-fn parse_chat_completion_content(response_text: &str) -> Result<Value, RuntimeError> {
-    let response: Value = serde_json::from_str(response_text).map_err(provider_error)?;
+fn parse_chat_completion_content(
+    response: &Value,
+    tool_name_map: &BTreeMap<String, String>,
+) -> Result<Value, RuntimeError> {
+    if let Some(tool_calls) = parse_native_tool_calls(response, tool_name_map)? {
+        return Ok(tool_calls);
+    }
+
     let content = response
         .pointer("/choices/0/message/content")
         .and_then(Value::as_str)
@@ -411,6 +567,123 @@ fn parse_chat_completion_content(response_text: &str) -> Result<Value, RuntimeEr
         Ok(json) => Ok(json),
         Err(_) => Ok(json!({ "content": normalized })),
     }
+}
+
+fn parse_native_tool_calls(
+    response: &Value,
+    tool_name_map: &BTreeMap<String, String>,
+) -> Result<Option<Value>, RuntimeError> {
+    if tool_name_map.is_empty() {
+        return Ok(None);
+    }
+    let Some(tool_calls) = response
+        .pointer("/choices/0/message/tool_calls")
+        .and_then(Value::as_array)
+    else {
+        return Ok(None);
+    };
+    if tool_calls.is_empty() {
+        return Ok(None);
+    }
+
+    let mut normalized_calls = Vec::new();
+    for call in tool_calls {
+        let Some(safe_name) = call.pointer("/function/name").and_then(Value::as_str) else {
+            continue;
+        };
+        let original_name = tool_name_map.get(safe_name).cloned().ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "model returned undeclared native tool call {safe_name}"
+            ))
+        })?;
+        let arguments = call
+            .pointer("/function/arguments")
+            .and_then(Value::as_str)
+            .unwrap_or("{}");
+        let input: Value = serde_json::from_str(arguments).map_err(|error| {
+            RuntimeError::Provider(format!(
+                "invalid native tool call arguments for {original_name}: {error}"
+            ))
+        })?;
+        let input = normalize_native_tool_arguments(input);
+        normalized_calls.push(json!({
+            "tool": original_name,
+            "input": input
+        }));
+    }
+    if normalized_calls.is_empty() {
+        return Err(RuntimeError::Provider(
+            "native tool call response did not contain function tool calls".to_string(),
+        ));
+    }
+
+    let rationale = response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .filter(|content| !content.trim().is_empty())
+        .unwrap_or("model requested native tool calls");
+
+    Ok(Some(json!({
+        "complete": false,
+        "tool_calls": normalized_calls,
+        "rationale": rationale
+    })))
+}
+
+fn normalize_native_tool_arguments(value: Value) -> Value {
+    match value {
+        Value::String(text) => normalize_native_tool_argument_string(text),
+        Value::Array(items) => Value::Array(
+            items
+                .into_iter()
+                .map(normalize_native_tool_arguments)
+                .collect(),
+        ),
+        Value::Object(values) => Value::Object(
+            values
+                .into_iter()
+                .map(|(key, value)| (key, normalize_native_tool_arguments(value)))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+fn normalize_native_tool_argument_string(text: String) -> Value {
+    let trimmed = text.trim();
+    if trimmed.starts_with('[') || trimmed.starts_with('{') {
+        if let Ok(parsed) = serde_json::from_str::<Value>(trimmed) {
+            return normalize_native_tool_arguments(parsed);
+        }
+    }
+    if trimmed == "true" {
+        return Value::Bool(true);
+    }
+    if trimmed == "false" {
+        return Value::Bool(false);
+    }
+    let looks_integer = trimmed
+        .strip_prefix('-')
+        .unwrap_or(trimmed)
+        .chars()
+        .all(|character| character.is_ascii_digit());
+    if looks_integer {
+        if let Ok(number) = trimmed.parse::<i64>() {
+            return json!(number);
+        }
+    }
+    Value::String(text)
+}
+
+fn sanitize_provider_error_text(error: &str) -> String {
+    sanitize_trace_text(
+        error,
+        &TraceWriteOptions {
+            redact_sensitive: true,
+            max_string_chars: Some(2048),
+            max_event_bytes: None,
+        },
+    )
 }
 
 fn strip_markdown_code_fence(content: &str) -> Option<&str> {
@@ -444,7 +717,10 @@ mod tests {
     #[test]
     fn parses_text_content_as_content_object() {
         let value = parse_chat_completion_content(
-            r#"{"choices":[{"message":{"content":"hello from model"}}]}"#,
+            &json!({
+                "choices": [{"message": {"content": "hello from model"}}]
+            }),
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -454,7 +730,10 @@ mod tests {
     #[test]
     fn parses_json_content_as_json() {
         let value = parse_chat_completion_content(
-            r#"{"choices":[{"message":{"content":"{\"answer\":42}"}}]}"#,
+            &json!({
+                "choices": [{"message": {"content": "{\"answer\":42}"}}]
+            }),
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -463,9 +742,13 @@ mod tests {
 
     #[test]
     fn parses_fenced_json_content_as_json() {
-        let value = parse_chat_completion_content(
-            r#"{"choices":[{"message":{"content":"```json\n{\n  \"summary\": \"ok\",\n  \"risk_score\": 0.1\n}\n```"}}]}"#,
-        )
+        let value = parse_chat_completion_content(&json!({
+            "choices": [{
+                "message": {
+                    "content": "```json\n{\n  \"summary\": \"ok\",\n  \"risk_score\": 0.1\n}\n```"
+                }
+            }]
+        }), &BTreeMap::new())
         .unwrap();
 
         assert_eq!(value, json!({"summary": "ok", "risk_score": 0.1}));
@@ -474,7 +757,10 @@ mod tests {
     #[test]
     fn strips_non_json_fence_as_content_object() {
         let value = parse_chat_completion_content(
-            r#"{"choices":[{"message":{"content":"```text\nnot json\n```"}}]}"#,
+            &json!({
+                "choices": [{"message": {"content": "```text\nnot json\n```"}}]
+            }),
+            &BTreeMap::new(),
         )
         .unwrap();
 
@@ -625,6 +911,7 @@ mod tests {
             json_mode: Some(true),
             response_format: None,
             extra_body: None,
+            native_tool_calls: None,
         };
 
         assert_eq!(
@@ -650,6 +937,7 @@ mod tests {
                 "json_schema": {"name": "decision", "schema": {"type": "object"}}
             })),
             extra_body: None,
+            native_tool_calls: None,
         };
 
         assert_eq!(
@@ -807,6 +1095,122 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_calls_attach_openai_function_tools_when_enabled() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: "OPENAI_API_KEY".to_string(),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            "choose tools".to_string(),
+            &json!({
+                "allowed_tools": ["file.ops", "repo.search"],
+                "tool_schemas": {
+                    "file.ops": {
+                        "required": {"operations": "array of edit operations"},
+                        "optional": {"dry_run": "boolean"}
+                    },
+                    "repo.search": {
+                        "required": {"query": "search text"}
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(request.tool_name_map["file_ops"], "file.ops");
+        assert_eq!(request.tool_name_map["repo_search"], "repo.search");
+        assert_eq!(request.body["tool_choice"], json!("auto"));
+        assert_eq!(
+            request.body["tools"][0]["function"]["parameters"]["required"],
+            json!(["operations"])
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_parse_to_air_decision_shape() {
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("file_ops".to_string(), "file.ops".to_string());
+
+        let value = parse_chat_completion_content(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "content": "Need an edit.",
+                        "tool_calls": [{
+                            "type": "function",
+                            "function": {
+                                "name": "file_ops",
+                                "arguments": "{\"operations\":[{\"kind\":\"edit\"}]}"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            &tool_name_map,
+        )
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "complete": false,
+                "tool_calls": [{
+                    "tool": "file.ops",
+                    "input": {
+                        "operations": [{"kind": "edit"}]
+                    }
+                }],
+                "rationale": "Need an edit."
+            })
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_normalize_stringified_arguments() {
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("repo_symbols".to_string(), "repo.symbols".to_string());
+
+        let value = parse_chat_completion_content(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "type": "function",
+                            "function": {
+                                "name": "repo_symbols",
+                                "arguments": "{\"names\":\"[\\\"call_repo_references_tool\\\"]\",\"max_symbols\":\"3\",\"line_numbers\":\"true\"}"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            &tool_name_map,
+        )
+        .unwrap();
+
+        assert_eq!(
+            value["tool_calls"][0]["input"],
+            json!({
+                "names": ["call_repo_references_tool"],
+                "max_symbols": 3,
+                "line_numbers": true
+            })
+        );
+    }
+
+    #[test]
     fn effective_request_timeout_uses_smaller_action_deadline() {
         assert_eq!(
             effective_request_timeout(Some(30), Some(Duration::from_secs(5))),
@@ -863,6 +1267,7 @@ mod tests {
             json_mode: None,
             response_format: None,
             extra_body: None,
+            native_tool_calls: None,
         };
 
         assert_eq!(
@@ -889,6 +1294,7 @@ mod tests {
             json_mode: None,
             response_format: None,
             extra_body: None,
+            native_tool_calls: None,
         };
 
         assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");
@@ -909,13 +1315,12 @@ mod tests {
     }
 
     #[test]
-    fn provider_http_error_redacts_and_truncates_response_body() {
+    fn provider_error_redacts_and_truncates_response_body() {
         let body = format!(
             "api_key=sk-live-secret Authorization: Bearer provider-secret {}",
             "x".repeat(4096)
         );
-        let error =
-            provider_http_error("chat/completions", reqwest::StatusCode::BAD_REQUEST, &body);
+        let error = provider_error(&body);
         let message = error.to_string();
 
         assert!(!message.contains("sk-live-secret"));

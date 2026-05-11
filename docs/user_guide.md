@@ -223,6 +223,7 @@ AIR uses OpenAI-compatible model config for real model calls:
       "temperature": 0,
       "request_timeout_seconds": 120,
       "json_mode": true,
+      "native_tool_calls": false,
       "extra_body": {
         "thinking": {
           "type": "enabled",
@@ -235,9 +236,11 @@ AIR uses OpenAI-compatible model config for real model calls:
 }
 ```
 
-`request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout for each HTTP request. AIR also records elapsed-time violations in the runtime trace.
+`request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout as the request deadline. AIR also records elapsed-time violations in the runtime trace.
 
-OpenAI-compatible providers are not identical. AIR does not hard-code behavior for each model name. Use `json_mode` or `response_format` for structured-output support, and use `extra_body` to pass provider-specific request fields such as thinking controls, self-hosted gateway flags, or other vendor extensions. AIR merges `extra_body` into the chat/completions request body without overriding the configured AIR fields. When a provider returns text or a wrapper that does not match the declared AIR output schema, the runtime rejects it with schema feedback so retry attempts can repair the response against the same declared interface.
+OpenAI-compatible providers are not identical. AIR does not hard-code behavior for each model name. The provider uses `async-openai` as the single transport path, with BYOT JSON request bodies so AIR can still pass provider extensions. Use `json_mode` or `response_format` for structured-output support, and use `extra_body` to pass provider-specific request fields such as thinking controls, self-hosted gateway flags, or other vendor extensions. AIR merges `extra_body` into the chat/completions request body without overriding the configured AIR fields. When a provider returns text or a wrapper that does not match the declared AIR output schema, the runtime rejects it with schema feedback so retry attempts can repair the response against the same declared interface.
+
+Set `native_tool_calls` to `true` only for providers that support OpenAI chat-completions function tools. In that mode, AIR converts model input fields named `allowed_tools` and `tool_schemas` into OpenAI `tools`, then normalizes returned `tool_calls` back into AIR's `{complete:false, tool_calls:[...]}` decision shape. This is an opt-in single path, not a fallback; if the provider rejects native tools, the model call fails visibly.
 
 For deterministic offline smoke tests, the native CLI also accepts fixture model configs:
 

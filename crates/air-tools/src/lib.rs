@@ -4016,18 +4016,10 @@ fn call_repo_references_tool(
         }
         let path = item["path"].as_str().unwrap_or_default().to_string();
         let line_number = item["line"].as_u64().unwrap_or_default() as usize;
-        let definition_kind = parse_symbol_declaration(text)
-            .and_then(|(kind, declaration)| {
-                (kind != "impl" && declaration == symbol).then_some(kind)
-            });
-        let reference = json!({
-            "path": item["path"],
-            "line": item["line"],
-            "column": item["column"],
-            "text": text,
-            "definition": definition_kind.is_some(),
-            "kind": definition_kind.unwrap_or("reference")
+        let definition_kind = parse_symbol_declaration(text).and_then(|(kind, declaration)| {
+            (kind != "impl" && declaration == symbol).then_some(kind)
         });
+        let reference = build_reference_entry(&item, text, definition_kind);
         if definition_kind.is_some() {
             definitions.push(reference.clone());
         }
@@ -4116,6 +4108,17 @@ fn call_repo_references_tool(
             }
         }]
     }))
+}
+
+fn build_reference_entry(item: &Value, text: &str, definition_kind: Option<&str>) -> Value {
+    json!({
+        "path": item["path"],
+        "line": item["line"],
+        "column": item["column"],
+        "text": text,
+        "definition": definition_kind.is_some(),
+        "kind": definition_kind.unwrap_or("reference")
+    })
 }
 
 fn is_identifier_like(symbol: &str) -> bool {
