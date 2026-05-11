@@ -138,11 +138,12 @@ fn semantic_plan(module: &AirModule) -> Result<SemanticPlan, OpenAiAgentsJsBacke
             StateAction::ModelCall { model, .. } if model_alias.is_none() => {
                 model_alias = Some(model.clone());
             }
-            StateAction::ToolCall { tool, .. } => {
-                if tool_name.replace(tool.clone()).is_some() {
-                    return Err(OpenAiAgentsJsBackendError::TooManyToolCalls);
-                }
+            StateAction::ToolCall { tool, .. }
+                if tool_name.replace(tool.clone()).is_some() =>
+            {
+                return Err(OpenAiAgentsJsBackendError::TooManyToolCalls);
             }
+            StateAction::ToolCall { .. } => {}
             StateAction::ToolDispatch { .. } | StateAction::ToolBatchDispatch { .. } => {
                 return Err(OpenAiAgentsJsBackendError::TooManyToolCalls);
             }
