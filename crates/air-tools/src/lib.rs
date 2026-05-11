@@ -5492,6 +5492,22 @@ fn call_artifact_validate_tool(
     }))
 }
 
+fn validate_test_command_allowlisted(
+    name: &str,
+    test_command: &str,
+    allowed_test_commands: &[String],
+) -> Result<(), RuntimeError> {
+    if !allowed_test_commands
+        .iter()
+        .any(|allowed| allowed == test_command)
+    {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} candidate test_command {test_command} is not allowlisted"
+        )));
+    }
+    Ok(())
+}
+
 fn call_candidate_validate_tool(
     name: &str,
     input: &Value,
@@ -5512,14 +5528,7 @@ fn call_candidate_validate_tool(
     }
 
     let test_command = required_input_string(name, candidate, "test_command")?;
-    if !allowed_test_commands
-        .iter()
-        .any(|allowed| allowed == test_command)
-    {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} candidate test_command {test_command} is not allowlisted"
-        )));
-    }
+    validate_test_command_allowlisted(name, &test_command, allowed_test_commands)?;
 
     let mut related_files = Vec::new();
     if let Some(files) = candidate.get("related_files").and_then(Value::as_array) {
