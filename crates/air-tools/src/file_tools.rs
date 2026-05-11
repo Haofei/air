@@ -774,8 +774,13 @@ enum EditMatchStrategy {
     Auto,
     Exact,
     LineTrimmed,
+    BlockAnchor,
     WhitespaceNormalized,
     IndentationFlexible,
+    EscapeNormalized,
+    TrimmedBoundary,
+    ContextAware,
+    MultiOccurrence,
 }
 
 impl EditMatchStrategy {
@@ -796,10 +801,15 @@ impl EditMatchStrategy {
             "auto" => Ok(Self::Auto),
             "exact" => Ok(Self::Exact),
             "line_trimmed" => Ok(Self::LineTrimmed),
+            "block_anchor" => Ok(Self::BlockAnchor),
             "whitespace_normalized" => Ok(Self::WhitespaceNormalized),
             "indentation_flexible" => Ok(Self::IndentationFlexible),
+            "escape_normalized" => Ok(Self::EscapeNormalized),
+            "trimmed_boundary" => Ok(Self::TrimmedBoundary),
+            "context_aware" => Ok(Self::ContextAware),
+            "multi_occurrence" => Ok(Self::MultiOccurrence),
             _ => Err(RuntimeError::Provider(format!(
-                "tool {tool_name} {label}.match_strategy must be one of auto, exact, line_trimmed, whitespace_normalized, indentation_flexible"
+                "tool {tool_name} {label}.match_strategy must be one of auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, multi_occurrence"
             ))),
         }
     }
@@ -809,8 +819,13 @@ impl EditMatchStrategy {
             Self::Auto => "auto",
             Self::Exact => "exact",
             Self::LineTrimmed => "line_trimmed",
+            Self::BlockAnchor => "block_anchor",
             Self::WhitespaceNormalized => "whitespace_normalized",
             Self::IndentationFlexible => "indentation_flexible",
+            Self::EscapeNormalized => "escape_normalized",
+            Self::TrimmedBoundary => "trimmed_boundary",
+            Self::ContextAware => "context_aware",
+            Self::MultiOccurrence => "multi_occurrence",
         }
     }
 }
@@ -842,8 +857,13 @@ fn find_edit_matches(
         for candidate in [
             EditMatchStrategy::Exact,
             EditMatchStrategy::LineTrimmed,
-            EditMatchStrategy::IndentationFlexible,
+            EditMatchStrategy::BlockAnchor,
             EditMatchStrategy::WhitespaceNormalized,
+            EditMatchStrategy::IndentationFlexible,
+            EditMatchStrategy::EscapeNormalized,
+            EditMatchStrategy::TrimmedBoundary,
+            EditMatchStrategy::ContextAware,
+            EditMatchStrategy::MultiOccurrence,
         ] {
             let matches = find_edit_matches_with_strategy(content, old_string, candidate);
             if matches.is_empty() {
@@ -872,7 +892,7 @@ fn find_edit_matches_with_strategy(
 ) -> Vec<EditMatch> {
     match strategy {
         EditMatchStrategy::Auto => unreachable!("auto expands before concrete matching"),
-        EditMatchStrategy::Exact => content
+        EditMatchStrategy::Exact | EditMatchStrategy::MultiOccurrence => content
             .match_indices(old_string)
             .map(|(start, value)| EditMatch {
                 start,
@@ -882,12 +902,20 @@ fn find_edit_matches_with_strategy(
         EditMatchStrategy::LineTrimmed => {
             find_line_based_edit_matches(content, old_string, |line| line.trim().to_string())
         }
+        EditMatchStrategy::BlockAnchor => find_block_anchor_edit_matches(content, old_string),
         EditMatchStrategy::WhitespaceNormalized => {
-            find_line_based_edit_matches(content, old_string, normalize_whitespace)
+            find_whitespace_normalized_edit_matches(content, old_string)
         }
         EditMatchStrategy::IndentationFlexible => {
             find_line_based_edit_matches(content, old_string, strip_common_indentation)
         }
+        EditMatchStrategy::EscapeNormalized => {
+            find_escape_normalized_edit_matches(content, old_string)
+        }
+        EditMatchStrategy::TrimmedBoundary => {
+            find_trimmed_boundary_edit_matches(content, old_string)
+        }
+        EditMatchStrategy::ContextAware => find_context_aware_edit_matches(content, old_string),
     }
 }
 
@@ -990,6 +1018,337 @@ where
         }
     }
     matches
+}
+
+fn find_block_anchor_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
+    let content_lines = split_lines_with_offsets(content);
+    let search_lines = normalized_search_lines(old_string);
+    if search_lines.len() < 3 {
+        return Vec::new();
+    }
+    let first_line = search_lines[0].trim();
+    let last_line = search_lines[search_lines.len() - 1].trim();
+    if first_line.is_empty() || last_line.is_empty() {
+        return Vec::new();
+    }
+
+    let mut candidates = Vec::new();
+    for start_line in 0..content_lines.len() {
+        if content_lines[start_line].text.trim() != first_line {
+            continue;
+        }
+        for (end_line, line) in content_lines.iter().enumerate().skip(start_line + 2) {
+            if line.text.trim() == last_line {
+                candidates.push((start_line, end_line));
+                break;
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    if candidates.len() == 1 {
+        let (start_line, end_line) = candidates[0];
+        return vec![line_span_match(&content_lines, start_line, end_line)];
+    }
+
+    let mut best = None;
+    let mut best_similarity = -1.0_f64;
+    for (start_line, end_line) in candidates {
+        let similarity =
+            anchored_block_similarity(&content_lines, &search_lines, start_line, end_line);
+        if similarity > best_similarity {
+            best_similarity = similarity;
+            best = Some((start_line, end_line));
+        }
+    }
+    if best_similarity < 0.3 {
+        return Vec::new();
+    }
+    let Some((start_line, end_line)) = best else {
+        return Vec::new();
+    };
+    vec![line_span_match(&content_lines, start_line, end_line)]
+}
+
+fn find_whitespace_normalized_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
+    let mut matches = Vec::new();
+    let normalized_search = normalize_whitespace(old_string);
+    if normalized_search.is_empty() {
+        return matches;
+    }
+
+    let content_lines = split_lines_with_offsets(content);
+    if !old_string.contains('\n') {
+        for line in &content_lines {
+            let normalized_line = normalize_whitespace(line.text);
+            if normalized_line == normalized_search {
+                matches.push(EditMatch {
+                    start: line.start,
+                    end: line.end,
+                });
+                continue;
+            }
+            if !normalized_line.contains(&normalized_search) {
+                continue;
+            }
+            let words = old_string.split_whitespace().collect::<Vec<_>>();
+            if words.is_empty() {
+                continue;
+            }
+            let pattern = words
+                .iter()
+                .map(|word| regex::escape(word))
+                .collect::<Vec<_>>()
+                .join(r"\s+");
+            if let Ok(regex) = regex::Regex::new(&pattern) {
+                for regex_match in regex.find_iter(line.text) {
+                    matches.push(EditMatch {
+                        start: line.start + regex_match.start(),
+                        end: line.start + regex_match.end(),
+                    });
+                }
+            }
+        }
+    }
+
+    matches.extend(find_line_based_edit_matches(
+        content,
+        old_string,
+        normalize_whitespace,
+    ));
+    dedup_edit_matches(matches)
+}
+
+fn find_escape_normalized_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
+    let unescaped_search = unescape_edit_string(old_string);
+    let mut matches = content
+        .match_indices(&unescaped_search)
+        .map(|(start, value)| EditMatch {
+            start,
+            end: start + value.len(),
+        })
+        .collect::<Vec<_>>();
+
+    let content_lines = split_lines_with_offsets(content);
+    let search_lines = normalized_search_lines(&unescaped_search);
+    if search_lines.is_empty() || search_lines.len() > content_lines.len() {
+        return dedup_edit_matches(matches);
+    }
+    for start_line in 0..=content_lines.len() - search_lines.len() {
+        let end_line = start_line + search_lines.len() - 1;
+        let block = &content[content_lines[start_line].start..content_lines[end_line].end];
+        if unescape_edit_string(block) == unescaped_search {
+            matches.push(EditMatch {
+                start: content_lines[start_line].start,
+                end: content_lines[end_line].end,
+            });
+        }
+    }
+    dedup_edit_matches(matches)
+}
+
+fn find_trimmed_boundary_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
+    let trimmed_search = old_string.trim();
+    if trimmed_search == old_string || trimmed_search.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = content
+        .match_indices(trimmed_search)
+        .map(|(start, value)| EditMatch {
+            start,
+            end: start + value.len(),
+        })
+        .collect::<Vec<_>>();
+
+    let content_lines = split_lines_with_offsets(content);
+    let search_lines = normalized_search_lines(trimmed_search);
+    if search_lines.is_empty() || search_lines.len() > content_lines.len() {
+        return dedup_edit_matches(matches);
+    }
+    for start_line in 0..=content_lines.len() - search_lines.len() {
+        let end_line = start_line + search_lines.len() - 1;
+        let block = &content[content_lines[start_line].start..content_lines[end_line].end];
+        if block.trim() == trimmed_search {
+            matches.push(EditMatch {
+                start: content_lines[start_line].start,
+                end: content_lines[end_line].end,
+            });
+        }
+    }
+    dedup_edit_matches(matches)
+}
+
+fn find_context_aware_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
+    let content_lines = split_lines_with_offsets(content);
+    let search_lines = normalized_search_lines(old_string);
+    if search_lines.len() < 3 {
+        return Vec::new();
+    }
+    let first_line = search_lines[0].trim();
+    let last_line = search_lines[search_lines.len() - 1].trim();
+    if first_line.is_empty() || last_line.is_empty() {
+        return Vec::new();
+    }
+
+    let mut matches = Vec::new();
+    for start_line in 0..content_lines.len() {
+        if content_lines[start_line].text.trim() != first_line {
+            continue;
+        }
+        for end_line in start_line + 2..content_lines.len() {
+            if content_lines[end_line].text.trim() != last_line {
+                continue;
+            }
+            let block_len = end_line - start_line + 1;
+            if block_len != search_lines.len() {
+                break;
+            }
+            if middle_lines_match_ratio(&content_lines, &search_lines, start_line, end_line) >= 0.5
+            {
+                matches.push(line_span_match(&content_lines, start_line, end_line));
+            }
+            break;
+        }
+    }
+    matches
+}
+
+fn normalized_search_lines(text: &str) -> Vec<&str> {
+    let mut lines = text.split('\n').collect::<Vec<_>>();
+    if lines.last() == Some(&"") {
+        lines.pop();
+    }
+    lines
+}
+
+fn line_span_match(lines: &[LineSpan<'_>], start_line: usize, end_line: usize) -> EditMatch {
+    EditMatch {
+        start: lines[start_line].start,
+        end: lines[end_line].end,
+    }
+}
+
+fn anchored_block_similarity(
+    content_lines: &[LineSpan<'_>],
+    search_lines: &[&str],
+    start_line: usize,
+    end_line: usize,
+) -> f64 {
+    let actual_middle = end_line.saturating_sub(start_line + 1);
+    let search_middle = search_lines.len().saturating_sub(2);
+    let lines_to_check = actual_middle.min(search_middle);
+    if lines_to_check == 0 {
+        return 1.0;
+    }
+    let mut similarity = 0.0;
+    for offset in 0..lines_to_check {
+        let original_line = content_lines[start_line + offset + 1].text.trim();
+        let search_line = search_lines[offset + 1].trim();
+        let max_len = original_line
+            .chars()
+            .count()
+            .max(search_line.chars().count());
+        if max_len == 0 {
+            similarity += 1.0;
+            continue;
+        }
+        let distance = levenshtein_chars(original_line, search_line);
+        similarity += 1.0 - (distance as f64 / max_len as f64);
+    }
+    similarity / lines_to_check as f64
+}
+
+fn middle_lines_match_ratio(
+    content_lines: &[LineSpan<'_>],
+    search_lines: &[&str],
+    start_line: usize,
+    end_line: usize,
+) -> f64 {
+    let mut matching_lines = 0;
+    let mut total_non_empty = 0;
+    for (line, content_line) in content_lines
+        .iter()
+        .enumerate()
+        .take(end_line)
+        .skip(start_line + 1)
+    {
+        let offset = line - start_line;
+        let content_line = content_line.text.trim();
+        let search_line = search_lines[offset].trim();
+        if content_line.is_empty() && search_line.is_empty() {
+            continue;
+        }
+        total_non_empty += 1;
+        if content_line == search_line {
+            matching_lines += 1;
+        }
+    }
+    if total_non_empty == 0 {
+        1.0
+    } else {
+        matching_lines as f64 / total_non_empty as f64
+    }
+}
+
+fn levenshtein_chars(left: &str, right: &str) -> usize {
+    let left = left.chars().collect::<Vec<_>>();
+    let right = right.chars().collect::<Vec<_>>();
+    if left.is_empty() || right.is_empty() {
+        return left.len().max(right.len());
+    }
+    let mut previous = (0..=right.len()).collect::<Vec<_>>();
+    let mut current = vec![0; right.len() + 1];
+    for (left_index, left_char) in left.iter().enumerate() {
+        current[0] = left_index + 1;
+        for (right_index, right_char) in right.iter().enumerate() {
+            let insertion = current[right_index] + 1;
+            let deletion = previous[right_index + 1] + 1;
+            let substitution = previous[right_index] + usize::from(left_char != right_char);
+            current[right_index + 1] = insertion.min(deletion).min(substitution);
+        }
+        std::mem::swap(&mut previous, &mut current);
+    }
+    previous[right.len()]
+}
+
+fn unescape_edit_string(text: &str) -> String {
+    let mut output = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            output.push(ch);
+            continue;
+        }
+        match chars.next() {
+            Some('n') => output.push('\n'),
+            Some('t') => output.push('\t'),
+            Some('r') => output.push('\r'),
+            Some('\'') => output.push('\''),
+            Some('"') => output.push('"'),
+            Some('`') => output.push('`'),
+            Some('\\') => output.push('\\'),
+            Some('\n') => output.push('\n'),
+            Some('$') => output.push('$'),
+            Some(other) => {
+                output.push('\\');
+                output.push(other);
+            }
+            None => output.push('\\'),
+        }
+    }
+    output
+}
+
+fn dedup_edit_matches(matches: Vec<EditMatch>) -> Vec<EditMatch> {
+    let mut deduped = Vec::new();
+    for edit_match in matches {
+        if !deduped.contains(&edit_match) {
+            deduped.push(edit_match);
+        }
+    }
+    deduped
 }
 
 #[derive(Debug, Clone, Copy)]

@@ -466,6 +466,7 @@ workflow:
                       dry_run: "boolean"
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+                      match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
                   file.patch:
                     required: {patch: "unified diff"}
                     optional:
@@ -610,6 +611,7 @@ workflow:
                       dry_run: "boolean"
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
+                      match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
                   file.patch:
                     required: {patch: "unified diff"}
                     optional:
