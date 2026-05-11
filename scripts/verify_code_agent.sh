@@ -526,6 +526,73 @@ assert "examples/code-agent/edit-fixture/math.js" in diagnostic_context["output"
 assert repair_decider["input"]["verification_status"] == "failed", repair_decider
 PY
 
+echo "[code-agent] edit loop searches truncated auto verify logs"
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("examples/code-agent/tools.core.json", encoding="utf-8") as handle:
+    config = json.load(handle)
+config["tools"]["test.run"]["max_bytes"] = 8
+config["tools"]["test.run"]["truncation_direction"] = "tail"
+with open("target/generated/tools.truncated-auto-verify.json", "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2)
+PY
+edit_truncated_auto_verify_backup="$(mktemp)"
+cp examples/code-agent/edit-fixture/math.js "$edit_truncated_auto_verify_backup"
+restore_edit_truncated_auto_verify_fixture() {
+  cp "$edit_truncated_auto_verify_backup" examples/code-agent/edit-fixture/math.js
+  rm -f "$edit_truncated_auto_verify_backup"
+}
+trap restore_edit_truncated_auto_verify_fixture EXIT
+cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
+  --store examples/code-agent/module-store.air-store.yaml \
+  --input examples/code-agent/edit.input.json \
+  --model-config examples/code-agent/model-fixtures.auto-verify-failed.json \
+  --tool-config target/generated/tools.truncated-auto-verify.json \
+  --trace-out target/generated/code_agent_edit_truncated_auto_verify.trace.jsonl \
+  > target/generated/code_agent_edit_truncated_auto_verify.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_truncated_auto_verify.post_test.log
+restore_edit_truncated_auto_verify_fixture
+trap - EXIT
+
+"${PYTHON:-python3}" - <<'PY'
+import json
+
+with open("target/generated/code_agent_edit_truncated_auto_verify.output.json", encoding="utf-8") as handle:
+    output = json.load(handle)
+edit = output["edit"]
+assert edit["final_success"] is True, edit
+assert edit["patch_applied"] is True, edit
+
+with open("target/generated/code_agent_edit_truncated_auto_verify.trace.jsonl", encoding="utf-8") as handle:
+    events = [json.loads(line) for line in handle if line.strip()]
+failed_verify = next(
+    event for event in events
+    if event.get("rule") == "record-auto-verify-failed-output-truncated"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "auto_verify_failed"
+)
+assert failed_verify["input"]["result"][0]["output"]["truncated"] is True, failed_verify
+assert failed_verify["input"]["result"][0]["output"]["full_log_path"], failed_verify
+full_log_search = next(
+    event for event in events
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("meta", {}).get("tool") == "file.search"
+    and event.get("input", {}).get("path") == failed_verify["input"]["result"][0]["output"]["full_log_path"]
+)
+assert full_log_search["output"]["match_count"] >= 1, full_log_search
+repair_decider = next(
+    event for event in events
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+    and any(
+        observation.get("action") == "auto_verify_full_log_context"
+        for observation in event.get("input", {}).get("observations", [])
+    )
+)
+assert repair_decider["input"]["verification_status"] == "failed", repair_decider
+PY
+
 echo "[code-agent] edit loop repairs single allowed write path"
 edit_write_path_error_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_write_path_error_backup"

@@ -83,6 +83,10 @@ state:
     type: array
     items:
       type: object
+  auto_verify_full_log_context:
+    type: array
+    items:
+      type: object
   final_diff_result:
     type: array
     items:
@@ -590,8 +594,98 @@ workflow:
             verification_status: failed
             phase: choose
 
+    - id: record-auto-verify-failed-output-truncated
+      when: phase == "post_verify" && auto_verify_result[0].output.success == false && auto_verify_result[0].output.truncated == true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify_failed
+              rationale:
+                literal: Automatically ran validation after a workspace edit; output.success=false, so diagnostics must be fixed before completion.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: test.run
+                      input:
+                        object:
+                          command:
+                            ref: test_command
+              result:
+                ref: auto_verify_result
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: diagnostic.context
+                  input:
+                    object:
+                      diagnostics:
+                        ref: auto_verify_result[0].output.diagnostics
+                      context_lines:
+                        literal: 6
+              - object:
+                  tool:
+                    literal: file.search
+                  input:
+                    object:
+                      path:
+                        ref: auto_verify_result[0].output.full_log_path
+                      pattern:
+                        literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
+                      context_lines:
+                        literal: 3
+                      max_matches:
+                        literal: 20
+          output: auto_verify_full_log_context
+          max_calls: 2
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_verify_full_log_context
+              rationale:
+                literal: The validation log was truncated, so AIR searched the persisted full_log_path before the next repair decision. Use this log context together with diagnostics instead of re-running only to recover hidden output.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: diagnostic.context
+                      input:
+                        object:
+                          diagnostics:
+                            ref: auto_verify_result[0].output.diagnostics
+                          context_lines:
+                            literal: 6
+                  - object:
+                      tool:
+                        literal: file.search
+                      input:
+                        object:
+                          path:
+                            ref: auto_verify_result[0].output.full_log_path
+                          pattern:
+                            literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
+                          context_lines:
+                            literal: 3
+                          max_matches:
+                            literal: 20
+              result:
+                ref: auto_verify_full_log_context
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
     - id: record-auto-verify-failed-output
-      when: phase == "post_verify" && auto_verify_result[0].output.success == false
+      when: phase == "post_verify" && auto_verify_result[0].output.success == false && auto_verify_result[0].output.truncated != true
       actions:
         - kind: append
           target: observations
