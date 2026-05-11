@@ -60,7 +60,7 @@ When `test.run` output is truncated (`output.truncated == true`), the full log i
 
 When `file.ops` `edit` validation fails (e.g. `old_string` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `old_string` does not match but one of its lines is present, the diagnostic includes an `old_string_anchor` line for a precise retry location.
 
-Before committing to an edit route, `candidate.validate` checks that the `target_path` and allowlisted `test_command` are valid together, catching misconfigured paths or disallowed commands early.
+The edit loop runs `candidate.validate` automatically during preflight when `target_path` and `test_command` are known, catching misconfigured paths or disallowed commands before any edit attempt.
 
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 

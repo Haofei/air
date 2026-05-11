@@ -47,7 +47,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, preflight, choose, act, post_act, post_verify, summarize, done, failed]
+    enum: [init, preflight, preflight_candidate, choose, act, post_act, post_verify, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -100,6 +100,10 @@ state:
     items:
       type: object
   initial_target_context:
+    type: array
+    items:
+      type: object
+  initial_candidate_validation:
     type: array
     items:
       type: object
@@ -242,7 +246,7 @@ workflow:
                 ref: initial_target_context
         - kind: set
           values:
-            phase: choose
+            phase: preflight_candidate
 
     - id: preflight-target-read
       when: phase == "preflight" && target_path != "" && target_search_pattern == ""
@@ -284,6 +288,65 @@ workflow:
                             ref: target_path
               result:
                 ref: initial_target_context
+        - kind: set
+          values:
+            phase: preflight_candidate
+
+    - id: preflight-candidate-validate
+      when: phase == "preflight_candidate" && target_path != "" && test_command != ""
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: candidate.validate
+                  input:
+                    object:
+                      candidate:
+                        object:
+                          target_path:
+                            ref: target_path
+                          test_command:
+                            ref: test_command
+                          related_files:
+                            ref: related_files
+          output: initial_candidate_validation
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: initial_candidate_validation
+              rationale:
+                literal: Deterministically validate the target path and allowlisted test command before the first model edit decision.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: candidate.validate
+                      input:
+                        object:
+                          candidate:
+                            object:
+                              target_path:
+                                ref: target_path
+                              test_command:
+                                ref: test_command
+                              related_files:
+                                ref: related_files
+              result:
+                ref: initial_candidate_validation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: preflight-candidate-skip
+      when: phase == "preflight_candidate"
+      actions:
         - kind: set
           values:
             phase: choose

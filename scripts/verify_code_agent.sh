@@ -94,7 +94,19 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+candidate_validate_index = next(
+    index for index, event in enumerate(events)
+    if event.get("action") == "tool_batch_dispatch_item"
+    and event.get("status") == "ok"
+    and event.get("meta", {}).get("tool") == "candidate.validate"
+)
+first_decider_index = next(
+    index for index, event in enumerate(events)
+    if event.get("action") == "model_call_start"
+    and event.get("meta", {}).get("model") == "code_edit_decider"
+)
+assert candidate_validate_index < first_decider_index, (candidate_validate_index, first_decider_index)
 file_ops = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
@@ -399,7 +411,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop gives structured feedback for content wrappers"
@@ -450,7 +462,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop records edit validation failures"
@@ -513,7 +525,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "file.ops", "diagnostic.context", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "diagnostic.context", "file.ops", "test.run", "git.diff"], tools
 diagnostic_context = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
@@ -601,7 +613,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "candidate.validate", "file.read", "file.ops", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop collects diagnostic context after failed auto verify"
@@ -642,6 +654,7 @@ tools = [
 ]
 assert tools == [
     "file.search",
+    "candidate.validate",
     "file.ops",
     "test.run",
     "diagnostic.context",
@@ -787,7 +800,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -842,7 +855,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -934,7 +947,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
 file_patch = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
