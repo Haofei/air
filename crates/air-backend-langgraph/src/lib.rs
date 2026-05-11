@@ -1520,6 +1520,9 @@ def _air_run_module(module_id: str, module_inputs: dict[str, Any]) -> dict[str, 
                         meta = _air_action_meta(dispatched_action)
                         meta["index"] = index
                         _air_emit_trace(module_id, step, rule_id, "tool_batch_dispatch_item", "error", input_value=input_value, meta=meta, error=str(error))
+                        if observe_errors:
+                            batch_outputs.append({"tool": tool_name, "input": input_value, "status": "error", "error": str(error), "output": {"status": "error", "error": str(error)}})
+                            continue
                         raise
                     for attempt in range(1, max_attempts + 1):
                         limit = module.get("policy", {}).get("max_tool_calls")
@@ -2366,6 +2369,7 @@ mod tests {
         assert!(code.contains("def _air_validate_tool_capability"));
         assert!(code.contains("def _air_enforce_approval_required_batch_isolation"));
         assert!(code.contains("def _air_enforce_repeated_tool_policy"));
+        assert!(code.contains("if observe_errors:\n                            batch_outputs.append({\"tool\": tool_name"));
         assert!(code.contains("is not declared by module"));
         assert!(code.contains("AIR_TOOL_PROVIDER"));
         assert!(code.contains("AIR_TOOL_CAPABILITIES"));

@@ -1342,7 +1342,22 @@ where
                 }
                 return Err(error);
             }
-            enforce_repeated_tool_policy(context, "tool_batch_dispatch_item", &tool, &tool_input)?;
+            if let Err(error) = enforce_repeated_tool_policy(
+                context,
+                "tool_batch_dispatch_item",
+                &tool,
+                &tool_input,
+            ) {
+                if on_error == ToolErrorMode::Observe {
+                    results.push(tool_batch_error_observation(
+                        &tool,
+                        &tool_input,
+                        &error.to_string(),
+                    ));
+                    continue;
+                }
+                return Err(error);
+            }
             let mut item_output = None;
             for attempt in 1..=max_attempts {
                 let meta_args = ToolCallMeta {

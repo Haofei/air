@@ -1076,6 +1076,11 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
             enforceRepeatedToolPolicy(module, toolHistory, normalized.toolName, inputValue);
           } catch (error) {
             emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch_item', status: 'error', input: inputValue, meta: { ...actionMeta(dispatchedAction), index }, error: String(error?.message ?? error) });
+            if (observeErrors) {
+              const message = String(error?.message ?? error);
+              batchOutputs.push({ tool: normalized.toolName, input: inputValue, status: 'error', error: message, output: { status: 'error', error: message } });
+              continue;
+            }
             throw error;
           }
           for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1742,6 +1747,12 @@ mod tests {
         assert!(code.contains("status: 'error'"));
         assert!(code.contains("is not declared by module"));
         assert!(code.contains("tool: '<invalid>'"));
+        assert!(code.contains(
+            "enforceRepeatedToolPolicy(module, toolHistory, normalized.toolName, inputValue);"
+        ));
+        assert!(code.contains(
+            "if (observeErrors) {\n              const message = String(error?.message ?? error);"
+        ));
         assert!(code.contains("function runtimeContext"));
         assert!(code.contains("localState._air = runtimeContext"));
     }

@@ -1050,6 +1050,53 @@ fn tool_batch_dispatch_can_observe_provider_errors() {
 }
 
 #[test]
+fn tool_batch_dispatch_can_observe_repeated_tool_policy_errors() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch { on_error, .. } =
+        workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *on_error = air_core::ToolErrorMode::Observe;
+
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([
+                {"tool": "docs.search", "input": {"query": "same"}},
+                {"tool": "docs.search", "input": {"query": "same"}}
+            ]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 1);
+    assert_eq!(result.outputs["observations"][0]["status"], json!("ok"));
+    assert_eq!(result.outputs["observations"][1]["status"], json!("error"));
+    assert_eq!(
+        result.outputs["observations"][1]["error"],
+        json!("policy.max_repeated_tool_calls exceeded for tool docs.search: limit=1 attempted=2")
+    );
+    assert!(result.trace.iter().any(|event| {
+        event.action == "tool_batch_dispatch"
+            && event.status == TraceStatus::Ok
+            && event
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta["error_count"] == 1)
+    }));
+}
+
+#[test]
 fn tool_batch_dispatch_can_observe_undeclared_tools() {
     let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
     let Workflow::StateMachine(workflow) = &mut module.workflow else {
