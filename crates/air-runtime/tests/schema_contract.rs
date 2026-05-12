@@ -1,8 +1,8 @@
 use air_core::{StateAction, Workflow};
 use air_runtime::{
     read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl,
-    write_trace_jsonl_with_options, ApprovalDecision, ModelProvider, RuntimeError, State,
-    ToolProvider, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
+    write_trace_jsonl_with_options, ApprovalDecision, ModelProvider, ModelRequestStats,
+    RuntimeError, State, ToolProvider, TraceEvent, TraceStatus, TraceWriteOptions, Vm,
 };
 use serde_json::{json, Value};
 use std::cell::RefCell;
@@ -31,6 +31,22 @@ struct SchemaTools;
 impl ToolProvider for SchemaTools {
     fn call_tool(&mut self, name: &str, _input: &Value) -> Result<Value, RuntimeError> {
         panic!("unexpected tool {name}")
+    }
+}
+
+struct RequestStatsModels {
+    output: Value,
+    stats: Option<ModelRequestStats>,
+}
+
+impl ModelProvider for RequestStatsModels {
+    fn call_model(&mut self, name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+        assert_eq!(name, "extractor");
+        Ok(self.output.clone())
+    }
+
+    fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
+        self.stats.take()
     }
 }
 
@@ -1089,6 +1105,18 @@ fn tool_batch_dispatch_can_observe_repeated_tool_policy_errors() {
         result.outputs["observations"][1]["error"],
         json!("policy.max_repeated_tool_calls exceeded for tool docs.search: limit=1 attempted=2")
     );
+    assert_eq!(
+        result.outputs["observations"][1]["error_code"],
+        json!("doom_loop")
+    );
+    assert_eq!(
+        result.outputs["observations"][1]["permission"],
+        json!("doom_loop")
+    );
+    assert_eq!(
+        result.outputs["observations"][1]["output"]["error_code"],
+        json!("doom_loop")
+    );
     assert!(result.trace.iter().any(|event| {
         event.action == "tool_batch_dispatch"
             && event.status == TraceStatus::Ok
@@ -2042,6 +2070,39 @@ fn notifies_observer_as_actions_complete() {
     assert_eq!(complete_meta["will_retry"], json!(false));
     assert_eq!(complete_meta["input_bytes"], start_meta["input_bytes"]);
     assert!(complete_meta.get("elapsed_ms").is_some());
+}
+
+#[test]
+fn model_call_trace_records_provider_request_stats_when_available() {
+    let extract = load_agent("tests/agents/schema-extract.air.yaml");
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: RequestStatsModels {
+            output: valid_extracted(),
+            stats: Some(ModelRequestStats {
+                provider_request_bytes: 1234,
+                provider_user_content_bytes: 456,
+                provider_tools_bytes: 789,
+            }),
+        },
+    };
+
+    let result = vm
+        .run(
+            &extract,
+            State::from_iter([("text".to_string(), json!("billing issue"))]),
+        )
+        .unwrap();
+    let complete_meta = result
+        .trace
+        .iter()
+        .find(|event| event.action == "model_call")
+        .and_then(|event| event.meta.as_ref())
+        .expect("model_call meta");
+
+    assert_eq!(complete_meta["provider_request_bytes"], json!(1234));
+    assert_eq!(complete_meta["provider_user_content_bytes"], json!(456));
+    assert_eq!(complete_meta["provider_tools_bytes"], json!(789));
 }
 
 #[test]

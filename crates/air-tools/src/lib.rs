@@ -4556,7 +4556,7 @@ fn bytes_to_limited_text_with_direction(
     (
         String::from_utf8_lossy(limited).to_string(),
         truncated,
-        bytes.len(),
+        limited.len(),
     )
 }
 

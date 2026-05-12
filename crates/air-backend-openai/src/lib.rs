@@ -1,7 +1,9 @@
-use air_runtime::{sanitize_trace_text, ModelProvider, RuntimeError, TraceWriteOptions};
+use air_runtime::{
+    sanitize_trace_text, ModelProvider, ModelRequestStats, RuntimeError, TraceWriteOptions,
+};
 use async_openai::{config::OpenAIConfig, Client as OpenAiClient};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
@@ -200,6 +202,7 @@ fn invalid_config(path: &Path, message: impl Into<String>) -> OpenAiConfigError 
 pub struct OpenAiCompatibleModelProvider {
     config: OpenAiCompatibleConfig,
     runtime: Arc<Runtime>,
+    last_request_stats: Option<ModelRequestStats>,
 }
 
 impl OpenAiCompatibleModelProvider {
@@ -212,6 +215,7 @@ impl OpenAiCompatibleModelProvider {
         Ok(Self {
             config,
             runtime: Arc::new(runtime),
+            last_request_stats: None,
         })
     }
 
@@ -221,6 +225,7 @@ impl OpenAiCompatibleModelProvider {
         input: &Value,
         action_timeout: Option<Duration>,
     ) -> Result<Value, RuntimeError> {
+        self.last_request_stats = None;
         let model_config = self
             .config
             .models
@@ -235,8 +240,8 @@ impl OpenAiCompatibleModelProvider {
         })?;
         let base_url = resolve_base_url(model_config)?;
         let model_name = resolve_model_name(model_config)?;
-        let content = input_to_content(input)?;
-        let request = build_chat_completion_body(model_config, model_name, content, input)?;
+        let request = build_chat_completion_body(model_config, model_name, input)?;
+        self.last_request_stats = Some(chat_completion_request_stats(&request.body));
 
         let request_timeout =
             effective_request_timeout(model_config.request_timeout_seconds, action_timeout);
@@ -265,6 +270,10 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
         timeout: Duration,
     ) -> Result<Value, RuntimeError> {
         self.call_model_with_request_timeout(name, input, Some(timeout))
+    }
+
+    fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
+        self.last_request_stats.take()
     }
 }
 
@@ -360,9 +369,9 @@ fn openai_client(api_key: String, base_url: &str) -> OpenAiClient<OpenAIConfig> 
 fn build_chat_completion_body(
     model_config: &OpenAiModelConfig,
     model_name: String,
-    content: String,
     input: &Value,
 ) -> Result<ChatCompletionBody, RuntimeError> {
+    let content = input_to_request_content(model_config, input)?;
     let mut messages = Vec::new();
     if let Some(system_prompt) = &model_config.system_prompt {
         messages.push(json!({
@@ -400,6 +409,36 @@ fn build_chat_completion_body(
         body,
         tool_name_map,
     })
+}
+
+fn chat_completion_request_stats(body: &Value) -> ModelRequestStats {
+    ModelRequestStats {
+        provider_request_bytes: serde_json::to_vec(body)
+            .map(|bytes| bytes.len())
+            .unwrap_or(0),
+        provider_user_content_bytes: provider_user_content_bytes(body),
+        provider_tools_bytes: body
+            .get("tools")
+            .and_then(|tools| serde_json::to_vec(tools).ok())
+            .map(|bytes| bytes.len())
+            .unwrap_or(0),
+    }
+}
+
+fn provider_user_content_bytes(body: &Value) -> usize {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|message| message.get("role").and_then(Value::as_str) == Some("user"))
+        .filter_map(|message| message.get("content"))
+        .map(|content| match content {
+            Value::String(text) => text.len(),
+            other => serde_json::to_vec(other)
+                .map(|bytes| bytes.len())
+                .unwrap_or(0),
+        })
+        .sum()
 }
 
 fn attach_native_tool_calls(
@@ -535,6 +574,17 @@ fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
+fn input_to_request_content(
+    model_config: &OpenAiModelConfig,
+    input: &Value,
+) -> Result<String, RuntimeError> {
+    if model_config.native_tool_calls == Some(true) {
+        input_to_native_tool_content(input)
+    } else {
+        input_to_content(input)
+    }
+}
+
 fn resolved_response_format(model_config: &OpenAiModelConfig) -> Option<Value> {
     if let Some(response_format) = &model_config.response_format {
         return Some(response_format.clone());
@@ -559,6 +609,361 @@ fn input_to_content(input: &Value) -> Result<String, RuntimeError> {
         Value::String(value) => Ok(value.clone()),
         other => serde_json::to_string(other).map_err(provider_error),
     }
+}
+
+fn input_to_native_tool_content(input: &Value) -> Result<String, RuntimeError> {
+    let Some(object) = input.as_object() else {
+        return input_to_content(input);
+    };
+
+    let mut projected = Map::new();
+    let mut context = Map::new();
+    for (key, value) in object {
+        match key.as_str() {
+            "allowed_tools" | "tool_schemas" => {}
+            "observations" | "edit_evidence" => {
+                projected.insert(
+                    if key == "observations" {
+                        "recent_tool_results".to_string()
+                    } else {
+                        key.clone()
+                    },
+                    compact_observation_history(value),
+                );
+            }
+            "tool_policy" => {
+                projected.insert("guidance".to_string(), compact_prompt_value(value));
+            }
+            "task" | "query" => {
+                projected.insert(key.clone(), compact_prompt_value(value));
+            }
+            "runtime"
+            | "verification_status"
+            | "target_path"
+            | "target_search_pattern"
+            | "target_symbol_query"
+            | "related_files"
+            | "write_paths" => {
+                context.insert(key.clone(), compact_prompt_value(value));
+            }
+            _ => {
+                context.insert(key.clone(), compact_prompt_value(value));
+            }
+        }
+    }
+    if !context.is_empty() {
+        projected.insert("context".to_string(), Value::Object(context));
+    }
+    projected.insert(
+        "response_contract".to_string(),
+        json!("Use provider-native tool calls for actions. Return complete=true with no tool calls only when the task is verified complete or no edit is needed."),
+    );
+
+    serde_json::to_string(&Value::Object(projected)).map_err(provider_error)
+}
+
+fn compact_observation_history(value: &Value) -> Value {
+    let Some(items) = value.as_array() else {
+        return compact_prompt_value(value);
+    };
+    let mut protected_chars = 0usize;
+    let mut compacted = Vec::with_capacity(items.len());
+    for item in items.iter().rev() {
+        let estimated_chars = compact_json(item).chars().count();
+        let item = compact_observation(item);
+        if protected_chars <= TOOL_RESULT_PRUNE_PROTECT_CHARS {
+            protected_chars = protected_chars.saturating_add(estimated_chars);
+            compacted.push(item);
+        } else {
+            compacted.push(prune_old_observation_tool_results(&item));
+        }
+    }
+    compacted.reverse();
+    Value::Array(compacted)
+}
+
+const TOOL_RESULT_PRUNE_PROTECT_CHARS: usize = 40_000;
+const OLD_TOOL_RESULT_CLEARED: &str = "[Old tool result content cleared]";
+
+fn compact_observation(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return compact_prompt_value(value);
+    };
+    let mut compact = Map::new();
+    copy_compact_field(&mut compact, object, "action");
+    copy_compact_field(&mut compact, object, "rationale");
+    if let Some(requested) = object.get("requested") {
+        compact.insert("requested".to_string(), compact_tool_requests(requested));
+    }
+    if let Some(result) = object.get("result") {
+        compact.insert("result".to_string(), compact_tool_results(result));
+    }
+    Value::Object(compact)
+}
+
+fn copy_compact_field(compact: &mut Map<String, Value>, object: &Map<String, Value>, field: &str) {
+    if let Some(value) = object.get(field) {
+        compact.insert(field.to_string(), compact_prompt_value(value));
+    }
+}
+
+fn compact_tool_requests(value: &Value) -> Value {
+    let Some(items) = value.as_array() else {
+        return compact_prompt_value(value);
+    };
+    Value::Array(
+        items
+            .iter()
+            .map(|item| {
+                let Some(object) = item.as_object() else {
+                    return compact_prompt_value(item);
+                };
+                let mut compact = Map::new();
+                copy_compact_field(&mut compact, object, "tool");
+                if let Some(input) = object.get("input") {
+                    compact.insert("input".to_string(), compact_tool_input(input));
+                }
+                Value::Object(compact)
+            })
+            .collect(),
+    )
+}
+
+fn compact_tool_results(value: &Value) -> Value {
+    let Some(items) = value.as_array() else {
+        return compact_prompt_value(value);
+    };
+    Value::Array(items.iter().map(compact_tool_result).collect())
+}
+
+fn compact_tool_result(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return compact_prompt_value(value);
+    };
+    let mut compact = Map::new();
+    for field in ["tool", "status", "error_code", "permission", "message"] {
+        copy_compact_field(&mut compact, object, field);
+    }
+    if let Some(input) = object.get("input") {
+        compact.insert("input".to_string(), compact_tool_input(input));
+    }
+    if let Some(output) = object.get("output") {
+        compact.insert("output".to_string(), compact_tool_output(output));
+    }
+    if let Some(error) = object.get("error") {
+        compact.insert("error".to_string(), compact_prompt_value(error));
+    }
+    Value::Object(compact)
+}
+
+fn prune_old_observation_tool_results(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    let mut compact = object.clone();
+    if let Some(results) = object.get("result").and_then(Value::as_array) {
+        compact.insert(
+            "result".to_string(),
+            Value::Array(results.iter().map(prune_old_tool_result_content).collect()),
+        );
+    }
+    Value::Object(compact)
+}
+
+fn prune_old_tool_result_content(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return value.clone();
+    };
+    let mut compact = Map::new();
+    for field in ["tool", "status", "input", "error"] {
+        if let Some(value) = object.get(field) {
+            compact.insert(field.to_string(), value.clone());
+        }
+    }
+    if object.get("output").is_some() {
+        compact.insert(
+            "output".to_string(),
+            json!({
+                "_air_compacted": true,
+                "message": OLD_TOOL_RESULT_CLEARED,
+            }),
+        );
+    }
+    Value::Object(compact)
+}
+
+fn compact_tool_input(value: &Value) -> Value {
+    compact_json_value_for_prompt(value, 3, 8, 1_000)
+}
+
+fn compact_tool_output(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return compact_json_value_for_prompt(value, 3, 8, 4_000);
+    };
+
+    let mut compact = Map::new();
+    for field in [
+        "success",
+        "status",
+        "error",
+        "error_code",
+        "permission",
+        "message",
+        "applied",
+        "passed",
+        "failed_count",
+        "bytes",
+        "path",
+        "start_line",
+        "end_line",
+        "truncated",
+        "full_log_path",
+        "full_output_path",
+        "truncation_hint",
+        "content_format",
+        "unscoped_read",
+        "changed_files",
+        "diagnostics",
+        "todos",
+        "matches",
+    ] {
+        if let Some(value) = object.get(field) {
+            compact.insert(
+                field.to_string(),
+                compact_json_value_for_prompt(value, 3, 8, 2_000),
+            );
+        }
+    }
+    if let Some(content) = object.get("content") {
+        compact.insert(
+            "content_preview".to_string(),
+            compact_stringish_value(content, 4_000),
+        );
+    }
+    if let Some(artifacts) = object.get("artifacts") {
+        compact.insert(
+            "artifact_refs".to_string(),
+            compact_artifact_refs(artifacts),
+        );
+    }
+    if compact.is_empty() {
+        compact_json_value_for_prompt(value, 3, 8, 4_000)
+    } else {
+        Value::Object(compact)
+    }
+}
+
+fn compact_artifact_refs(value: &Value) -> Value {
+    let Some(items) = value.as_array() else {
+        return compact_prompt_value(value);
+    };
+    Value::Array(
+        items
+            .iter()
+            .take(8)
+            .filter_map(|item| {
+                let object = item.as_object()?;
+                let mut compact = Map::new();
+                for field in ["id", "kind", "title", "uri"] {
+                    if let Some(value) = object.get(field) {
+                        compact.insert(field.to_string(), compact_prompt_value(value));
+                    }
+                }
+                if let Some(metadata) = object.get("metadata") {
+                    compact.insert(
+                        "metadata".to_string(),
+                        compact_json_value_for_prompt(metadata, 2, 8, 500),
+                    );
+                }
+                Some(Value::Object(compact))
+            })
+            .collect(),
+    )
+}
+
+fn compact_prompt_value(value: &Value) -> Value {
+    compact_json_value_for_prompt(value, 4, 16, 4_000)
+}
+
+fn compact_json_value_for_prompt(
+    value: &Value,
+    max_depth: usize,
+    max_items: usize,
+    max_string_chars: usize,
+) -> Value {
+    if max_depth == 0 {
+        return json!({
+            "_air_compacted": true,
+            "preview": truncate_text(&compact_json(value), max_string_chars)
+        });
+    }
+    match value {
+        Value::String(text) => Value::String(truncate_text(text, max_string_chars)),
+        Value::Array(items) => {
+            let mut compact = items
+                .iter()
+                .take(max_items)
+                .map(|item| {
+                    compact_json_value_for_prompt(
+                        item,
+                        max_depth.saturating_sub(1),
+                        max_items,
+                        max_string_chars,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if items.len() > compact.len() {
+                compact.push(json!({
+                    "_air_compacted": true,
+                    "omitted_items": items.len() - compact.len()
+                }));
+            }
+            Value::Array(compact)
+        }
+        Value::Object(object) => {
+            let mut compact = Map::new();
+            for (key, value) in object.iter().take(max_items) {
+                if matches!(key.as_str(), "artifacts" | "artifact_ids") {
+                    continue;
+                }
+                compact.insert(
+                    key.clone(),
+                    compact_json_value_for_prompt(
+                        value,
+                        max_depth.saturating_sub(1),
+                        max_items,
+                        max_string_chars,
+                    ),
+                );
+            }
+            if object.len() > compact.len() {
+                compact.insert(
+                    "_air_compacted".to_string(),
+                    json!({"omitted_fields": object.len() - compact.len()}),
+                );
+            }
+            Value::Object(compact)
+        }
+        other => other.clone(),
+    }
+}
+
+fn compact_stringish_value(value: &Value, max_chars: usize) -> Value {
+    match value {
+        Value::String(text) => Value::String(truncate_text(text, max_chars)),
+        other => Value::String(truncate_text(&compact_json(other), max_chars)),
+    }
+}
+
+fn truncate_text(text: &str, max_chars: usize) -> String {
+    let mut result = String::new();
+    for character in text.chars().take(max_chars) {
+        result.push(character);
+    }
+    if result.len() < text.len() {
+        result.push_str("\n[AIR_COMPACTED]");
+    }
+    result
 }
 
 fn parse_chat_completion_content(
@@ -1128,8 +1533,8 @@ mod tests {
         let request = build_chat_completion_body(
             &config,
             "glm-5.1".to_string(),
-            "choose tools".to_string(),
             &json!({
+                "task": "choose tools",
                 "allowed_tools": ["file.ops", "repo.search"],
                 "tool_schemas": {
                     "file.ops": {
@@ -1150,6 +1555,185 @@ mod tests {
         assert_eq!(
             request.body["tools"][0]["function"]["parameters"]["required"],
             json!(["operations"])
+        );
+        let content = request.body["messages"][0]["content"].as_str().unwrap();
+        assert!(content.contains("choose tools"));
+        assert!(
+            !content.contains("tool_schemas") && !content.contains("allowed_tools"),
+            "native tool mode must pass tool definitions through provider tools, not duplicate them in user content"
+        );
+        let projected: Value = serde_json::from_str(content).unwrap();
+        assert_eq!(projected["task"], json!("choose tools"));
+        assert!(projected.get("response_contract").is_some());
+        assert!(projected.get("context").is_none());
+    }
+
+    #[test]
+    fn native_tool_content_compacts_tool_observations() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+        };
+        let long_content = "x".repeat(10_000);
+        let input = json!({
+            "task": "inspect",
+            "allowed_tools": ["file.read"],
+            "tool_schemas": {
+                "file.read": {
+                    "required": {"path": "repo-relative path"}
+                }
+            },
+            "observations": [{
+                "action": "tool_batch_dispatch",
+                "rationale": "read file",
+                "requested": [{
+                    "tool": "file.read",
+                    "input": {"path": "src/lib.rs", "irrelevant": long_content}
+                }],
+                "result": [{
+                    "tool": "file.read",
+                    "status": "ok",
+                    "input": {"path": "src/lib.rs"},
+                    "output": {
+                        "path": "src/lib.rs",
+                        "start_line": 1,
+                        "end_line": 500,
+                        "content": long_content,
+                        "artifacts": [{"id": 1, "content": long_content}]
+                    }
+                }]
+            }]
+        });
+
+        let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
+        let content = request.body["messages"][0]["content"].as_str().unwrap();
+
+        assert!(content.contains("content_preview"));
+        assert!(content.contains("artifact_refs"));
+        assert!(content.contains("[AIR_COMPACTED]"));
+        assert!(!content.contains("\"artifacts\""));
+        assert!(!content.contains("\"tool_schemas\""));
+        let projected: Value = serde_json::from_str(content).unwrap();
+        assert!(projected.get("recent_tool_results").is_some());
+        assert!(projected.get("observations").is_none());
+        assert!(content.len() < 15_000, "{content}");
+    }
+
+    #[test]
+    fn native_tool_content_preserves_structured_tool_error_feedback() {
+        let input = json!({
+            "task": "avoid loop",
+            "observations": [{
+                "action": "tool_batch_dispatch",
+                "rationale": "same read again",
+                "requested": [{
+                    "tool": "file.read",
+                    "input": {"path": "src/lib.rs"}
+                }],
+                "result": [{
+                    "tool": "file.read",
+                    "status": "error",
+                    "input": {"path": "src/lib.rs"},
+                    "error": "policy.max_repeated_tool_calls exceeded for tool file.read: limit=3 attempted=4",
+                    "output": {
+                        "status": "error",
+                        "error": "policy.max_repeated_tool_calls exceeded for tool file.read: limit=3 attempted=4",
+                        "error_code": "doom_loop",
+                        "permission": "doom_loop",
+                        "message": "Use existing observations or choose a different next action."
+                    }
+                }]
+            }]
+        });
+
+        let content = input_to_native_tool_content(&input).unwrap();
+        let projected: Value = serde_json::from_str(&content).unwrap();
+        let output = &projected["recent_tool_results"][0]["result"][0]["output"];
+
+        assert_eq!(output["error_code"], json!("doom_loop"));
+        assert_eq!(output["permission"], json!("doom_loop"));
+        assert!(output["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("different next action")));
+    }
+
+    #[test]
+    fn native_tool_content_prunes_old_tool_results_like_opencode() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+        };
+        let old_content = "old-result-".repeat(10_000);
+        let recent_content = "recent-result-".repeat(100);
+        let observations = (0..6)
+            .map(|index| {
+                let content = if index == 5 {
+                    recent_content.clone()
+                } else {
+                    old_content.clone()
+                };
+                json!({
+                    "action": "tool_batch_dispatch",
+                    "rationale": format!("turn {index}"),
+                    "requested": [{
+                        "tool": "file.read",
+                        "input": {"path": format!("src/{index}.rs")}
+                    }],
+                    "result": [{
+                        "tool": "file.read",
+                        "status": "ok",
+                        "input": {"path": format!("src/{index}.rs")},
+                        "output": {
+                            "path": format!("src/{index}.rs"),
+                            "content": content
+                        }
+                    }]
+                })
+            })
+            .collect::<Vec<_>>();
+        let input = json!({
+            "task": "inspect",
+            "allowed_tools": ["file.read"],
+            "tool_schemas": {
+                "file.read": {
+                    "required": {"path": "repo-relative path"}
+                }
+            },
+            "observations": observations
+        });
+
+        let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
+        let content = request.body["messages"][0]["content"].as_str().unwrap();
+
+        assert!(content.contains(OLD_TOOL_RESULT_CLEARED));
+        assert!(
+            content.contains("recent-result-"),
+            "recent tool output should remain available"
+        );
+        assert!(
+            content.len() < 80_000,
+            "old tool outputs should be pruned from prompt content, got {} chars",
+            content.len()
         );
     }
 

@@ -1422,46 +1422,50 @@ mod tests {
     }
 
     #[test]
-    fn targeted_symbol_choose_rule_hides_todos_and_broad_references() {
+    fn edit_loop_uses_one_choose_rule_for_targeted_and_general_tasks() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let targeted_rule = yaml["workflow"]["rules"]
-            .as_sequence()
-            .unwrap()
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        assert!(
+            rules
+                .iter()
+                .all(|rule| rule["id"].as_str() != Some("choose-targeted-symbol")),
+            "targeted tasks should use the same OpenCode-style choose/act loop as general tasks"
+        );
+
+        let choose_rule = rules
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("choose-targeted-symbol"))
+            .find(|rule| rule["id"].as_str() == Some("choose"))
             .unwrap();
-        let allowed_tools = targeted_rule["actions"][0]["input"]["object"]["allowed_tools"]
-            ["array"]
+        assert_eq!(
+            choose_rule["when"],
+            serde_yaml::Value::String("phase == \"choose\"".to_string())
+        );
+        let allowed_tools = choose_rule["actions"][0]["input"]["object"]["allowed_tools"]["array"]
             .as_sequence()
             .unwrap()
             .iter()
             .filter_map(|tool| tool["literal"].as_str())
             .collect::<HashSet<_>>();
 
-        for tool in ["repo.symbols", "file.read", "file.ops"] {
-            assert!(
-                allowed_tools.contains(tool),
-                "targeted symbol rule should expose {tool}"
-            );
-        }
-
         for tool in [
             "todo.write",
             "todo.read",
-            "repo.references",
             "repo.search",
+            "repo.symbols",
+            "lsp.references",
+            "file.read",
             "file.search",
-            "git.status",
+            "file.ops",
             "git.diff",
             "test.run",
         ] {
             assert!(
-                !allowed_tools.contains(tool),
-                "targeted symbol rule should hide {tool}"
+                allowed_tools.contains(tool),
+                "single choose loop should expose {tool}"
             );
         }
     }
@@ -1520,77 +1524,101 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_forces_write_earlier_for_targeted_edits() {
+    fn edit_loop_does_not_force_write_after_exploration_budget() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let targeted_force_rule = yaml["workflow"]["rules"]
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        let rule_ids = rules
+            .iter()
+            .filter_map(|rule| rule["id"].as_str())
+            .collect::<Vec<_>>();
+        assert!(
+            !rule_ids.iter().any(|id| id.contains("force")),
+            "edit loop should follow an opencode-style read/edit/diagnose loop, not a force-write branch"
+        );
+        let phases = yaml["state"]["phase"]["enum"]
             .as_sequence()
             .unwrap()
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("force-write-after-targeted-explore-budget"))
+            .filter_map(serde_yaml::Value::as_str)
+            .collect::<Vec<_>>();
+        assert!(
+            !phases.contains(&"force_act"),
+            "force_act made repair turns write-only and blocked diagnostic reads"
+        );
+        let doom_loop_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("record-opencode-doom-loop-warning"))
             .unwrap();
-
         assert_eq!(
-            targeted_force_rule["when"],
-            serde_yaml::Value::String(
-                "phase == \"choose\" && target_symbol_query != \"\" && _air.model_calls >= 4 && verification_status != \"passed\""
-                    .to_string()
-            )
+            doom_loop_rule["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("choose".to_string()),
+            "doom-loop feedback must return to the normal choose loop without restricting tools"
         );
-        assert_eq!(
-            targeted_force_rule["actions"][1]["input"]["object"]["allowed_tools"]["array"][0]
-                ["literal"],
-            serde_yaml::Value::String("file.ops".to_string())
-        );
-        assert_eq!(
-            targeted_force_rule["actions"][1]["input"]["object"]["allowed_tools"]["array"]
-                .as_sequence()
-                .unwrap()
-                .len(),
-            1
-        );
-        assert_eq!(
-            targeted_force_rule["actions"][1]["input"]["object"]["observations"]["max_bytes"],
-            serde_yaml::Value::Number(8000.into())
-        );
-        let write_policy = targeted_force_rule["actions"][1]["input"]["object"]["tool_policy"]
-            ["literal"]["write"]
-            .as_str()
+        let policy_error_rule_index = rules
+            .iter()
+            .position(|rule| rule["id"].as_str() == Some("record-doom-loop-policy-error"))
+            .unwrap();
+        let path_error_rule_index = rules
+            .iter()
+            .position(|rule| rule["id"].as_str() == Some("record-file-read-path-error-hint"))
             .unwrap();
         assert!(
-            write_policy.contains("one small explicit file.ops replace_lines/edit/write")
-                && write_policy.contains("next smallest coherent edit"),
-            "targeted force-write policy must force a small generic write instead of more exploration"
+            policy_error_rule_index < path_error_rule_index,
+            "OpenCode doom-loop policy errors must be classified before file.read path hints"
+        );
+        assert!(
+            rules[policy_error_rule_index]["when"]
+                .as_str()
+                .unwrap()
+                .contains("observation[0].error_code == \"doom_loop\""),
+            "repeated tool calls should surface as doom_loop feedback, not path errors"
         );
     }
 
     #[test]
-    fn edit_loop_stops_after_empty_force_write_decision() {
+    fn edit_loop_preserves_search_and_symbol_context_as_edit_evidence() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let force_empty_rule = yaml["workflow"]["rules"]
-            .as_sequence()
-            .unwrap()
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+        let evidence_rule = rules
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("force-empty-action"))
+            .find(|rule| rule["id"].as_str() == Some("record-code-context-evidence"))
             .unwrap();
+        let when = evidence_rule["when"].as_str().unwrap();
 
+        for tool in [
+            "repo.symbols",
+            "file.search",
+            "repo.context",
+            "lsp.references",
+        ] {
+            assert!(
+                when.contains(tool),
+                "edit loop should keep {tool} evidence instead of forcing rediscovery"
+            );
+        }
         assert_eq!(
-            force_empty_rule["when"],
-            serde_yaml::Value::String(
-                "phase == \"force_act\" && decision.complete == false && decision.tool_calls == []"
-                    .to_string()
-            )
+            evidence_rule["actions"][0]["target"],
+            serde_yaml::Value::String("edit_evidence".to_string())
         );
-        assert_eq!(
-            force_empty_rule["actions"][1]["values"]["phase"],
-            serde_yaml::Value::String("summarize".to_string())
+
+        let choose_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose"))
+            .unwrap();
+        let max_items = choose_rule["actions"][0]["input"]["object"]["edit_evidence"]["max_items"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            max_items >= 6,
+            "edit evidence needs room for read plus search/symbol context"
         );
     }
 
@@ -1834,8 +1862,8 @@ mod tests {
             "tool budget should allow repeated narrow reads, writes, tests, diagnostics, and diffs"
         );
         assert!(
-            (12..=20).contains(&max_repeated_tool_calls),
-            "repeated test/read cycles are normal, but still need a cap"
+            (3..=4).contains(&max_repeated_tool_calls),
+            "OpenCode-style doom-loop feedback should stop repeated identical tool calls quickly"
         );
         assert!(
             (4..=6).contains(&choose_retry_attempts),

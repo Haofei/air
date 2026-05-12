@@ -101,8 +101,6 @@ pub(crate) fn build_input_with_pack(
             let target_search_pattern = code_search_pattern(&query);
             let write_paths = edit_write_paths(target.as_ref(), &write);
             let target_symbol_query = code_symbol_query(&query);
-            let acceptance_assertions =
-                edit_acceptance_assertions(target.as_ref(), &write_paths, &target_symbol_query);
             let mut input = Map::new();
             input.insert("task".to_string(), Value::String(task.clone()));
             input.insert("query".to_string(), Value::String(query));
@@ -120,7 +118,10 @@ pub(crate) fn build_input_with_pack(
             );
             input.insert("related_files".to_string(), path_array(related));
             input.insert("write_paths".to_string(), path_array(write_paths));
-            input.insert("acceptance_assertions".to_string(), acceptance_assertions);
+            input.insert(
+                "acceptance_assertions".to_string(),
+                Value::Array(Vec::new()),
+            );
             Ok(input)
         }
     }
@@ -139,34 +140,6 @@ fn edit_write_paths(target: Option<&PathBuf>, write: &[PathBuf]) -> Vec<PathBuf>
         }
     }
     paths
-}
-
-fn edit_acceptance_assertions(
-    target: Option<&PathBuf>,
-    write_paths: &[PathBuf],
-    target_symbol_query: &str,
-) -> Value {
-    let Some(target) = target else {
-        return Value::Array(Vec::new());
-    };
-    if target_symbol_query.trim().is_empty() {
-        return Value::Array(Vec::new());
-    }
-    let Some(destination) = write_paths.iter().find(|path| *path != target) else {
-        return Value::Array(Vec::new());
-    };
-    Value::Array(vec![
-        serde_json::json!({
-            "kind": "symbol_absent",
-            "path": path_ref_to_input_string(target),
-            "name": target_symbol_query,
-        }),
-        serde_json::json!({
-            "kind": "symbol_present",
-            "path": path_ref_to_input_string(destination),
-            "name": target_symbol_query,
-        }),
-    ])
 }
 
 fn required_path(value: Option<PathBuf>, flag: &str, recipe: CodeRecipe) -> Result<PathBuf> {
@@ -409,6 +382,15 @@ fn is_low_signal_search_token(token: &str) -> bool {
             | "existing"
             | "behavior"
             | "unchanged"
+            | "use"
+            | "using"
+            | "around"
+            | "preserve"
+            | "configured"
+            | "verification"
+            | "helper"
+            | "small"
+            | "duplicated"
             | "omitted"
             | "set"
             | "not"
@@ -425,7 +407,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn edit_input_derives_split_acceptance_assertions() {
+    fn edit_input_does_not_guess_split_acceptance_assertions() {
         let input = build_input(CodeInputOptions {
             task: "split context tool".to_string(),
             recipe: CodeRecipe::Edit,
@@ -441,18 +423,8 @@ mod tests {
 
         assert_eq!(
             input.get("acceptance_assertions").unwrap(),
-            &json!([
-                {
-                    "kind": "symbol_absent",
-                    "path": "crates/air-tools/src/lib.rs",
-                    "name": "call_context_measure_tool"
-                },
-                {
-                    "kind": "symbol_present",
-                    "path": "crates/air-tools/src/context_tools.rs",
-                    "name": "call_context_measure_tool"
-                }
-            ])
+            &json!([]),
+            "AIR should not invent structural postconditions from a natural-language edit task"
         );
     }
 
@@ -463,6 +435,16 @@ mod tests {
                 "Refactor crates/air-tools/src/candidate_tools.rs by extracting a helper"
             ),
             "candidate_tools"
+        );
+    }
+
+    #[test]
+    fn symbol_query_ignores_sentence_case_instruction_words() {
+        assert_eq!(
+            code_symbol_query(
+                "Use a small helper around duplicated full_output_path artifact metadata"
+            ),
+            "full_output_path"
         );
     }
 }

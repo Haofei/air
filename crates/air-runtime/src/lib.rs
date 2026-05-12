@@ -269,6 +269,17 @@ pub trait ModelProvider {
     ) -> Result<Value, RuntimeError> {
         self.call_model(name, input)
     }
+
+    fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
+        None
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRequestStats {
+    pub provider_request_bytes: usize,
+    pub provider_user_content_bytes: usize,
+    pub provider_tools_bytes: usize,
 }
 
 pub fn system_return_event(outputs: State) -> TraceEvent {
@@ -784,18 +795,23 @@ where
                         &attempt_input,
                         Duration::from_secs(*timeout_seconds),
                     ) {
-                        Ok(result) => result,
+                        Ok(result) => {
+                            let provider_stats = self.models.take_last_request_stats();
+                            (result, provider_stats)
+                        }
                         Err(error) => {
+                            let provider_stats = self.models.take_last_request_stats();
                             let is_final_attempt = attempt == max_attempts;
                             let error_message = error.to_string();
                             context.push_event_with_meta(
                                 "model_call",
                                 Some(attempt_input),
                                 None,
-                                Some(model_call_result_meta(
+                                Some(model_call_result_meta_with_provider(
                                     &model_meta_args,
                                     attempt_started_at.elapsed().as_millis(),
                                     !is_final_attempt,
+                                    provider_stats.as_ref(),
                                 )),
                                 Err(error_message.clone()),
                             );
@@ -809,16 +825,18 @@ where
                     if let Some(error) =
                         action_timeout_error("model_call", *timeout_seconds, attempt_started_at)
                     {
+                        let (result, provider_stats) = result;
                         let is_final_attempt = attempt == max_attempts;
                         let error_message = error.to_string();
                         context.push_event_with_meta(
                             "model_call",
                             Some(attempt_input),
                             Some(result),
-                            Some(model_call_result_meta(
+                            Some(model_call_result_meta_with_provider(
                                 &model_meta_args,
                                 attempt_started_at.elapsed().as_millis(),
                                 !is_final_attempt,
+                                provider_stats.as_ref(),
                             )),
                             Err(error_message.clone()),
                         );
@@ -828,6 +846,7 @@ where
                         retry_error = Some(RetryError::Message(error_message));
                         continue;
                     }
+                    let (result, provider_stats) = result;
                     let result =
                         match model_result_for_output_schema(context.module, output, result) {
                             Ok(result) => result,
@@ -838,10 +857,11 @@ where
                                     "model_call",
                                     Some(attempt_input),
                                     Some(error.value),
-                                    Some(model_call_result_meta(
+                                    Some(model_call_result_meta_with_provider(
                                         &model_meta_args,
                                         attempt_started_at.elapsed().as_millis(),
                                         !is_final_attempt,
+                                        provider_stats.as_ref(),
                                     )),
                                     Err(error_message.clone()),
                                 );
@@ -863,10 +883,11 @@ where
                             "model_call",
                             Some(attempt_input),
                             Some(result),
-                            Some(model_call_result_meta(
+                            Some(model_call_result_meta_with_provider(
                                 &model_meta_args,
                                 attempt_started_at.elapsed().as_millis(),
                                 !is_final_attempt,
+                                provider_stats.as_ref(),
                             )),
                             Err(error_message.clone()),
                         );
@@ -881,10 +902,11 @@ where
                         "model_call",
                         Some(attempt_input),
                         context.state.get(output).cloned(),
-                        Some(model_call_result_meta(
+                        Some(model_call_result_meta_with_provider(
                             &model_meta_args,
                             attempt_started_at.elapsed().as_millis(),
                             false,
+                            provider_stats.as_ref(),
                         )),
                         Ok(()),
                     );
@@ -1353,10 +1375,10 @@ where
                 &tool_input,
             ) {
                 if on_error == ToolErrorMode::Observe {
-                    results.push(tool_batch_error_observation(
+                    results.push(tool_batch_error_observation_for_runtime_error(
                         &tool,
                         &tool_input,
-                        &error.to_string(),
+                        &error,
                     ));
                     continue;
                 }
@@ -1486,6 +1508,7 @@ where
                     "tool": tool,
                     "input": tool_input,
                     "status": "ok",
+                    "error_code": null,
                     "output": result,
                 }));
                 break;
@@ -2268,12 +2291,48 @@ fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value
         "tool": tool,
         "input": input,
         "status": "error",
+        "error_code": "tool_error",
         "error": error,
         "output": {
             "status": "error",
+            "error_code": "tool_error",
             "error": error,
         }
     })
+}
+
+fn tool_batch_error_observation_for_runtime_error(
+    tool: &str,
+    input: &Value,
+    error: &RuntimeError,
+) -> Value {
+    let mut observation = tool_batch_error_observation(tool, input, &error.to_string());
+    if let RuntimeError::RepeatedToolCallLimitExceeded {
+        tool,
+        limit,
+        attempted,
+    } = error
+    {
+        let policy = json!({
+            "error_code": "doom_loop",
+            "permission": "doom_loop",
+            "message": "The same tool call repeated with identical semantic input. Use existing observations or choose a different next action instead of retrying the same call.",
+            "tool": tool,
+            "limit": limit,
+            "attempted": attempted,
+        });
+        if let Some(object) = observation.as_object_mut() {
+            for (key, value) in policy.as_object().unwrap() {
+                object.insert(key.clone(), value.clone());
+            }
+            if let Some(output) = object.get_mut("output").and_then(Value::as_object_mut) {
+                for (key, value) in policy.as_object().unwrap() {
+                    output.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    observation
 }
 
 fn tool_batch_level_error_observation(input: &Value, error: &str) -> Value {
@@ -2283,9 +2342,11 @@ fn tool_batch_level_error_observation(input: &Value, error: &str) -> Value {
             "requested": input,
         },
         "status": "error",
+        "error_code": "tool_error",
         "error": error,
         "output": {
             "status": "error",
+            "error_code": "tool_error",
             "error": error,
             "requested": input,
         }
@@ -2298,9 +2359,11 @@ fn tool_batch_malformed_observation(dispatch: &Value, error: &str) -> Value {
         "tool": tool,
         "input": {},
         "status": "error",
+        "error_code": "tool_error",
         "error": error,
         "output": {
             "status": "error",
+            "error_code": "tool_error",
             "error": error,
             "requested": dispatch,
         }
@@ -2340,13 +2403,9 @@ fn enforce_repeated_tool_policy(
     let Some(limit) = context.module.policy.max_repeated_tool_calls else {
         return Ok(());
     };
+    let normalized_input = repeated_tool_input_key(tool, input);
 
-    let repeated = context
-        .tool_history
-        .iter()
-        .rev()
-        .take_while(|record| record.tool == tool && record.input == *input)
-        .count() as u32;
+    let repeated = recent_repeated_tool_call_count(context.tool_history, tool, &normalized_input);
     let attempted = repeated + 1;
     if attempted > limit {
         let error = RuntimeError::RepeatedToolCallLimitExceeded {
@@ -2370,9 +2429,60 @@ fn enforce_repeated_tool_policy(
 
     context.tool_history.push(ToolCallRecord {
         tool: tool.to_string(),
-        input: input.clone(),
+        input: normalized_input,
     });
     Ok(())
+}
+
+fn recent_repeated_tool_call_count(
+    history: &[ToolCallRecord],
+    tool: &str,
+    normalized_input: &Value,
+) -> u32 {
+    history
+        .iter()
+        .rev()
+        .take(12)
+        .filter(|record| record.tool == tool && record.input == *normalized_input)
+        .count() as u32
+}
+
+fn repeated_tool_input_key(tool: &str, input: &Value) -> Value {
+    match tool {
+        "file.read" => pick_tool_input_fields(
+            input,
+            &[
+                "path",
+                "start_line",
+                "end_line",
+                "lines",
+                "contains",
+                "occurrence",
+            ],
+        ),
+        "file.search" => pick_tool_input_fields(input, &["path", "pattern", "query"]),
+        "repo.search" | "repo.context" => pick_tool_input_fields(
+            input,
+            &["path", "file_glob", "glob", "query", "pattern", "mode"],
+        ),
+        "repo.symbols" => pick_tool_input_fields(input, &["path", "query", "names"]),
+        "repo.references" => pick_tool_input_fields(input, &["path", "symbol"]),
+        "lsp.references" => pick_tool_input_fields(input, &["path", "symbol", "line", "character"]),
+        _ => input.clone(),
+    }
+}
+
+fn pick_tool_input_fields(input: &Value, fields: &[&str]) -> Value {
+    let Some(object) = input.as_object() else {
+        return input.clone();
+    };
+    let mut key = Map::new();
+    for field in fields {
+        if let Some(value) = object.get(*field) {
+            key.insert((*field).to_string(), value.clone());
+        }
+    }
+    Value::Object(key)
 }
 
 struct ExecutionContext<'a> {
@@ -2522,8 +2632,33 @@ fn model_call_result_meta(
     elapsed_ms: u128,
     will_retry: bool,
 ) -> Value {
+    model_call_result_meta_with_provider(args, elapsed_ms, will_retry, None)
+}
+
+fn model_call_result_meta_with_provider(
+    args: &ModelCallMetaArgs<'_>,
+    elapsed_ms: u128,
+    will_retry: bool,
+    provider_stats: Option<&ModelRequestStats>,
+) -> Value {
     let mut meta = model_call_meta(args);
     insert_result_meta(&mut meta, elapsed_ms, will_retry);
+    if let Some(stats) = provider_stats {
+        if let Some(meta) = meta.as_object_mut() {
+            meta.insert(
+                "provider_request_bytes".to_string(),
+                json!(stats.provider_request_bytes),
+            );
+            meta.insert(
+                "provider_user_content_bytes".to_string(),
+                json!(stats.provider_user_content_bytes),
+            );
+            meta.insert(
+                "provider_tools_bytes".to_string(),
+                json!(stats.provider_tools_bytes),
+            );
+        }
+    }
     meta
 }
 
@@ -3043,6 +3178,82 @@ mod tests {
             error,
             RuntimeError::ToolBatchDispatchToolNotAllowed { .. }
         ));
+    }
+
+    #[test]
+    fn repeated_tool_key_ignores_non_semantic_read_and_search_options() {
+        assert_eq!(
+            repeated_tool_input_key(
+                "file.search",
+                &json!({
+                    "path": "src/lib.rs",
+                    "pattern": "truncat",
+                    "context_lines": 3,
+                    "max_matches": 20
+                })
+            ),
+            repeated_tool_input_key(
+                "file.search",
+                &json!({
+                    "path": "src/lib.rs",
+                    "pattern": "truncat",
+                    "context_lines": 5,
+                    "max_matches": 80
+                })
+            )
+        );
+        assert_eq!(
+            repeated_tool_input_key(
+                "file.read",
+                &json!({
+                    "path": "src/lib.rs",
+                    "start_line": 10,
+                    "end_line": 20,
+                    "line_numbers": true,
+                    "max_bytes": 4096
+                })
+            ),
+            repeated_tool_input_key(
+                "file.read",
+                &json!({
+                    "path": "src/lib.rs",
+                    "start_line": 10,
+                    "end_line": 20,
+                    "line_numbers": false,
+                    "max_bytes": 65536
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn repeated_tool_count_uses_recent_window_instead_of_only_consecutive_calls() {
+        let file_search = repeated_tool_input_key(
+            "file.search",
+            &json!({"path": "src/lib.rs", "pattern": "truncat", "context_lines": 3}),
+        );
+        let history = vec![
+            ToolCallRecord {
+                tool: "file.search".to_string(),
+                input: file_search.clone(),
+            },
+            ToolCallRecord {
+                tool: "repo.symbols".to_string(),
+                input: json!({"path": "src/lib.rs", "query": "truncat"}),
+            },
+            ToolCallRecord {
+                tool: "file.search".to_string(),
+                input: repeated_tool_input_key(
+                    "file.search",
+                    &json!({"path": "src/lib.rs", "pattern": "truncat", "context_lines": 5}),
+                ),
+            },
+        ];
+
+        assert_eq!(
+            recent_repeated_tool_call_count(&history, "file.search", &file_search),
+            2
+        );
     }
 
     #[test]

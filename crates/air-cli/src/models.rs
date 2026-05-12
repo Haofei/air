@@ -109,6 +109,14 @@ impl ModelProvider for ModelProviderChoice {
             }
         }
     }
+
+    fn take_last_request_stats(&mut self) -> Option<air_runtime::ModelRequestStats> {
+        match self {
+            ModelProviderChoice::Echo(provider) => provider.take_last_request_stats(),
+            ModelProviderChoice::Fixture(provider) => provider.take_last_request_stats(),
+            ModelProviderChoice::OpenAi(provider) => provider.take_last_request_stats(),
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -392,8 +400,9 @@ mod tests {
             "code_edit_decider prompt should keep the edit loop on file.ops instead of exposing patch as a second write primitive"
         );
         assert!(
-            edit_prompt.contains("tool_schemas"),
-            "code_edit_decider prompt must tell models to follow tool_schemas"
+            edit_prompt.contains("available native tools")
+                && edit_prompt.contains("provider schemas"),
+            "code_edit_decider prompt must rely on provider-native tool schemas instead of duplicated tool_schemas JSON"
         );
         assert!(
             edit_prompt.contains("native provider tool calls"),
@@ -408,13 +417,12 @@ mod tests {
             "code_edit_decider prompt must require exact path copying"
         );
         assert!(
-            edit_prompt
-                .contains("skip todo tools for single-file refactors and already-targeted edits"),
-            "code_edit_decider prompt must avoid todo churn on targeted refactors"
+            edit_prompt.contains("targeted refactors that need a checklist"),
+            "code_edit_decider prompt must allow todo tools for targeted multi-step refactors"
         );
         assert!(
-            edit_prompt.contains("do not do broad helper archaeology"),
-            "code_edit_decider prompt must discourage over-exploration on targeted edits"
+            edit_prompt.contains("do not keep rereading the same ranges"),
+            "code_edit_decider prompt must discourage over-exploration without creating a special targeted mode"
         );
         let summarize_prompt = config
             .models

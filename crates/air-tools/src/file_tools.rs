@@ -104,20 +104,56 @@ pub(super) fn call_file_read_tool(
         (start_line, end_line, None)
     };
     let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
-    let (content, truncated, bytes) =
+    let (selected_content, truncated, bytes) =
         bytes_to_limited_text(selected.as_bytes(), effective_max_bytes);
-    let numbered_content = if line_numbers {
-        Some(numbered_content(
-            &content,
-            effective_start_line.unwrap_or(1),
-        ))
+    let full_output_path =
+        maybe_save_full_output(name, &base, "file-read", selected.as_bytes(), truncated)?;
+    let content = if line_numbers {
+        numbered_content(&selected_content, effective_start_line.unwrap_or(1))
     } else {
-        None
+        selected_content
     };
+    let unscoped_read = effective_start_line.is_none()
+        && effective_end_line.is_none()
+        && match_line.is_none()
+        && body.len() > effective_max_bytes;
+    let truncation_hint = file_read_truncation_hint(
+        truncated,
+        unscoped_read,
+        body.len(),
+        full_output_path.as_deref(),
+    );
+    let artifact = json!({
+        "id": format!("file:{}", path.display()),
+        "kind": "file_span",
+        "title": path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or_else(|| path.to_str().unwrap_or("file")),
+        "uri": path.display().to_string(),
+        "metadata": {
+            "provider": "file_read",
+            "path": path.display().to_string(),
+            "bytes": bytes,
+            "source_bytes": body.len(),
+            "start_line": effective_start_line,
+            "end_line": effective_end_line,
+            "match_line": match_line,
+            "contains": contains,
+            "context_lines": context_lines,
+            "occurrence": occurrence,
+            "total_lines": total_lines,
+            "truncated": truncated,
+            "full_output_path": full_output_path,
+            "unscoped_read": unscoped_read,
+            "line_numbers": line_numbers,
+            "line_numbers_defaulted": !explicit_line_numbers && line_numbers
+        }
+    });
     Ok(json!({
         "path": path.display().to_string(),
-        "content": content.clone(),
-        "numbered_content": numbered_content,
+        "content": content,
+        "content_format": if line_numbers { "line_numbered" } else { "plain" },
         "bytes": bytes,
         "source_bytes": body.len(),
         "start_line": effective_start_line,
@@ -129,34 +165,36 @@ pub(super) fn call_file_read_tool(
         "total_lines": total_lines,
         "max_bytes": effective_max_bytes,
         "truncated": truncated,
+        "full_output_path": full_output_path,
+        "truncation_hint": truncation_hint,
+        "unscoped_read": unscoped_read,
         "line_numbers": line_numbers,
         "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
-        "artifacts": [{
-            "id": format!("file:{}", path.display()),
-            "kind": "file_span",
-            "title": path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_else(|| path.to_str().unwrap_or("file")),
-            "uri": path.display().to_string(),
-            "metadata": {
-                "provider": "file_read",
-                "path": path.display().to_string(),
-                "bytes": bytes,
-                "source_bytes": body.len(),
-                "start_line": effective_start_line,
-                "end_line": effective_end_line,
-                "match_line": match_line,
-                "contains": contains,
-                "context_lines": context_lines,
-                "occurrence": occurrence,
-                "total_lines": total_lines,
-                "truncated": truncated,
-                "line_numbers": line_numbers,
-                "line_numbers_defaulted": !explicit_line_numbers && line_numbers
-            }
-        }],
+        "artifacts": [artifact],
     }))
+}
+
+fn file_read_truncation_hint(
+    truncated: bool,
+    unscoped_read: bool,
+    source_bytes: usize,
+    full_output_path: Option<&str>,
+) -> Option<String> {
+    truncated.then(|| {
+        let saved = full_output_path
+            .map(|path| format!(" Full selected output saved to: {path}."))
+            .unwrap_or_default();
+        if unscoped_read {
+            format!(
+                "Output was truncated from {} bytes.{saved} Use file.search, contains+context_lines, or file.read with start_line/end_line to inspect a narrow range instead of repeating an unscoped read.",
+                source_bytes,
+            )
+        } else {
+            format!(
+                "Output was truncated from the selected range.{saved} Increase max_bytes only if the whole selected range is immediately needed, otherwise use a narrower line range."
+            )
+        }
+    })
 }
 
 pub(super) fn call_file_read_many_tool(
@@ -344,8 +382,50 @@ pub(super) fn call_file_search_tool(
     }
     let (artifact_content, content_truncated, bytes) =
         bytes_to_limited_text(rendered.as_bytes(), max_bytes);
+    let full_output_path = maybe_save_full_output(
+        name,
+        &base,
+        "file-search",
+        rendered.as_bytes(),
+        content_truncated,
+    )?;
     let match_truncated = result.total_match_count > result.matches.len();
     let truncated = match_truncated || content_truncated || result.any_line_truncated;
+    let truncation_hint = file_search_truncation_hint(
+        content_truncated,
+        match_truncated,
+        full_output_path.as_deref(),
+    );
+    let artifact = json!({
+        "id": format!("file-search:{}:{}", path.display(), stable_pattern_id(pattern)),
+        "kind": "file_search",
+        "title": format!(
+            "{} matches in {}",
+            result.total_match_count,
+            path.file_name().and_then(|name| name.to_str()).unwrap_or("file")
+        ),
+        "uri": path.display().to_string(),
+        "content": artifact_content,
+        "metadata": {
+            "provider": "file_search",
+            "path": path.display().to_string(),
+            "directory": directory,
+            "pattern": pattern,
+            "pattern_source": pattern_source,
+            "match_count": result.total_match_count,
+            "returned_match_count": result.matches.len(),
+            "total_lines": result.total_lines,
+            "searched_file_count": result.searched_file_count,
+            "skipped_file_count": result.skipped_file_count,
+            "context_lines": context_lines,
+            "max_matches": effective_max_matches,
+            "max_line_chars": effective_max_line_chars,
+            "line_truncated": result.any_line_truncated,
+            "truncated": truncated,
+            "full_output_path": full_output_path,
+            "truncation_hint": truncation_hint
+        }
+    });
     Ok(json!({
         "path": path.display().to_string(),
         "directory": directory,
@@ -362,32 +442,69 @@ pub(super) fn call_file_search_tool(
         "max_line_chars": effective_max_line_chars,
         "line_truncated": result.any_line_truncated,
         "truncated": truncated,
+        "full_output_path": full_output_path,
+        "truncation_hint": truncation_hint,
         "bytes": bytes,
-        "artifacts": [{
-            "id": format!("file-search:{}:{}", path.display(), stable_pattern_id(pattern)),
-            "kind": "file_search",
-            "title": format!("{} matches in {}", result.total_match_count, path.file_name().and_then(|name| name.to_str()).unwrap_or("file")),
-            "uri": path.display().to_string(),
-            "content": artifact_content,
-            "metadata": {
-                "provider": "file_search",
-                "path": path.display().to_string(),
-                "directory": directory,
-                "pattern": pattern,
-                "pattern_source": pattern_source,
-                "match_count": result.total_match_count,
-                "returned_match_count": result.matches.len(),
-                "total_lines": result.total_lines,
-                "searched_file_count": result.searched_file_count,
-                "skipped_file_count": result.skipped_file_count,
-                "context_lines": context_lines,
-                "max_matches": effective_max_matches,
-                "max_line_chars": effective_max_line_chars,
-                "line_truncated": result.any_line_truncated,
-                "truncated": truncated
-            }
-        }]
+        "artifacts": [artifact]
     }))
+}
+
+fn file_search_truncation_hint(
+    content_truncated: bool,
+    match_truncated: bool,
+    full_output_path: Option<&str>,
+) -> Option<String> {
+    if !content_truncated && !match_truncated {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if content_truncated {
+        if let Some(path) = full_output_path {
+            parts.push(format!("Full returned search preview saved to: {path}."));
+        }
+        parts.push("Use file.search with a narrower pattern or file.read with exact line ranges to inspect specific sections.".to_string());
+    }
+    if match_truncated {
+        parts.push("Search matches exceeded max_matches; narrow the pattern/path or increase max_matches only when the broader match set is immediately needed.".to_string());
+    }
+    Some(parts.join(" "))
+}
+
+fn maybe_save_full_output(
+    tool_name: &str,
+    base_dir: &Path,
+    prefix: &str,
+    content: &[u8],
+    truncated: bool,
+) -> Result<Option<String>, RuntimeError> {
+    if truncated {
+        Ok(Some(save_text_tool_output(
+            tool_name, base_dir, prefix, content,
+        )?))
+    } else {
+        Ok(None)
+    }
+}
+
+fn save_text_tool_output(
+    tool_name: &str,
+    base_dir: &Path,
+    prefix: &str,
+    content: &[u8],
+) -> Result<String, RuntimeError> {
+    let output_dir = base_dir.join(".air").join("tool-output");
+    fs::create_dir_all(&output_dir).map_err(|error| {
+        RuntimeError::Provider(format!("tool {tool_name} create output dir: {error}"))
+    })?;
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|error| RuntimeError::Provider(format!("tool {tool_name} timestamp: {error}")))?
+        .as_millis();
+    let path = output_dir.join(format!("{prefix}-{timestamp}.log"));
+    fs::write(&path, content).map_err(|error| {
+        RuntimeError::Provider(format!("tool {tool_name} write full output: {error}"))
+    })?;
+    Ok(path.display().to_string())
 }
 
 fn file_search_pattern_input<'a>(

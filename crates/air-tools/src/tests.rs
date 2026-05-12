@@ -629,9 +629,10 @@ fn file_read_many_reads_multiple_files_with_artifacts() {
     assert_eq!(output["max_bytes_per_file"], json!(1024));
     assert_eq!(output["files"][1]["match_line"], json!(2));
     assert_eq!(
-        output["files"][1]["numbered_content"],
+        output["files"][1]["content"],
         json!("00001| first\n00002| needle\n00003| last")
     );
+    assert_eq!(output["files"][1]["content_format"], json!("line_numbered"));
     assert_eq!(output["artifacts"].as_array().unwrap().len(), 2);
     assert_eq!(tools.tool_capability("file.read_many"), Some("file.read"));
     let _ = fs::remove_dir_all(dir);
@@ -1247,12 +1248,9 @@ fn file_read_can_return_numbered_content() {
         )
         .unwrap();
 
-    assert_eq!(output["content"], json!("two\nthree"));
+    assert_eq!(output["content"], json!("00002| two\n00003| three"));
+    assert_eq!(output["content_format"], json!("line_numbered"));
     assert_eq!(output["line_numbers"], json!(true));
-    assert_eq!(
-        output["numbered_content"],
-        json!("00002| two\n00003| three")
-    );
     assert_eq!(
         output["artifacts"][0]["metadata"]["line_numbers"],
         json!(true)
@@ -1282,13 +1280,10 @@ fn file_read_range_defaults_to_numbered_content() {
         .call_tool("file.read", &json!({"path": "note.txt", "start_line": 2}))
         .unwrap();
 
-    assert_eq!(output["content"], json!("two\nthree"));
+    assert_eq!(output["content"], json!("00002| two\n00003| three"));
+    assert_eq!(output["content_format"], json!("line_numbered"));
     assert_eq!(output["line_numbers"], json!(true));
     assert_eq!(output["line_numbers_defaulted"], json!(true));
-    assert_eq!(
-        output["numbered_content"],
-        json!("00002| two\n00003| three")
-    );
     assert_eq!(
         output["artifacts"][0]["metadata"]["line_numbers_defaulted"],
         json!(true)
@@ -1318,15 +1313,12 @@ fn file_read_accepts_lines_range_alias() {
         .call_tool("file.read", &json!({"path": "note.txt", "lines": "2-3"}))
         .unwrap();
 
-    assert_eq!(output["content"], json!("two\nthree"));
+    assert_eq!(output["content"], json!("00002| two\n00003| three"));
+    assert_eq!(output["content_format"], json!("line_numbered"));
     assert_eq!(output["start_line"], json!(2));
     assert_eq!(output["end_line"], json!(3));
     assert_eq!(output["line_numbers"], json!(true));
     assert_eq!(output["line_numbers_defaulted"], json!(true));
-    assert_eq!(
-        output["numbered_content"],
-        json!("00002| two\n00003| three")
-    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -3741,7 +3733,8 @@ fn file_read_can_return_line_ranges() {
         )
         .unwrap();
 
-    assert_eq!(output["content"], json!("two\nthree"));
+    assert_eq!(output["content"], json!("00002| two\n00003| three"));
+    assert_eq!(output["content_format"], json!("line_numbered"));
     assert_eq!(output["start_line"], json!(2));
     assert_eq!(output["end_line"], json!(3));
     assert_eq!(output["total_lines"], json!(4));
@@ -3783,19 +3776,123 @@ fn file_read_can_return_context_around_contains_match() {
         )
         .unwrap();
 
-    assert_eq!(output["content"], json!("before\ntarget symbol\nafter"));
+    assert_eq!(
+        output["content"],
+        json!("00002| before\n00003| target symbol\n00004| after")
+    );
+    assert_eq!(output["content_format"], json!("line_numbered"));
     assert_eq!(output["start_line"], json!(2));
     assert_eq!(output["end_line"], json!(4));
     assert_eq!(output["match_line"], json!(3));
-    assert_eq!(
-        output["numbered_content"],
-        json!("00002| before\n00003| target symbol\n00004| after")
-    );
     assert_eq!(
         output["artifacts"][0]["metadata"]["contains"],
         json!("target")
     );
     assert_eq!(output["occurrence"], json!(1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_truncates_unscoped_large_reads_with_range_hint() {
+    let dir = temp_dir("air-tools-file-read-unscoped-large");
+    let content = (1..=200)
+        .map(|line| format!("line {line:03} {}", "x".repeat(30)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("large.txt"), content).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 512
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.read",
+            &json!({"path": "large.txt", "line_numbers": true}),
+        )
+        .unwrap();
+
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["unscoped_read"], json!(true));
+    assert_eq!(output["bytes"], json!(512));
+    assert_eq!(output["content_format"], json!("line_numbered"));
+    assert!(output["content"]
+        .as_str()
+        .unwrap()
+        .contains("00001| line 001"));
+    assert!(output["truncation_hint"]
+        .as_str()
+        .unwrap()
+        .contains("start_line/end_line"));
+    let full_output_path = output["full_output_path"].as_str().unwrap();
+    assert!(full_output_path.ends_with(".log"), "{full_output_path}");
+    assert!(Path::new(full_output_path)
+        .starts_with(dir.canonicalize().unwrap().join(".air").join("tool-output")));
+    assert!(fs::read_to_string(full_output_path)
+        .unwrap()
+        .contains("line 200"));
+    assert!(output.get("numbered_content").is_none());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_search_saves_full_returned_preview_when_content_is_truncated() {
+    let dir = temp_dir("air-tools-file-search-full-output");
+    fs::write(
+        dir.join("note.txt"),
+        (1..=40)
+            .map(|line| format!("needle line {line:02} {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n"),
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.search": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 128,
+                  "max_matches": 40
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.search",
+            &json!({"path": "note.txt", "pattern": "needle"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["truncated"], json!(true));
+    let full_output_path = output["full_output_path"].as_str().unwrap();
+    assert!(full_output_path.ends_with(".log"), "{full_output_path}");
+    assert!(fs::read_to_string(full_output_path)
+        .unwrap()
+        .contains("needle line 40"));
+    assert!(output["truncation_hint"]
+        .as_str()
+        .unwrap()
+        .contains("Full returned search preview saved"));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["full_output_path"],
+        json!(full_output_path)
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

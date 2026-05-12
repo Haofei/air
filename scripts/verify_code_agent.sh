@@ -43,24 +43,23 @@ observations_window = re.search(
     choose.group("body"),
 )
 assert observations_window, "choose rule must use byte-bounded observation history"
-assert int(observations_window.group(1)) == 30, observations_window.group(0)
-assert int(observations_window.group(2)) == 200000, (
+assert int(observations_window.group(1)) == 4, observations_window.group(0)
+assert int(observations_window.group(2)) == 24000, (
     observations_window.group(0) if observations_window else None
 )
-
-targeted_force = re.search(r"- id:\s*force-write-after-targeted-explore-budget\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
-assert targeted_force, "missing targeted force-write rule"
-targeted_window = re.search(
-    r"observations:\s*\n\s+take_last_within_bytes:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)\s*\n\s+max_bytes:\s*(\d+)",
-    targeted_force.group("body"),
+edit_evidence_window = re.search(
+    r"edit_evidence:\s*\n\s+take_last_within_bytes:\s*\n\s+ref:\s*edit_evidence\s*\n\s+max_items:\s*(\d+)\s*\n\s+max_bytes:\s*(\d+)",
+    choose.group("body"),
 )
-assert targeted_window, "targeted force-write rule must use byte-bounded observation history"
-assert int(targeted_window.group(1)) <= 4, targeted_window.group(0)
-assert int(targeted_window.group(2)) <= 24000, targeted_window.group(0)
+assert edit_evidence_window, "choose rule must preserve bounded edit evidence separately"
+assert int(edit_evidence_window.group(1)) == 6, edit_evidence_window.group(0)
+assert int(edit_evidence_window.group(2)) == 30000, edit_evidence_window.group(0)
 
-force_empty = re.search(r"- id:\s*force-empty-action\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
-assert force_empty, "missing force-empty-action rule"
-assert re.search(r"phase:\s*summarize", force_empty.group("body")), force_empty.group("body")
+assert "force-write-after-targeted-explore-budget" not in module
+assert "force-write-after-explore-budget" not in module
+assert "force-empty-action" not in module
+assert "force_act" not in module
+assert "choose-targeted-symbol" not in module
 
 config = json.loads(Path("examples/bigmodel-openai-compatible.json").read_text())
 for model in ("code_edit_decider", "code_edit_summarizer"):
