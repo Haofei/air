@@ -5,7 +5,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use tree_sitter::{Node, Parser};
 
 pub(crate) fn call_repo_symbols_tool(
     name: &str,
@@ -53,7 +52,7 @@ pub(crate) fn call_repo_symbols_tool(
         super::validate_git_pathspec(name, glob)?;
     }
 
-    let mut symbols = tree_sitter_rust_repo_symbols(
+    let symbols = repo_symbols_rg(
         name,
         &repo,
         &paths,
@@ -64,21 +63,6 @@ pub(crate) fn call_repo_symbols_tool(
         &smart_terms,
         effective_max_symbols,
     )?;
-    let rust_symbol_count = symbols.len();
-    if symbols.len() < effective_max_symbols {
-        symbols.extend(repo_symbols_rg(
-            name,
-            &repo,
-            &paths,
-            glob,
-            &name_filters,
-            mode,
-            &query,
-            &smart_terms,
-            effective_max_symbols - symbols.len(),
-            true,
-        )?);
-    }
 
     let rendered = symbols
         .iter()
@@ -122,7 +106,6 @@ pub(crate) fn call_repo_symbols_tool(
                 "paths": paths,
                 "max_symbols": effective_max_symbols,
                 "bytes": bytes,
-                "rust_symbols": rust_symbol_count,
                 "truncated": truncated
             }
         }]
@@ -140,9 +123,8 @@ fn repo_symbols_rg(
     query: &str,
     smart_terms: &[String],
     max_symbols: usize,
-    exclude_rust: bool,
 ) -> Result<Vec<Value>, RuntimeError> {
-    let pattern = r"^\s*(pub\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+|const\s+|let\s+|var\s+)";
+    let pattern = r"^\s*(pub\s+|pub\([^)]*\)\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+|const\s+|let\s+|var\s+)";
     let mut command = Command::new("rg");
     command.args([
         "--line-number",
@@ -156,22 +138,8 @@ fn repo_symbols_rg(
     if let Some(glob) = glob {
         command.arg("-g").arg(glob);
     }
-    if exclude_rust {
-        command.arg("-g").arg("!*.rs");
-    }
     if !paths.is_empty() {
-        let fallback_paths = if exclude_rust {
-            paths
-                .iter()
-                .filter(|path| !path.ends_with(".rs"))
-                .collect::<Vec<_>>()
-        } else {
-            paths.iter().collect::<Vec<_>>()
-        };
-        if fallback_paths.is_empty() {
-            return Ok(Vec::new());
-        }
-        command.args(fallback_paths);
+        command.args(paths);
     }
     let output = command
         .current_dir(repo)
@@ -238,206 +206,6 @@ fn repo_symbols_rg(
         }
     }
     Ok(symbols)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn tree_sitter_rust_repo_symbols(
-    tool_name: &str,
-    repo: &Path,
-    paths: &[String],
-    glob: Option<&str>,
-    name_filters: &BTreeSet<String>,
-    mode: &str,
-    query: &str,
-    smart_terms: &[String],
-    max_symbols: usize,
-) -> Result<Vec<Value>, RuntimeError> {
-    if max_symbols == 0 {
-        return Ok(Vec::new());
-    }
-    let files = repo_rust_files(tool_name, repo, paths, glob)?;
-    if files.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut parser = Parser::new();
-    let language = tree_sitter_rust::LANGUAGE.into();
-    parser.set_language(&language).map_err(|error| {
-        RuntimeError::Provider(format!("tool {tool_name} rust parser: {error}"))
-    })?;
-
-    let mut symbols = Vec::new();
-    for path in files {
-        let absolute =
-            super::canonicalize_tool_path(tool_name, "repo.symbols rust path", &repo.join(&path))?;
-        if !absolute.starts_with(repo) || !absolute.is_file() {
-            continue;
-        }
-        let source = fs::read_to_string(&absolute).map_err(|error| {
-            RuntimeError::Provider(format!("tool {tool_name} repo symbols: {error}"))
-        })?;
-        let Some(tree) = parser.parse(&source, None) else {
-            continue;
-        };
-        collect_tree_sitter_rust_symbols(
-            tree.root_node(),
-            &path,
-            &source,
-            name_filters,
-            mode,
-            query,
-            smart_terms,
-            &mut symbols,
-            max_symbols,
-        );
-        if symbols.len() >= max_symbols {
-            break;
-        }
-    }
-    Ok(symbols)
-}
-
-fn repo_rust_files(
-    tool_name: &str,
-    repo: &Path,
-    paths: &[String],
-    glob: Option<&str>,
-) -> Result<Vec<String>, RuntimeError> {
-    let mut command = Command::new("rg");
-    command.args(["--files", "--color", "never"]);
-    if let Some(glob) = glob {
-        command.arg("-g").arg(glob);
-    } else {
-        command.arg("-g").arg("*.rs");
-    }
-    if !paths.is_empty() {
-        command.args(paths);
-    }
-    let output = command.current_dir(repo).output().map_err(|error| {
-        RuntimeError::Provider(format!("tool {tool_name} repo symbols: {error}"))
-    })?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} repo symbols failed: {}",
-            super::provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .filter(|line| line.ends_with(".rs"))
-        .map(ToString::to_string)
-        .collect())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn collect_tree_sitter_rust_symbols(
-    node: Node<'_>,
-    path: &str,
-    source: &str,
-    name_filters: &BTreeSet<String>,
-    mode: &str,
-    query: &str,
-    smart_terms: &[String],
-    symbols: &mut Vec<Value>,
-    max_symbols: usize,
-) {
-    if symbols.len() >= max_symbols {
-        return;
-    }
-    if let Some(symbol) = tree_sitter_rust_symbol(node, path, source) {
-        if repo_symbol_value_matches(&symbol, name_filters, mode, query, smart_terms) {
-            symbols.push(symbol);
-            if symbols.len() >= max_symbols {
-                return;
-            }
-        }
-    }
-
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        collect_tree_sitter_rust_symbols(
-            child,
-            path,
-            source,
-            name_filters,
-            mode,
-            query,
-            smart_terms,
-            symbols,
-            max_symbols,
-        );
-        if symbols.len() >= max_symbols {
-            break;
-        }
-    }
-}
-
-fn tree_sitter_rust_symbol(node: Node<'_>, path: &str, source: &str) -> Option<Value> {
-    let kind = match node.kind() {
-        "function_item" | "function_signature_item" => "function",
-        "struct_item" => "struct",
-        "enum_item" => "enum",
-        "trait_item" => "interface",
-        "impl_item" => "impl",
-        "type_item" => "type",
-        "const_item" | "static_item" => "variable",
-        _ => return None,
-    };
-    let name = if kind == "impl" {
-        let type_node = node.child_by_field_name("type")?;
-        rust_type_symbol_name(type_node.utf8_text(source.as_bytes()).ok()?.trim())?
-    } else {
-        node.child_by_field_name("name")?
-            .utf8_text(source.as_bytes())
-            .ok()?
-            .trim()
-            .to_string()
-    };
-    if name.is_empty() {
-        return None;
-    }
-    let start = node.start_position();
-    let end = node.end_position();
-    let text = source
-        .lines()
-        .nth(start.row)
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    Some(json!({
-        "path": path,
-        "line": start.row + 1,
-        "end_line": end.row + 1,
-        "column": start.column + 1,
-        "kind": kind,
-        "name": name,
-        "text": text
-    }))
-}
-
-fn repo_symbol_value_matches(
-    symbol: &Value,
-    name_filters: &BTreeSet<String>,
-    mode: &str,
-    query: &str,
-    smart_terms: &[String],
-) -> bool {
-    let symbol_name = symbol["name"].as_str().unwrap_or_default();
-    if !name_filters.is_empty() {
-        return name_filters.contains(&symbol_name.to_ascii_lowercase());
-    }
-    let path = symbol["path"].as_str().unwrap_or_default().to_lowercase();
-    let name = symbol_name.to_lowercase();
-    match mode {
-        "smart" if smart_terms.is_empty() => true,
-        "smart" => {
-            let text = symbol["text"].as_str().unwrap_or_default().to_lowercase();
-            smart_terms
-                .iter()
-                .any(|term| path.contains(term) || name.contains(term) || text.contains(term))
-        }
-        _ => query.is_empty() || name.contains(query) || path.contains(query),
-    }
 }
 
 fn repo_symbol_lines_by_path(raw: &str) -> BTreeMap<String, Vec<u64>> {
@@ -607,8 +375,21 @@ pub(super) fn parse_symbol_declaration(line: &str) -> Option<(&'static str, Stri
     let mut token = tokens.next()?;
     while matches!(
         token,
-        "pub" | "export" | "async" | "static" | "final" | "private" | "protected" | "public"
-    ) {
+        "pub"
+            | "crate)"
+            | "self)"
+            | "super)"
+            | "export"
+            | "async"
+            | "unsafe"
+            | "const"
+            | "static"
+            | "final"
+            | "private"
+            | "protected"
+            | "public"
+    ) || token.starts_with("pub(")
+    {
         token = tokens.next()?;
     }
     let kind = match token {

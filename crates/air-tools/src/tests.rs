@@ -232,7 +232,7 @@ fn code_assert_validates_symbols_and_file_patterns() {
         "pub fn kept_symbol() {}\npub fn moved_symbol() {}\n",
     )
     .unwrap();
-    fs::write(dir.join("dest.rs"), "pub fn moved_symbol() {}\n").unwrap();
+    fs::write(dir.join("dest.rs"), "pub(crate) fn moved_symbol() {}\n").unwrap();
     let config_path = write_config(
         &dir,
         r#"{
@@ -5129,6 +5129,59 @@ fn repo_symbols_returns_lightweight_symbol_map() {
     assert_eq!(output["symbols"][0]["end_line"], json!(1));
     assert_eq!(output["artifacts"][0]["kind"], json!("repo_symbols"));
     assert_eq!(tools.tool_capability("repo.symbols"), Some("code.read"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+#[ignore = "requires rust-analyzer installed on PATH"]
+fn lsp_references_reuses_session_within_config_tools() {
+    let dir = temp_dir("air-tools-lsp-session-cache");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"air_tools_lsp_session_cache\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "pub fn helper() -> usize { 1 }\n\npub fn caller() -> usize { helper() }\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "lsp.references": {
+                  "kind": "rust_analyzer_references",
+                  "capability": "code.read",
+                  "root_dir": ".",
+                  "command": "rust-analyzer",
+                  "max_results": 20,
+                  "max_bytes": 65536
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    for _ in 0..2 {
+        let output = tools
+            .call_tool(
+                "lsp.references",
+                &json!({
+                    "path": "src/lib.rs",
+                    "symbol": "helper",
+                    "include_declaration": true
+                }),
+            )
+            .unwrap();
+        assert!(
+            output["reference_count"].as_u64().unwrap_or_default() >= 2,
+            "{output}"
+        );
+    }
+
+    assert_eq!(tools.rust_analyzer_sessions.len(), 1);
     let _ = fs::remove_dir_all(dir);
 }
 

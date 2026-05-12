@@ -83,6 +83,16 @@ for path in (
     "examples/code-agent/fixtures/tools.playwright.json",
 ):
     tools = json.loads(Path(path).read_text())["tools"]
+    assert "lsp.references" in tools, path
+    assert tools["lsp.references"].get("kind") == "rust_analyzer_references", (
+        path,
+        tools["lsp.references"],
+    )
+    assert "lsp.diagnostics" in tools, path
+    assert tools["lsp.diagnostics"].get("kind") == "rust_analyzer_diagnostics", (
+        path,
+        tools["lsp.diagnostics"],
+    )
     file_search = tools["file.search"]
     assert file_search.get("max_matches") <= 40, (path, file_search.get("max_matches"))
     assert file_search.get("max_context_lines") <= 2, (
@@ -115,6 +125,7 @@ cargo test -q -p air-tools command_run
 cargo test -q -p air-tools repo_search
 cargo test -q -p air-tools repo_context
 cargo test -q -p air-tools diagnostic_context
+cargo test -q -p air-tools rust_lsp_tools
 
 echo "[code-agent] default explore profile run"
 cargo run -q -p air-cli -- code "check whether build is a public code-agent primitive" \
@@ -239,12 +250,16 @@ decider_start = next(
 tool_schemas = decider_start["input"]["tool_schemas"]
 assert "repo.files" in tool_schemas, tool_schemas
 assert "repo.symbols" in tool_schemas, tool_schemas
+assert "lsp.references" in tool_schemas, tool_schemas
+assert "lsp.diagnostics" in tool_schemas, tool_schemas
 assert "file.ops" in tool_schemas, tool_schemas
 assert "code.assert" in tool_schemas, tool_schemas
 assert "candidate.validate" in tool_schemas, tool_schemas
 assert "test.run" in tool_schemas, tool_schemas
 assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
 assert "names" in tool_schemas["repo.symbols"]["optional"], tool_schemas["repo.symbols"]
+assert "symbol" in tool_schemas["lsp.references"]["optional"], tool_schemas["lsp.references"]
+assert "path" in tool_schemas["lsp.references"]["required"], tool_schemas["lsp.references"]
 assert "max_changed_lines" in tool_schemas["file.ops"]["optional"], tool_schemas["file.ops"]
 assert "max_changed_lines" in tool_schemas["file.patch"]["optional"], tool_schemas["file.patch"]
 assert "assertions" in tool_schemas["code.assert"]["required"], tool_schemas["code.assert"]

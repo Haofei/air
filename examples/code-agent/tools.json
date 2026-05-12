@@ -114,6 +114,22 @@
       "context_lines": 4,
       "max_bytes": 65536
     },
+    "lsp.references": {
+      "kind": "rust_analyzer_references",
+      "capability": "code.read",
+      "root_dir": "../..",
+      "command": "rust-analyzer",
+      "max_results": 120,
+      "max_bytes": 65536
+    },
+    "lsp.diagnostics": {
+      "kind": "rust_analyzer_diagnostics",
+      "capability": "code.read",
+      "root_dir": "../..",
+      "command": "rust-analyzer",
+      "max_diagnostics": 80,
+      "max_bytes": 65536
+    },
     "repo.context": {
       "kind": "repo_context",
       "capability": "code.read",

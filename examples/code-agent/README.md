@@ -47,7 +47,7 @@ It runs as:
 init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 ```
 
-The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `file.read`, `file.search`, `file.ops`, `file.patch`, `code.assert`, `test.run`, and `git.diff`.
+The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `lsp.references`, `lsp.diagnostics`, `file.read`, `file.search`, `file.ops`, `file.patch`, `code.assert`, `test.run`, and `git.diff`.
 
 `tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind `test.run` aliases for workspace tests, clippy, the code-agent gate, backend conformance, and bounded package/test-filter runs.
 
@@ -62,7 +62,11 @@ When `test.run` output is truncated (`output.truncated == true`), the full log i
 When `file.ops` `edit` validation fails (e.g. `old_string` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `old_string` does not match but one of its lines is present, the diagnostic includes an `old_string_anchor` line for a precise retry location.
 
 The edit loop runs `candidate.validate` automatically during preflight when `target_path` and `test_command` are known, catching misconfigured paths or disallowed commands before any edit attempt.
-Use `code.assert` for structural postconditions that tests may not prove directly, such as `symbol_absent` in the original file and `symbol_present` in a new split module.
+Use `code.assert` for structural postconditions that tests may not prove directly, such as `symbol_absent`, `symbol_present`, `file_contains`, or `file_not_contains`.
+
+Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic references matter, then make explicit `file.ops` or `file.patch` edits and let validation diagnostics close the loop.
+
+Use `lsp.references` before larger refactors when regex references are too weak. The current bundled implementation uses rust-analyzer and keeps that LSP session alive inside the tool provider for the duration of the run, so repeated semantic lookups do not restart the language server. `lsp.diagnostics` exposes language-server diagnostics for the next repair step.
 
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 

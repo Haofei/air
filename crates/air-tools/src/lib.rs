@@ -32,10 +32,17 @@ mod provider;
 pub use provider::{EchoTools, ToolProviderChoice};
 mod repo_symbols;
 use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
+mod rust_lsp_tools;
+use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
 mod todo_tools;
 use todo_tools::{call_todo_read_tool, call_todo_write_tool};
 mod artifact_tools;
 use artifact_tools::call_artifact_validate_tool;
+use git_tools::git_status_label;
+mod repo_reference_tools;
+use repo_reference_tools::call_repo_references_tool;
+mod diagnostic_context_tools;
+use diagnostic_context_tools::call_diagnostic_context_tool;
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
@@ -414,6 +421,36 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
+    RustAnalyzerReferences {
+        #[serde(default)]
+        capability: Option<String>,
+
+        root_dir: PathBuf,
+
+        #[serde(default)]
+        command: Option<String>,
+
+        #[serde(default)]
+        max_results: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    RustAnalyzerDiagnostics {
+        #[serde(default)]
+        capability: Option<String>,
+
+        root_dir: PathBuf,
+
+        #[serde(default)]
+        command: Option<String>,
+
+        #[serde(default)]
+        max_diagnostics: Option<usize>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
     DiagnosticContext {
         #[serde(default)]
         capability: Option<String>,
@@ -563,6 +600,8 @@ impl ToolConfig {
             | ToolConfig::RepoContext { capability, .. }
             | ToolConfig::RepoSymbols { capability, .. }
             | ToolConfig::RepoReferences { capability, .. }
+            | ToolConfig::RustAnalyzerReferences { capability, .. }
+            | ToolConfig::RustAnalyzerDiagnostics { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::CodeAssert { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
@@ -600,13 +639,27 @@ struct ApprovalConfig {
     metadata: Option<Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct ConfigTools {
     tools: BTreeMap<String, ToolConfig>,
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
     read_snapshots: BTreeMap<PathBuf, SystemTime>,
     current_todos: Vec<Value>,
+    rust_analyzer_sessions: BTreeMap<String, RustAnalyzerSession>,
+}
+
+impl Clone for ConfigTools {
+    fn clone(&self) -> Self {
+        Self {
+            tools: self.tools.clone(),
+            approvals: self.approvals.clone(),
+            config_dir: self.config_dir.clone(),
+            read_snapshots: self.read_snapshots.clone(),
+            current_todos: self.current_todos.clone(),
+            rust_analyzer_sessions: BTreeMap::new(),
+        }
+    }
 }
 
 impl ConfigTools {
@@ -625,6 +678,7 @@ impl ConfigTools {
                 .to_path_buf(),
             read_snapshots: BTreeMap::new(),
             current_todos: Vec::new(),
+            rust_analyzer_sessions: BTreeMap::new(),
         })
     }
 
@@ -650,6 +704,7 @@ impl ConfigTools {
             config_dir: PathBuf::from("."),
             read_snapshots: BTreeMap::new(),
             current_todos: Vec::new(),
+            rust_analyzer_sessions: BTreeMap::new(),
         }
     }
 
@@ -682,6 +737,25 @@ impl ConfigTools {
             }
         }
         Ok(())
+    }
+
+    fn rust_analyzer_session(
+        &mut self,
+        tool_name: &str,
+        root_dir: &Path,
+        command: &str,
+    ) -> Result<&mut RustAnalyzerSession, RuntimeError> {
+        let root = canonicalize_tool_path(tool_name, "root_dir", root_dir)?;
+        let key = format!("{command}\n{}", root.display());
+        if !self.rust_analyzer_sessions.contains_key(&key) {
+            let session = RustAnalyzerSession::start(tool_name, &root, command)?;
+            self.rust_analyzer_sessions.insert(key.clone(), session);
+        }
+        self.rust_analyzer_sessions.get_mut(&key).ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "tool {tool_name} failed to cache rust-analyzer session"
+            ))
+        })
     }
 }
 
@@ -1247,6 +1321,40 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     path,
                     &format!("tools.{name}.context_lines"),
                     *context_lines,
+                )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::RustAnalyzerReferences {
+                root_dir,
+                max_results,
+                max_bytes,
+                ..
+            } => {
+                if root_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.root_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+            }
+            ToolConfig::RustAnalyzerDiagnostics {
+                root_dir,
+                max_diagnostics,
+                max_bytes,
+                ..
+            } => {
+                if root_dir.as_os_str().is_empty() {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.root_dir must not be empty",
+                        path.display()
+                    );
+                }
+                validate_positive_usize(
+                    path,
+                    &format!("tools.{name}.max_diagnostics"),
+                    *max_diagnostics,
                 )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
@@ -1984,6 +2092,34 @@ impl ToolProvider for ConfigTools {
                 self.remember_repo_output_paths(&repo_dir, &output)?;
                 Ok(output)
             }
+            ToolConfig::RustAnalyzerReferences {
+                capability: _,
+                root_dir,
+                command,
+                max_results,
+                max_bytes,
+            } => {
+                let root_dir = resolve_config_path(&self.config_dir, &root_dir);
+                let command = command.as_deref().unwrap_or("rust-analyzer");
+                let max_results = max_results.unwrap_or(120);
+                let max_bytes = max_bytes.unwrap_or(256 * 1024);
+                let session = self.rust_analyzer_session(name, &root_dir, command)?;
+                call_lsp_references_tool(name, session, input, max_results, max_bytes)
+            }
+            ToolConfig::RustAnalyzerDiagnostics {
+                capability: _,
+                root_dir,
+                command,
+                max_diagnostics,
+                max_bytes,
+            } => call_lsp_diagnostics_tool(
+                name,
+                input,
+                &resolve_config_path(&self.config_dir, &root_dir),
+                command.as_deref().unwrap_or("rust-analyzer"),
+                max_diagnostics.unwrap_or(80),
+                max_bytes.unwrap_or(256 * 1024),
+            ),
             ToolConfig::DiagnosticContext {
                 capability: _,
                 repo_dir,
@@ -2111,6 +2247,8 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoContext { capability, .. }
             | ToolConfig::RepoSymbols { capability, .. }
             | ToolConfig::RepoReferences { capability, .. }
+            | ToolConfig::RustAnalyzerReferences { capability, .. }
+            | ToolConfig::RustAnalyzerDiagnostics { capability, .. }
             | ToolConfig::DiagnosticContext { capability, .. }
             | ToolConfig::CodeAssert { capability, .. }
             | ToolConfig::TodoWrite { capability, .. }
@@ -2965,20 +3103,6 @@ fn parse_git_status_line(line: &str) -> Option<Value> {
     }))
 }
 
-fn git_status_label(code: &str) -> &'static str {
-    match code {
-        "??" => "untracked",
-        "!!" => "ignored",
-        " M" | "M " | "MM" => "modified",
-        " A" | "A " | "AM" => "added",
-        " D" | "D " => "deleted",
-        "R " | " R" => "renamed",
-        "C " | " C" => "copied",
-        "UU" | "AA" | "DD" | "AU" | "UA" | "DU" | "UD" => "unmerged",
-        _ => "changed",
-    }
-}
-
 fn call_repo_files_tool(
     name: &str,
     input: &Value,
@@ -3601,172 +3725,6 @@ fn repo_smart_search_terms(query: &str) -> Vec<String> {
     terms
 }
 
-fn call_repo_references_tool(
-    name: &str,
-    input: &Value,
-    repo_dir: &Path,
-    max_matches: usize,
-    max_files: usize,
-    context_lines: usize,
-    max_bytes: usize,
-) -> Result<Value, RuntimeError> {
-    let symbol = required_input_string(name, input, "symbol")?.trim();
-    if !is_identifier_like(symbol) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.symbol must be an identifier-like token"
-        )));
-    }
-    let effective_max_matches =
-        optional_bounded_usize_input(name, input, "max_matches", max_matches)?
-            .unwrap_or(max_matches);
-    let effective_max_files =
-        optional_bounded_usize_input(name, input, "max_files", max_files)?.unwrap_or(max_files);
-    let effective_context_lines =
-        optional_bounded_usize_input(name, input, "context_lines", context_lines)?
-            .unwrap_or(context_lines);
-    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let paths = repo_tool_paths(name, input)?;
-    let mut command = Command::new("rg");
-    command.args([
-        "--line-number",
-        "--column",
-        "--with-filename",
-        "--no-heading",
-        "--color",
-        "never",
-        "--fixed-strings",
-        symbol,
-    ]);
-    if let Some(glob) = input.get("glob").and_then(Value::as_str) {
-        validate_git_pathspec(name, glob)?;
-        command.arg("-g").arg(glob);
-    }
-    if !paths.is_empty() {
-        command.args(&paths);
-    }
-    let output = command
-        .current_dir(&repo)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} repo references: {error}")))?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} repo references failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-
-    let raw = String::from_utf8_lossy(&output.stdout);
-    let mut references = Vec::new();
-    let mut definitions = Vec::new();
-    let mut match_lines_by_path: BTreeMap<String, Vec<usize>> = BTreeMap::new();
-    let mut selected_paths = Vec::new();
-    let mut token_match_count = 0usize;
-    for line in raw.lines() {
-        let item = parse_rg_vimgrep_line(line);
-        let text = item["text"].as_str().unwrap_or_default();
-        if !contains_identifier_token(text, symbol) {
-            continue;
-        }
-        token_match_count += 1;
-        if references.len() >= effective_max_matches {
-            continue;
-        }
-        let path = item["path"].as_str().unwrap_or_default().to_string();
-        let line_number = item["line"].as_u64().unwrap_or_default() as usize;
-        let definition_kind = parse_symbol_declaration(text).and_then(|(kind, declaration)| {
-            (kind != "impl" && declaration == symbol).then_some(kind)
-        });
-        let reference = build_reference_entry(&item, text, definition_kind);
-        if definition_kind.is_some() {
-            definitions.push(reference.clone());
-        }
-        references.push(reference);
-        if path.is_empty() || line_number == 0 {
-            continue;
-        }
-        if !match_lines_by_path.contains_key(&path) {
-            if selected_paths.len() >= effective_max_files {
-                continue;
-            }
-            selected_paths.push(path.clone());
-        }
-        match_lines_by_path
-            .entry(path)
-            .or_default()
-            .push(line_number);
-    }
-
-    let mut snippets = Vec::new();
-    let mut rendered = String::new();
-    for path in selected_paths {
-        let Some(lines) = match_lines_by_path.get(&path) else {
-            continue;
-        };
-        let candidate = repo.join(&path);
-        let file_path = canonicalize_tool_path(name, "repo reference path", &candidate)?;
-        if !file_path.starts_with(&repo) {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} repo reference path is outside configured repo_dir"
-            )));
-        }
-        let body = fs::read(&file_path)
-            .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-        let full_content = String::from_utf8_lossy(&body).to_string();
-        let total_lines = full_content.lines().count();
-        let ranges = merge_line_ranges(lines, total_lines, effective_context_lines);
-        for (start_line, end_line) in ranges {
-            let content = numbered_line_range(&full_content, start_line, end_line);
-            if !rendered.is_empty() {
-                rendered.push('\n');
-            }
-            rendered.push_str(&format!("--- {path}:{start_line}-{end_line} ---\n"));
-            rendered.push_str(&content);
-            snippets.push(json!({
-                "path": path,
-                "start_line": start_line,
-                "end_line": end_line,
-                "match_lines": lines
-                    .iter()
-                    .copied()
-                    .filter(|line| *line >= start_line && *line <= end_line)
-                    .collect::<Vec<_>>(),
-                "content": content,
-                "total_lines": total_lines,
-            }));
-        }
-    }
-
-    let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
-    let truncated = token_match_count > references.len() || truncated_bytes;
-    Ok(json!({
-        "repo": repo.display().to_string(),
-        "symbol": symbol,
-        "definitions": definitions,
-        "references": references,
-        "snippets": snippets,
-        "bytes": bytes,
-        "truncated": truncated,
-        "artifacts": [{
-            "id": format!("repo-references:{}:{}", repo.display(), symbol),
-            "kind": "repo_references",
-            "title": format!("repo references: {symbol}"),
-            "uri": repo.display().to_string(),
-            "content": content,
-            "metadata": {
-                "provider": "repo_references",
-                "repo": repo.display().to_string(),
-                "symbol": symbol,
-                "paths": paths,
-                "max_matches": effective_max_matches,
-                "max_files": effective_max_files,
-                "context_lines": effective_context_lines,
-                "bytes": bytes,
-                "truncated": truncated
-            }
-        }]
-    }))
-}
-
 fn build_reference_entry(item: &Value, text: &str, definition_kind: Option<&str>) -> Value {
     json!({
         "path": item["path"],
@@ -3799,246 +3757,6 @@ fn contains_identifier_token(line: &str, symbol: &str) -> bool {
 
 fn is_identifier_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '$'
-}
-
-fn call_diagnostic_context_tool(
-    name: &str,
-    input: &Value,
-    repo_dir: &Path,
-    max_diagnostics: usize,
-    context_lines: usize,
-    max_bytes: usize,
-) -> Result<Value, RuntimeError> {
-    let empty_diagnostics = Vec::new();
-    let diagnostics = match input.get("diagnostics") {
-        Some(diagnostics) => diagnostics.as_array().ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {name} input.diagnostics must be an array"))
-        })?,
-        None => &empty_diagnostics,
-    };
-    let effective_max_diagnostics =
-        optional_bounded_usize_input(name, input, "max_diagnostics", max_diagnostics)?
-            .unwrap_or(max_diagnostics);
-    let effective_context_lines =
-        optional_bounded_usize_input(name, input, "context_lines", context_lines)?
-            .unwrap_or(context_lines);
-    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let mut files: BTreeMap<PathBuf, DiagnosticContextFile> = BTreeMap::new();
-    let mut considered = Vec::new();
-    let mut unreadable = Vec::new();
-
-    for (index, diagnostic) in diagnostics
-        .iter()
-        .take(effective_max_diagnostics)
-        .enumerate()
-    {
-        let path = diagnostic.get("path").and_then(Value::as_str);
-        let line = diagnostic.get("line").and_then(Value::as_u64);
-        let Some(path) = path else {
-            unreadable.push(json!({
-                "diagnostic_index": index,
-                "reason": "missing path"
-            }));
-            continue;
-        };
-        let line = line
-            .and_then(|line| usize::try_from(line).ok())
-            .filter(|line| *line > 0)
-            .unwrap_or(1);
-        let line_defaulted = diagnostic
-            .get("line")
-            .and_then(Value::as_u64)
-            .and_then(|line| usize::try_from(line).ok())
-            .is_none_or(|line| line == 0);
-        let Some((absolute_path, relative_path)) = resolve_diagnostic_context_path(&repo, path)
-        else {
-            unreadable.push(json!({
-                "diagnostic_index": index,
-                "path": path,
-                "reason": "path is outside repo_dir or cannot be read"
-            }));
-            continue;
-        };
-        let body = match fs::read(&absolute_path) {
-            Ok(body) => body,
-            Err(error) => {
-                unreadable.push(json!({
-                    "diagnostic_index": index,
-                    "path": relative_path,
-                    "reason": format!("read failed: {error}")
-                }));
-                continue;
-            }
-        };
-        if is_likely_binary(&body) {
-            unreadable.push(json!({
-                "diagnostic_index": index,
-                "path": relative_path,
-                "reason": "file appears to be binary"
-            }));
-            continue;
-        }
-        let content = match std::str::from_utf8(&body) {
-            Ok(content) => content.to_string(),
-            Err(_) => {
-                unreadable.push(json!({
-                    "diagnostic_index": index,
-                    "path": relative_path,
-                    "reason": "file is not valid UTF-8"
-                }));
-                continue;
-            }
-        };
-        let total_lines = content.lines().count().max(1);
-        if line > total_lines {
-            unreadable.push(json!({
-                "diagnostic_index": index,
-                "path": relative_path,
-                "line": line,
-                "reason": "line is outside file"
-            }));
-            continue;
-        }
-        considered.push(diagnostic.clone());
-        let file = files
-            .entry(absolute_path)
-            .or_insert_with(|| DiagnosticContextFile {
-                relative_path,
-                content,
-                total_lines,
-                lines: Vec::new(),
-                diagnostic_indexes: Vec::new(),
-                path_only_diagnostic_indexes: Vec::new(),
-            });
-        file.lines.push(line);
-        file.diagnostic_indexes.push(index);
-        if line_defaulted {
-            file.path_only_diagnostic_indexes.push(index);
-        }
-    }
-
-    let mut snippets = Vec::new();
-    let mut rendered = String::new();
-    let mut truncated = diagnostics.len() > effective_max_diagnostics;
-    for file in files.values() {
-        for (start_line, end_line) in
-            merge_line_ranges(&file.lines, file.total_lines, effective_context_lines)
-        {
-            let content = numbered_line_range(&file.content, start_line, end_line);
-            let remaining = max_bytes.saturating_sub(rendered.len());
-            if remaining == 0 {
-                truncated = true;
-                break;
-            }
-            let (limited_content, content_truncated, _source_bytes) =
-                bytes_to_limited_text(content.as_bytes(), remaining);
-            let diagnostic_indexes = file
-                .lines
-                .iter()
-                .zip(file.diagnostic_indexes.iter())
-                .filter_map(|(line, index)| {
-                    (*line >= start_line && *line <= end_line).then_some(*index)
-                })
-                .collect::<Vec<_>>();
-            let path_only_diagnostic_indexes = diagnostic_indexes
-                .iter()
-                .copied()
-                .filter(|index| file.path_only_diagnostic_indexes.contains(index))
-                .collect::<Vec<_>>();
-            truncated |= content_truncated;
-            if !rendered.is_empty() {
-                rendered.push_str("\n\n");
-            }
-            rendered.push_str(&format!(
-                "== {}:{}-{} ==\n{}",
-                file.relative_path, start_line, end_line, limited_content
-            ));
-            snippets.push(json!({
-                "path": file.relative_path,
-                "start_line": start_line,
-                "end_line": end_line,
-                "content": limited_content,
-                "diagnostic_indexes": diagnostic_indexes,
-                "path_only_diagnostic_indexes": path_only_diagnostic_indexes,
-                "truncated": content_truncated
-            }));
-            if content_truncated {
-                break;
-            }
-        }
-        if rendered.len() >= max_bytes {
-            truncated = true;
-            break;
-        }
-    }
-    let bytes = rendered.len();
-
-    Ok(json!({
-        "repo": repo.display().to_string(),
-        "diagnostics": considered,
-        "snippets": snippets,
-        "unreadable": unreadable,
-        "diagnostic_count": diagnostics.len(),
-        "max_diagnostics": effective_max_diagnostics,
-        "context_lines": effective_context_lines,
-        "bytes": bytes,
-        "truncated": truncated,
-        "artifacts": [{
-            "id": format!("diagnostic-context:{}", repo.display()),
-            "kind": "diagnostic_context",
-            "title": "diagnostic context",
-            "uri": repo.display().to_string(),
-            "content": rendered,
-            "metadata": {
-                "provider": "diagnostic_context",
-                "repo": repo.display().to_string(),
-                "diagnostic_count": diagnostics.len(),
-                "snippet_count": snippets.len(),
-                "unreadable_count": unreadable.len(),
-                "max_diagnostics": effective_max_diagnostics,
-                "context_lines": effective_context_lines,
-                "bytes": bytes,
-                "truncated": truncated
-            }
-        }]
-    }))
-}
-
-#[derive(Debug)]
-struct DiagnosticContextFile {
-    relative_path: String,
-    content: String,
-    total_lines: usize,
-    lines: Vec<usize>,
-    diagnostic_indexes: Vec<usize>,
-    path_only_diagnostic_indexes: Vec<usize>,
-}
-
-fn resolve_diagnostic_context_path(
-    repo: &Path,
-    diagnostic_path: &str,
-) -> Option<(PathBuf, String)> {
-    let raw_path = Path::new(diagnostic_path);
-    if !raw_path.is_absolute()
-        && validate_git_pathspec("diagnostic.context", diagnostic_path).is_err()
-    {
-        return None;
-    }
-    let candidate = if raw_path.is_absolute() {
-        raw_path.to_path_buf()
-    } else {
-        repo.join(raw_path)
-    };
-    let absolute = candidate.canonicalize().ok()?;
-    if !absolute.starts_with(repo) {
-        return None;
-    }
-    let relative = absolute
-        .strip_prefix(repo)
-        .ok()?
-        .to_string_lossy()
-        .to_string();
-    Some((absolute, relative))
 }
 
 fn call_command_run_tool(

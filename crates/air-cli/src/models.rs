@@ -408,12 +408,13 @@ mod tests {
             "code_edit_decider prompt must require exact path copying"
         );
         assert!(
-            edit_prompt.contains("skip todo tools for single-file refactors and targeted splits"),
+            edit_prompt
+                .contains("skip todo tools for single-file refactors and already-targeted edits"),
             "code_edit_decider prompt must avoid todo churn on targeted refactors"
         );
         assert!(
             edit_prompt.contains("do not do broad helper archaeology"),
-            "code_edit_decider prompt must discourage over-exploration on targeted splits"
+            "code_edit_decider prompt must discourage over-exploration on targeted edits"
         );
         let summarize_prompt = config
             .models

@@ -163,6 +163,12 @@ tools:
   - name: repo.references
     capability: code.read
     timeout_ms: 10000
+  - name: lsp.references
+    capability: code.read
+    timeout_ms: 30000
+  - name: lsp.diagnostics
+    capability: code.read
+    timeout_ms: 30000
   - name: file.read
     capability: file.read
     timeout_ms: 10000
@@ -243,7 +249,7 @@ workflow:
               action:
                 literal: initial_target_symbols
               rationale:
-                literal: Deterministically locate target symbols before the first model decision so Rust edits start from AST-derived function ranges instead of broad text search.
+                literal: Deterministically locate target symbols before the first model decision so targeted edits start from concrete symbol ranges instead of broad text search.
               requested:
                 array:
                   - object:
@@ -544,7 +550,7 @@ workflow:
               tool_policy:
                 literal:
                   mode: "Exploration budget is exhausted. Read/search tools are not allowed in this decision."
-                  write: "Use edit_evidence and initial_target_context as the stable source context. If the edit is possible from those line ranges, call exactly one write tool: file.ops or file.patch. Do not ask for more context."
+                  write: "Use edit_evidence and initial_target_context as the stable source context. Make exactly one small write-focused call: file.ops for anchored edits, line ranges, or new files, or file.patch when a unified diff is clearer. Do not ask for more context in this forced step."
                   finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
           output: decision
           timeout_seconds: 180
@@ -555,7 +561,7 @@ workflow:
             phase: force_act
 
     - id: force-write-after-targeted-explore-budget
-      when: phase == "choose" && target_symbol_query != "" && _air.model_calls >= 5 && verification_status != "passed"
+      when: phase == "choose" && target_symbol_query != "" && _air.model_calls >= 4 && verification_status != "passed"
       actions:
         - kind: append
           target: observations
@@ -564,7 +570,7 @@ workflow:
               action:
                 literal: targeted_exploration_budget_reached
               rationale:
-                literal: AIR has reached the bounded exploration budget for this targeted symbol split. Further helper discovery is disabled for the next decision; write the split using the gathered ranges or return complete only if no edit is needed.
+                literal: AIR has reached the bounded exploration budget for this targeted edit. Further helper discovery is disabled for the next decision; make the smallest coherent edit using the gathered ranges or return complete only if no edit is needed.
               requested:
                 array: []
               result:
@@ -590,13 +596,13 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 4
-                max_bytes: 24000
+                max_items: 2
+                max_bytes: 8000
               edit_evidence:
                 take_last_within_bytes:
                   ref: edit_evidence
-                max_items: 8
-                max_bytes: 60000
+                max_items: 3
+                max_bytes: 20000
               initial_target_context:
                 ref: initial_target_context
               verification_status:
@@ -626,8 +632,8 @@ workflow:
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
               tool_policy:
                 literal:
-                  mode: "Targeted split exploration is exhausted. Read/search tools are not allowed in this decision."
-                  write: "Use edit_evidence and initial_target_context as the stable source context. Write the split now with exactly one write tool: file.ops or file.patch."
+                  mode: "Targeted edit exploration is exhausted. Read/search tools are not allowed in this decision."
+                  write: "Use only the latest edit_evidence ranges and initial_target_context. Make one small explicit file.ops replace_lines/edit/write or file.patch edit. If the requested refactor is too large for one write, make the next smallest coherent edit that keeps the workspace as valid as possible and let validation guide the next turn."
                   finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
           output: decision
           timeout_seconds: 180
@@ -665,13 +671,13 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 12
-                max_bytes: 50000
+                max_items: 6
+                max_bytes: 24000
               edit_evidence:
                 take_last_within_bytes:
                   ref: edit_evidence
-                max_items: 8
-                max_bytes: 60000
+                max_items: 3
+                max_bytes: 20000
               verification_status:
                 ref: verification_status
               runtime:
@@ -681,6 +687,8 @@ workflow:
                   - literal: repo.symbols
                   - literal: file.read
                   - literal: file.read_many
+                  - literal: lsp.references
+                  - literal: lsp.diagnostics
                   - literal: file.ops
                   - literal: file.patch
                   - literal: diagnostic.context
@@ -695,6 +703,20 @@ workflow:
                       names: "array of exact symbol names; use this to fetch several function ranges in one call"
                       path: "repo-relative scope"
                       max_symbols: "bounded result limit"
+                  lsp.references:
+                    required:
+                      path: "repo-relative source file containing the symbol or position"
+                    optional:
+                      symbol: "exact identifier when semantic references are needed"
+                      line: "1-based line when symbol is not enough"
+                      character: "0-based UTF-8 character offset"
+                      include_declaration: "boolean; default true"
+                      max_results: "bounded result limit"
+                  lsp.diagnostics:
+                    required: {}
+                    optional:
+                      path: "optional repo-relative source file filter"
+                      max_diagnostics: "bounded diagnostic limit"
                   file.read:
                     required: {path: "repo-relative file path"}
                     optional:
@@ -742,12 +764,12 @@ workflow:
                     optional: {}
               tool_policy:
                 literal:
-                  mode: "This is a targeted symbol edit or split. Todo tools and broad reference scans are disabled; work from the exact symbol ranges already observed."
+                  mode: "This is a targeted edit. Todo tools and broad reference scans are disabled; work from the exact ranges already observed."
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
-                  read_first: "Read only the exact target range and, at most, one additional helper range that will move with the target before writing."
-                  small_steps: "Choose one to four tool calls per turn. Do not request whole large files. Do not expand into repo.references, repo.files, repo.search, or helper archaeology. After exact target ranges are known, either write next or read the single remaining helper range required for that write."
-                  edits: "Use file.ops with kind=edit or replace_lines for localized moves and module wiring changes. Use file.patch only when force_patch is true or a patch is strictly clearer. If a turn includes file.ops or file.patch, keep that turn to one write-focused call."
-                  verify: "Do not run test.run before the first write in this targeted split route. For code splits, include code.assert in the same batch as the write when you can express the postcondition, for example symbol_absent in the source file and symbol_present in the destination file. AIR will run test.run after the write path completes."
+                  read_first: "Read the exact target range and at most one immediately-needed context range before writing."
+                  small_steps: "Choose one to four tool calls per turn. Do not request whole large files. Avoid broad repo.references, repo.files, repo.search, or helper archaeology after the target range is known. Use lsp.references only when semantic references are the deciding fact before an edit. After reading the target range and one relevant context range, write next instead of gathering more context."
+                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops with kind=replace_lines/edit/write or file.patch for explicit textual edits. Use file.ops with kind=edit for localized repairs and wording changes. Use file.patch only when force_patch is true or a patch is strictly clearer. If a turn includes a write tool, keep that turn to one write-focused call."
+                  verify: "Do not run test.run before the first write in this targeted route. Include code.assert after the write when you can express a useful structural postcondition. AIR will run test.run after the write path completes."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
           timeout_seconds: 180
@@ -800,6 +822,8 @@ workflow:
                   - literal: repo.context
                   - literal: repo.symbols
                   - literal: repo.references
+                  - literal: lsp.references
+                  - literal: lsp.diagnostics
                   - literal: file.read
                   - literal: file.read_many
                   - literal: file.search
@@ -854,6 +878,20 @@ workflow:
                       path: "repo-relative scope"
                       context_lines: "bounded context lines"
                       max_matches: "bounded result limit"
+                  lsp.references:
+                    required:
+                      path: "repo-relative source file containing the symbol or position"
+                    optional:
+                      symbol: "exact identifier when semantic references are needed"
+                      line: "1-based line when symbol is not enough"
+                      character: "0-based UTF-8 character offset"
+                      include_declaration: "boolean; default true"
+                      max_results: "bounded result limit"
+                  lsp.diagnostics:
+                    required: {}
+                    optional:
+                      path: "optional repo-relative source file filter"
+                      max_diagnostics: "bounded diagnostic limit"
                   file.read:
                     required: {path: "repo-relative file path"}
                     optional:
@@ -922,14 +960,14 @@ workflow:
                       args: "accepted alias object for parameters, but prefer top-level fields"
               tool_policy:
                 literal:
-                  plan: "Use todo.write/read only when the task clearly spans multiple files or repeated verification cycles. Skip todo tools for single-file edits and targeted splits."
-                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, and repo.references only when call sites are the single missing fact before a write."
+                  plan: "Use todo.write/read only when the task clearly spans multiple files or repeated verification cycles. Skip todo tools for single-file edits and already-targeted work."
+                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, lsp.references for semantic references when available, and repo.references only when token-level references are enough."
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
                   read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
-                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search calls only when they unblock the same immediate write. Do not request whole large files. For function moves and splits, call repo.symbols once with names:[...] to get start/end lines, then read exact function ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target symbol ranges, the next turn must either write or read at most one additional helper range that will move with the target; do not expand into broad repo.references or helper archaeology."
-                  edits: "Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, moved blocks, or ranges over roughly 40 changed lines, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes file.ops or file.patch, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
+                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search calls only when they unblock the same immediate write. Do not request whole large files. Use repo.symbols once to get start/end lines when names are known, then read exact ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target ranges, the next turn must either write or read at most one additional immediately-needed range; do not expand into broad repo.references or helper archaeology."
+                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops replace_lines or file.patch for explicit textual edits. Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes a write tool, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
                   tests: "Use test.run with the supplied allowlisted test_command only. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
-                  verify: "Before complete=true, normally choose code.assert for structural postconditions, plus test.run and git.diff so the final summary can prove the outcome. For code splits, assert symbol_absent in the source file and symbol_present in the destination file."
+                  verify: "Before complete=true, normally choose code.assert for useful structural postconditions, plus test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
           timeout_seconds: 180
@@ -1285,7 +1323,7 @@ workflow:
               action:
                 literal: acceptance_assertions_observed
               rationale:
-                literal: Automatically checked structural postconditions after validation passed so a code split cannot complete solely because tests passed.
+                literal: Automatically checked structural postconditions after validation passed so a structural edit cannot complete solely because tests passed.
               requested:
                 array:
                   - object:
@@ -1311,7 +1349,7 @@ workflow:
               action:
                 literal: acceptance_assertions_failed
               rationale:
-                literal: Structural postconditions failed even though tests passed; fix the code split before completion.
+                literal: Structural postconditions failed even though tests passed; fix the edit before completion.
               requested:
                 array:
                   - object:

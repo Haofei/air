@@ -1119,7 +1119,7 @@ mod tests {
             target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
             write: vec![PathBuf::from("crates/air-tools/src/repo_symbols.rs")],
             test: Some("cargo_air_tools_repo_tests".to_string()),
-            query: Some("repo_symbols tree_sitter rg fallback module split".to_string()),
+            query: Some("repo_symbols rg fallback module split".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
@@ -1586,7 +1586,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_forces_write_earlier_for_targeted_symbol_splits() {
+    fn edit_loop_forces_write_earlier_for_targeted_edits() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1602,7 +1602,7 @@ mod tests {
         assert_eq!(
             targeted_force_rule["when"],
             serde_yaml::Value::String(
-                "phase == \"choose\" && target_symbol_query != \"\" && _air.model_calls >= 5 && verification_status != \"passed\""
+                "phase == \"choose\" && target_symbol_query != \"\" && _air.model_calls >= 4 && verification_status != \"passed\""
                     .to_string()
             )
         );
@@ -1618,7 +1618,16 @@ mod tests {
         );
         assert_eq!(
             targeted_force_rule["actions"][1]["input"]["object"]["observations"]["max_bytes"],
-            serde_yaml::Value::Number(24000.into())
+            serde_yaml::Value::Number(8000.into())
+        );
+        let write_policy = targeted_force_rule["actions"][1]["input"]["object"]["tool_policy"]
+            ["literal"]["write"]
+            .as_str()
+            .unwrap();
+        assert!(
+            write_policy.contains("one small explicit file.ops replace_lines/edit/write")
+                && write_policy.contains("next smallest coherent edit"),
+            "targeted force-write policy must force a small generic write instead of more exploration"
         );
     }
 

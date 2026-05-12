@@ -30,6 +30,4 @@ tokio = { version = "1.48", features = ["rt", "time"] }
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 regex = "1.10"
 miette = { version = "7.4", features = ["fancy"] }
-tree-sitter = "0.26"
-tree-sitter-rust = "0.24"
 dotenvy = "0.15"
