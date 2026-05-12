@@ -65,10 +65,6 @@ enum Command {
         #[arg(long)]
         write: Vec<PathBuf>,
 
-        /// Allowlisted test command alias from the selected tool config.
-        #[arg(long)]
-        test: Option<String>,
-
         /// Optional search/query string. Defaults to the task.
         #[arg(long)]
         query: Option<String>,
@@ -88,10 +84,6 @@ enum Command {
         /// Required review term. May be repeated.
         #[arg(long = "required-term")]
         required_terms: Vec<String>,
-
-        /// Tell the edit loop that a behavior-preserving change is intended even if validation already passes.
-        #[arg(long)]
-        force_patch: bool,
 
         /// Code-agent pack manifest. Defaults to examples/code-agent/code-agent.air-pack.yaml.
         #[arg(long)]
@@ -533,13 +525,11 @@ fn main() -> Result<()> {
             recipe,
             target,
             write,
-            test,
             query,
             related,
             search_query,
             repo_query,
             required_terms,
-            force_patch,
             pack,
             profile,
             model_config,
@@ -563,13 +553,11 @@ fn main() -> Result<()> {
             recipe,
             target,
             write,
-            test,
             query,
             related,
             search_query,
             repo_query,
             required_terms,
-            force_patch,
             pack,
             profile,
             model_config,
@@ -1667,8 +1655,6 @@ mod tests {
             "fix the failing add function and retest",
             "--target",
             "examples/code-agent/edit-fixture/math.js",
-            "--test",
-            "edit_fixture_test",
             "--related",
             "examples/code-agent/edit-fixture/test.js",
         ])
@@ -1678,7 +1664,6 @@ mod tests {
             task,
             recipe,
             target,
-            test,
             related,
             profile,
             explain,
@@ -1696,7 +1681,6 @@ mod tests {
                 "examples/code-agent/edit-fixture/math.js"
             ))
         );
-        assert_eq!(test, Some("edit_fixture_test".to_string()));
         assert_eq!(
             related,
             vec![std::path::PathBuf::from(
@@ -1761,8 +1745,6 @@ mod tests {
             "edit",
             "--target",
             "examples/code-agent/edit-fixture/math.js",
-            "--test",
-            "edit_fixture_test",
             "--related",
             "examples/code-agent/edit-fixture/test.js",
         ])
@@ -1771,7 +1753,6 @@ mod tests {
         let Command::Code {
             recipe,
             target,
-            test,
             related,
             ..
         } = cli.command
@@ -1786,7 +1767,6 @@ mod tests {
                 "examples/code-agent/edit-fixture/math.js"
             ))
         );
-        assert_eq!(test, Some("edit_fixture_test".to_string()));
         assert_eq!(
             related,
             vec![std::path::PathBuf::from(
@@ -1803,8 +1783,6 @@ mod tests {
             "fix the failing add function and retest",
             "--target",
             "examples/code-agent/edit-fixture/math.js",
-            "--test",
-            "edit_fixture_test",
             "--explain",
         ])
         .unwrap();
@@ -1828,8 +1806,6 @@ mod tests {
             "fix the failing add function until tests pass",
             "--target",
             "examples/code-agent/edit-fixture/math.js",
-            "--test",
-            "edit_fixture_test",
             "--loop",
             "--max-iterations",
             "2",

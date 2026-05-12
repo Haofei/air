@@ -7,7 +7,7 @@ fn parse_input_files(tool_name: &str, input: &Value) -> Result<Vec<String>, Runt
     let raw_files = raw_files.as_array().ok_or_else(|| {
         RuntimeError::Provider(format!("tool {tool_name} input.files must be an array"))
     })?;
-    let mut paths = Vec::with_capacity(raw_files.len());
+    let mut file_paths = Vec::with_capacity(raw_files.len());
     for (index, file) in raw_files.iter().enumerate() {
         let path = if let Some(path) = file.as_str() {
             path
@@ -22,9 +22,9 @@ fn parse_input_files(tool_name: &str, input: &Value) -> Result<Vec<String>, Runt
                 })?
         };
         validate_git_pathspec(tool_name, path)?;
-        paths.push(path.to_string());
+        file_paths.push(path.to_string());
     }
-    Ok(paths)
+    Ok(file_paths)
 }
 
 pub(super) fn git_diff_paths(

@@ -47,11 +47,11 @@ It runs as:
 init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 ```
 
-The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `lsp.references`, `lsp.diagnostics`, `file.read`, `file.search`, `file.ops`, `file.patch`, `code.assert`, `test.run`, and `git.diff`.
+The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `lsp.references`, `lsp.diagnostics`, `file.read`, `file.search`, `file.ops`, `code.assert`, `test.run`, and `git.diff`.
 
-`tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind `test.run` aliases for workspace tests, clippy, the code-agent gate, backend conformance, and bounded package/test-filter runs.
+`tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands, so the model can ask for `format.run` or `test.run` without choosing a command variant. The default self-validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes.
 
-Completion is blocked until verification has passed. The loop does not transition to `summarize -> done` until a `test.run` invocation returns `success: true`. This means every edit cycle must ultimately prove its change through the configured verification command; if tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
+Completion is blocked until formatting and verification have passed. After a `file.ops` write, AIR automatically runs `format.run` and then `test.run`; the model does not choose formatter timing. The loop does not transition to `summarize -> done` until verification returns `success: true`. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
 The default edit budget is sized for real bounded coding work rather than a smoke test: `max_steps: 160`, `max_model_calls: 40`, `max_tool_calls: 200`, `max_repeated_tool_calls: 16`, and a 30-observation / 200KB model input window. This gives the loop room for repeated explore -> edit -> verify -> fix cycles while AIR still enforces approval, tool, and trace boundaries.
 
@@ -61,10 +61,10 @@ When `test.run` output is truncated (`output.truncated == true`), the full log i
 
 When `file.ops` `edit` validation fails (e.g. `old_string` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `old_string` does not match but one of its lines is present, the diagnostic includes an `old_string_anchor` line for a precise retry location.
 
-The edit loop runs `candidate.validate` automatically during preflight when `target_path` and `test_command` are known, catching misconfigured paths or disallowed commands before any edit attempt.
+The edit loop runs `candidate.validate` automatically during preflight when `target_path` is known, catching misconfigured paths before any edit attempt.
 Use `code.assert` for structural postconditions that tests may not prove directly, such as `symbol_absent`, `symbol_present`, `file_contains`, or `file_not_contains`.
 
-Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic references matter, then make explicit `file.ops` or `file.patch` edits and let validation diagnostics close the loop.
+Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic references matter, then make explicit `file.ops` edits and let validation diagnostics close the loop.
 
 Use `lsp.references` before larger refactors when regex references are too weak. The current bundled implementation uses rust-analyzer and keeps that LSP session alive inside the tool provider for the duration of the run, so repeated semantic lookups do not restart the language server. `lsp.diagnostics` exposes language-server diagnostics for the next repair step.
 
@@ -74,16 +74,14 @@ Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-c
 cargo run -p air-cli -- code "update the AIR code-agent docs and run the code-agent gate" \
   --recipe edit \
   --profile examples/code-agent/edit.self.air-profile.yaml \
-  --target examples/code-agent/README.md \
-  --test verify_code_agent
+  --target examples/code-agent/README.md
 ```
 
-For targetless edit, keep the validation command explicit and let the loop discover the file:
+For targetless edit, let the loop discover the file and run the configured validation:
 
 ```bash
 cargo run -p air-cli -- code "fix the failing add function" \
   --recipe edit \
-  --test edit_fixture_test \
   --query "edit fixture add function test"
 ```
 
@@ -111,7 +109,6 @@ Run through the user-facing wrapper:
 cargo run -p air-cli -- code "edit the failing add function and retest" \
   --recipe edit \
   --target examples/code-agent/edit-fixture/math.js \
-  --test edit_fixture_test \
   --related examples/code-agent/edit-fixture/test.js
 ```
 

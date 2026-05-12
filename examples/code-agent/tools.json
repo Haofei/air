@@ -8,12 +8,12 @@
         {
           "id": "docs-command-run-safety",
           "title": "Command runner safety for coding agents",
-          "content": "Coding agents should use allowlisted command aliases, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
+          "content": "Coding agents should use configured commands, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
         },
         {
           "id": "docs-code-agent-loop",
           "title": "Core coding-agent loop",
-          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with allowlisted tests."
+          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with configured validations."
         },
         {
           "id": "docs-edit-safety",
@@ -139,17 +139,6 @@
       "context_lines": 8,
       "max_bytes": 65536
     },
-    "file.patch": {
-      "kind": "file_patch",
-      "capability": "file.write",
-      "repo_dir": "../..",
-      "require_read": true,
-      "allow_new_files": true,
-      "allow_delete_files": false,
-      "max_files": 6,
-      "max_bytes": 65536,
-      "max_changed_lines": 80
-    },
     "diagnostic.context": {
       "kind": "diagnostic_context",
       "capability": "code.read",
@@ -203,12 +192,27 @@
       "kind": "command_run",
       "capability": "code.test",
       "cwd": "../..",
-      "commands": {},
-      "parameters": {
-        "test_filter": {
-          "allow": "identifier",
-          "max_chars": 120
-        }
+      "commands": {
+        "default": [
+          "bash",
+          "-lc",
+          "cargo test -q --workspace && cargo clippy -q --workspace --all-targets -- -D warnings"
+        ]
+      },
+      "timeout_seconds": 120,
+      "max_bytes": 65536,
+      "truncation_direction": "tail"
+    },
+    "format.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "default": [
+          "cargo",
+          "fmt",
+          "--all"
+        ]
       },
       "timeout_seconds": 120,
       "max_bytes": 65536,

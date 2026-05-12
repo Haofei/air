@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod candidate_tools;
@@ -46,6 +47,10 @@ use diagnostic_context_tools::call_diagnostic_context_tool;
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
+static GIT_BASELINE_DIFF_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+type GitDiffBaseline = BTreeMap<String, Option<Vec<u8>>>;
+type GitDiffBaselines = BTreeMap<PathBuf, GitDiffBaseline>;
 
 #[derive(Debug, Deserialize)]
 struct ToolConfigFile {
@@ -517,8 +522,6 @@ enum ToolConfig {
         capability: Option<String>,
 
         base_dir: PathBuf,
-
-        allowed_test_commands: Vec<String>,
     },
     CommandRun {
         #[serde(default)]
@@ -645,6 +648,7 @@ pub struct ConfigTools {
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
     read_snapshots: BTreeMap<PathBuf, SystemTime>,
+    git_diff_baselines: GitDiffBaselines,
     current_todos: Vec<Value>,
     rust_analyzer_sessions: BTreeMap<String, RustAnalyzerSession>,
 }
@@ -656,6 +660,7 @@ impl Clone for ConfigTools {
             approvals: self.approvals.clone(),
             config_dir: self.config_dir.clone(),
             read_snapshots: self.read_snapshots.clone(),
+            git_diff_baselines: self.git_diff_baselines.clone(),
             current_todos: self.current_todos.clone(),
             rust_analyzer_sessions: BTreeMap::new(),
         }
@@ -669,14 +674,17 @@ impl ConfigTools {
         let config: ToolConfigFile = serde_json::from_str(&source)
             .with_context(|| format!("failed to parse tool config JSON {}", path.display()))?;
         validate_tool_config(&config, &path)?;
+        let config_dir = path
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .to_path_buf();
+        let git_diff_baselines = capture_git_diff_baselines(&config, &config_dir)?;
         Ok(Self {
             tools: config.tools,
             approvals: config.approvals,
-            config_dir: path
-                .parent()
-                .unwrap_or_else(|| Path::new("."))
-                .to_path_buf(),
+            config_dir,
             read_snapshots: BTreeMap::new(),
+            git_diff_baselines,
             current_todos: Vec::new(),
             rust_analyzer_sessions: BTreeMap::new(),
         })
@@ -703,6 +711,7 @@ impl ConfigTools {
             approvals: BTreeMap::new(),
             config_dir: PathBuf::from("."),
             read_snapshots: BTreeMap::new(),
+            git_diff_baselines: BTreeMap::new(),
             current_todos: Vec::new(),
             rust_analyzer_sessions: BTreeMap::new(),
         }
@@ -757,6 +766,77 @@ impl ConfigTools {
             ))
         })
     }
+}
+
+fn capture_git_diff_baselines(
+    config: &ToolConfigFile,
+    config_dir: &Path,
+) -> Result<GitDiffBaselines> {
+    let mut baselines = BTreeMap::new();
+    for tool in config.tools.values() {
+        let ToolConfig::GitDiff { repo_dir, .. } = tool else {
+            continue;
+        };
+        let repo =
+            fs::canonicalize(resolve_config_path(config_dir, repo_dir)).with_context(|| {
+                format!(
+                    "failed to canonicalize git_diff repo_dir {}",
+                    repo_dir.display()
+                )
+            })?;
+        if baselines.contains_key(&repo) {
+            continue;
+        }
+        let paths = current_git_diff_paths(&repo).with_context(|| {
+            format!("failed to capture git_diff baseline for {}", repo.display())
+        })?;
+        let mut snapshots = BTreeMap::new();
+        for path in paths {
+            let absolute = repo.join(&path);
+            let content = if absolute.is_file() {
+                Some(fs::read(&absolute).with_context(|| {
+                    format!(
+                        "failed to read git_diff baseline file {}",
+                        absolute.display()
+                    )
+                })?)
+            } else {
+                None
+            };
+            snapshots.insert(path, content);
+        }
+        baselines.insert(repo, snapshots);
+    }
+    Ok(baselines)
+}
+
+fn current_git_diff_paths(repo: &Path) -> Result<Vec<String>> {
+    let mut paths = BTreeSet::new();
+    for args in [
+        &["diff", "--name-only"][..],
+        &["ls-files", "--others", "--exclude-standard"][..],
+    ] {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .with_context(|| format!("failed to run git {}", args.join(" ")))?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+            );
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = line.trim();
+            if !path.is_empty() {
+                paths.insert(path.replace('\\', "/"));
+            }
+        }
+    }
+    Ok(paths.into_iter().collect())
 }
 
 fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
@@ -1434,28 +1514,13 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
             ToolConfig::ArtifactValidate { max_ids, .. } => {
                 validate_positive_usize(path, &format!("tools.{name}.max_ids"), *max_ids)?;
             }
-            ToolConfig::CandidateValidate {
-                base_dir,
-                allowed_test_commands,
-                ..
-            } => {
+            ToolConfig::CandidateValidate { base_dir, .. } => {
                 if base_dir.as_os_str().is_empty() {
                     anyhow::bail!(
                         "tool config {} tools.{name}.base_dir must not be empty",
                         path.display()
                     );
                 }
-                if allowed_test_commands.is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.allowed_test_commands must not be empty",
-                        path.display()
-                    );
-                }
-                validate_non_empty_strings(
-                    path,
-                    &format!("tools.{name}.allowed_test_commands"),
-                    Some(allowed_test_commands),
-                )?;
             }
             ToolConfig::CommandRun {
                 cwd,
@@ -1996,12 +2061,18 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 repo_dir,
                 max_bytes,
-            } => call_git_diff_tool(
-                name,
-                input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
-                max_bytes.unwrap_or(256 * 1024),
-            ),
+            } => {
+                let repo = resolve_config_path(&self.config_dir, &repo_dir);
+                let canonical_repo = canonicalize_tool_path(name, "repo_dir", &repo)?;
+                let baseline = self.git_diff_baselines.get(&canonical_repo);
+                call_git_diff_tool(
+                    name,
+                    input,
+                    &canonical_repo,
+                    max_bytes.unwrap_or(256 * 1024),
+                    baseline,
+                )
+            }
             ToolConfig::GitStatus {
                 capability: _,
                 repo_dir,
@@ -2195,12 +2266,10 @@ impl ToolProvider for ConfigTools {
             ToolConfig::CandidateValidate {
                 capability: _,
                 base_dir,
-                allowed_test_commands,
             } => call_candidate_validate_tool(
                 name,
                 input,
                 &resolve_config_path(&self.config_dir, &base_dir),
-                &allowed_test_commands,
             ),
             ToolConfig::CommandRun {
                 capability: _,
@@ -2862,8 +2931,9 @@ fn call_git_diff_tool(
     input: &Value,
     repo_dir: &Path,
     max_bytes: usize,
+    baseline: Option<&BTreeMap<String, Option<Vec<u8>>>>,
 ) -> Result<Value, RuntimeError> {
-    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
+    let repo = repo_dir.to_path_buf();
     let (paths, has_filter) = git_diff_paths(name, input)?;
     if has_filter && paths.is_empty() {
         return Ok(git_diff_output(
@@ -2876,33 +2946,32 @@ fn call_git_diff_tool(
             0,
         ));
     }
-    let mut command = Command::new("git");
-    command.arg("-C").arg(&repo).arg("diff");
-    if input
-        .get("staged")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        command.arg("--staged");
-    }
-    if !paths.is_empty() {
-        command.arg("--");
-        command.args(&paths);
-    }
     let staged = input
         .get("staged")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let output = command
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?;
-    if !output.status.success() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} git diff failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    let mut raw_diff = String::from_utf8_lossy(&output.stdout).to_string();
+    let raw_diff = if !staged {
+        git_diff_against_baseline(name, &repo, input, &paths, has_filter, baseline)?
+    } else {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(&repo).arg("diff");
+        command.arg("--staged");
+        if !paths.is_empty() {
+            command.arg("--");
+            command.args(&paths);
+        }
+        let output = command
+            .output()
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?;
+        if !output.status.success() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} git diff failed: {}",
+                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+            )));
+        }
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let mut raw_diff = raw_diff;
     let untracked_files = if !staged && has_filter && !paths.is_empty() {
         append_requested_untracked_diffs(name, &repo, &paths, &mut raw_diff)?
     } else {
@@ -2959,6 +3028,152 @@ fn git_diff_output(
             }
         }],
     })
+}
+
+fn git_diff_against_baseline(
+    name: &str,
+    repo: &Path,
+    _input: &Value,
+    paths: &[String],
+    has_filter: bool,
+    baseline: Option<&BTreeMap<String, Option<Vec<u8>>>>,
+) -> Result<String, RuntimeError> {
+    let Some(baseline) = baseline.filter(|baseline| !baseline.is_empty()) else {
+        return run_git_diff_raw(name, repo, paths, false);
+    };
+
+    let mut candidates = if has_filter {
+        paths.iter().cloned().collect::<BTreeSet<_>>()
+    } else {
+        current_git_diff_paths(repo)
+            .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?
+            .into_iter()
+            .collect::<BTreeSet<_>>()
+    };
+    if !has_filter {
+        candidates.extend(baseline.keys().cloned());
+    }
+
+    let mut baseline_paths = Vec::new();
+    let mut normal_paths = Vec::new();
+    for path in candidates {
+        if baseline.contains_key(&path) {
+            baseline_paths.push(path);
+        } else {
+            normal_paths.push(path);
+        }
+    }
+
+    let mut diff = run_git_diff_raw(name, repo, &normal_paths, false)?;
+    for path in baseline_paths {
+        let before = baseline.get(&path).cloned().unwrap_or(None);
+        let current_path = repo.join(&path);
+        let after = if current_path.is_file() {
+            Some(fs::read(&current_path).map_err(|error| {
+                RuntimeError::Provider(format!("tool {name} read current file {path}: {error}"))
+            })?)
+        } else {
+            None
+        };
+        if before == after {
+            continue;
+        }
+        diff.push_str(&git_diff_file_contents(name, &path, before, after)?);
+    }
+    Ok(diff)
+}
+
+fn run_git_diff_raw(
+    name: &str,
+    repo: &Path,
+    paths: &[String],
+    staged: bool,
+) -> Result<String, RuntimeError> {
+    let mut command = Command::new("git");
+    command.arg("-C").arg(repo).arg("diff");
+    if staged {
+        command.arg("--staged");
+    }
+    if !paths.is_empty() {
+        command.arg("--");
+        command.args(paths);
+    }
+    let output = command
+        .output()
+        .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?;
+    if !output.status.success() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} git diff failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+fn git_diff_file_contents(
+    name: &str,
+    path: &str,
+    before: Option<Vec<u8>>,
+    after: Option<Vec<u8>>,
+) -> Result<String, RuntimeError> {
+    let id = GIT_BASELINE_DIFF_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let root =
+        std::env::temp_dir().join(format!("air-git-baseline-diff-{}-{id}", std::process::id()));
+    let before_path = root.join("before").join(path);
+    let after_path = root.join("after").join(path);
+    write_optional_temp_file(&before_path, before.as_deref())?;
+    write_optional_temp_file(&after_path, after.as_deref())?;
+
+    let output = Command::new("git")
+        .args([
+            "diff",
+            "--no-index",
+            "--src-prefix=a/",
+            "--dst-prefix=b/",
+            "--",
+        ])
+        .arg(&before_path)
+        .arg(&after_path)
+        .output()
+        .map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} git diff --no-index: {error}"))
+        })?;
+    let _ = fs::remove_dir_all(&root);
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} git diff --no-index failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    let diff = String::from_utf8_lossy(&output.stdout).to_string();
+    Ok(normalize_no_index_diff_paths(
+        &diff,
+        path,
+        &before_path,
+        &after_path,
+    ))
+}
+
+fn write_optional_temp_file(path: &Path, content: Option<&[u8]>) -> Result<(), RuntimeError> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            RuntimeError::Provider(format!("tool git.diff create temp dir: {error}"))
+        })?;
+    }
+    fs::write(path, content.unwrap_or(&[]))
+        .map_err(|error| RuntimeError::Provider(format!("tool git.diff write temp file: {error}")))
+}
+
+fn normalize_no_index_diff_paths(
+    diff: &str,
+    repo_path: &str,
+    before_path: &Path,
+    after_path: &Path,
+) -> String {
+    let before = before_path.to_string_lossy();
+    let after = after_path.to_string_lossy();
+    diff.replace(before.as_ref(), repo_path)
+        .replace(after.as_ref(), repo_path)
 }
 
 fn append_requested_untracked_diffs(
@@ -3767,13 +3982,19 @@ fn call_command_run_tool(
     parameters: &BTreeMap<String, CommandParameterRule>,
     options: CommandRunOptions,
 ) -> Result<Value, RuntimeError> {
-    let command_name = input
-        .get("command")
-        .or_else(|| input.get("test_command"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {name} input.command must be a string"))
-        })?;
+    let command_name = match input.get("command").and_then(Value::as_str) {
+        Some(command) => command,
+        None if commands.len() == 1 => commands
+            .keys()
+            .next()
+            .map(String::as_str)
+            .expect("single command map has one key"),
+        None => {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.command must be a string when multiple commands are configured"
+            )));
+        }
+    };
     let Some(command) = commands.get(command_name) else {
         return Err(RuntimeError::Provider(format!(
             "tool {name} command {command_name} is not configured"

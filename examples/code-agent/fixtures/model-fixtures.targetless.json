@@ -7,9 +7,7 @@
           "tool_calls": [
             {
               "tool": "test.run",
-              "input": {
-                "test_command": "edit_fixture_test"
-              }
+              "input": {}
             },
             {
               "tool": "repo.search",
@@ -30,7 +28,7 @@
               }
             }
           ],
-          "rationale": "Start without a known target by running the allowlisted test and searching the fixture directory."
+          "rationale": "Start without a known target by running the configured validation and searching the fixture directory."
         },
         {
           "complete": false,
@@ -88,7 +86,7 @@
       "workspace_diff": {
         "examples/code-agent/edit-fixture/math.js": "--- a/examples/code-agent/edit-fixture/math.js\n+++ b/examples/code-agent/edit-fixture/math.js\n@@ -2,1 +2,1 @@\n-  return a - b;\n+  return a + b;\n"
       },
-      "rationale": "The targetless edit loop found the fixture files, fixed the add function, and verified the allowlisted test."
+      "rationale": "The targetless edit loop found the fixture files, fixed the add function, and verified the configured validation."
     }
   }
 }

@@ -47,7 +47,7 @@ pub(crate) struct CodeAgentRouteWhen {
 pub(crate) struct CodeAgentRouteFacts {
     pub(crate) task: String,
     pub(crate) target: bool,
-    pub(crate) test: bool,
+    pub(crate) write: bool,
     pub(crate) search_query: bool,
     pub(crate) repo_query: bool,
     pub(crate) required_terms: bool,
@@ -66,13 +66,11 @@ pub(crate) struct CodeAgentInputFacts {
     pub(crate) task: bool,
     pub(crate) target: bool,
     pub(crate) write: bool,
-    pub(crate) test: bool,
     pub(crate) query: bool,
     pub(crate) related: bool,
     pub(crate) search_query: bool,
     pub(crate) repo_query: bool,
     pub(crate) required_terms: bool,
-    pub(crate) force_patch: bool,
 }
 
 #[cfg(test)]
@@ -361,7 +359,6 @@ all:
             &CodeAgentInputFacts {
                 task: true,
                 target: true,
-                test: true,
                 ..CodeAgentInputFacts::default()
             },
         )
@@ -376,28 +373,20 @@ all:
             "edit",
             &CodeAgentInputFacts {
                 task: true,
-                test: true,
                 ..CodeAgentInputFacts::default()
             },
         )
-        .expect("targetless edit should be accepted when test is present");
+        .expect("targetless edit should be accepted");
 
         let error = pack
-            .validate_recipe_input_facts(
-                "edit",
-                &CodeAgentInputFacts {
-                    task: true,
-                    target: true,
-                    ..CodeAgentInputFacts::default()
-                },
-            )
-            .expect_err("missing test should be rejected by pack input contract");
+            .validate_recipe_input_facts("edit", &CodeAgentInputFacts::default())
+            .expect_err("missing task should be rejected by pack input contract");
 
         assert!(
             error.to_string().contains("missing required input"),
             "{error}"
         );
-        assert!(error.to_string().contains("test"), "{error}");
+        assert!(error.to_string().contains("task"), "{error}");
     }
 
     #[test]
@@ -408,13 +397,12 @@ all:
             .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
                 task: "edit provider".to_string(),
                 target: true,
-                test: true,
                 ..CodeAgentRouteFacts::default()
             })
             .unwrap();
 
         assert_eq!(decision.recipe, "edit");
-        assert_eq!(decision.route_index, 0);
+        assert_eq!(decision.route_index, 1);
         assert!(!decision.fallback);
     }
 
@@ -424,8 +412,7 @@ all:
 
         let decision = pack
             .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
-                task: "understand this file".to_string(),
-                target: true,
+                task: "understand the code-agent architecture".to_string(),
                 ..CodeAgentRouteFacts::default()
             })
             .unwrap();
@@ -443,7 +430,7 @@ all:
                     recipe: "edit".to_string(),
                     fallback: false,
                     when: CodeAgentRouteWhen {
-                        any_present: vec!["test".to_string()],
+                        any_present: vec!["target".to_string()],
                         ..CodeAgentRouteWhen::default()
                     },
                 }],
@@ -660,7 +647,6 @@ fn is_known_recipe_input_field(field: &str) -> bool {
         "task"
             | "target"
             | "write"
-            | "test"
             | "query"
             | "related"
             | "search_query"
@@ -668,7 +654,6 @@ fn is_known_recipe_input_field(field: &str) -> bool {
             | "required_terms"
             | "target_symbol_query"
             | "target_search_pattern"
-            | "force_patch"
     )
 }
 
@@ -717,7 +702,7 @@ fn validate_route_when(when: &CodeAgentRouteWhen, source: &str) -> Result<()> {
 fn is_known_route_field(field: &str) -> bool {
     matches!(
         field,
-        "target" | "test" | "search_query" | "repo_query" | "required_terms"
+        "target" | "write" | "search_query" | "repo_query" | "required_terms"
     )
 }
 
@@ -923,7 +908,7 @@ impl CodeAgentRouteFacts {
     fn field_present(&self, field: &str) -> bool {
         match field {
             "target" => self.target,
-            "test" => self.test,
+            "write" => self.write,
             "search_query" => self.search_query,
             "repo_query" => self.repo_query,
             "required_terms" => self.required_terms,
@@ -938,13 +923,11 @@ impl CodeAgentInputFacts {
             "task" => self.task,
             "target" => self.target,
             "write" => self.write,
-            "test" => self.test,
             "query" => self.query,
             "related" => self.related,
             "search_query" => self.search_query,
             "repo_query" => self.repo_query,
             "required_terms" => self.required_terms,
-            "force_patch" => self.force_patch,
             _ => false,
         }
     }

@@ -9,14 +9,13 @@
               "tool": "candidate.validate",
               "input": {
                 "candidate": {
-                  "target_path": "examples/code-agent/edit-fixture/math.js",
-                  "related_files": [],
-                  "test_command": "not_allowlisted"
+                  "target_path": "examples/code-agent/edit-fixture/missing.js",
+                  "related_files": []
                 }
               }
             }
           ],
-          "rationale": "Intentionally validate a non-allowlisted command so AIR records the candidate validation error as an observation."
+          "rationale": "Intentionally validate a missing target so AIR records the candidate validation error as an observation."
         },
         {
           "complete": false,
@@ -26,13 +25,12 @@
               "input": {
                 "candidate": {
                   "target_path": "examples/code-agent/edit-fixture/math.js",
-                  "related_files": [],
-                  "test_command": "edit_fixture_test"
+                  "related_files": []
                 }
               }
             }
           ],
-          "rationale": "Retry candidate validation with the supplied allowlisted test command."
+          "rationale": "Retry candidate validation with a readable target path."
         },
         {
           "complete": false,
@@ -84,7 +82,7 @@
       "workspace_diff": {
         "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
       },
-      "rationale": "AIR observed a rejected candidate validation for a non-allowlisted test command, retried with the allowlisted command, read the target, patched it, revalidated, and inspected the diff.",
+      "rationale": "AIR observed a rejected candidate validation for a missing target, retried with the readable target, read the target, patched it, revalidated, and inspected the diff.",
       "observations": []
     }
   }

@@ -18,8 +18,6 @@ inputs:
   acceptance_assertions:
     type: array
     items: object
-  test_command: string
-  force_patch: boolean
 
 outputs:
   edit:
@@ -51,7 +49,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, preflight, preflight_candidate, choose, act, force_act, post_act, post_verify, post_accept, summarize, done, failed]
+    enum: [init, preflight, preflight_candidate, choose, act, force_act, post_act, post_format, post_verify, post_accept, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -86,6 +84,10 @@ state:
     type: array
     items:
       type: object
+  auto_format_result:
+    type: array
+    items:
+      type: object
   auto_verify_diagnostic_context:
     type: array
     items:
@@ -99,6 +101,10 @@ state:
     items:
       type: object
   edit_validation_context:
+    type: array
+    items:
+      type: object
+  write_error_context:
     type: array
     items:
       type: object
@@ -181,9 +187,6 @@ tools:
   - name: file.ops
     capability: file.write
     timeout_ms: 10000
-  - name: file.patch
-    capability: file.write
-    timeout_ms: 10000
   - name: diagnostic.context
     capability: code.read
     timeout_ms: 10000
@@ -199,6 +202,9 @@ tools:
   - name: git.diff
     capability: code.read
     timeout_ms: 10000
+  - name: format.run
+    capability: code.test
+    timeout_ms: 120000
   - name: test.run
     capability: code.test
     timeout_ms: 120000
@@ -360,7 +366,7 @@ workflow:
             phase: preflight_candidate
 
     - id: preflight-candidate-validate
-      when: phase == "preflight_candidate" && target_path != "" && test_command != ""
+      when: phase == "preflight_candidate" && target_path != ""
       actions:
         - kind: tool_batch_dispatch
           input:
@@ -374,8 +380,6 @@ workflow:
                         object:
                           target_path:
                             ref: target_path
-                          test_command:
-                            ref: test_command
                           related_files:
                             ref: related_files
           output: initial_candidate_validation
@@ -389,7 +393,7 @@ workflow:
               action:
                 literal: initial_candidate_validation
               rationale:
-                literal: Deterministically validate the target path and allowlisted test command before the first model edit decision.
+                literal: Deterministically validate the target path before the first model edit decision.
               requested:
                 array:
                   - object:
@@ -401,8 +405,6 @@ workflow:
                             object:
                               target_path:
                                 ref: target_path
-                              test_command:
-                                ref: test_command
                               related_files:
                                 ref: related_files
               result:
@@ -454,10 +456,6 @@ workflow:
                 ref: target_path
               write_paths:
                 ref: write_paths
-              test_command:
-                ref: test_command
-              force_patch:
-                ref: force_patch
               observations:
                 take_last_within_bytes:
                   ref: observations
@@ -506,10 +504,6 @@ workflow:
                 ref: target_path
               write_paths:
                 ref: write_paths
-              test_command:
-                ref: test_command
-              force_patch:
-                ref: force_patch
               observations:
                 take_last_within_bytes:
                   ref: observations
@@ -529,7 +523,6 @@ workflow:
               allowed_tools:
                 array:
                   - literal: file.ops
-                  - literal: file.patch
               tool_schemas:
                 literal:
                   file.ops:
@@ -541,16 +534,10 @@ workflow:
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                       match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
-                  file.patch:
-                    required: {patch: "unified diff"}
-                    optional:
-                      dry_run: "boolean"
-                      allowed_paths: "automatically injected from write_paths; do not override"
-                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
               tool_policy:
                 literal:
                   mode: "Exploration budget is exhausted. Read/search tools are not allowed in this decision."
-                  write: "Use edit_evidence and initial_target_context as the stable source context. Make exactly one small write-focused call: file.ops for anchored edits, line ranges, or new files, or file.patch when a unified diff is clearer. Do not ask for more context in this forced step."
+                  write: "Use edit_evidence and initial_target_context as the stable source context. Make exactly one small write-focused call: file.ops for anchored edits, line ranges, or new files. Do not ask for more context in this forced step."
                   finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
           output: decision
           timeout_seconds: 180
@@ -589,10 +576,6 @@ workflow:
                 ref: target_path
               write_paths:
                 ref: write_paths
-              test_command:
-                ref: test_command
-              force_patch:
-                ref: force_patch
               observations:
                 take_last_within_bytes:
                   ref: observations
@@ -612,7 +595,6 @@ workflow:
               allowed_tools:
                 array:
                   - literal: file.ops
-                  - literal: file.patch
               tool_schemas:
                 literal:
                   file.ops:
@@ -624,16 +606,10 @@ workflow:
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                       match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
-                  file.patch:
-                    required: {patch: "unified diff"}
-                    optional:
-                      dry_run: "boolean"
-                      allowed_paths: "automatically injected from write_paths; do not override"
-                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
               tool_policy:
                 literal:
                   mode: "Targeted edit exploration is exhausted. Read/search tools are not allowed in this decision."
-                  write: "Use only the latest edit_evidence ranges and initial_target_context. Make one small explicit file.ops replace_lines/edit/write or file.patch edit. If the requested refactor is too large for one write, make the next smallest coherent edit that keeps the workspace as valid as possible and let validation guide the next turn."
+                  write: "Use only the latest edit_evidence ranges and initial_target_context. Make one small explicit file.ops replace_lines/edit/write edit. If the requested refactor is too large for one write, make the next smallest coherent edit that keeps the workspace as valid as possible and let validation guide the next turn."
                   finish: "Return complete=true only if the correct outcome is no edit. Otherwise write."
           output: decision
           timeout_seconds: 180
@@ -664,10 +640,6 @@ workflow:
                 ref: related_files
               write_paths:
                 ref: write_paths
-              test_command:
-                ref: test_command
-              force_patch:
-                ref: force_patch
               observations:
                 take_last_within_bytes:
                   ref: observations
@@ -690,7 +662,6 @@ workflow:
                   - literal: lsp.references
                   - literal: lsp.diagnostics
                   - literal: file.ops
-                  - literal: file.patch
                   - literal: diagnostic.context
                   - literal: code.assert
                   - literal: candidate.validate
@@ -742,12 +713,6 @@ workflow:
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                       match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
-                  file.patch:
-                    required: {patch: "unified diff"}
-                    optional:
-                      dry_run: "boolean"
-                      allowed_paths: "automatically injected from write_paths; do not override"
-                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                   diagnostic.context:
                     required: {}
                     optional:
@@ -760,7 +725,7 @@ workflow:
                       checks: "alias for assertions"
                   candidate.validate:
                     required:
-                      candidate: "{target_path, test_command, related_files?}; checks paths and allowlisted validation commands before committing to an edit route"
+                      candidate: "{target_path, related_files?}; checks paths before committing to an edit route"
                     optional: {}
               tool_policy:
                 literal:
@@ -768,7 +733,7 @@ workflow:
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
                   read_first: "Read the exact target range and at most one immediately-needed context range before writing."
                   small_steps: "Choose one to four tool calls per turn. Do not request whole large files. Avoid broad repo.references, repo.files, repo.search, or helper archaeology after the target range is known. Use lsp.references only when semantic references are the deciding fact before an edit. After reading the target range and one relevant context range, write next instead of gathering more context."
-                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops with kind=replace_lines/edit/write or file.patch for explicit textual edits. Use file.ops with kind=edit for localized repairs and wording changes. Use file.patch only when force_patch is true or a patch is strictly clearer. If a turn includes a write tool, keep that turn to one write-focused call."
+                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops with kind=replace_lines/edit/write for explicit textual edits. Use file.ops with kind=edit for localized repairs and wording changes. If a turn includes a write tool, keep that turn to one write-focused call."
                   verify: "Do not run test.run before the first write in this targeted route. Include code.assert after the write when you can express a useful structural postcondition. AIR will run test.run after the write path completes."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
@@ -800,10 +765,6 @@ workflow:
                 ref: related_files
               write_paths:
                 ref: write_paths
-              test_command:
-                ref: test_command
-              force_patch:
-                ref: force_patch
               observations:
                 take_last_within_bytes:
                   ref: observations
@@ -828,7 +789,6 @@ workflow:
                   - literal: file.read_many
                   - literal: file.search
                   - literal: file.ops
-                  - literal: file.patch
                   - literal: diagnostic.context
                   - literal: code.assert
                   - literal: candidate.validate
@@ -924,12 +884,6 @@ workflow:
                       allowed_paths: "automatically injected from write_paths; do not override"
                       max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                       match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
-                  file.patch:
-                    required: {patch: "unified diff"}
-                    optional:
-                      dry_run: "boolean"
-                      allowed_paths: "automatically injected from write_paths; do not override"
-                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
                   diagnostic.context:
                     required: {}
                     optional:
@@ -942,7 +896,7 @@ workflow:
                       checks: "alias for assertions"
                   candidate.validate:
                     required:
-                      candidate: "{target_path, test_command, related_files?}; checks paths and allowlisted validation commands before committing to an edit route"
+                      candidate: "{target_path, related_files?}; checks paths before committing to an edit route"
                     optional: {}
                   git.status:
                     required: {}
@@ -953,20 +907,17 @@ workflow:
                       paths: "array of repo-relative paths"
                       include_untracked: "boolean"
                   test.run:
-                    required: {command: "the supplied allowlisted test_command"}
-                    optional:
-                      package: "top-level package parameter for configured cargo package tests"
-                      test_filter: "top-level test filter parameter for configured cargo filtered tests"
-                      args: "accepted alias object for parameters, but prefer top-level fields"
+                    required: {}
+                    optional: {}
               tool_policy:
                 literal:
                   plan: "Use todo.write/read only when the task clearly spans multiple files or repeated verification cycles. Skip todo tools for single-file edits and already-targeted work."
                   discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, lsp.references for semantic references when available, and repo.references only when token-level references are enough."
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
-                  read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops or file.patch edits."
+                  read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
                   small_steps: "Choose one to four tool calls per turn. Batch independent read/search calls only when they unblock the same immediate write. Do not request whole large files. Use repo.symbols once to get start/end lines when names are known, then read exact ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target ranges, the next turn must either write or read at most one additional immediately-needed range; do not expand into broad repo.references or helper archaeology."
-                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops replace_lines or file.patch for explicit textual edits. Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. Use file.patch for unified diffs when force_patch is true or a patch is clearer. If a turn includes a write tool, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
-                  tests: "Use test.run with the supplied allowlisted test_command only. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
+                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops replace_lines for explicit textual edits. Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. If a turn includes a write tool, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
+                  tests: "Use test.run for the configured project validation. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
                   verify: "Before complete=true, normally choose code.assert for useful structural postconditions, plus test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
@@ -1010,7 +961,6 @@ workflow:
           max_calls: 1
           allowed_tools:
             - file.ops
-            - file.patch
           timeout_seconds: 120
           on_error: observe
         - kind: append
@@ -1065,11 +1015,45 @@ workflow:
             array:
               - object:
                   tool:
+                    literal: format.run
+                  input:
+                    literal: {}
+          output: auto_format_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: set
+          values:
+            phase: post_format
+
+    - id: auto-verify-after-format
+      when: phase == "post_format" && auto_format_result[0].status == "ok" && auto_format_result[0].output.success == true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_format_passed
+              rationale:
+                literal: Automatically ran formatter after a workspace edit before validation.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: format.run
+                      input:
+                        literal: {}
+              result:
+                ref: auto_format_result
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
                     literal: test.run
                   input:
-                    object:
-                      command:
-                        ref: test_command
+                    literal: {}
           output: auto_verify_result
           max_calls: 1
           timeout_seconds: 120
@@ -1078,26 +1062,30 @@ workflow:
           values:
             phase: post_verify
 
-    - id: auto-verify-file-patch
-      when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "ok" && observation[0].output.applied == true
+    - id: record-auto-format-failed
+      when: phase == "post_format"
       actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: test.run
-                  input:
-                    object:
-                      command:
-                        ref: test_command
-          output: auto_verify_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: auto_format_failed
+              rationale:
+                literal: Automatically ran formatter after a workspace edit; formatting failed and must be fixed before validation can run.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: format.run
+                      input:
+                        literal: {}
+              result:
+                ref: auto_format_result
         - kind: set
           values:
-            phase: post_verify
+            verification_status: failed
+            phase: choose
 
     - id: record-auto-verify-failed-tool
       when: phase == "post_verify" && auto_verify_result[0].status == "error"
@@ -1116,9 +1104,7 @@ workflow:
                       tool:
                         literal: test.run
                       input:
-                        object:
-                          command:
-                            ref: test_command
+                        literal: {}
               result:
                 ref: auto_verify_result
         - kind: set
@@ -1143,9 +1129,7 @@ workflow:
                       tool:
                         literal: test.run
                       input:
-                        object:
-                          command:
-                            ref: test_command
+                        literal: {}
               result:
                 ref: auto_verify_result
         - kind: tool_batch_dispatch
@@ -1233,9 +1217,7 @@ workflow:
                       tool:
                         literal: test.run
                       input:
-                        object:
-                          command:
-                            ref: test_command
+                        literal: {}
               result:
                 ref: auto_verify_result
         - kind: tool_batch_dispatch
@@ -1290,16 +1272,14 @@ workflow:
               action:
                 literal: auto_verify_passed
               rationale:
-                literal: Automatically ran the allowlisted validation after the workspace edit and it passed.
+                literal: Automatically ran the configured validation after the workspace edit and it passed.
               requested:
                 array:
                   - object:
                       tool:
                         literal: test.run
                       input:
-                        object:
-                          command:
-                            ref: test_command
+                        literal: {}
               result:
                 ref: auto_verify_result
         - kind: tool_batch_dispatch
@@ -1417,16 +1397,14 @@ workflow:
               action:
                 literal: auto_verify_passed
               rationale:
-                literal: Automatically ran the allowlisted validation after the workspace edit and it passed.
+                literal: Automatically ran the configured validation after the workspace edit and it passed.
               requested:
                 array:
                   - object:
                       tool:
                         literal: test.run
                       input:
-                        object:
-                          command:
-                            ref: test_command
+                        literal: {}
               result:
                 ref: auto_verify_result
         - kind: tool_batch_dispatch
@@ -1648,33 +1626,45 @@ workflow:
                     ref: observation[0].input
                   failed_error:
                     ref: observation[0].error
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-file-patch-write-path-error-hint
-      when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "error"
-      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: file.read
+                  input:
+                    object:
+                      path:
+                        ref: observation[0].input.operations[0].path
+                      max_bytes:
+                        literal: 60000
+                      line_numbers:
+                        literal: true
+          output: write_error_context
+          max_calls: 1
+          allowed_tools:
+            - file.read
+          timeout_seconds: 120
+          on_error: observe
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: write_path_error_hint
+                literal: write_error_context
               rationale:
-                literal: A patch tool call failed AIR write policy. If the error is about path policy, retry with patch paths copied exactly from write_paths. If it is about max_changed_lines or size, split the patch into smaller file.ops replace_lines operations.
+                literal: AIR re-read the failed write path after a write-policy error so the next edit decision has a fresh snapshot instead of looping on stale-read rejection.
               requested:
-                ref: decision.tool_calls
+                array:
+                  - object:
+                      tool:
+                        literal: file.read
+                      input:
+                        object:
+                          path:
+                            ref: observation[0].input.operations[0].path
               result:
-                object:
-                  write_paths:
-                    ref: write_paths
-                  failed_tool:
-                    ref: observation[0].tool
-                  failed_input:
-                    ref: observation[0].input
-                  failed_error:
-                    ref: observation[0].error
+                ref: write_error_context
         - kind: set
           values:
             phase: choose
@@ -1735,25 +1725,6 @@ workflow:
           values:
             phase: choose
 
-    - id: record-file-patch-validation-failed
-      when: phase == "post_act" && observation[0].tool == "file.patch" && observation[0].status == "ok" && observation[0].output.applied == false
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: edit_validation_failed
-              rationale:
-                literal: A file.patch edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid patch. If a small line-bounded edit is enough, prefer file.ops kind=replace_lines with the latest start_line/end_line.
-              requested:
-                ref: decision.tool_calls
-              result:
-                ref: observation
-        - kind: set
-          values:
-            phase: choose
-
     - id: record-batch-dispatch-error
       when: phase == "post_act" && observation[0].tool == "<batch>" && observation[0].status == "error"
       actions:
@@ -1794,7 +1765,7 @@ workflow:
               action:
                 literal: completion_blocked
               rationale:
-                literal: Completion was blocked because verification_status is not passed. Run the allowlisted test or fix failing diagnostics before finishing.
+                literal: Completion was blocked because verification_status is not passed. Run the configured validation or fix failing diagnostics before finishing.
               requested:
                 array: []
               result:
@@ -1820,10 +1791,6 @@ workflow:
                 ref: target_symbol_query
               write_paths:
                 ref: write_paths
-              test_command:
-                ref: test_command
-              force_patch:
-                ref: force_patch
               observations:
                 take_last_within_bytes:
                   ref: observations

@@ -56,7 +56,7 @@ fn todo_write_returns_a_structured_artifact() {
                     },
                     {
                         "id": "verify",
-                        "content": "Run the allowlisted verification",
+                        "content": "Run the configured verification",
                         "status": "pending",
                         "priority": "medium"
                     }
@@ -3985,8 +3985,6 @@ fn git_diff_accepts_patch_file_objects_and_empty_filters() {
         .env("GIT_COMMITTER_EMAIL", "air@example.com")
         .output()
         .unwrap();
-    fs::write(dir.join("agent.txt"), "after\n").unwrap();
-    fs::write(dir.join("user.txt"), "dirty user change\n").unwrap();
     let config_path = write_config(
         &dir,
         r#"{
@@ -3999,6 +3997,8 @@ fn git_diff_accepts_patch_file_objects_and_empty_filters() {
             }"#,
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
+    fs::write(dir.join("agent.txt"), "after\n").unwrap();
+    fs::write(dir.join("user.txt"), "dirty user change\n").unwrap();
 
     let output = tools
         .call_tool(
@@ -4015,6 +4015,66 @@ fn git_diff_accepts_patch_file_objects_and_empty_filters() {
     let empty = tools.call_tool("git.diff", &json!({"files": []})).unwrap();
     assert_eq!(empty["diff"], json!(""));
     assert_eq!(empty["bytes"], json!(0));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn git_diff_reports_only_changes_since_tool_initialization() {
+    let dir = temp_dir("air-tools-git-diff-baseline");
+    Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .arg("init")
+        .output()
+        .unwrap();
+    fs::write(dir.join("agent.txt"), "before\n").unwrap();
+    fs::write(dir.join("user.txt"), "clean\n").unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["add", "agent.txt", "user.txt"])
+        .output()
+        .unwrap();
+    Command::new("git")
+        .arg("-C")
+        .arg(&dir)
+        .args(["commit", "-m", "init"])
+        .env("GIT_AUTHOR_NAME", "AIR")
+        .env("GIT_AUTHOR_EMAIL", "air@example.com")
+        .env("GIT_COMMITTER_NAME", "AIR")
+        .env("GIT_COMMITTER_EMAIL", "air@example.com")
+        .output()
+        .unwrap();
+    fs::write(dir.join("user.txt"), "preexisting user change\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "git.diff": {
+                  "kind": "git_diff",
+                  "repo_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    fs::write(dir.join("agent.txt"), "after\n").unwrap();
+    fs::write(
+        dir.join("user.txt"),
+        "preexisting user change\nagent addition\n",
+    )
+    .unwrap();
+
+    let output = tools
+        .call_tool("git.diff", &json!({"paths": ["agent.txt", "user.txt"]}))
+        .unwrap();
+
+    let diff = output["diff"].as_str().unwrap();
+    assert!(diff.contains("agent.txt"));
+    assert!(diff.contains("+after"));
+    assert!(diff.contains("user.txt"));
+    assert!(diff.contains("+agent addition"));
+    assert!(!diff.contains("-clean"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -4407,8 +4467,7 @@ fn candidate_validate_rejects_missing_target_file() {
                 "candidate.validate": {
                   "kind": "candidate_validate",
                   "capability": "code.read",
-                  "base_dir": ".",
-                  "allowed_test_commands": ["unit"]
+                  "base_dir": "."
                 }
               }
             }"#,
@@ -4421,8 +4480,7 @@ fn candidate_validate_rejects_missing_target_file() {
             &json!({
                 "candidate": {
                     "target_path": "missing.js",
-                    "related_files": [],
-                    "test_command": "unit"
+                    "related_files": []
                 }
             }),
         )
@@ -4434,7 +4492,7 @@ fn candidate_validate_rejects_missing_target_file() {
 }
 
 #[test]
-fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
+fn candidate_validate_accepts_existing_target_and_related_file() {
     let dir = temp_dir("air-tools-candidate-valid");
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(dir.join("src/lib.js"), "module.exports = {}\n").unwrap();
@@ -4446,8 +4504,7 @@ fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
                 "candidate.validate": {
                   "kind": "candidate_validate",
                   "capability": "code.read",
-                  "base_dir": ".",
-                  "allowed_test_commands": ["unit"]
+                  "base_dir": "."
                 }
               }
             }"#,
@@ -4460,8 +4517,7 @@ fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
             &json!({
                 "candidate": {
                     "target_path": "src/lib.js",
-                    "related_files": ["src/test.js"],
-                    "test_command": "unit"
+                    "related_files": ["src/test.js"]
                 }
             }),
         )
@@ -4470,7 +4526,6 @@ fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
     assert_eq!(output["valid"], json!(true));
     assert_eq!(output["target_path"], json!("src/lib.js"));
     assert_eq!(output["related_files"], json!(["src/test.js"]));
-    assert_eq!(output["test_command"], json!("unit"));
     assert_eq!(
         tools.tool_capability("candidate.validate"),
         Some("code.read")
@@ -4479,7 +4534,7 @@ fn candidate_validate_accepts_existing_target_and_allowlisted_test() {
 }
 
 #[test]
-fn code_agent_self_tools_allow_project_verification_aliases() {
+fn code_agent_self_tools_validate_project_paths() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let config_path = root.join("examples/code-agent/tools.self.json");
     let mut tools = ConfigTools::from_file(config_path).unwrap();
@@ -4490,26 +4545,18 @@ fn code_agent_self_tools_allow_project_verification_aliases() {
             &json!({
                 "candidate": {
                     "target_path": "crates/air-tools/src/lib.rs",
-                    "related_files": ["crates/air-tools/src/tests.rs"],
-                    "test_command": "verify_code_agent"
+                    "related_files": ["crates/air-tools/src/tests.rs"]
                 }
             }),
         )
         .unwrap();
 
     assert_eq!(output["valid"], json!(true));
-    assert_eq!(output["test_command"], json!("verify_code_agent"));
 
     let error = tools
-        .call_tool(
-            "test.run",
-            &json!({
-                "command": "cargo_test_package",
-                "package": "not-a-package"
-            }),
-        )
+        .call_tool("test.run", &json!({"command": "missing"}))
         .unwrap_err();
-    assert!(error.to_string().contains("not an allowed value"));
+    assert!(error.to_string().contains("is not configured"));
 }
 
 #[test]
@@ -5851,7 +5898,7 @@ fn diagnostic_context_skips_paths_outside_repo() {
 }
 
 #[test]
-fn command_run_executes_allowlisted_command() {
+fn command_run_executes_configured_command() {
     let dir = temp_dir("air-tools-command-run");
     let config_path = write_config(
         &dir,
@@ -5883,8 +5930,8 @@ fn command_run_executes_allowlisted_command() {
 }
 
 #[test]
-fn command_run_accepts_test_command_alias() {
-    let dir = temp_dir("air-tools-command-run-test-command-alias");
+fn command_run_uses_single_configured_command_by_default() {
+    let dir = temp_dir("air-tools-command-run-default-command");
     let config_path = write_config(
         &dir,
         r#"{
@@ -5903,9 +5950,7 @@ fn command_run_accepts_test_command_alias() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
-        .call_tool("test.run", &json!({"test_command": "cargo_version"}))
-        .unwrap();
+    let output = tools.call_tool("test.run", &json!({})).unwrap();
 
     assert_eq!(output["success"], json!(true));
     assert!(output["log"].as_str().unwrap().contains("cargo"));

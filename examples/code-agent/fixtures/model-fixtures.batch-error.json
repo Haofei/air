@@ -21,9 +21,7 @@
             },
             {
               "tool": "test.run",
-              "input": {
-                "command": "edit_fixture_test"
-              }
+              "input": {}
             }
           ],
           "rationale": "Intentionally mix a write tool with a test so AIR records batch_dispatch_error."

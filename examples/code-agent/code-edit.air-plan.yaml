@@ -1,7 +1,7 @@
 plan:
   name: code-edit
   version: 0.1.0
-  description: "Unified coding-agent edit loop for a bounded task and one allowlisted validation command."
+  description: "Unified coding-agent edit loop for a bounded task with configured validation."
 
 requires:
   capabilities: [task.progress, file.read, file.write, code.read, code.test]
@@ -25,15 +25,10 @@ connect:
     to: edit.target_symbol_query
   - from: $input.related_files
     to: edit.related_files
-  - from: $input.test_command
-    to: edit.test_command
-  - from: $input.force_patch
-    to: edit.force_patch
-
 outputs:
   edit: edit.edit
 
 decisions:
   - id: choose-code-edit-loop
-    rationale: "A validation command is known, so run the unified AIR edit loop. If target_path is empty, the loop must discover and read the target before writing."
+    rationale: "Run the unified AIR edit loop with configured validation. If target_path is empty, the loop must discover and read the target before writing."
     selected: [edit]

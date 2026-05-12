@@ -8,12 +8,12 @@
         {
           "id": "docs-command-run-safety",
           "title": "Command runner safety for coding agents",
-          "content": "Coding agents should use allowlisted command aliases, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
+          "content": "Coding agents should use configured commands, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
         },
         {
           "id": "docs-code-agent-loop",
           "title": "Core coding-agent loop",
-          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with allowlisted tests."
+          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with configured validations."
         },
         {
           "id": "docs-edit-safety",
@@ -129,17 +129,6 @@
       "max_bytes": 262144,
       "max_changed_lines": 1000
     },
-    "file.patch": {
-      "kind": "file_patch",
-      "capability": "file.write",
-      "repo_dir": "../..",
-      "require_read": true,
-      "allow_new_files": false,
-      "allow_delete_files": false,
-      "max_files": 2,
-      "max_bytes": 65536,
-      "max_changed_lines": 1000
-    },
     "diagnostic.context": {
       "kind": "diagnostic_context",
       "capability": "code.read",
@@ -158,20 +147,7 @@
     "candidate.validate": {
       "kind": "candidate_validate",
       "capability": "code.read",
-      "base_dir": "../..",
-      "allowed_test_commands": [
-        "cargo_air_cli_code_budget_tests",
-        "cargo_air_tools_repo_tests",
-        "cargo_air_tools_file_tests",
-        "cargo_air_tools_tests",
-        "cargo_test_workspace",
-        "cargo_clippy_workspace",
-        "verify_code_agent",
-        "verify_backend_conformance",
-        "bench_code_agent",
-        "cargo_test_package",
-        "cargo_test_package_filter"
-      ]
+      "base_dir": "../.."
     },
     "git.status": {
       "kind": "git_status",
@@ -190,102 +166,26 @@
       "capability": "code.test",
       "cwd": "../..",
       "commands": {
-        "cargo_air_cli_code_budget_tests": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "air-cli",
-          "budget"
-        ],
-        "cargo_air_tools_repo_tests": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "air-tools",
-          "repo_"
-        ],
-        "cargo_air_tools_file_tests": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "air-tools",
-          "file_"
-        ],
-        "cargo_air_tools_tests": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "air-tools"
-        ],
-        "cargo_test_workspace": [
-          "cargo",
-          "test",
-          "-q",
-          "--workspace"
-        ],
-        "cargo_clippy_workspace": [
-          "cargo",
-          "clippy",
-          "-q",
-          "--workspace",
-          "--all-targets",
-          "--",
-          "-D",
-          "warnings"
-        ],
-        "verify_code_agent": [
+        "default": [
           "bash",
-          "scripts/verify_code_agent.sh"
-        ],
-        "verify_backend_conformance": [
-          "bash",
-          "scripts/verify_backend_conformance.sh"
-        ],
-        "bench_code_agent": [
-          "bash",
-          "scripts/bench_code_agent.sh"
-        ],
-        "cargo_test_package": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "{{ package }}"
-        ],
-        "cargo_test_package_filter": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "{{ package }}",
-          "{{ test_filter }}"
+          "-lc",
+          "cargo test -q --workspace && cargo clippy -q --workspace --all-targets -- -D warnings"
         ]
       },
-      "parameters": {
-        "package": {
-          "allow": "identifier",
-          "values": [
-            "air-cli",
-            "air-core",
-            "air-linker",
-            "air-parser",
-            "air-runtime",
-            "air-tools",
-            "air-verify",
-            "air-backend-langgraph",
-            "air-backend-openai",
-            "air-backend-openai-agents-js"
-          ],
-          "max_chars": 80
-        },
-        "test_filter": {
-          "allow": "identifier",
-          "max_chars": 120
-        }
+      "timeout_seconds": 120,
+      "max_bytes": 65536,
+      "truncation_direction": "tail"
+    },
+    "format.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../..",
+      "commands": {
+        "default": [
+          "cargo",
+          "fmt",
+          "--all"
+        ]
       },
       "timeout_seconds": 120,
       "max_bytes": 65536,

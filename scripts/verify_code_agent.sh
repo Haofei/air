@@ -72,9 +72,10 @@ assert config["models"]["code_edit_decider"].get("native_tool_calls") is True, (
 )
 
 self_tools = json.loads(Path("examples/code-agent/tools.self.json").read_text())
-for tool in ("file.ops", "file.patch"):
-    max_changed_lines = self_tools["tools"][tool].get("max_changed_lines")
-    assert max_changed_lines is not None and max_changed_lines >= 800, (tool, max_changed_lines)
+max_changed_lines = self_tools["tools"]["file.ops"].get("max_changed_lines")
+assert max_changed_lines is not None and max_changed_lines >= 800, ("file.ops", max_changed_lines)
+assert "file.patch" not in self_tools["tools"]
+assert "format.run" in self_tools["tools"]
 
 for path in (
     "examples/code-agent/tools.json",
@@ -183,7 +184,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "format.run", "test.run", "git.diff"], tools
 candidate_validate_index = next(
     index for index, event in enumerate(events)
     if event.get("action") == "tool_batch_dispatch_item"
@@ -261,11 +262,11 @@ assert "names" in tool_schemas["repo.symbols"]["optional"], tool_schemas["repo.s
 assert "symbol" in tool_schemas["lsp.references"]["optional"], tool_schemas["lsp.references"]
 assert "path" in tool_schemas["lsp.references"]["required"], tool_schemas["lsp.references"]
 assert "max_changed_lines" in tool_schemas["file.ops"]["optional"], tool_schemas["file.ops"]
-assert "max_changed_lines" in tool_schemas["file.patch"]["optional"], tool_schemas["file.patch"]
+assert "file.patch" not in tool_schemas, tool_schemas
 assert "assertions" in tool_schemas["code.assert"]["required"], tool_schemas["code.assert"]
 assert "candidate" in tool_schemas["candidate.validate"]["required"], tool_schemas["candidate.validate"]
-assert "package" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
-assert "test_filter" in tool_schemas["test.run"]["optional"], tool_schemas["test.run"]
+assert tool_schemas["test.run"]["required"] == {}, tool_schemas["test.run"]
+assert tool_schemas["test.run"]["optional"] == {}, tool_schemas["test.run"]
 PY
 
 echo "[code-agent] edit loop searches truncated manual test logs"
@@ -395,6 +396,7 @@ assert tools == [
     "file.search",
     "file.read_many",
     "file.ops",
+    "format.run",
     "test.run",
     "git.diff",
 ], tools
@@ -530,7 +532,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "format.run", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop records edit validation failures"
@@ -593,7 +595,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "file.ops", "diagnostic.context", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "diagnostic.context", "file.ops", "format.run", "test.run", "git.diff"], tools
 diagnostic_context = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
@@ -671,9 +673,8 @@ decider_after_error = next(
         for result in observation.get("result", [])
     )
 )
-assert "not_allowlisted" in candidate_error["error"], candidate_error
+assert "missing.js" in candidate_error["error"], candidate_error
 assert candidate_ok["output"]["valid"] is True, candidate_ok
-assert candidate_ok["output"]["test_command"] == "edit_fixture_test", candidate_ok
 assert decider_after_error["input"]["verification_status"] == "unknown", decider_after_error
 tools = [
     event.get("meta", {}).get("tool")
@@ -681,7 +682,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "candidate.validate", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "candidate.validate", "file.read", "file.ops", "format.run", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop collects diagnostic context after failed auto verify"
@@ -724,9 +725,11 @@ assert tools == [
     "file.search",
     "candidate.validate",
     "file.ops",
+    "format.run",
     "test.run",
     "diagnostic.context",
     "file.ops",
+    "format.run",
     "test.run",
     "git.diff",
 ], tools
@@ -890,7 +893,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "file.ops", "format.run", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -945,7 +948,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "test.run", "git.diff"], tools
+assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "format.run", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
@@ -961,7 +964,6 @@ echo "[code-agent] user-facing edit command explain"
 cargo run -q -p air-cli -- code "edit the failing add function and retest" \
   --recipe edit \
   --target examples/code-agent/edit-fixture/math.js \
-  --test edit_fixture_test \
   --related examples/code-agent/edit-fixture/test.js \
   --explain \
   > target/generated/code_agent_edit_explain.output.json
@@ -974,7 +976,7 @@ with open("target/generated/code_agent_edit_explain.output.json", encoding="utf-
 assert output["resolved_recipe"] == "edit", output
 assert output["pack"]["recipe"] == "edit", output
 assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profile.yaml", output
-assert output["input"]["test_command"] == "edit_fixture_test", output
+assert "test_command" not in output["input"], output
 PY
 
 echo "[code-agent] user-facing self edit command explain"
@@ -982,7 +984,6 @@ cargo run -q -p air-cli -- code "update AIR code-agent docs and run the code-age
   --recipe edit \
   --profile examples/code-agent/edit.self.air-profile.yaml \
   --target examples/code-agent/README.md \
-  --test verify_code_agent \
   --explain \
   > target/generated/code_agent_edit_self_explain.output.json
 
@@ -997,54 +998,7 @@ assert output["pack"]["recipe"] == "edit", output
 assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profile.yaml", output
 assert output["pack"]["profile_override"] is True, output
 assert output["input"]["target_path"] == "examples/code-agent/README.md", output
-assert output["input"]["test_command"] == "verify_code_agent", output
-PY
-
-echo "[code-agent] edit loop patch run"
-edit_patch_backup="$(mktemp)"
-cp examples/code-agent/edit-fixture/math.js "$edit_patch_backup"
-restore_edit_patch_fixture() {
-  cp "$edit_patch_backup" examples/code-agent/edit-fixture/math.js
-  rm -f "$edit_patch_backup"
-}
-trap restore_edit_patch_fixture EXIT
-cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/fixtures/edit.patch.input.json \
-  --model-config examples/code-agent/fixtures/model-fixtures.patch.json \
-  --tool-config examples/code-agent/fixtures/tools.core.json \
-  --trace-out target/generated/code_agent_edit_patch.trace.jsonl \
-  > target/generated/code_agent_edit_patch.output.json
-node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_patch.post_test.log
-restore_edit_patch_fixture
-trap - EXIT
-
-"${PYTHON:-python3}" - <<'PY'
-import json
-
-with open("target/generated/code_agent_edit_patch.output.json", encoding="utf-8") as handle:
-    output = json.load(handle)
-edit = output["edit"]
-assert edit["final_success"] is True, edit
-assert edit["patch_applied"] is True, edit
-assert "examples/code-agent/edit-fixture/math.js" in edit["workspace_diff"]["diff"], edit
-
-with open("target/generated/code_agent_edit_patch.trace.jsonl", encoding="utf-8") as handle:
-    events = [json.loads(line) for line in handle if line.strip()]
-tools = [
-    event.get("meta", {}).get("tool")
-    for event in events
-    if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("status") == "ok"
-]
-assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.patch", "test.run", "git.diff"], tools
-file_patch = next(
-    event for event in events
-    if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.patch"
-)
-assert file_patch["input"]["allowed_paths"] == ["examples/code-agent/edit-fixture/math.js"], file_patch
-assert any(event.get("action") == "approval" and event.get("status") == "ok" for event in events), events
+assert "test_command" not in output["input"], output
 PY
 
 echo "[code-agent] ok"

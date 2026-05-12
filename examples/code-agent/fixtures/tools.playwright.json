@@ -198,6 +198,21 @@
       "timeout_seconds": 120,
       "max_bytes": 65536,
       "truncation_direction": "tail"
+    },
+    "format.run": {
+      "kind": "command_run",
+      "capability": "code.test",
+      "cwd": "../../..",
+      "commands": {
+        "format": [
+          "cargo",
+          "fmt",
+          "--all"
+        ]
+      },
+      "timeout_seconds": 120,
+      "max_bytes": 65536,
+      "truncation_direction": "tail"
     }
   }
 }

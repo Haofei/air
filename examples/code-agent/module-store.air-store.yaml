@@ -85,15 +85,11 @@ recipes:
           to: edit.target_symbol_query
         - from: $input.related_files
           to: edit.related_files
-        - from: $input.test_command
-          to: edit.test_command
-        - from: $input.force_patch
-          to: edit.force_patch
       outputs:
         edit: edit.edit
       decisions:
         - id: use-code-edit-loop
-          rationale: "The target file and test command are already known, so run the unified opencode-style edit loop."
+          rationale: "Run the unified opencode-style edit loop with configured validation."
           selected: [code.edit_loop@0.1.0]
   - id: code.review_with_std_context@0.1.0
     visibility: public

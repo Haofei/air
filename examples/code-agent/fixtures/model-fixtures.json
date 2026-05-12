@@ -1,7 +1,7 @@
 {
   "fixtures": {
     "code_explorer": {
-      "summary": "Fixture exploration completed: command_run is implemented as a fixed allowlisted argv runner with constrained template parameters, structured diagnostics, and bounded output artifacts.",
+      "summary": "Fixture exploration completed: command_run is implemented as a fixed default argv runner with constrained template parameters, structured diagnostics, and bounded output artifacts.",
       "relevant_files": [
         {
           "path": "crates/air-tools/src/lib.rs",
@@ -9,7 +9,7 @@
         },
         {
           "path": "examples/code-agent/tools.json",
-          "reason": "Shows how a coding agent exposes allowlisted cargo test aliases and constrained test_filter parameters."
+          "reason": "Shows how a coding agent exposes default default validation commands and constrained test_filter parameters."
         },
         {
           "path": "scripts/verify_code_agent.sh",
@@ -19,7 +19,7 @@
       "findings": [
         {
           "title": "Shell access is intentionally not exposed",
-          "evidence": "The fixture target uses configured argv aliases and parameter policy checks instead of letting the model provide an arbitrary shell command.",
+          "evidence": "The fixture target uses configured argv commands and parameter policy checks instead of letting the model provide an arbitrary shell command.",
           "source_ids": [
             "todo:list"
           ]
@@ -37,7 +37,7 @@
       ],
       "next_steps": [
         "Use code.explore for open-ended repository questions before invoking code.edit.",
-        "Keep command aliases narrow and prefer parameter policies over raw shell access."
+        "Keep commands narrow and prefer parameter policies over raw shell access."
       ]
     },
     "context_compactor": {
@@ -52,7 +52,7 @@
           ]
         },
         {
-          "fact": "The code-review gather step also reads the target script, related config, repository matches, git diff/status, and an allowlisted air-tools test result.",
+          "fact": "The code-review gather step also reads the target script, related config, repository matches, git diff/status, and an default air-tools test result.",
           "source_ids": [
             "docs-playwright-timeouts",
             "docs-search-relevance"
@@ -78,9 +78,7 @@
           "complete": false,
           "tool_calls": [
             {
-              "input": {
-                "command": "edit_fixture_test"
-              }
+              "input": {}
             }
           ],
           "rationale": "Intentionally malformed fixture item that omits the tool name so the edit loop exercises observed tool-call errors."
@@ -90,12 +88,10 @@
           "tool_calls": [
             {
               "tool": "test.run",
-              "input": {
-                "command": "edit_fixture_test"
-              }
+              "input": {}
             }
           ],
-          "rationale": "Run the allowlisted validation first to capture the current failure."
+          "rationale": "Run the configured validation first to capture the current failure."
         },
         {
           "complete": false,
@@ -162,7 +158,7 @@
       "workspace_diff": {
         "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
       },
-      "rationale": "The bounded tool loop read the target and test, applied a one-line replace_lines operation, and the allowlisted fixture test passed.",
+      "rationale": "The bounded tool loop read the target and test, applied a one-line replace_lines operation, and the configured fixture validation passed.",
       "observations": []
     },
     "code_reviewer": {

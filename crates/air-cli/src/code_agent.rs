@@ -39,13 +39,11 @@ pub(crate) struct CodeOptions {
     pub(crate) recipe: CodeRecipe,
     pub(crate) target: Option<PathBuf>,
     pub(crate) write: Vec<PathBuf>,
-    pub(crate) test: Option<String>,
     pub(crate) query: Option<String>,
     pub(crate) related: Vec<PathBuf>,
     pub(crate) search_query: Option<String>,
     pub(crate) repo_query: Option<String>,
     pub(crate) required_terms: Vec<String>,
-    pub(crate) force_patch: bool,
     pub(crate) pack: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
@@ -81,13 +79,11 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         recipe,
         target,
         write,
-        test,
         query,
         related,
         search_query,
         repo_query,
         required_terms,
-        force_patch,
         pack,
         profile,
         model_config,
@@ -119,7 +115,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         &task,
         recipe,
         target.as_ref(),
-        test.as_ref(),
+        !write.is_empty(),
         search_query.as_ref(),
         repo_query.as_ref(),
         &required_terms,
@@ -131,7 +127,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             task: !task.trim().is_empty(),
             target: target.is_some(),
             write: !write.is_empty(),
-            test: test.as_ref().is_some_and(|value| !value.trim().is_empty()),
             query: query.as_ref().is_some_and(|value| !value.trim().is_empty()),
             related: !related.is_empty(),
             search_query: search_query
@@ -141,7 +136,6 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
                 .as_ref()
                 .is_some_and(|value| !value.trim().is_empty()),
             required_terms: !required_terms.is_empty(),
-            force_patch,
         },
     )?;
     let profile = match profile {
@@ -155,13 +149,11 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             recipe,
             target,
             write,
-            test,
             query,
             related,
             search_query,
             repo_query,
             required_terms,
-            force_patch,
         },
     )?;
     let mut session_state = match session.as_ref() {
@@ -970,13 +962,11 @@ mod tests {
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: Some("unit".to_string()),
             query: None,
             related: vec![PathBuf::from("src/test.rs")],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -990,7 +980,6 @@ mod tests {
             input["target_path"],
             Value::String("src/lib.rs".to_string())
         );
-        assert_eq!(input["test_command"], Value::String("unit".to_string()));
         assert_eq!(
             input["related_files"],
             Value::Array(vec![Value::String("src/test.rs".to_string())])
@@ -1011,13 +1000,11 @@ mod tests {
                 PathBuf::from("src/core.rs"),
                 PathBuf::from("src/runtime.rs"),
             ],
-            test: Some("unit".to_string()),
             query: None,
             related: vec![PathBuf::from("src/core.rs")],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1037,17 +1024,14 @@ mod tests {
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: Some("unit".to_string()),
             query: None,
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
-        assert_eq!(input["test_command"], Value::String("unit".to_string()));
         assert_eq!(
             input["target_path"],
             Value::String("src/lib.rs".to_string())
@@ -1061,13 +1045,11 @@ mod tests {
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: Some("unit".to_string()),
             query: Some("EchoTools ToolProviderChoice provider module air-tools".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: true,
         })
         .unwrap();
 
@@ -1079,7 +1061,6 @@ mod tests {
             input["target_symbol_query"],
             Value::String("EchoTools".to_string())
         );
-        assert_eq!(input["force_patch"], Value::Bool(true));
     }
 
     #[test]
@@ -1089,13 +1070,11 @@ mod tests {
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("crates/air-cli/src/run_plan.rs")),
             write: vec![],
-            test: Some("cargo_test_package_filter".to_string()),
             query: None,
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1118,13 +1097,11 @@ mod tests {
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
             write: vec![PathBuf::from("crates/air-tools/src/repo_symbols.rs")],
-            test: Some("cargo_air_tools_repo_tests".to_string()),
             query: Some("repo_symbols rg fallback module split".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1141,13 +1118,11 @@ mod tests {
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
             write: vec![PathBuf::from("crates/air-tools/src/command_diagnostics.rs")],
-            test: Some("cargo_air_tools_tests".to_string()),
             query: Some("extract_command_diagnostics diagnostics parser helpers relocate".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1158,47 +1133,17 @@ mod tests {
     }
 
     #[test]
-    fn edit_input_honors_force_patch() {
-        let input = build_input(CodeInputOptions {
-            task: "change provider".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            test: Some("unit".to_string()),
-            query: None,
-            related: vec![PathBuf::from("src/lib_test.rs")],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-            force_patch: true,
-        })
-        .unwrap();
-
-        assert_eq!(input["force_patch"], Value::Bool(true));
-        assert_eq!(
-            input["target_path"],
-            Value::String("src/lib.rs".to_string())
-        );
-        assert_eq!(
-            input["related_files"],
-            Value::Array(vec![Value::String("src/lib_test.rs".to_string())])
-        );
-    }
-
-    #[test]
     fn explicit_edit_can_start_without_known_target() {
         let input = build_input(CodeInputOptions {
             task: "fix the failing add function".to_string(),
             recipe: CodeRecipe::Edit,
             target: None,
             write: vec![],
-            test: Some("edit_fixture_test".to_string()),
             query: Some("edit fixture add function test".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1212,10 +1157,7 @@ mod tests {
             Value::String("edit|fixture|add|function|test".to_string())
         );
         assert_eq!(input["target_symbol_query"], Value::String(String::new()));
-        assert_eq!(
-            input["test_command"],
-            Value::String("edit_fixture_test".to_string())
-        );
+        assert!(input.get("test_command").is_none());
     }
 
     #[test]
@@ -1225,18 +1167,14 @@ mod tests {
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: Some("unit".to_string()),
             query: None,
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
-
-        assert_eq!(input["force_patch"], Value::Bool(false));
-        assert_eq!(input["test_command"], Value::String("unit".to_string()));
+        assert!(input.get("test_command").is_none());
     }
 
     #[test]
@@ -1246,13 +1184,11 @@ mod tests {
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: None,
             query: None,
             related: vec![],
             search_query: Some("library docs".to_string()),
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1273,13 +1209,11 @@ mod tests {
             recipe: CodeRecipe::Auto,
             target: None,
             write: vec![],
-            test: None,
             query: Some("code agent repository exploration".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1301,13 +1235,11 @@ mod tests {
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: None,
             query: None,
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1326,13 +1258,11 @@ mod tests {
             recipe: CodeRecipe::Explore,
             target: None,
             write: vec![],
-            test: None,
             query: Some("code agent edit loop architecture".to_string()),
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 
@@ -1351,13 +1281,11 @@ mod tests {
             recipe: CodeRecipe::Auto,
             target: Some(PathBuf::from("src/lib.rs")),
             write: vec![],
-            test: Some("unit".to_string()),
             query: None,
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
         let explanation = json!({
@@ -1411,10 +1339,7 @@ mod tests {
             Value::String("examples/code-agent/edit.air-profile.yaml".to_string())
         );
         assert_eq!(explanation["pack"]["profile_override"], Value::Bool(false));
-        assert_eq!(
-            explanation["input"]["test_command"],
-            Value::String("unit".to_string())
-        );
+        assert!(explanation["input"].get("test_command").is_none());
     }
 
     #[test]
@@ -1469,10 +1394,11 @@ mod tests {
             "repo.context",
             "repo.symbols",
             "repo.references",
+            "lsp.references",
+            "lsp.diagnostics",
             "file.read",
             "file.search",
             "file.ops",
-            "file.patch",
             "test.run",
             "git.diff",
         ] {
@@ -1485,6 +1411,14 @@ mod tests {
                 "tool {tool} is not visible to the edit decider"
             );
         }
+        assert!(
+            declared_tools.contains("format.run"),
+            "formatter must be declared for the automatic post-write loop"
+        );
+        assert!(
+            !allowed_tools.contains("format.run"),
+            "formatter should be automatic, not a model-selected tool"
+        );
     }
 
     #[test]
@@ -1508,7 +1442,7 @@ mod tests {
             .filter_map(|tool| tool["literal"].as_str())
             .collect::<HashSet<_>>();
 
-        for tool in ["repo.symbols", "file.read", "file.ops", "file.patch"] {
+        for tool in ["repo.symbols", "file.read", "file.ops"] {
             assert!(
                 allowed_tools.contains(tool),
                 "targeted symbol rule should expose {tool}"
@@ -1612,9 +1546,11 @@ mod tests {
             serde_yaml::Value::String("file.ops".to_string())
         );
         assert_eq!(
-            targeted_force_rule["actions"][1]["input"]["object"]["allowed_tools"]["array"][1]
-                ["literal"],
-            serde_yaml::Value::String("file.patch".to_string())
+            targeted_force_rule["actions"][1]["input"]["object"]["allowed_tools"]["array"]
+                .as_sequence()
+                .unwrap()
+                .len(),
+            1
         );
         assert_eq!(
             targeted_force_rule["actions"][1]["input"]["object"]["observations"]["max_bytes"],
@@ -1770,10 +1706,6 @@ mod tests {
             .iter()
             .position(|id| *id == "record-file-ops-validation-failed")
             .unwrap();
-        let file_patch_failed = rule_ids
-            .iter()
-            .position(|id| *id == "record-file-patch-validation-failed")
-            .unwrap();
         let continue_after_act = rule_ids
             .iter()
             .position(|id| *id == "continue-after-act")
@@ -1782,10 +1714,6 @@ mod tests {
         assert!(
             file_ops_failed < continue_after_act,
             "file.ops validation failures must be observed before the generic post_act transition"
-        );
-        assert!(
-            file_patch_failed < continue_after_act,
-            "file.patch validation failures must be observed before the generic post_act transition"
         );
         let file_ops_rule = yaml["workflow"]["rules"]
             .as_sequence()
@@ -2132,15 +2060,15 @@ mod tests {
                 trace_file: "trace.jsonl".to_string(),
                 agent: "agent".to_string(),
                 step: 2,
-                rule: "patch".to_string(),
+                rule: "edit".to_string(),
                 action: "tool_batch_dispatch_item".to_string(),
                 status: "ok".to_string(),
                 model: None,
-                tool: Some("file.patch".to_string()),
+                tool: Some("file.ops".to_string()),
                 approval_for: Vec::new(),
                 files: vec!["src/lib.rs".to_string()],
                 artifact_ids: vec!["artifact:1".to_string()],
-                artifact_kinds: vec!["file_patch".to_string()],
+                artifact_kinds: vec!["file_ops".to_string()],
                 input_keys: Vec::new(),
                 output_keys: Vec::new(),
                 error: None,
@@ -2171,10 +2099,10 @@ mod tests {
         assert_eq!(summary.tool_call_count, 1);
         assert_eq!(summary.approval_count, 1);
         assert_eq!(summary.models, vec!["code_reviewer"]);
-        assert_eq!(summary.tools, vec!["file.patch"]);
+        assert_eq!(summary.tools, vec!["file.ops"]);
         assert_eq!(summary.approvals, vec!["file.write"]);
         assert_eq!(summary.files, vec!["src/lib.rs"]);
-        assert_eq!(summary.artifact_kinds, vec!["file_patch"]);
+        assert_eq!(summary.artifact_kinds, vec!["file_ops"]);
     }
 
     #[test]
@@ -2409,7 +2337,6 @@ mod tests {
             .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
                 task: "fix it".to_string(),
                 target: true,
-                test: true,
                 ..CodeAgentRouteFacts::default()
             })
             .unwrap();
@@ -2470,7 +2397,7 @@ mod tests {
         );
         assert_eq!(
             serde_json::to_value(&pack.routing_decision).unwrap()["route_index"],
-            Value::Number(0.into())
+            Value::Number(1.into())
         );
         assert!(!roundtrip.turns[0].completed);
     }
@@ -2574,13 +2501,11 @@ mod tests {
             recipe: CodeRecipe::Review,
             target: Some(PathBuf::from("scripts/search.cjs")),
             write: vec![],
-            test: None,
             query: Some("search".to_string()),
             related: vec![PathBuf::from("scripts/search.test.cjs")],
             search_query: None,
             repo_query: None,
             required_terms: vec!["playwright".to_string()],
-            force_patch: false,
         })
         .unwrap();
 
@@ -2610,13 +2535,11 @@ mod tests {
             recipe: CodeRecipe::Review,
             target: Some(PathBuf::from("scripts/search.cjs")),
             write: vec![],
-            test: None,
             query: None,
             related: vec![],
             search_query: None,
             repo_query: None,
             required_terms: vec![],
-            force_patch: false,
         })
         .unwrap();
 

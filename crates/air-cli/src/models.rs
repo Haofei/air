@@ -388,8 +388,8 @@ mod tests {
             "code_edit_decider prompt must not describe the old patch-only schema"
         );
         assert!(
-            edit_prompt.contains("file.patch"),
-            "code_edit_decider prompt must describe the unified diff patch tool"
+            !edit_prompt.contains("file.patch"),
+            "code_edit_decider prompt should keep the edit loop on file.ops instead of exposing patch as a second write primitive"
         );
         assert!(
             edit_prompt.contains("tool_schemas"),

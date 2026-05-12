@@ -23,13 +23,11 @@ pub(crate) struct CodeInputOptions {
     pub(crate) recipe: CodeRecipe,
     pub(crate) target: Option<PathBuf>,
     pub(crate) write: Vec<PathBuf>,
-    pub(crate) test: Option<String>,
     pub(crate) query: Option<String>,
     pub(crate) related: Vec<PathBuf>,
     pub(crate) search_query: Option<String>,
     pub(crate) repo_query: Option<String>,
     pub(crate) required_terms: Vec<String>,
-    pub(crate) force_patch: bool,
 }
 
 #[cfg(test)]
@@ -47,13 +45,11 @@ pub(crate) fn build_input_with_pack(
         recipe,
         target,
         write,
-        test,
         query,
         related,
         search_query,
         repo_query,
         required_terms,
-        force_patch,
     } = options;
 
     let recipe = resolve_recipe_name(
@@ -61,7 +57,7 @@ pub(crate) fn build_input_with_pack(
         &task,
         recipe,
         target.as_ref(),
-        test.as_ref(),
+        !write.is_empty(),
         search_query.as_ref(),
         repo_query.as_ref(),
         &required_terms,
@@ -101,7 +97,6 @@ pub(crate) fn build_input_with_pack(
             Ok(input)
         }
         CodeRecipe::Edit => {
-            let test = required_string(test, "--test", recipe)?;
             let query = query.unwrap_or_else(|| task.clone());
             let target_search_pattern = code_search_pattern(&query);
             let write_paths = edit_write_paths(target.as_ref(), &write);
@@ -126,8 +121,6 @@ pub(crate) fn build_input_with_pack(
             input.insert("related_files".to_string(), path_array(related));
             input.insert("write_paths".to_string(), path_array(write_paths));
             input.insert("acceptance_assertions".to_string(), acceptance_assertions);
-            input.insert("test_command".to_string(), Value::String(test));
-            input.insert("force_patch".to_string(), Value::Bool(force_patch));
             Ok(input)
         }
     }
@@ -183,13 +176,6 @@ fn required_path(value: Option<PathBuf>, flag: &str, recipe: CodeRecipe) -> Resu
     Ok(value)
 }
 
-fn required_string(value: Option<String>, flag: &str, recipe: CodeRecipe) -> Result<String> {
-    let Some(value) = value else {
-        bail!("air code --recipe {} requires {flag}", recipe_name(recipe));
-    };
-    Ok(value)
-}
-
 pub(crate) fn default_profile(pack: &CodeAgentPackContext, recipe: CodeRecipe) -> Result<PathBuf> {
     pack.default_profile_for_recipe(recipe_name(recipe))
 }
@@ -215,7 +201,7 @@ pub(crate) fn resolve_recipe(
     task: &str,
     recipe: CodeRecipe,
     target: Option<&PathBuf>,
-    test: Option<&String>,
+    write: bool,
     search_query: Option<&String>,
     repo_query: Option<&String>,
     required_terms: &[String],
@@ -229,7 +215,7 @@ pub(crate) fn resolve_recipe(
     let routing_decision = pack.resolve_auto_recipe_decision(&CodeAgentRouteFacts {
         task: task.to_string(),
         target: target.is_some(),
-        test: test.is_some(),
+        write,
         search_query: search_query.is_some(),
         repo_query: repo_query.is_some(),
         required_terms: !required_terms.is_empty(),
@@ -253,7 +239,7 @@ fn resolve_recipe_name(
     task: &str,
     recipe: CodeRecipe,
     target: Option<&PathBuf>,
-    test: Option<&String>,
+    write: bool,
     search_query: Option<&String>,
     repo_query: Option<&String>,
     required_terms: &[String],
@@ -263,7 +249,7 @@ fn resolve_recipe_name(
         task,
         recipe,
         target,
-        test,
+        write,
         search_query,
         repo_query,
         required_terms,
@@ -318,9 +304,19 @@ pub(crate) fn code_search_pattern(query: &str) -> String {
 }
 
 pub(crate) fn code_symbol_query(query: &str) -> String {
-    code_search_tokens(query)
+    let tokens = code_search_tokens(query);
+    if let Some(token) = tokens.iter().find(|token| {
+        !is_low_signal_search_token(token)
+            && token
+                .chars()
+                .any(|character| character.is_ascii_uppercase())
+    }) {
+        return token.clone();
+    }
+    tokens
         .into_iter()
-        .find(|token| is_symbol_like_search_token(token))
+        .filter(|token| !is_low_signal_search_token(token) && token.contains('_'))
+        .max_by_key(|token| token.len())
         .unwrap_or_default()
 }
 
@@ -391,13 +387,6 @@ fn search_token_rank(token: &str) -> u8 {
     rank
 }
 
-fn is_symbol_like_search_token(token: &str) -> bool {
-    token.contains('_')
-        || token
-            .chars()
-            .any(|character| character.is_ascii_uppercase())
-}
-
 fn is_low_signal_search_token(token: &str) -> bool {
     matches!(
         token.to_ascii_lowercase().as_str(),
@@ -426,6 +415,7 @@ fn is_low_signal_search_token(token: &str) -> bool {
             | "run"
             | "plan"
             | "add"
+            | "refactor"
     )
 }
 
@@ -441,13 +431,11 @@ mod tests {
             recipe: CodeRecipe::Edit,
             target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
             write: vec![PathBuf::from("crates/air-tools/src/context_tools.rs")],
-            test: Some("cargo_air_tools_tests".to_string()),
             query: Some("call_context_measure_tool".to_string()),
             related: Vec::new(),
             search_query: None,
             repo_query: None,
             required_terms: Vec::new(),
-            force_patch: false,
         })
         .unwrap();
 
@@ -465,6 +453,16 @@ mod tests {
                     "name": "call_context_measure_tool"
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn symbol_query_ignores_generic_refactor_verbs() {
+        assert_eq!(
+            code_symbol_query(
+                "Refactor crates/air-tools/src/candidate_tools.rs by extracting a helper"
+            ),
+            "candidate_tools"
         );
     }
 }

@@ -5,12 +5,12 @@ agent:
 
 routing:
   auto:
-    - recipe: edit
-      when:
-        all_present: [target, test]
     - recipe: review
       when:
         any_present: [search_query, repo_query, required_terms]
+    - recipe: edit
+      when:
+        any_present: [target, write]
     - recipe: explore
       fallback: true
 
@@ -20,7 +20,7 @@ recipes:
     intent: "Fallback read-only exploration profile used before CLI recipe inference."
     input:
       required: [task]
-      optional: [target, write, test, query, related, search_query, repo_query, required_terms, force_patch]
+      optional: [target, write, query, related, search_query, repo_query, required_terms]
     completion:
       any:
         - exists: /exploration
@@ -49,10 +49,10 @@ recipes:
             - exists: /review
   - id: edit
     default_profile: edit.air-profile.yaml
-    intent: "Run the unified bounded code edit loop over an allowlisted test; target may be known or discovered before writing."
+    intent: "Run the unified bounded code edit loop with configured validation; target may be known or discovered before writing."
     input:
-      required: [task, test]
-      optional: [query, target, write, related, force_patch, target_search_pattern, target_symbol_query]
+      required: [task]
+      optional: [query, target, write, related, target_search_pattern, target_symbol_query]
     completion:
       any:
         - equals:

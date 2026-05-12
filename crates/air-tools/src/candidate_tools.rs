@@ -1,26 +1,9 @@
 use super::*;
 
-fn validate_test_command_allowlisted(
-    name: &str,
-    test_command: &str,
-    allowed_test_commands: &[String],
-) -> Result<(), RuntimeError> {
-    if !allowed_test_commands
-        .iter()
-        .any(|allowed| allowed == test_command)
-    {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} candidate test_command {test_command} is not allowlisted"
-        )));
-    }
-    Ok(())
-}
-
 pub(super) fn call_candidate_validate_tool(
     name: &str,
     input: &Value,
     base_dir: &Path,
-    allowed_test_commands: &[String],
 ) -> Result<Value, RuntimeError> {
     let candidate = input.get("candidate").unwrap_or(input);
     let target_path = required_input_string(name, candidate, "target_path")?;
@@ -35,11 +18,38 @@ pub(super) fn call_candidate_validate_tool(
         )));
     }
 
-    let test_command = required_input_string(name, candidate, "test_command")?;
-    validate_test_command_allowlisted(name, test_command, allowed_test_commands)?;
+    let related_files = validate_related_files(name, candidate, &base_dir, target_path)?;
 
+    Ok(json!({
+        "valid": true,
+        "target_path": target_path,
+        "related_files": related_files,
+        "artifacts": [{
+            "id": format!("candidate-validation:{target_path}"),
+            "kind": "candidate_validation",
+            "title": "edit candidate validation",
+            "uri": format!("air://candidate/{target_path}"),
+            "content": format!("valid: true\ntarget_path: {target_path}"),
+            "metadata": {
+                "provider": "candidate_validate",
+                "valid": true,
+                "target_path": target_path
+            }
+        }]
+    }))
+}
+
+fn validate_related_files(
+    name: &str,
+    candidate_input: &Value,
+    base_dir: &Path,
+    target_path: &str,
+) -> Result<Vec<String>, RuntimeError> {
     let mut related_files = Vec::new();
-    if let Some(files) = candidate.get("related_files").and_then(Value::as_array) {
+    if let Some(files) = candidate_input
+        .get("related_files")
+        .and_then(Value::as_array)
+    {
         for file in files {
             let Some(file) = file.as_str() else {
                 return Err(RuntimeError::Provider(format!(
@@ -49,7 +59,7 @@ pub(super) fn call_candidate_validate_tool(
             validate_git_pathspec(name, file)?;
             let absolute =
                 canonicalize_tool_path(name, "candidate.related_files", &base_dir.join(file))?;
-            if !absolute.starts_with(&base_dir) || !absolute.is_file() {
+            if !absolute.starts_with(base_dir) || !absolute.is_file() {
                 return Err(RuntimeError::Provider(format!(
                     "tool {name} candidate related file {file} is not a readable file under {}",
                     base_dir.display()
@@ -60,24 +70,5 @@ pub(super) fn call_candidate_validate_tool(
             }
         }
     }
-
-    Ok(json!({
-        "valid": true,
-        "target_path": target_path,
-        "related_files": related_files,
-        "test_command": test_command,
-        "artifacts": [{
-            "id": format!("candidate-validation:{target_path}:{test_command}"),
-            "kind": "candidate_validation",
-            "title": "refactor candidate validation",
-            "uri": format!("air://candidate/{target_path}"),
-            "content": format!("valid: true\ntarget_path: {target_path}\ntest_command: {test_command}"),
-            "metadata": {
-                "provider": "candidate_validate",
-                "valid": true,
-                "target_path": target_path,
-                "test_command": test_command
-            }
-        }]
-    }))
+    Ok(related_files)
 }
