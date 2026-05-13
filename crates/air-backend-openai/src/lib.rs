@@ -59,6 +59,9 @@ pub struct OpenAiModelConfig {
 
     #[serde(default)]
     pub native_tool_calls: Option<bool>,
+
+    #[serde(default)]
+    pub trace_provider_io: Option<bool>,
 }
 
 #[derive(Debug, Error)]
@@ -241,18 +244,28 @@ impl OpenAiCompatibleModelProvider {
         let base_url = resolve_base_url(model_config)?;
         let model_name = resolve_model_name(model_config)?;
         let request = build_chat_completion_body(model_config, model_name, input)?;
-        self.last_request_stats = Some(chat_completion_request_stats(&request.body));
+        let trace_provider_io = model_config.trace_provider_io == Some(true);
+        self.last_request_stats = Some(chat_completion_request_stats(
+            &request.body,
+            trace_provider_io,
+        ));
 
         let request_timeout =
             effective_request_timeout(model_config.request_timeout_seconds, action_timeout);
         let client = openai_client(api_key, &base_url);
 
-        let response = self.runtime.block_on(async {
+        let response: Value = self.runtime.block_on(async {
             tokio::time::timeout(request_timeout, client.chat().create_byot(request.body))
                 .await
                 .map_err(|_| provider_timeout_error("chat/completions", request_timeout))?
                 .map_err(provider_error)
         })?;
+
+        if trace_provider_io {
+            if let Some(stats) = self.last_request_stats.as_mut() {
+                stats.provider_response = Some(response.clone());
+            }
+        }
 
         parse_chat_completion_content(&response, &request.tool_name_map)
     }
@@ -411,7 +424,7 @@ fn build_chat_completion_body(
     })
 }
 
-fn chat_completion_request_stats(body: &Value) -> ModelRequestStats {
+fn chat_completion_request_stats(body: &Value, trace_provider_io: bool) -> ModelRequestStats {
     ModelRequestStats {
         provider_request_bytes: serde_json::to_vec(body)
             .map(|bytes| bytes.len())
@@ -422,6 +435,8 @@ fn chat_completion_request_stats(body: &Value) -> ModelRequestStats {
             .and_then(|tools| serde_json::to_vec(tools).ok())
             .map(|bytes| bytes.len())
             .unwrap_or(0),
+        provider_request: trace_provider_io.then(|| body.clone()),
+        provider_response: None,
     }
 }
 
@@ -469,7 +484,7 @@ fn attach_native_tool_calls(
             "function": {
                 "name": safe_name,
                 "description": native_tool_description(original_name, schema),
-                "parameters": native_tool_parameters(schema),
+                "parameters": native_tool_parameters(original_name, schema),
                 "strict": false
             }
         }));
@@ -521,6 +536,18 @@ fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize
 }
 
 fn native_tool_description(original_name: &str, schema: Option<&Value>) -> String {
+    match original_name {
+        "read" => {
+            return "Read a repo file or line range. Prefer narrow offset/limit reads after search results.".to_string();
+        }
+        "grep" => {
+            return "Search file contents with a regex or literal pattern and return matching line locations.".to_string();
+        }
+        "edit" => {
+            return "Edit one file by replacing an exact oldString with newString. Read or search the target first.".to_string();
+        }
+        _ => {}
+    }
     let Some(schema) = schema else {
         return format!("AIR tool {original_name}");
     };
@@ -534,7 +561,56 @@ fn native_tool_description(original_name: &str, schema: Option<&Value>) -> Strin
     parts.join("; ")
 }
 
-fn native_tool_parameters(schema: Option<&Value>) -> Value {
+fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value {
+    match original_name {
+        "read" => {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "filePath": {"type": "string", "description": "Repo-relative file path to read."},
+                    "offset": {"type": "integer", "description": "Optional zero-based line offset."},
+                    "limit": {"type": "integer", "description": "Optional maximum number of lines to read."},
+                    "path": {"type": "string", "description": "Alias for filePath."},
+                    "start_line": {"type": "integer", "description": "Optional one-based start line."},
+                    "end_line": {"type": "integer", "description": "Optional one-based end line."}
+                },
+                "required": ["filePath"],
+                "additionalProperties": true
+            });
+        }
+        "grep" => {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "Regex or literal pattern to search for."},
+                    "path": {"type": "string", "description": "Repo-relative file or directory to search. Defaults to the repo root."},
+                    "include": {"type": "string", "description": "Optional glob-like hint for files to include."},
+                    "maxMatches": {"type": "integer", "description": "Optional maximum matches to return."},
+                    "contextLines": {"type": "integer", "description": "Optional surrounding context lines."}
+                },
+                "required": ["pattern"],
+                "additionalProperties": true
+            });
+        }
+        "edit" => {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "filePath": {"type": "string", "description": "Repo-relative file path to edit."},
+                    "oldString": {"type": "string", "description": "Exact text to replace. Include enough surrounding context to be unique."},
+                    "newString": {"type": "string", "description": "Replacement text."},
+                    "replaceAll": {"type": "boolean", "description": "Replace every occurrence only when all matches should change."},
+                    "path": {"type": "string", "description": "Alias for filePath."},
+                    "old_string": {"type": "string", "description": "Alias for oldString."},
+                    "new_string": {"type": "string", "description": "Alias for newString."},
+                    "match_strategy": {"type": "string", "description": "Optional AIR edit matching strategy."}
+                },
+                "required": ["filePath", "oldString", "newString"],
+                "additionalProperties": true
+            });
+        }
+        _ => {}
+    }
     let mut properties = serde_json::Map::new();
     let mut required_names = Vec::new();
     if let Some(schema) = schema {
@@ -618,17 +694,22 @@ fn input_to_native_tool_content(input: &Value) -> Result<String, RuntimeError> {
 
     let mut projected = Map::new();
     let mut context = Map::new();
+    let mut transcript = Vec::new();
     for (key, value) in object {
         match key.as_str() {
             "allowed_tools" | "tool_schemas" => {}
             "observations" | "edit_evidence" => {
+                let compacted = compact_observation_history(value);
+                if let Some(section) = render_tool_transcript(key, &compacted) {
+                    transcript.push(section);
+                }
                 projected.insert(
                     if key == "observations" {
                         "recent_tool_results".to_string()
                     } else {
                         key.clone()
                     },
-                    compact_observation_history(value),
+                    compacted,
                 );
             }
             "tool_policy" => {
@@ -654,12 +735,176 @@ fn input_to_native_tool_content(input: &Value) -> Result<String, RuntimeError> {
     if !context.is_empty() {
         projected.insert("context".to_string(), Value::Object(context));
     }
+    if !transcript.is_empty() {
+        projected.insert(
+            "tool_transcript".to_string(),
+            Value::String(truncate_text(&transcript.join("\n\n"), 60_000)),
+        );
+    }
     projected.insert(
         "response_contract".to_string(),
         json!("Use provider-native tool calls for actions. Return complete=true with no tool calls only when the task is verified complete or no edit is needed."),
     );
 
     serde_json::to_string(&Value::Object(projected)).map_err(provider_error)
+}
+
+fn render_tool_transcript(label: &str, value: &Value) -> Option<String> {
+    let items = value.as_array()?;
+    let mut lines = vec![format!("<{label}>")];
+    for item in items {
+        render_observation_transcript(item, &mut lines);
+    }
+    lines.push(format!("</{label}>"));
+    Some(lines.join("\n"))
+}
+
+fn render_observation_transcript(value: &Value, lines: &mut Vec<String>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    if let Some(action) = object.get("action").and_then(Value::as_str) {
+        lines.push(format!("action: {action}"));
+    }
+    if let Some(rationale) = object.get("rationale").and_then(Value::as_str) {
+        lines.push(format!("rationale: {}", truncate_text(rationale, 800)));
+    }
+    if let Some(results) = object.get("result").and_then(Value::as_array) {
+        for result in results {
+            render_tool_result_transcript(result, lines);
+        }
+    }
+}
+
+fn render_tool_result_transcript(value: &Value, lines: &mut Vec<String>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let tool = object.get("tool").and_then(Value::as_str).unwrap_or("tool");
+    let status = object
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    lines.push(format!("<tool_result tool=\"{tool}\" status=\"{status}\">"));
+
+    if let Some(input) = object.get("input") {
+        lines.push(format!("input: {}", compact_json(input)));
+    }
+    if let Some(error) = object.get("error").and_then(Value::as_str) {
+        lines.push(format!("error: {}", truncate_text(error, 1_000)));
+    }
+    if let Some(output) = object.get("output") {
+        render_tool_output_transcript(tool, output, lines);
+    }
+    lines.push("</tool_result>".to_string());
+}
+
+fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<String>) {
+    match tool {
+        "file.read" | "read" => render_file_read_transcript(output, lines),
+        "file.read_many" | "read_many" => render_file_read_many_transcript(output, lines),
+        "file.search" | "grep" => render_file_search_transcript(output, lines),
+        "repo.symbols" => render_symbols_transcript(output, lines),
+        _ => {
+            lines.push(format!(
+                "output: {}",
+                truncate_text(&compact_json(output), 4_000)
+            ));
+        }
+    }
+}
+
+fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
+    let path = output
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    lines.push(format!("<file path=\"{path}\">"));
+    let content = output
+        .get("content_preview")
+        .or_else(|| output.get("content"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    if content.is_empty() {
+        lines.push(truncate_text(&compact_json(output), 4_000));
+    } else {
+        lines.push(truncate_text(content, 4_000));
+    }
+    lines.push("</file>".to_string());
+}
+
+fn render_file_read_many_transcript(output: &Value, lines: &mut Vec<String>) {
+    let Some(files) = output.get("files").and_then(Value::as_array) else {
+        lines.push(format!(
+            "output: {}",
+            truncate_text(&compact_json(output), 4_000)
+        ));
+        return;
+    };
+    lines.push(format!("files: {}", files.len()));
+    for file in files.iter().take(8) {
+        render_file_read_transcript(file, lines);
+    }
+    if let Some(truncation_hint) = output.get("truncation_hint").and_then(Value::as_str) {
+        lines.push(format!(
+            "truncation_hint: {}",
+            truncate_text(truncation_hint, 1_000)
+        ));
+    }
+}
+
+fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
+    let match_count = output
+        .get("matches")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    lines.push(format!("Found {match_count} matches"));
+    let Some(matches) = output.get("matches").and_then(Value::as_array) else {
+        return;
+    };
+    for item in matches.iter().take(40) {
+        let Some(object) = item.as_object() else {
+            continue;
+        };
+        let path = object.get("path").and_then(Value::as_str).unwrap_or("");
+        let line = object
+            .get("line")
+            .or_else(|| object.get("line_number"))
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let text = object
+            .get("text")
+            .or_else(|| object.get("line_text"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        lines.push(format!("{path}:{line}: {}", truncate_text(text, 500)));
+    }
+}
+
+fn render_symbols_transcript(output: &Value, lines: &mut Vec<String>) {
+    let Some(symbols) = output.get("symbols").and_then(Value::as_array) else {
+        lines.push(format!(
+            "output: {}",
+            truncate_text(&compact_json(output), 4_000)
+        ));
+        return;
+    };
+    lines.push("symbols:".to_string());
+    for symbol in symbols.iter().take(60) {
+        let Some(object) = symbol.as_object() else {
+            continue;
+        };
+        let path = object.get("path").and_then(Value::as_str).unwrap_or("");
+        let line = object.get("line").and_then(Value::as_u64).unwrap_or(0);
+        let end_line = object
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .unwrap_or(line);
+        let kind = object.get("kind").and_then(Value::as_str).unwrap_or("");
+        let name = object.get("name").and_then(Value::as_str).unwrap_or("");
+        lines.push(format!("{path}:{line}-{end_line} {kind} {name}"));
+    }
 }
 
 fn compact_observation_history(value: &Value) -> Value {
@@ -814,6 +1059,11 @@ fn compact_tool_output(value: &Value) -> Value {
         "failed_count",
         "bytes",
         "path",
+        "repo",
+        "query",
+        "effective_query",
+        "mode",
+        "names",
         "start_line",
         "end_line",
         "truncated",
@@ -826,6 +1076,9 @@ fn compact_tool_output(value: &Value) -> Value {
         "diagnostics",
         "todos",
         "matches",
+        "symbols",
+        "references",
+        "locations",
     ] {
         if let Some(value) = object.get(field) {
             compact.insert(
@@ -844,6 +1097,63 @@ fn compact_tool_output(value: &Value) -> Value {
         compact.insert(
             "artifact_refs".to_string(),
             compact_artifact_refs(artifacts),
+        );
+    }
+    if let Some(files) = object.get("files").and_then(Value::as_array) {
+        compact.insert(
+            "files".to_string(),
+            Value::Array(
+                files
+                    .iter()
+                    .take(8)
+                    .map(compact_file_read_output_for_prompt)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
+    if compact.is_empty() {
+        compact_json_value_for_prompt(value, 3, 8, 4_000)
+    } else {
+        Value::Object(compact)
+    }
+}
+
+fn compact_file_read_output_for_prompt(value: &Value) -> Value {
+    let Some(object) = value.as_object() else {
+        return compact_json_value_for_prompt(value, 3, 8, 4_000);
+    };
+    let mut compact = Map::new();
+    for field in [
+        "path",
+        "bytes",
+        "source_bytes",
+        "start_line",
+        "end_line",
+        "match_line",
+        "contains",
+        "context_lines",
+        "total_lines",
+        "truncated",
+        "full_output_path",
+        "truncation_hint",
+        "content_format",
+        "unscoped_read",
+        "line_numbers",
+    ] {
+        if let Some(value) = object.get(field) {
+            compact.insert(
+                field.to_string(),
+                compact_json_value_for_prompt(value, 3, 8, 1_000),
+            );
+        }
+    }
+    if let Some(content) = object
+        .get("content_preview")
+        .or_else(|| object.get("content"))
+    {
+        compact.insert(
+            "content_preview".to_string(),
+            compact_stringish_value(content, 4_000),
         );
     }
     if compact.is_empty() {
@@ -1175,6 +1485,24 @@ mod tests {
     }
 
     #[test]
+    fn request_stats_include_provider_request_only_when_enabled() {
+        let body = json!({
+            "model": "glm-5.1",
+            "messages": [{"role": "user", "content": "inspect the code"}],
+            "tools": [{"type": "function", "function": {"name": "file_read"}}]
+        });
+
+        let plain = chat_completion_request_stats(&body, false);
+        assert_eq!(plain.provider_user_content_bytes, "inspect the code".len());
+        assert!(plain.provider_request.is_none());
+        assert!(plain.provider_response.is_none());
+
+        let traced = chat_completion_request_stats(&body, true);
+        assert_eq!(traced.provider_request, Some(body));
+        assert!(traced.provider_response.is_none());
+    }
+
+    #[test]
     fn strips_non_json_fence_as_content_object() {
         let value = parse_chat_completion_content(
             &json!({
@@ -1292,6 +1620,30 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_file_accepts_provider_io_trace_flag() {
+        let path = temp_file_path("air-model-config-provider-io", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "planner": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "gpt-5.1",
+                  "trace_provider_io": true
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(config.models["planner"].trace_provider_io, Some(true));
+    }
+
+    #[test]
     fn parse_config_file_rejects_zero_request_timeout_seconds() {
         let path = temp_file_path("air-model-config-timeout-zero", "json");
         fs::write(
@@ -1332,6 +1684,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            trace_provider_io: None,
         };
 
         assert_eq!(
@@ -1358,6 +1711,7 @@ mod tests {
             })),
             extra_body: None,
             native_tool_calls: None,
+            trace_provider_io: None,
         };
 
         assert_eq!(
@@ -1529,17 +1883,22 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            trace_provider_io: None,
         };
         let request = build_chat_completion_body(
             &config,
             "glm-5.1".to_string(),
             &json!({
                 "task": "choose tools",
-                "allowed_tools": ["file.ops", "repo.search"],
+                "allowed_tools": ["edit", "repo.search"],
                 "tool_schemas": {
-                    "file.ops": {
-                        "required": {"operations": "array of edit operations"},
-                        "optional": {"dry_run": "boolean"}
+                    "edit": {
+                        "required": {
+                            "filePath": "repo-relative file path",
+                            "oldString": "exact text to replace",
+                            "newString": "replacement text"
+                        },
+                        "optional": {"replaceAll": "boolean"}
                     },
                     "repo.search": {
                         "required": {"query": "search text"}
@@ -1549,12 +1908,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(request.tool_name_map["file_ops"], "file.ops");
+        assert_eq!(request.tool_name_map["edit"], "edit");
         assert_eq!(request.tool_name_map["repo_search"], "repo.search");
         assert_eq!(request.body["tool_choice"], json!("auto"));
         assert_eq!(
             request.body["tools"][0]["function"]["parameters"]["required"],
-            json!(["operations"])
+            json!(["filePath", "oldString", "newString"])
         );
         let content = request.body["messages"][0]["content"].as_str().unwrap();
         assert!(content.contains("choose tools"));
@@ -1583,6 +1942,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            trace_provider_io: None,
         };
         let long_content = "x".repeat(10_000);
         let input = json!({
@@ -1668,6 +2028,120 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_content_preserves_symbol_navigation_output() {
+        let input = json!({
+            "task": "inspect helper",
+            "edit_evidence": [{
+                "action": "code_context_evidence",
+                "requested": [{
+                    "tool": "repo.symbols",
+                    "input": {
+                        "path": "crates/air-tools/src/file_tools.rs",
+                        "query": "maybe_save_full_output"
+                    }
+                }],
+                "result": [{
+                    "tool": "repo.symbols",
+                    "status": "ok",
+                    "input": {
+                        "path": "crates/air-tools/src/file_tools.rs",
+                        "query": "maybe_save_full_output"
+                    },
+                    "output": {
+                        "repo": "/Users/hwang/work/air",
+                        "query": "maybe_save_full_output",
+                        "effective_query": "maybe_save_full_output",
+                        "mode": "fixed",
+                        "bytes": 72,
+                        "symbols": [{
+                            "name": "maybe_save_full_output",
+                            "kind": "function",
+                            "path": "crates/air-tools/src/file_tools.rs",
+                            "line": 473,
+                            "end_line": 487,
+                            "text": "fn maybe_save_full_output("
+                        }]
+                    }
+                }]
+            }]
+        });
+
+        let content = input_to_native_tool_content(&input).unwrap();
+        let projected: Value = serde_json::from_str(&content).unwrap();
+        let output = &projected["edit_evidence"][0]["result"][0]["output"];
+
+        assert_eq!(output["effective_query"], json!("maybe_save_full_output"));
+        assert_eq!(
+            output["symbols"][0]["name"],
+            json!("maybe_save_full_output")
+        );
+        assert_eq!(output["symbols"][0]["line"], json!(473));
+        assert_eq!(output["symbols"][0]["end_line"], json!(487));
+    }
+
+    #[test]
+    fn native_tool_content_renders_read_many_files_as_file_snippets() {
+        let input = json!({
+            "task": "move helper",
+            "edit_evidence": [{
+                "action": "file_read_many_evidence",
+                "requested": [{
+                    "tool": "read_many",
+                    "input": {
+                        "files": ["src/lib.rs", "src/git_tools.rs"],
+                        "line_numbers": true
+                    }
+                }],
+                "result": [{
+                    "tool": "read_many",
+                    "status": "ok",
+                    "input": {
+                        "files": ["src/lib.rs", "src/git_tools.rs"],
+                        "line_numbers": true
+                    },
+                    "output": {
+                        "file_count": 2,
+                        "bytes": 128,
+                        "truncated": false,
+                        "files": [{
+                            "path": "src/lib.rs",
+                            "content": "10 fn old_helper() {}\n11 fn keep() {}",
+                            "start_line": 10,
+                            "end_line": 11,
+                            "content_format": "line_numbered"
+                        }, {
+                            "path": "src/git_tools.rs",
+                            "content": "1 pub(super) fn git_diff_paths() {}",
+                            "start_line": 1,
+                            "end_line": 1,
+                            "content_format": "line_numbered"
+                        }]
+                    }
+                }]
+            }]
+        });
+
+        let content = input_to_native_tool_content(&input).unwrap();
+        let projected: Value = serde_json::from_str(&content).unwrap();
+        let compacted = &projected["edit_evidence"][0]["result"][0]["output"];
+        let transcript = projected["tool_transcript"].as_str().unwrap();
+
+        assert_eq!(compacted["files"][0]["path"], json!("src/lib.rs"));
+        assert!(compacted["files"][0]["content_preview"]
+            .as_str()
+            .is_some_and(|content| content.contains("fn old_helper")));
+        assert!(
+            transcript.contains("<file path=\"src/lib.rs\">"),
+            "{transcript}"
+        );
+        assert!(transcript.contains("fn old_helper"), "{transcript}");
+        assert!(
+            transcript.contains("<file path=\"src/git_tools.rs\">"),
+            "{transcript}"
+        );
+    }
+
+    #[test]
     fn native_tool_content_prunes_old_tool_results_like_opencode() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
@@ -1682,6 +2156,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            trace_provider_io: None,
         };
         let old_content = "old-result-".repeat(10_000);
         let recent_content = "recent-result-".repeat(100);
@@ -1740,7 +2215,7 @@ mod tests {
     #[test]
     fn native_tool_calls_parse_to_air_decision_shape() {
         let mut tool_name_map = BTreeMap::new();
-        tool_name_map.insert("file_ops".to_string(), "file.ops".to_string());
+        tool_name_map.insert("edit".to_string(), "edit".to_string());
 
         let value = parse_chat_completion_content(
             &json!({
@@ -1750,8 +2225,8 @@ mod tests {
                         "tool_calls": [{
                             "type": "function",
                             "function": {
-                                "name": "file_ops",
-                                "arguments": "{\"operations\":[{\"kind\":\"edit\"}]}"
+                                "name": "edit",
+                                "arguments": "{\"filePath\":\"src/lib.rs\",\"oldString\":\"old\",\"newString\":\"new\"}"
                             }
                         }]
                     }
@@ -1766,9 +2241,11 @@ mod tests {
             json!({
                 "complete": false,
                 "tool_calls": [{
-                    "tool": "file.ops",
+                    "tool": "edit",
                     "input": {
-                        "operations": [{"kind": "edit"}]
+                        "filePath": "src/lib.rs",
+                        "oldString": "old",
+                        "newString": "new"
                     }
                 }],
                 "rationale": "Need an edit."
@@ -1867,6 +2344,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            trace_provider_io: None,
         };
 
         assert_eq!(
@@ -1893,6 +2371,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            trace_provider_io: None,
         };
 
         assert_eq!(
@@ -1920,6 +2399,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            trace_provider_io: None,
         };
 
         assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");
@@ -1943,6 +2423,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            trace_provider_io: None,
         };
 
         assert_eq!(resolve_model_name(&config).unwrap(), "runtime-model");

@@ -389,8 +389,28 @@ function valueKind(value) {
 
 fn push_strict_js_runtime(output: &mut String) {
     output.push_str(
-        r#"function readJson(path) {
+r#"function readJson(path) {
   return JSON.parse(fs.readFileSync(path, 'utf8'));
+}
+
+function loadDotEnv(path = '.env') {
+  if (!fs.existsSync(path)) return;
+  const source = fs.readFileSync(path, 'utf8');
+  for (const rawLine of source.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith('#')) continue;
+    const separator = line.indexOf('=');
+    if (separator <= 0) continue;
+    const key = line.slice(0, separator).trim();
+    let value = line.slice(separator + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+    if (!(key in process.env)) process.env[key] = value;
+  }
 }
 
 function parseArgs(argv) {
@@ -475,29 +495,8 @@ function validateToolCapability(module, action, toolConfigRoot) {
   }
 }
 
-function enforceApprovalRequiredBatchIsolation(module, batchValue) {
-  if (batchValue.length <= 1) {
-    return;
-  }
-  const required = module.policy?.require_approval ?? [];
-  if (required.length === 0) {
-    return;
-  }
-  for (const dispatchValue of batchValue) {
-    let toolName = dispatchValue && typeof dispatchValue === 'object' && !Array.isArray(dispatchValue) ? dispatchValue.tool : undefined;
-    if (typeof toolName === 'string') {
-      toolName = normalizeModelSelectedToolName(module, toolName).toolName;
-    }
-    const toolSpec = (module.tools ?? []).find((tool) => tool.name === toolName);
-    const capability = toolSpec?.capability;
-    if (capability && required.includes(capability)) {
-      throw new Error(`tool_batch_dispatch containing approval-required capability ${capability} must be isolated: attempted ${batchValue.length} calls`);
-    }
-  }
-}
-
 function applyWriteScope(toolName, inputValue, writeScope) {
-  if (!['file.write', 'file.edit', 'file.ops', 'file.patch'].includes(toolName) || writeScope == null) {
+  if (!['file.write', 'file.edit', 'edit'].includes(toolName) || writeScope == null) {
     return inputValue;
   }
   let allowedPaths;
@@ -1059,12 +1058,6 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         if (batchValue.length > maxCalls) {
           const error = new Error(`tool_batch_dispatch max_calls exceeded: limit=${maxCalls} attempted=${batchValue.length}`);
           emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch', status: 'error', input: batchValue, meta: { max_calls: maxCalls, attempted: batchValue.length }, error: error.message });
-          throw error;
-        }
-        try {
-          enforceApprovalRequiredBatchIsolation(module, batchValue);
-        } catch (error) {
-          emitTrace({ agent: moduleId, step, rule: ruleId, action: 'tool_batch_dispatch', status: 'error', input: batchValue, meta: { attempted: batchValue.length }, error: String(error?.message ?? error) });
           throw error;
         }
         const batchOutputs = [];
@@ -1712,6 +1705,8 @@ mod tests {
         assert!(code.contains("resultValue = await callTool(toolConfig, action.tool, inputValue);"));
         assert!(code.contains("field.endsWith('[]')"));
         assert!(code.contains("inputs[field].push(value);"));
+        assert!(code.contains("function loadDotEnv"));
+        assert!(code.contains("loadDotEnv();"));
         assert!(code.contains("function normalizePath"));
         assert!(code.contains("path = normalizePath(path);"));
         assert!(code.contains("function validateRunPlanCapabilities"));
@@ -1762,8 +1757,6 @@ mod tests {
         assert!(code.contains("action.kind === 'tool_batch_dispatch'"));
         assert!(code.contains("tool_batch_dispatch input must be an array"));
         assert!(code.contains("tool_batch_dispatch max_calls exceeded"));
-        assert!(code.contains("function enforceApprovalRequiredBatchIsolation"));
-        assert!(code.contains("approval-required capability"));
         assert!(code.contains("tool_batch_dispatch_item_start"));
         assert!(code.contains("batchOutputs.push"));
         assert!(code.contains("requested_tool"));

@@ -141,9 +141,6 @@ pub enum RuntimeError {
     #[error("tool_batch_dispatch max_calls exceeded: limit={limit} attempted={attempted}")]
     ToolBatchDispatchLimitExceeded { limit: u32, attempted: u32 },
 
-    #[error("tool_batch_dispatch containing approval-required capability {capability} must be isolated: attempted {attempted} calls")]
-    ToolBatchDispatchApprovalIsolation { capability: String, attempted: u32 },
-
     #[error("tool_batch_dispatch selected tool {tool}, but allowed_tools only permits {allowed_tools:?}")]
     ToolBatchDispatchToolNotAllowed {
         tool: String,
@@ -275,11 +272,17 @@ pub trait ModelProvider {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ModelRequestStats {
     pub provider_request_bytes: usize,
     pub provider_user_content_bytes: usize,
     pub provider_tools_bytes: usize,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_request: Option<Value>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_response: Option<Value>,
 }
 
 pub fn system_return_event(outputs: State) -> TraceEvent {
@@ -1259,40 +1262,6 @@ where
             );
             return Err(error);
         }
-        let resolved_dispatches = dispatch_items
-            .iter()
-            .filter_map(|(_, dispatch)| dispatch.as_ref().ok().cloned())
-            .map(|(tool, input)| {
-                let (tool, _) = normalize_model_selected_tool_name(context.module, tool);
-                (tool, input)
-            })
-            .collect::<Vec<_>>();
-        if let Err(error) = enforce_approval_required_batch_isolation(
-            context.module,
-            &resolved_dispatches,
-            attempted,
-        ) {
-            if on_error == ToolErrorMode::Observe {
-                observe_tool_batch_dispatch_error(
-                    context,
-                    input,
-                    output,
-                    attempted,
-                    max_calls,
-                    &error.to_string(),
-                )?;
-                return Ok(());
-            }
-            context.push_event_with_meta(
-                "tool_batch_dispatch",
-                Some(input),
-                None,
-                Some(json!({"attempted": attempted})),
-                Err(error.to_string()),
-            );
-            return Err(error);
-        }
-
         let max_attempts = retry
             .as_ref()
             .map(|retry| retry.max_attempts)
@@ -2121,40 +2090,6 @@ fn validate_tool_capability<T: ToolProvider>(
     Ok(())
 }
 
-fn enforce_approval_required_batch_isolation(
-    module: &AirModule,
-    dispatches: &[(String, Value)],
-    attempted: u32,
-) -> Result<(), RuntimeError> {
-    if attempted <= 1 {
-        return Ok(());
-    }
-    for (tool, _) in dispatches {
-        let Some(tool_spec) = module
-            .tools
-            .iter()
-            .find(|candidate| candidate.name == *tool)
-        else {
-            continue;
-        };
-        let Some(capability) = tool_spec.capability.as_ref() else {
-            continue;
-        };
-        if module
-            .policy
-            .require_approval
-            .iter()
-            .any(|required| required == capability)
-        {
-            return Err(RuntimeError::ToolBatchDispatchApprovalIsolation {
-                capability: capability.clone(),
-                attempted,
-            });
-        }
-    }
-    Ok(())
-}
-
 fn validate_batch_allowed_tool(tool: &str, allowed_tools: &[String]) -> Result<(), RuntimeError> {
     if allowed_tools.is_empty() || allowed_tools.iter().any(|allowed| allowed == tool) {
         return Ok(());
@@ -2242,7 +2177,7 @@ fn apply_write_scope_to_tool_input(
     input: Value,
     write_scope: Option<&Value>,
 ) -> Result<Value, RuntimeError> {
-    if !matches!(tool, "file.write" | "file.edit" | "file.ops" | "file.patch") {
+    if !matches!(tool, "file.write" | "file.edit" | "edit") {
         return Ok(input);
     }
     let Some(write_scope) = write_scope else {
@@ -2657,6 +2592,12 @@ fn model_call_result_meta_with_provider(
                 "provider_tools_bytes".to_string(),
                 json!(stats.provider_tools_bytes),
             );
+            if let Some(request) = &stats.provider_request {
+                meta.insert("provider_request".to_string(), request.clone());
+            }
+            if let Some(response) = &stats.provider_response {
+                meta.insert("provider_response".to_string(), response.clone());
+            }
         }
     }
     meta
@@ -2966,7 +2907,7 @@ fn take_last_within_bytes_value(
         let mut candidate = value.clone();
         let mut candidate_bytes = json_value_size_bytes(&candidate);
         if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
-            candidate = compact_trace_payload(value);
+            candidate = compact_context_payload(value, max_bytes);
             candidate_bytes = json_value_size_bytes(&candidate);
         }
         if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
@@ -2977,6 +2918,222 @@ fn take_last_within_bytes_value(
     }
     selected.reverse();
     Ok(Value::Array(selected))
+}
+
+fn compact_context_payload(value: &Value, max_bytes: usize) -> Value {
+    let compact = compact_context_value(value);
+    if json_value_size_bytes(&compact) <= max_bytes {
+        return compact;
+    }
+    compact_json_value(&compact, max_bytes)
+}
+
+fn compact_context_value(value: &Value) -> Value {
+    match value {
+        Value::Array(items) => {
+            Value::Array(items.iter().take(16).map(compact_context_value).collect())
+        }
+        Value::Object(object) if looks_like_observation(object) => {
+            compact_observation_context(object)
+        }
+        Value::Object(object) if looks_like_tool_result(object) => {
+            compact_tool_result_context(object)
+        }
+        Value::Object(object) if object.get("files").and_then(Value::as_array).is_some() => {
+            compact_file_collection_context(object)
+        }
+        Value::Object(object)
+            if object.get("content").is_some() || object.get("content_preview").is_some() =>
+        {
+            compact_file_like_context(object, 4_000)
+        }
+        Value::Object(object) => {
+            let mut compact = Map::new();
+            for (key, value) in object.iter().take(16) {
+                compact.insert(key.clone(), compact_context_value(value));
+            }
+            if object.len() > compact.len() {
+                compact.insert(
+                    "_air_compacted".to_string(),
+                    json!({"omitted_fields": object.len() - compact.len()}),
+                );
+            }
+            Value::Object(compact)
+        }
+        Value::String(text) => Value::String(compact_context_string_for_model_input(text, 2_000)),
+        other => other.clone(),
+    }
+}
+
+fn looks_like_observation(object: &Map<String, Value>) -> bool {
+    object.contains_key("action")
+        && (object.contains_key("requested") || object.contains_key("result"))
+}
+
+fn looks_like_tool_result(object: &Map<String, Value>) -> bool {
+    object.contains_key("tool") && (object.contains_key("output") || object.contains_key("error"))
+}
+
+fn compact_observation_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in ["action", "rationale"] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(requested) = object.get("requested") {
+        compact.insert("requested".to_string(), compact_context_value(requested));
+    }
+    if let Some(result) = object.get("result") {
+        compact.insert("result".to_string(), compact_context_value(result));
+    }
+    Value::Object(compact)
+}
+
+fn compact_tool_result_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in ["tool", "status", "error_code", "permission", "message"] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(input) = object.get("input") {
+        compact.insert("input".to_string(), compact_json_value(input, 1_500));
+    }
+    if let Some(output) = object.get("output").and_then(Value::as_object) {
+        compact.insert("output".to_string(), compact_tool_output_context(output));
+    }
+    if let Some(error) = object.get("error") {
+        compact.insert("error".to_string(), compact_context_value(error));
+    }
+    Value::Object(compact)
+}
+
+fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
+    if object.get("files").and_then(Value::as_array).is_some() {
+        return compact_file_collection_context(object);
+    }
+    if object.get("content").is_some() || object.get("content_preview").is_some() {
+        return compact_file_like_context(object, 4_000);
+    }
+
+    let mut compact = Map::new();
+    for field in [
+        "success",
+        "status",
+        "error",
+        "error_code",
+        "permission",
+        "message",
+        "applied",
+        "passed",
+        "failed_count",
+        "bytes",
+        "path",
+        "repo",
+        "query",
+        "effective_query",
+        "mode",
+        "names",
+        "start_line",
+        "end_line",
+        "truncated",
+        "full_log_path",
+        "full_output_path",
+        "truncation_hint",
+        "content_format",
+        "unscoped_read",
+        "changed_files",
+        "diagnostics",
+        "todos",
+        "matches",
+        "symbols",
+        "references",
+        "locations",
+    ] {
+        if let Some(value) = object.get(field) {
+            compact.insert(field.to_string(), compact_context_value(value));
+        }
+    }
+    if compact.is_empty() {
+        compact_context_value(&Value::Object(object.clone()))
+    } else {
+        Value::Object(compact)
+    }
+}
+
+fn compact_file_collection_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in [
+        "file_count",
+        "bytes",
+        "max_bytes_per_file",
+        "truncated",
+        "truncation_hint",
+    ] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(files) = object.get("files").and_then(Value::as_array) {
+        compact.insert(
+            "files".to_string(),
+            Value::Array(
+                files
+                    .iter()
+                    .take(8)
+                    .filter_map(Value::as_object)
+                    .map(|file| compact_file_like_context(file, 3_000))
+                    .collect(),
+            ),
+        );
+    }
+    Value::Object(compact)
+}
+
+fn compact_file_like_context(object: &Map<String, Value>, max_content_chars: usize) -> Value {
+    let mut compact = Map::new();
+    for field in [
+        "path",
+        "bytes",
+        "source_bytes",
+        "start_line",
+        "end_line",
+        "match_line",
+        "contains",
+        "context_lines",
+        "total_lines",
+        "truncated",
+        "full_output_path",
+        "truncation_hint",
+        "content_format",
+        "unscoped_read",
+        "line_numbers",
+    ] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(content) = object
+        .get("content_preview")
+        .or_else(|| object.get("content"))
+        .and_then(Value::as_str)
+    {
+        compact.insert(
+            "content_preview".to_string(),
+            Value::String(compact_context_string_for_model_input(
+                content,
+                max_content_chars,
+            )),
+        );
+    }
+    Value::Object(compact)
+}
+
+fn copy_context_field(compact: &mut Map<String, Value>, object: &Map<String, Value>, field: &str) {
+    if let Some(value) = object.get(field) {
+        compact.insert(field.to_string(), compact_context_value(value));
+    }
+}
+
+fn compact_context_string_for_model_input(text: &str, max_chars: usize) -> String {
+    let mut result = text.chars().take(max_chars).collect::<String>();
+    if result.len() < text.len() {
+        result.push_str("\n[AIR_COMPACTED]");
+    }
+    result
 }
 
 fn event(
@@ -3137,13 +3294,13 @@ mod tests {
         let mut state = State::new();
         state.insert(
             "observation".to_string(),
-            json!([{"tool": "file.ops", "status": "ok"}]),
+            json!([{"tool": "edit", "status": "ok"}]),
         );
         let outputs = State::new();
 
         assert_eq!(
             read_path(&state, &outputs, "observation[0].tool").unwrap(),
-            &json!("file.ops")
+            &json!("edit")
         );
         assert_eq!(
             read_path(&state, &outputs, "observation.0.status").unwrap(),
@@ -3170,10 +3327,9 @@ mod tests {
 
     #[test]
     fn validates_batch_allowed_tools() {
-        assert!(validate_batch_allowed_tool("file.ops", &["file.ops".to_string()]).is_ok());
+        assert!(validate_batch_allowed_tool("edit", &["edit".to_string()]).is_ok());
 
-        let error =
-            validate_batch_allowed_tool("file.read", &["file.ops".to_string()]).unwrap_err();
+        let error = validate_batch_allowed_tool("file.read", &["edit".to_string()]).unwrap_err();
         assert!(matches!(
             error,
             RuntimeError::ToolBatchDispatchToolNotAllowed { .. }
@@ -3254,6 +3410,66 @@ mod tests {
             recent_repeated_tool_call_count(&history, "file.search", &file_search),
             2
         );
+    }
+
+    #[test]
+    fn take_last_within_bytes_preserves_read_many_file_context_when_compacting() {
+        let large_content = format!(
+            "{}\nfn target_helper() {{\n    println!(\"keep this\");\n}}\n{}",
+            "prefix\n".repeat(2_000),
+            "suffix\n".repeat(2_000)
+        );
+        let evidence = json!([{
+            "action": "file_read_many_evidence",
+            "rationale": "preserve source context",
+            "requested": [{
+                "tool": "read_many",
+                "input": {
+                    "files": ["src/lib.rs", "src/tools.rs"],
+                    "line_numbers": true
+                }
+            }],
+            "result": [{
+                "tool": "read_many",
+                "status": "ok",
+                "input": {
+                    "files": ["src/lib.rs", "src/tools.rs"],
+                    "line_numbers": true
+                },
+                "output": {
+                    "file_count": 2,
+                    "bytes": 120000,
+                    "truncated": true,
+                    "files": [{
+                        "path": "src/lib.rs",
+                        "content": large_content,
+                        "start_line": null,
+                        "end_line": null,
+                        "truncated": true,
+                        "truncation_hint": "Use a narrower range"
+                    }, {
+                        "path": "src/tools.rs",
+                        "content": "fn other_helper() {}",
+                        "start_line": 1,
+                        "end_line": 1,
+                        "truncated": false
+                    }]
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 18_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"files\""), "{rendered}");
+        assert!(rendered.contains("src/lib.rs"), "{rendered}");
+        assert!(rendered.contains("content_preview"), "{rendered}");
+        assert!(rendered.contains("Use a narrower range"), "{rendered}");
+        assert!(
+            !rendered.contains("\"result\":{\"_air_truncated\":true}"),
+            "{rendered}"
+        );
+        assert!(rendered.len() <= 18_000, "compacted evidence is too large");
     }
 
     #[test]

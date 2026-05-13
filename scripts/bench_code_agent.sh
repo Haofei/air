@@ -39,7 +39,7 @@ run_route \
   "recipe"
 run_route \
   "edit" \
-  "Edit a failing test using structured diagnostics, apply bounded file operations, and retest." \
+  "Edit a failing test using OpenCode-style read/edit/verify steps, and retest." \
   "code.edit_loop@0.1.0" \
   "recipe"
 run_route \
@@ -82,15 +82,10 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == [
-    "file.search",
-    "candidate.validate",
-    "test.run",
-    "file.read",
-    "file.ops",
-    "test.run",
-    "git.diff",
-], tools
+assert "edit" in tools, tools
+assert "read" in tools, tools
+assert "test.run" in tools, tools
+assert "git.diff" in tools, tools
 assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
 PY
 
@@ -118,16 +113,17 @@ assert edit["patch_applied"] is True, edit
 
 with open("target/generated/code-agent-bench/fuzzy-line-trimmed.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
-file_ops = [
+edit_events = [
     event
     for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("meta", {}).get("tool") == "edit"
 ]
-assert len(file_ops) == 1, file_ops
-assert file_ops[0]["input"]["match_strategy"] == "auto", file_ops[0]
-assert file_ops[0]["output"]["match_strategies"] == ["line_trimmed"], file_ops[0]
-assert file_ops[0]["output"]["applied"] is True, file_ops[0]
+assert len(edit_events) == 1, edit_events
+assert set(["filePath", "oldString", "newString"]).issubset(edit_events[0]["input"]), edit_events[0]
+assert "match_strategy" not in edit_events[0]["input"], edit_events[0]
+assert edit_events[0]["output"]["match_strategies"] == ["line_trimmed"], edit_events[0]
+assert edit_events[0]["output"]["applied"] is True, edit_events[0]
 PY
 
 echo "[code-agent-bench] ok"

@@ -35,6 +35,27 @@ context_lines = re.search(r"context_lines:\s*\n\s+literal:\s*(\d+)", preflight.g
 max_matches = re.search(r"max_matches:\s*\n\s+literal:\s*(\d+)", preflight.group("body"))
 assert context_lines and int(context_lines.group(1)) <= 2, context_lines.group(0) if context_lines else None
 assert max_matches and int(max_matches.group(1)) <= 8, max_matches.group(0) if max_matches else None
+assert "literal: read" in preflight.group("body"), "target search preflight must include bounded target read"
+assert "target: edit_evidence" in preflight.group("body"), (
+    "target search preflight must preserve source context as edit_evidence"
+)
+assert "initial_target_search_evidence" in preflight.group("body"), preflight.group("body")
+symbols_preflight = re.search(r"- id:\s*preflight-target-symbols(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert symbols_preflight, "missing preflight-target-symbols rule"
+assert "literal: repo.symbols" in symbols_preflight.group("body")
+assert "max_calls: 1" in symbols_preflight.group("body"), symbols_preflight.group("body")
+assert "phase: preflight_symbol_read" in symbols_preflight.group("body"), (
+    "target symbol preflight must read the symbol range in a follow-up preflight step"
+)
+symbols_range_read = re.search(r"- id:\s*preflight-target-symbol-read(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert symbols_range_read, "missing preflight-target-symbol-read rule"
+assert "literal: read" in symbols_range_read.group("body")
+assert "initial_target_context[0].output.symbols[0].line" in symbols_range_read.group("body")
+assert "initial_target_context[0].output.symbols[0].end_line" in symbols_range_read.group("body")
+assert "target: edit_evidence" in symbols_range_read.group("body"), (
+    "target symbol range read must preserve source context as edit_evidence"
+)
+assert "initial_target_symbol_range_evidence" in symbols_range_read.group("body"), symbols_range_read.group("body")
 
 choose = re.search(r"- id:\s*choose\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
 assert choose, "missing choose rule"
@@ -54,12 +75,34 @@ edit_evidence_window = re.search(
 assert edit_evidence_window, "choose rule must preserve bounded edit evidence separately"
 assert int(edit_evidence_window.group(1)) == 6, edit_evidence_window.group(0)
 assert int(edit_evidence_window.group(2)) == 30000, edit_evidence_window.group(0)
+edit_contract = re.search(
+    r"\n\s+edit:\s*\n(?P<body>.*?)(?:\n\s+diagnostic\.context:)",
+    choose.group("body"),
+    re.S,
+)
+assert edit_contract, "choose rule must expose an edit tool contract"
+edit_contract_body = edit_contract.group("body")
+for key in ("filePath", "oldString", "newString", "replaceAll"):
+    assert key in edit_contract_body, (key, edit_contract_body)
+for key in (
+    "old_string",
+    "new_string",
+    "match_strategy",
+    "allowed_paths",
+    "max_changed_lines",
+    "dry_run",
+):
+    assert key not in edit_contract_body, (key, edit_contract_body)
 
-assert "force-write-after-targeted-explore-budget" not in module
-assert "force-write-after-explore-budget" not in module
-assert "force-empty-action" not in module
-assert "force_act" not in module
-assert "choose-targeted-symbol" not in module
+summarize = re.search(r"- id:\s*summarize\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
+assert summarize, "missing summarize rule"
+summary_observations_window = re.search(
+    r"observations:\s*\n\s+take_last_within_bytes:\s*\n\s+ref:\s*observations\s*\n\s+max_items:\s*(\d+)\s*\n\s+max_bytes:\s*(\d+)",
+    summarize.group("body"),
+)
+assert summary_observations_window, "summarize rule must use bounded final observations"
+assert int(summary_observations_window.group(1)) <= 8, summary_observations_window.group(0)
+assert int(summary_observations_window.group(2)) <= 30000, summary_observations_window.group(0)
 
 config = json.loads(Path("examples/bigmodel-openai-compatible.json").read_text())
 for model in ("code_edit_decider", "code_edit_summarizer"):
@@ -69,11 +112,14 @@ assert config["models"]["code_edit_decider"].get("native_tool_calls") is True, (
     "code_edit_decider",
     config["models"]["code_edit_decider"].get("native_tool_calls"),
 )
+decider_prompt = config["models"]["code_edit_decider"].get("system_prompt", "").lower()
+assert "repository lint style" in decider_prompt, decider_prompt
+assert "too_many_arguments" in decider_prompt, decider_prompt
+assert "type_complexity" in decider_prompt, decider_prompt
 
 self_tools = json.loads(Path("examples/code-agent/tools.self.json").read_text())
-max_changed_lines = self_tools["tools"]["file.ops"].get("max_changed_lines")
-assert max_changed_lines is not None and max_changed_lines >= 800, ("file.ops", max_changed_lines)
-assert "file.patch" not in self_tools["tools"]
+max_changed_lines = self_tools["tools"]["edit"].get("max_changed_lines")
+assert max_changed_lines is not None and max_changed_lines >= 800, ("edit", max_changed_lines)
 assert "format.run" in self_tools["tools"]
 
 for path in (
@@ -93,7 +139,7 @@ for path in (
         path,
         tools["lsp.diagnostics"],
     )
-    file_search = tools["file.search"]
+    file_search = tools["grep"]
     assert file_search.get("max_matches") <= 40, (path, file_search.get("max_matches"))
     assert file_search.get("max_context_lines") <= 2, (
         path,
@@ -118,8 +164,7 @@ node scripts/playwright_search_fixture_test.cjs
 node scripts/playwright_page_audit_fixture_test.cjs
 cargo test -q -p air-tools file_read
 cargo test -q -p air-tools file_search
-cargo test -q -p air-tools file_ops
-cargo test -q -p air-tools file_patch
+cargo test -q -p air-tools edit
 cargo test -q -p air-tools git_status
 cargo test -q -p air-tools command_run
 cargo test -q -p air-tools repo_search
@@ -183,7 +228,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "format.run", "test.run", "git.diff"], tools
+assert tools == ["grep", "read", "candidate.validate", "test.run", "read", "edit", "format.run", "test.run", "git.diff"], tools
 candidate_validate_index = next(
     index for index, event in enumerate(events)
     if event.get("action") == "tool_batch_dispatch_item"
@@ -196,24 +241,13 @@ first_decider_index = next(
     and event.get("meta", {}).get("model") == "code_edit_decider"
 )
 assert candidate_validate_index < first_decider_index, (candidate_validate_index, first_decider_index)
-file_ops = next(
+edit = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("meta", {}).get("tool") == "edit"
 )
-assert file_ops["input"]["allowed_paths"] == ["examples/code-agent/edit-fixture/math.js"], file_ops
+assert edit["input"]["filePath"] == "examples/code-agent/edit-fixture/math.js", edit
 assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
-assert any(
-    event.get("action") == "tool_batch_dispatch_item"
-    and event.get("status") == "error"
-    and event.get("meta", {}).get("tool") == "<invalid>"
-    for event in events
-), events
-assert any(
-    event.get("action") == "tool_batch_dispatch"
-    and event.get("meta", {}).get("error_count") == 1
-    for event in events
-), events
 models = [
     event.get("meta", {}).get("model")
     for event in events
@@ -248,20 +282,24 @@ decider_start = next(
     and event.get("meta", {}).get("model") == "code_edit_decider"
 )
 tool_schemas = decider_start["input"]["tool_schemas"]
-assert "repo.files" in tool_schemas, tool_schemas
+assert "glob" in tool_schemas, tool_schemas
 assert "repo.symbols" in tool_schemas, tool_schemas
 assert "lsp.references" in tool_schemas, tool_schemas
 assert "lsp.diagnostics" in tool_schemas, tool_schemas
-assert "file.ops" in tool_schemas, tool_schemas
+assert "edit" in tool_schemas, tool_schemas
 assert "code.assert" in tool_schemas, tool_schemas
 assert "candidate.validate" in tool_schemas, tool_schemas
 assert "test.run" in tool_schemas, tool_schemas
-assert "pattern" in tool_schemas["repo.files"]["optional"], tool_schemas["repo.files"]
+assert "pattern" in tool_schemas["glob"]["required"], tool_schemas["glob"]
 assert "names" in tool_schemas["repo.symbols"]["optional"], tool_schemas["repo.symbols"]
 assert "symbol" in tool_schemas["lsp.references"]["optional"], tool_schemas["lsp.references"]
 assert "path" in tool_schemas["lsp.references"]["required"], tool_schemas["lsp.references"]
-assert "max_changed_lines" in tool_schemas["file.ops"]["optional"], tool_schemas["file.ops"]
-assert "file.patch" not in tool_schemas, tool_schemas
+assert "filePath" in tool_schemas["edit"]["required"], tool_schemas["edit"]
+assert "oldString" in tool_schemas["edit"]["required"], tool_schemas["edit"]
+assert "newString" in tool_schemas["edit"]["required"], tool_schemas["edit"]
+assert "replaceAll" in tool_schemas["edit"]["optional"], tool_schemas["edit"]
+assert "max_changed_lines" not in tool_schemas["edit"]["optional"], tool_schemas["edit"]
+assert "match_strategy" not in tool_schemas["edit"]["optional"], tool_schemas["edit"]
 assert "assertions" in tool_schemas["code.assert"]["required"], tool_schemas["code.assert"]
 assert "candidate" in tool_schemas["candidate.validate"]["required"], tool_schemas["candidate.validate"]
 assert tool_schemas["test.run"]["required"] == {}, tool_schemas["test.run"]
@@ -334,11 +372,11 @@ manual_failed = next(
     event for event in events
     if event.get("rule") == "record-manual-test-failed-output-truncated"
     and event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.search"
+    and event.get("meta", {}).get("tool") == "grep"
 )
 assert manual_failed["input"]["path"], manual_failed
 assert manual_failed["output"]["match_count"] >= 1, manual_failed
-repair_decider = next(
+correction_decider = next(
     event for event in events
     if event.get("action") == "model_call_start"
     and event.get("meta", {}).get("model") == "code_edit_decider"
@@ -347,7 +385,7 @@ repair_decider = next(
         for observation in event.get("input", {}).get("observations", [])
     )
 )
-assert repair_decider["input"]["verification_status"] == "failed", repair_decider
+assert correction_decider["input"]["verification_status"] == "failed", correction_decider
 PY
 
 echo "[code-agent] targetless edit loop offline run"
@@ -378,7 +416,10 @@ edit = output["edit"]
 assert edit["initial_success"] is False, edit
 assert edit["final_success"] is True, edit
 assert edit["patch_applied"] is True, edit
-assert "examples/code-agent/edit-fixture/math.js" in edit["workspace_diff"], edit
+assert edit["changed_files"] == ["examples/code-agent/edit-fixture/math.js"], edit
+assert edit["workspace_changed_files"] == ["examples/code-agent/edit-fixture/math.js"], edit
+assert edit["preexisting_changed_files"] == [], edit
+assert "examples/code-agent/edit-fixture/math.js" in edit["workspace_diff"]["diff"], edit
 
 with open("target/generated/code_agent_edit_targetless.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
@@ -390,22 +431,22 @@ tools = [
 ]
 assert tools == [
     "test.run",
-    "repo.search",
+    "glob",
     "diagnostic.context",
-    "file.search",
-    "file.read_many",
-    "file.ops",
+    "grep",
+    "read_many",
+    "edit",
     "format.run",
     "test.run",
     "git.diff",
 ], tools
-repo_search = next(
+glob = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "repo.search"
+    and event.get("meta", {}).get("tool") == "glob"
 )
-assert repo_search["output"]["query_source"] == "pattern", repo_search
-assert repo_search["output"]["glob"] == "examples/code-agent/edit-fixture/*.js", repo_search
+assert glob["output"]["query_source"] == "none", glob
+assert glob["output"]["glob"] == "examples/code-agent/edit-fixture/*.js", glob
 diagnostics = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
@@ -415,7 +456,7 @@ assert diagnostics["output"]["diagnostic_count"] == 0, diagnostics
 file_search = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.search"
+    and event.get("meta", {}).get("tool") == "grep"
 )
 assert file_search["output"]["directory"] is True, file_search
 PY
@@ -466,7 +507,7 @@ assert any(
 failed_read = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.read"
+    and event.get("meta", {}).get("tool") == "read"
     and event.get("status") == "error"
 )
 assert failed_read["input"]["path"] == "examples/code-agent/edit-fixture/math.", failed_read
@@ -479,59 +520,6 @@ assert any(
     observation.get("action") == "path_error_hint"
     for observation in summarizer["input"]["observations"]
 ), summarizer
-PY
-
-echo "[code-agent] edit loop records batch dispatch errors"
-edit_batch_error_backup="$(mktemp)"
-cp examples/code-agent/edit-fixture/math.js "$edit_batch_error_backup"
-restore_edit_batch_error_fixture() {
-  cp "$edit_batch_error_backup" examples/code-agent/edit-fixture/math.js
-  rm -f "$edit_batch_error_backup"
-}
-trap restore_edit_batch_error_fixture EXIT
-cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml \
-  --store examples/code-agent/module-store.air-store.yaml \
-  --input examples/code-agent/edit.input.json \
-  --model-config examples/code-agent/fixtures/model-fixtures.batch-error.json \
-  --tool-config examples/code-agent/fixtures/tools.core.json \
-  --trace-out target/generated/code_agent_edit_batch_error.trace.jsonl \
-  > target/generated/code_agent_edit_batch_error.output.json
-node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_batch_error.post_test.log
-restore_edit_batch_error_fixture
-trap - EXIT
-
-"${PYTHON:-python3}" - <<'PY'
-import json
-
-with open("target/generated/code_agent_edit_batch_error.output.json", encoding="utf-8") as handle:
-    output = json.load(handle)
-edit = output["edit"]
-assert edit["final_success"] is True, edit
-assert edit["patch_applied"] is True, edit
-
-with open("target/generated/code_agent_edit_batch_error.trace.jsonl", encoding="utf-8") as handle:
-    events = [json.loads(line) for line in handle if line.strip()]
-assert any(
-    event.get("rule") == "record-batch-dispatch-error"
-    and event.get("action") == "append"
-    and event.get("output", [{}])[-1].get("action") == "batch_dispatch_error"
-    and "write tool alone" in event.get("output", [{}])[-1].get("rationale", "")
-    for event in events
-), events
-batch_error = next(
-    event for event in events
-    if event.get("action") == "tool_batch_dispatch"
-    and event.get("meta", {}).get("error_count") == 1
-    and event.get("output", [{}])[0].get("tool") == "<batch>"
-)
-assert "approval-required capability file.write must be isolated" in batch_error["output"][0]["error"], batch_error
-tools = [
-    event.get("meta", {}).get("tool")
-    for event in events
-    if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("status") == "ok"
-]
-assert tools == ["file.search", "candidate.validate", "file.ops", "format.run", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop records edit validation failures"
@@ -565,42 +553,42 @@ assert edit["patch_applied"] is True, edit
 with open("target/generated/code_agent_edit_validation_failed.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
 assert any(
-    event.get("rule") == "record-file-ops-validation-failed"
+    event.get("rule") == "record-edit-validation-failed"
     and event.get("action") == "append"
     and event.get("output", [{}])[-1].get("action") == "edit_validation_failed"
-    and "prefer kind=replace_lines" in event.get("output", [{}])[-1].get("rationale", "")
+    and "oldString" in event.get("output", [{}])[-1].get("rationale", "")
     for event in events
 ), events
-failed_file_ops = next(
+failed_edit = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("meta", {}).get("tool") == "edit"
     and event.get("status") == "ok"
     and event.get("output", {}).get("applied") is False
 )
-assert failed_file_ops["output"]["diagnostics"][0]["field"] == "old_string", failed_file_ops
-successful_file_ops = [
+assert failed_edit["output"]["diagnostics"][0]["field"] == "old_string", failed_edit
+successful_edit = [
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.ops"
+    and event.get("meta", {}).get("tool") == "edit"
     and event.get("status") == "ok"
     and event.get("output", {}).get("applied") is True
 ]
-assert successful_file_ops, events
-assert successful_file_ops[0]["input"]["operations"][0]["kind"] == "replace_lines", successful_file_ops[0]
+assert successful_edit, events
+assert successful_edit[0]["input"]["filePath"] == "examples/code-agent/edit-fixture/math.js", successful_edit[0]
 tools = [
     event.get("meta", {}).get("tool")
     for event in events
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "file.ops", "diagnostic.context", "file.ops", "format.run", "test.run", "git.diff"], tools
+assert tools == ["grep", "read", "candidate.validate", "edit", "diagnostic.context", "edit", "format.run", "test.run", "git.diff"], tools
 diagnostic_context = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("meta", {}).get("tool") == "diagnostic.context"
 )
-repair_decider = next(
+correction_decider = next(
     event for event in events
     if event.get("action") == "model_call_start"
     and event.get("meta", {}).get("model") == "code_edit_decider"
@@ -617,7 +605,7 @@ assert "examples/code-agent/edit-fixture/math.js" in diagnostic_context["output"
 assert diagnostic_context["output"]["snippets"][0]["start_line"] == 1, diagnostic_context
 assert diagnostic_context["output"]["snippets"][0]["end_line"] == 5, diagnostic_context
 assert diagnostic_context["output"]["snippets"][0]["path_only_diagnostic_indexes"] == [], diagnostic_context
-assert repair_decider["input"]["verification_status"] == "unknown", repair_decider
+assert correction_decider["input"]["verification_status"] == "unknown", correction_decider
 PY
 
 echo "[code-agent] edit loop observes candidate validation errors"
@@ -669,7 +657,11 @@ decider_after_error = next(
     and any(
         result.get("tool") == "candidate.validate" and result.get("status") == "error"
         for observation in event.get("input", {}).get("observations", [])
-        for result in observation.get("result", [])
+        for result in (
+            observation.get("result", [])
+            if isinstance(observation.get("result", []), list)
+            else []
+        )
     )
 )
 assert "missing.js" in candidate_error["error"], candidate_error
@@ -681,7 +673,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "candidate.validate", "file.read", "file.ops", "format.run", "test.run", "git.diff"], tools
+assert tools == ["grep", "read", "candidate.validate", "candidate.validate", "read", "edit", "format.run", "test.run", "git.diff"], tools
 PY
 
 echo "[code-agent] edit loop collects diagnostic context after failed auto verify"
@@ -721,13 +713,14 @@ tools = [
     and event.get("status") == "ok"
 ]
 assert tools == [
-    "file.search",
+    "grep",
+    "read",
     "candidate.validate",
-    "file.ops",
+    "edit",
     "format.run",
     "test.run",
     "diagnostic.context",
-    "file.ops",
+    "edit",
     "format.run",
     "test.run",
     "git.diff",
@@ -743,7 +736,7 @@ diagnostic_context = next(
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("meta", {}).get("tool") == "diagnostic.context"
 )
-repair_decider = next(
+correction_decider = next(
     event for event in events
     if event.get("action") == "model_call_start"
     and event.get("meta", {}).get("model") == "code_edit_decider"
@@ -756,7 +749,7 @@ assert failed_verify["input"]["result"][0]["output"]["success"] is False, failed
 assert diagnostic_context["input"]["diagnostics"], diagnostic_context
 assert diagnostic_context["output"]["snippets"], diagnostic_context
 assert "examples/code-agent/edit-fixture/math.js" in diagnostic_context["output"]["snippets"][0]["path"], diagnostic_context
-assert repair_decider["input"]["verification_status"] == "failed", repair_decider
+assert correction_decider["input"]["verification_status"] == "failed", correction_decider
 PY
 
 echo "[code-agent] edit loop searches truncated auto verify logs"
@@ -832,11 +825,11 @@ assert failed_verify["input"]["result"][0]["output"]["full_log_path"], failed_ve
 full_log_search = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.search"
+    and event.get("meta", {}).get("tool") == "grep"
     and event.get("input", {}).get("path") == failed_verify["input"]["result"][0]["output"]["full_log_path"]
 )
 assert full_log_search["output"]["match_count"] >= 1, full_log_search
-repair_decider = next(
+correction_decider = next(
     event for event in events
     if event.get("action") == "model_call_start"
     and event.get("meta", {}).get("model") == "code_edit_decider"
@@ -845,10 +838,10 @@ repair_decider = next(
         for observation in event.get("input", {}).get("observations", [])
     )
 )
-assert repair_decider["input"]["verification_status"] == "failed", repair_decider
+assert correction_decider["input"]["verification_status"] == "failed", correction_decider
 PY
 
-echo "[code-agent] edit loop repairs single allowed write path"
+echo "[code-agent] edit loop rejects truncated write path and recovers"
 edit_write_path_error_backup="$(mktemp)"
 cp examples/code-agent/edit-fixture/math.js "$edit_write_path_error_backup"
 restore_edit_write_path_error_fixture() {
@@ -861,47 +854,52 @@ cargo run -q -p air-cli -- run-plan examples/code-agent/code-edit.air-plan.yaml 
   --input examples/code-agent/edit.input.json \
   --model-config examples/code-agent/fixtures/model-fixtures.write-path-error.json \
   --tool-config examples/code-agent/fixtures/tools.core.json \
-  --trace-out target/generated/code_agent_edit_write_path_repair.trace.jsonl \
-  > target/generated/code_agent_edit_write_path_repair.output.json
-node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_write_path_repair.post_test.log
+  --trace-out target/generated/code_agent_edit_write_path_recovery.trace.jsonl \
+  > target/generated/code_agent_edit_write_path_recovery.output.json
+node examples/code-agent/edit-fixture/test.js > target/generated/code_agent_edit_write_path_recovery.post_test.log
 restore_edit_write_path_error_fixture
 trap - EXIT
 
 "${PYTHON:-python3}" - <<'PY'
 import json
 
-with open("target/generated/code_agent_edit_write_path_repair.output.json", encoding="utf-8") as handle:
+with open("target/generated/code_agent_edit_write_path_recovery.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
 edit = output["edit"]
 assert edit["final_success"] is True, edit
 assert edit["patch_applied"] is True, edit
 
-with open("target/generated/code_agent_edit_write_path_repair.trace.jsonl", encoding="utf-8") as handle:
+with open("target/generated/code_agent_edit_write_path_recovery.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
-file_ops = next(
+edit = next(
     event for event in events
     if event.get("action") == "tool_batch_dispatch_item"
-    and event.get("meta", {}).get("tool") == "file.ops"
-    and event.get("status") == "ok"
+    and event.get("meta", {}).get("tool") == "edit"
+    and event.get("status") == "error"
 )
-assert file_ops["output"]["path_repairs"][0]["from"] == "examples/code-agent/edit-fixture/math.", file_ops
-assert file_ops["output"]["path_repairs"][0]["to"] == "examples/code-agent/edit-fixture/math.js", file_ops
+assert "outside allowed_paths" in edit["error"], edit
+assert edit["input"]["filePath"] == "examples/code-agent/edit-fixture/math.", edit
+assert any(
+    event.get("rule") == "record-edit-write-path-error-hint"
+    and event.get("action") == "append"
+    and event.get("output", [{}])[-1].get("action") == "write_path_error_hint"
+    for event in events
+), events
 tools = [
     event.get("meta", {}).get("tool")
     for event in events
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "file.ops", "format.run", "test.run", "git.diff"], tools
+assert tools == ["grep", "read", "candidate.validate", "edit", "format.run", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"
     and event.get("meta", {}).get("model") == "code_edit_summarizer"
 )
 assert any(
-    result.get("output", {}).get("path_repairs")
+    observation.get("action") == "write_path_error_hint"
     for observation in summarizer["input"]["observations"]
-    for result in observation.get("result", [])
 ), summarizer
 PY
 
@@ -947,7 +945,7 @@ tools = [
     if event.get("action") == "tool_batch_dispatch_item"
     and event.get("status") == "ok"
 ]
-assert tools == ["file.search", "candidate.validate", "test.run", "file.read", "file.ops", "format.run", "test.run", "git.diff"], tools
+assert tools == ["grep", "read", "candidate.validate", "test.run", "read", "edit", "format.run", "test.run", "git.diff"], tools
 summarizer = next(
     event for event in events
     if event.get("action") == "model_call_start"

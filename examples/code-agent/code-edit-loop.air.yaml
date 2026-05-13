@@ -49,7 +49,7 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, preflight, preflight_candidate, choose, act, post_act, post_format, post_verify, post_accept, summarize, done, failed]
+    enum: [init, preflight, preflight_symbol_read, preflight_candidate, choose, act, post_act, post_format, post_verify, post_accept, summarize, done, failed]
   observations:
     type: array
     items: object
@@ -66,15 +66,12 @@ state:
       complete: boolean
       tool_calls:
         type: array
-        max_items: 4
         items:
           type: object
+          required: [tool, input]
           properties:
             tool: string
             input: object
-            name: string
-            args: object
-            arguments: object
       rationale: string
   observation:
     type: array
@@ -113,11 +110,24 @@ state:
     type: array
     items:
       type: object
+  edit_summary:
+    type: object
+    additional_properties: false
+    required: [initial_success, final_success, patch_applied, rationale]
+    properties:
+      initial_success: boolean
+      final_success: boolean
+      patch_applied: boolean
+      rationale: string
   acceptance_assert_result:
     type: array
     items:
       type: object
   initial_target_context:
+    type: array
+    items:
+      type: object
+  initial_target_read_context:
     type: array
     items:
       type: object
@@ -155,19 +165,10 @@ tools:
   - name: todo.read
     capability: task.progress
     timeout_ms: 10000
-  - name: repo.files
-    capability: code.read
-    timeout_ms: 10000
-  - name: repo.search
-    capability: code.read
-    timeout_ms: 10000
-  - name: repo.context
+  - name: glob
     capability: code.read
     timeout_ms: 10000
   - name: repo.symbols
-    capability: code.read
-    timeout_ms: 10000
-  - name: repo.references
     capability: code.read
     timeout_ms: 10000
   - name: lsp.references
@@ -176,16 +177,16 @@ tools:
   - name: lsp.diagnostics
     capability: code.read
     timeout_ms: 30000
-  - name: file.read
+  - name: read
     capability: file.read
     timeout_ms: 10000
-  - name: file.read_many
+  - name: read_many
     capability: file.read
     timeout_ms: 10000
-  - name: file.search
+  - name: grep
     capability: file.read
     timeout_ms: 10000
-  - name: file.ops
+  - name: edit
     capability: file.write
     timeout_ms: 10000
   - name: diagnostic.context
@@ -270,6 +271,152 @@ workflow:
                           query:
                             ref: target_symbol_query
               result:
+                object:
+                  evidence:
+                    literal: initial_target_context
+                  target_path:
+                    ref: target_path
+                  target_symbol_query:
+                    ref: target_symbol_query
+        - kind: append
+          target: edit_evidence
+          value:
+            object:
+              action:
+                literal: initial_target_symbols_evidence
+              rationale:
+                literal: Preserved preflight symbol ranges before the exact target range read.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: repo.symbols
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+                          query:
+                            ref: target_symbol_query
+              result:
+                ref: initial_target_context
+        - kind: set
+          values:
+            phase: preflight_symbol_read
+
+    - id: preflight-target-symbol-read
+      when: phase == "preflight_symbol_read" && initial_target_context[0].output.symbols != []
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: read
+                  input:
+                    object:
+                      path:
+                        ref: initial_target_context[0].output.symbols[0].path
+                      start_line:
+                        ref: initial_target_context[0].output.symbols[0].line
+                      end_line:
+                        ref: initial_target_context[0].output.symbols[0].end_line
+                      line_numbers:
+                        literal: true
+                      max_bytes:
+                        literal: 32768
+          output: initial_target_read_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: initial_target_symbol_range_read
+              rationale:
+                literal: Deterministically read the exact target symbol range after repo.symbols so the first model decision sees focused code instead of a whole file.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: read
+                      input:
+                        object:
+                          path:
+                            ref: initial_target_context[0].output.symbols[0].path
+                          start_line:
+                            ref: initial_target_context[0].output.symbols[0].line
+                          end_line:
+                            ref: initial_target_context[0].output.symbols[0].end_line
+              result:
+                object:
+                  symbols:
+                    ref: initial_target_context
+                  symbol_context:
+                    ref: initial_target_read_context
+        - kind: append
+          target: edit_evidence
+          value:
+            object:
+              action:
+                literal: initial_target_symbol_range_evidence
+              rationale:
+                literal: Preserved the exact target symbol range as stable edit evidence before the first model decision.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: repo.symbols
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+                          query:
+                            ref: target_symbol_query
+                  - object:
+                      tool:
+                        literal: read
+                      input:
+                        object:
+                          path:
+                            ref: initial_target_context[0].output.symbols[0].path
+                          start_line:
+                            ref: initial_target_context[0].output.symbols[0].line
+                          end_line:
+                            ref: initial_target_context[0].output.symbols[0].end_line
+              result:
+                array:
+                  - object:
+                      tool:
+                        literal: repo.symbols
+                      status:
+                        literal: ok
+                      output:
+                        ref: initial_target_context[0].output
+                  - object:
+                      tool:
+                        literal: read
+                      status:
+                        literal: ok
+                      output:
+                        ref: initial_target_read_context[0].output
+        - kind: set
+          values:
+            phase: preflight_candidate
+
+    - id: preflight-target-symbol-read-skip
+      when: phase == "preflight_symbol_read"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: initial_target_symbol_range_missing
+              rationale:
+                literal: repo.symbols did not return a concrete symbol range, so AIR proceeds with the symbol search observation and lets the model choose the next narrow read/search step.
+              result:
                 ref: initial_target_context
         - kind: set
           values:
@@ -283,7 +430,7 @@ workflow:
             array:
               - object:
                   tool:
-                    literal: file.search
+                    literal: grep
                   input:
                     object:
                       path:
@@ -294,8 +441,19 @@ workflow:
                         literal: 2
                       max_matches:
                         literal: 8
+              - object:
+                  tool:
+                    literal: read
+                  input:
+                    object:
+                      path:
+                        ref: target_path
+                      line_numbers:
+                        literal: true
+                      max_bytes:
+                        literal: 32768
           output: initial_target_context
-          max_calls: 1
+          max_calls: 2
           timeout_seconds: 120
           on_error: observe
         - kind: append
@@ -310,13 +468,54 @@ workflow:
                 array:
                   - object:
                       tool:
-                        literal: file.search
+                        literal: grep
                       input:
                         object:
                           path:
                             ref: target_path
                           pattern:
                             ref: target_search_pattern
+                  - object:
+                      tool:
+                        literal: read
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+              result:
+                object:
+                  evidence:
+                    literal: initial_target_context
+                  target_path:
+                    ref: target_path
+                  target_search_pattern:
+                    ref: target_search_pattern
+        - kind: append
+          target: edit_evidence
+          value:
+            object:
+              action:
+                literal: initial_target_search_evidence
+              rationale:
+                literal: Preserved preflight grep matches and the bounded target file read as stable edit evidence before the first model decision.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: grep
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+                          pattern:
+                            ref: target_search_pattern
+                  - object:
+                      tool:
+                        literal: read
+                      input:
+                        object:
+                          path:
+                            ref: target_path
               result:
                 ref: initial_target_context
         - kind: set
@@ -331,7 +530,7 @@ workflow:
             array:
               - object:
                   tool:
-                    literal: file.read
+                    literal: read
                   input:
                     object:
                       path:
@@ -356,7 +555,30 @@ workflow:
                 array:
                   - object:
                       tool:
-                        literal: file.read
+                        literal: read
+                      input:
+                        object:
+                          path:
+                            ref: target_path
+              result:
+                object:
+                  evidence:
+                    literal: initial_target_context
+                  target_path:
+                    ref: target_path
+        - kind: append
+          target: edit_evidence
+          value:
+            object:
+              action:
+                literal: initial_target_read_evidence
+              rationale:
+                literal: Preserved the bounded target file read as stable edit evidence before the first model decision.
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: read
                       input:
                         object:
                           path:
@@ -469,12 +691,44 @@ workflow:
                   rationale: Step budget reached before verified completion.
               runtime:
                 ref: _air
-          output: edit
+          output: edit_summary
           timeout_seconds: 180
           retry:
             max_attempts: 2
         - kind: set
           values:
+            edit:
+              object:
+                initial_success:
+                  ref: edit_summary.initial_success
+                final_success:
+                  ref: edit_summary.final_success
+                patch_applied:
+                  ref: edit_summary.patch_applied
+                changed_files:
+                  array: []
+                workspace_changed_files:
+                  array: []
+                preexisting_changed_files:
+                  array: []
+                workspace_diff:
+                  object:
+                    diff:
+                      literal: ""
+                    bytes:
+                      literal: 0
+                    truncated:
+                      literal: false
+                    artifacts:
+                      array: []
+                    changed_files:
+                      array: []
+                    workspace_changed_files:
+                      array: []
+                    preexisting_changed_files:
+                      array: []
+                rationale:
+                  ref: edit_summary.rationale
             phase: done
 
     - id: record-opencode-doom-loop-warning
@@ -487,7 +741,7 @@ workflow:
               action:
                 literal: opencode_doom_loop_warning
               rationale:
-                literal: "OpenCode-style loop feedback: the agent has spent several model turns on exploration without verified completion. This is not a write-only gate; continue reading only for a new, immediately necessary fact, otherwise use todo.write for a concrete checklist or apply the next smallest file.ops edit and let diagnostics guide the following turn."
+                literal: "OpenCode-style loop feedback: the agent has spent several model turns on exploration without verified completion. This is not a write-only gate; continue reading only for a new, immediately necessary fact, otherwise use todo.write for a concrete checklist or apply the next smallest edit and let diagnostics guide the following turn."
               requested:
                 array: []
               result:
@@ -497,11 +751,11 @@ workflow:
                   allowed_next_tools:
                     array:
                       - literal: todo.write
-                      - literal: file.read
-                      - literal: file.search
+                      - literal: read
+                      - literal: grep
                       - literal: repo.symbols
                       - literal: lsp.references
-                      - literal: file.ops
+                      - literal: edit
                       - literal: test.run
         - kind: set
           values:
@@ -547,17 +801,14 @@ workflow:
                 array:
                   - literal: todo.write
                   - literal: todo.read
-                  - literal: repo.files
-                  - literal: repo.search
-                  - literal: repo.context
+                  - literal: glob
                   - literal: repo.symbols
-                  - literal: repo.references
                   - literal: lsp.references
                   - literal: lsp.diagnostics
-                  - literal: file.read
-                  - literal: file.read_many
-                  - literal: file.search
-                  - literal: file.ops
+                  - literal: read
+                  - literal: read_many
+                  - literal: grep
+                  - literal: edit
                   - literal: diagnostic.context
                   - literal: code.assert
                   - literal: candidate.validate
@@ -572,28 +823,13 @@ workflow:
                   todo.read:
                     required: {}
                     optional: {}
-                  repo.files:
-                    required: {}
+                  glob:
+                    required:
+                      pattern: "glob/path pattern such as examples/code-agent/**/*.js"
                     optional:
                       query: "substring filter"
-                      pattern: "query alias, or glob/path pattern when it contains /, *, ?, or ["
-                      glob: "path glob such as examples/code-agent/**"
                       max_files: "bounded result limit"
                       include_all: "boolean"
-                  repo.search:
-                    required: {query: "search text; pattern is accepted as an alias"}
-                    optional:
-                      mode: "fixed, regex, or smart"
-                      file_glob: "path glob alias"
-                      path: "repo-relative scope"
-                      max_matches: "bounded result limit"
-                  repo.context:
-                    required: {query: "search text"}
-                    optional:
-                      mode: "fixed, regex, or smart"
-                      path: "repo-relative scope"
-                      context_lines: "bounded context lines"
-                      max_matches: "bounded result limit"
                   repo.symbols:
                     required: {}
                     optional:
@@ -601,12 +837,6 @@ workflow:
                       names: "array of exact symbol names; use this to fetch several function ranges in one call"
                       path: "repo-relative scope"
                       max_symbols: "bounded result limit"
-                  repo.references:
-                    required: {symbol: "exact identifier"}
-                    optional:
-                      path: "repo-relative scope"
-                      context_lines: "bounded context lines"
-                      max_matches: "bounded result limit"
                   lsp.references:
                     required:
                       path: "repo-relative source file containing the symbol or position"
@@ -621,38 +851,39 @@ workflow:
                     optional:
                       path: "optional repo-relative source file filter"
                       max_diagnostics: "bounded diagnostic limit"
-                  file.read:
-                    required: {path: "repo-relative file path"}
+                  read:
+                    required: {filePath: "repo-relative file path"}
                     optional:
+                      path: "alias for filePath"
+                      offset: "zero-based line offset"
+                      limit: "maximum lines to read"
                       start_line: "1-based start line"
                       end_line: "1-based end line"
                       lines: "single line or start-end range"
                       line_numbers: "boolean"
                       max_bytes: "bounded byte limit"
-                  file.read_many:
+                  read_many:
                     required: {files: "array of paths or objects with path"}
                     optional:
                       max_bytes_per_file: "bounded byte limit"
                       line_numbers: "boolean"
-                  file.search:
+                  grep:
                     required:
-                      path: "repo-relative file or directory"
                       pattern: "regular expression; query is accepted as an alias"
                     optional:
+                      path: "repo-relative file or directory; defaults to repo root"
+                      include: "optional file include hint"
                       context_lines: "bounded context lines"
+                      contextLines: "alias for context_lines"
                       max_matches: "bounded result limit"
-                  file.ops:
+                      maxMatches: "alias for max_matches"
+                  edit:
                     required:
-                      operations: "array; each item must be one of: {kind:'edit', path, old_string, new_string}; {kind:'replace_lines', path, start_line, end_line, new_string}; {kind:'write', path, content}"
+                      filePath: "repo-relative file path"
+                      oldString: "exact text to replace; include enough context to be unique"
+                      newString: "replacement text"
                     optional:
-                      path: "default repo-relative path for all operations"
-                      kind: "default operation kind"
-                      edits: "operations alias using the same operation shapes"
-                      ops: "operations alias using the same operation shapes"
-                      dry_run: "boolean"
-                      allowed_paths: "automatically injected from write_paths; do not override"
-                      max_changed_lines: "bounded changed-line limit; can only lower configured cap"
-                      match_strategy: "auto, exact, line_trimmed, block_anchor, whitespace_normalized, indentation_flexible, escape_normalized, trimmed_boundary, context_aware, or multi_occurrence; default auto for file.ops edit operations"
+                      replaceAll: "replace every occurrence only when all matches should change"
                   diagnostic.context:
                     required: {}
                     optional:
@@ -681,12 +912,12 @@ workflow:
               tool_policy:
                 literal:
                   plan: "Use todo.write/read when the task clearly spans multiple files or repeated verification cycles, even if target_path is set. Skip todo tools only for trivial single-file edits."
-                  discover: "Use repo.files for glob-style path discovery, repo.search/file.search for text search, repo.symbols for definitions and symbol start/end lines, lsp.references for semantic references when available, and repo.references only when token-level references are enough."
+                  discover: "Use glob for path discovery, grep for text search, repo.symbols for cheap definitions and symbol start/end lines, and lsp.references for semantic references when available."
                   paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
-                  read_first: "Call file.read, file.search, repo.context, or diagnostic.context before file.ops edits."
-                  small_steps: "Choose one to four tool calls per turn. Batch independent read/search calls only when they unblock the same immediate write. Do not request whole large files. Use repo.symbols once to get start/end lines when names are known, then read exact ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target ranges, the next turn must either write or read at most one additional immediately-needed range; do not expand into broad repo.references or helper archaeology."
-                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then use file.ops replace_lines for explicit textual edits. Use file.ops with kind=edit old_string/new_string for small anchored insertions or wording changes, especially in docs. For larger edits, prefer kind=replace_lines when line numbers came from the latest read and new_string preserves every line that should remain. Do not use old_string/replace or new_content/new_lines fields. If a turn includes a write tool, keep that batch to one write-focused call. Do not repeat reads of the same ranges instead of making an allowed edit."
-                  tests: "Use test.run for the configured project validation. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with file.search or a narrow file.read range instead of trying to inspect the whole log."
+                  read_first: "Call read, grep, or diagnostic.context before edits."
+                  small_steps: "Choose the tool calls needed for the next concrete step, and batch independent legal calls when they share the same evidence context. Do not request whole large files. Use repo.symbols once to get start/end lines when names are known, then read exact ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target ranges, the next turn must either write or read at most one additional immediately-needed range; do not expand into helper archaeology."
+                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then call edit with filePath, oldString, and newString. Include enough oldString context to make the replacement unique. Multiple independent edit calls are allowed in the same turn when each one has already been grounded by prior read/search/symbol evidence and each call stays inside write_paths. Do not repeat reads of the same ranges instead of making an allowed edit."
+                  tests: "Use test.run for the configured project validation. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with grep or a narrow read range instead of trying to inspect the whole log."
                   verify: "Before complete=true, normally choose code.assert for useful structural postconditions, plus test.run and git.diff so the final summary can prove the outcome."
                   finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
           output: decision
@@ -706,7 +937,7 @@ workflow:
           write_scope:
             ref: write_paths
           output: observation
-          max_calls: 4
+          max_calls: 200
           timeout_seconds: 120
           on_error: observe
         - kind: append
@@ -725,8 +956,8 @@ workflow:
           values:
             phase: post_act
 
-    - id: auto-verify-file-ops
-      when: phase == "post_act" && observation[0].tool == "file.ops" && observation[0].status == "ok" && observation[0].output.applied == true
+    - id: auto-verify-edit
+      when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == true
       actions:
         - kind: tool_batch_dispatch
           input:
@@ -864,7 +1095,7 @@ workflow:
                         literal: 6
               - object:
                   tool:
-                    literal: file.search
+                    literal: grep
                   input:
                     object:
                       path:
@@ -886,7 +1117,7 @@ workflow:
               action:
                 literal: auto_verify_full_log_context
               rationale:
-                literal: The validation log was truncated, so AIR searched the persisted full_log_path before the next repair decision. Use this log context together with diagnostics instead of re-running only to recover hidden output.
+                literal: The validation log was truncated, so AIR searched the persisted full_log_path before the next correction decision. Use this log context together with diagnostics instead of re-running only to recover hidden output.
               requested:
                 array:
                   - object:
@@ -900,7 +1131,7 @@ workflow:
                             literal: 6
                   - object:
                       tool:
-                        literal: file.search
+                        literal: grep
                       input:
                         object:
                           path:
@@ -961,7 +1192,7 @@ workflow:
               action:
                 literal: auto_verify_diagnostic_context
               rationale:
-                literal: Automatically collected source context around validation diagnostics before the next repair decision so fixes can target the failing scope instead of broad searching.
+                literal: Automatically collected source context around validation diagnostics before the next correction decision so fixes can target the failing scope instead of broad searching.
               requested:
                 array:
                   - object:
@@ -1180,7 +1411,7 @@ workflow:
                         literal: 6
               - object:
                   tool:
-                    literal: file.search
+                    literal: grep
                   input:
                     object:
                       path:
@@ -1202,7 +1433,7 @@ workflow:
               action:
                 literal: manual_test_full_log_context
               rationale:
-                literal: A manual validation run failed with truncated output, so AIR searched the persisted full_log_path and collected diagnostic context before the next repair decision.
+                literal: A manual validation run failed with truncated output, so AIR searched the persisted full_log_path and collected diagnostic context before the next correction decision.
               requested:
                 array:
                   - object:
@@ -1216,7 +1447,7 @@ workflow:
                             literal: 6
                   - object:
                       tool:
-                        literal: file.search
+                        literal: grep
                       input:
                         object:
                           path:
@@ -1288,7 +1519,7 @@ workflow:
             phase: choose
 
     - id: record-file-read-path-error-hint
-      when: phase == "post_act" && observation[0].tool == "file.read" && observation[0].status == "error" && target_path != ""
+      when: phase == "post_act" && observation[0].tool == "read" && observation[0].status == "error" && target_path != ""
       actions:
         - kind: append
           target: observations
@@ -1297,7 +1528,7 @@ workflow:
               action:
                 literal: path_error_hint
               rationale:
-                literal: A file.read call failed. Reuse the exact target_path or rediscover the path with repo.files before retrying; do not repeat the same failing path.
+                literal: A read call failed. Reuse the exact target_path or rediscover the path with glob before retrying; do not repeat the same failing path.
               requested:
                 ref: decision.tool_calls
               result:
@@ -1313,7 +1544,7 @@ workflow:
             phase: choose
 
     - id: record-file-read-evidence
-      when: phase == "post_act" && observation[0].tool == "file.read" && observation[0].status == "ok"
+      when: phase == "post_act" && observation[0].tool == "read" && observation[0].status == "ok"
       actions:
         - kind: append
           target: edit_evidence
@@ -1322,7 +1553,7 @@ workflow:
               action:
                 literal: file_read_evidence
               rationale:
-                literal: Preserved a successful file.read result as stable edit evidence so later edit decisions keep the exact line-numbered source context even when general observations are compacted.
+                literal: Preserved a successful read result as stable edit evidence so later edit decisions keep the exact line-numbered source context even when general observations are compacted.
               requested:
                 ref: decision.tool_calls
               result:
@@ -1332,7 +1563,7 @@ workflow:
             phase: choose
 
     - id: record-file-read-many-evidence
-      when: phase == "post_act" && observation[0].tool == "file.read_many" && observation[0].status == "ok"
+      when: phase == "post_act" && observation[0].tool == "read_many" && observation[0].status == "ok"
       actions:
         - kind: append
           target: edit_evidence
@@ -1341,7 +1572,7 @@ workflow:
               action:
                 literal: file_read_many_evidence
               rationale:
-                literal: Preserved a successful file.read_many result as stable edit evidence so later edit decisions keep source context even when general observations are compacted.
+                literal: Preserved a successful read_many result as stable edit evidence so later edit decisions keep source context even when general observations are compacted.
               requested:
                 ref: decision.tool_calls
               result:
@@ -1351,7 +1582,7 @@ workflow:
             phase: choose
 
     - id: record-code-context-evidence
-      when: phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "repo.symbols" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "file.search" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "repo.context" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "lsp.references"
+      when: phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "repo.symbols" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "grep" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "glob" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "lsp.references"
       actions:
         - kind: append
           target: edit_evidence
@@ -1369,8 +1600,8 @@ workflow:
           values:
             phase: choose
 
-    - id: record-file-ops-write-path-error-hint
-      when: phase == "post_act" && observation[0].tool == "file.ops" && observation[0].status == "error"
+    - id: record-edit-write-path-error-hint
+      when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "error"
       actions:
         - kind: append
           target: observations
@@ -1379,7 +1610,7 @@ workflow:
               action:
                 literal: write_path_error_hint
               rationale:
-                literal: A write tool call failed AIR write policy. If the error is about path policy, retry with paths copied exactly from write_paths. If it is about max_changed_lines or size, split the edit into smaller replace_lines/file.ops operations.
+                literal: A write tool call failed AIR write policy. If the error is about path policy, retry with paths copied exactly from write_paths. If it is about max_changed_lines or size, split the change into smaller edit calls.
               requested:
                 ref: decision.tool_calls
               result:
@@ -1397,11 +1628,11 @@ workflow:
             array:
               - object:
                   tool:
-                    literal: file.read
+                    literal: read
                   input:
                     object:
                       path:
-                        ref: observation[0].input.operations[0].path
+                        ref: observation[0].input.filePath
                       max_bytes:
                         literal: 60000
                       line_numbers:
@@ -1409,7 +1640,7 @@ workflow:
           output: write_error_context
           max_calls: 1
           allowed_tools:
-            - file.read
+            - read
           timeout_seconds: 120
           on_error: observe
         - kind: append
@@ -1424,19 +1655,19 @@ workflow:
                 array:
                   - object:
                       tool:
-                        literal: file.read
+                        literal: read
                       input:
                         object:
                           path:
-                            ref: observation[0].input.operations[0].path
+                            ref: observation[0].input.filePath
               result:
                 ref: write_error_context
         - kind: set
           values:
             phase: choose
 
-    - id: record-file-ops-validation-failed
-      when: phase == "post_act" && observation[0].tool == "file.ops" && observation[0].status == "ok" && observation[0].output.applied == false
+    - id: record-edit-validation-failed
+      when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == false
       actions:
         - kind: append
           target: observations
@@ -1445,7 +1676,7 @@ workflow:
               action:
                 literal: edit_validation_failed
               rationale:
-                literal: A file.ops edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid operation. If old_string did not match after a line-numbered read, prefer kind=replace_lines with the latest start_line/end_line.
+                literal: An edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid oldString.
               requested:
                 ref: decision.tool_calls
               result:
@@ -1473,7 +1704,7 @@ workflow:
               action:
                 literal: edit_validation_context
               rationale:
-                literal: A file.ops edit failed validation, so AIR automatically collected source context around the diagnostic path before the next edit decision.
+                literal: An edit failed validation, so AIR automatically collected source context around the diagnostic path before the next edit decision.
               requested:
                 array:
                   - object:
@@ -1501,7 +1732,7 @@ workflow:
               action:
                 literal: batch_dispatch_error
               rationale:
-                literal: A tool batch was rejected before individual tools ran. If the error mentions approval-required file.write isolation, retry the write tool alone in its own batch; run reads or tests in a later turn.
+                literal: A tool batch was rejected before individual tools ran. Fix the invalid tool name, input shape, repeated-call issue, write scope, or max_calls issue before retrying.
               requested:
                 ref: decision.tool_calls
               result:
@@ -1560,16 +1791,36 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 30
-                max_bytes: 200000
+                max_items: 8
+                max_bytes: 30000
+              final_diff_result:
+                ref: final_diff_result
               final_decision:
                 ref: decision
-          output: edit
+          output: edit_summary
           timeout_seconds: 180
           retry:
             max_attempts: 2
         - kind: set
           values:
+            edit:
+              object:
+                initial_success:
+                  ref: edit_summary.initial_success
+                final_success:
+                  ref: edit_summary.final_success
+                patch_applied:
+                  ref: edit_summary.patch_applied
+                changed_files:
+                  ref: final_diff_result[0].output.changed_files
+                workspace_changed_files:
+                  ref: final_diff_result[0].output.workspace_changed_files
+                preexisting_changed_files:
+                  ref: final_diff_result[0].output.preexisting_changed_files
+                workspace_diff:
+                  ref: final_diff_result[0].output
+                rationale:
+                  ref: edit_summary.rationale
             phase: done
 
     - id: done

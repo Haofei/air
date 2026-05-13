@@ -338,10 +338,10 @@ tools:
   - name: web.search
     capability: network.search
     timeout_ms: 120000
-  - name: file.read
+  - name: read
     capability: file.read
     timeout_ms: 10000
-  - name: file.read_many
+  - name: read_many
     capability: file.read
     timeout_ms: 10000
   - name: repo.files
@@ -557,7 +557,7 @@ workflow:
       when: phase == "read_file"
       actions:
         - kind: tool_call
-          tool: file.read
+          tool: read
           input:
             object:
               path:
@@ -576,7 +576,7 @@ workflow:
       when: phase == "read_related_files"
       actions:
         - kind: tool_call
-          tool: file.read_many
+          tool: read_many
           input:
             object:
               files:

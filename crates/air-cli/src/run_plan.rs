@@ -969,6 +969,175 @@ fn log_event(event: &TraceEvent) {
         "[air] {} step={} rule={} action={} status={}{}{}{}{}",
         event.agent, event.step, event.rule, event.action, status, meta, input, output, error
     );
+    for line in conversation_log_lines(event) {
+        eprintln!("{line}");
+    }
+}
+
+fn conversation_log_lines(event: &TraceEvent) -> Vec<String> {
+    match event.action.as_str() {
+        "model_call_start" => model_call_start_log_lines(event),
+        "model_call" => model_call_response_log_lines(event),
+        _ => Vec::new(),
+    }
+}
+
+fn model_call_start_log_lines(event: &TraceEvent) -> Vec<String> {
+    let model = event
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("model"))
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown-model>");
+    let mut parts = vec![format!("[air:chat] {} -> {}", event.agent, model)];
+    if let Some(input) = event.input.as_ref() {
+        if let Some(task) = input.get("task").and_then(Value::as_str) {
+            parts.push(format!("task={:?}", truncate_log_text(task, 300)));
+        }
+        if let Some(target_path) = input.get("target_path").and_then(Value::as_str) {
+            if !target_path.is_empty() {
+                parts.push(format!("target={target_path:?}"));
+            }
+        }
+        if let Some(verification_status) = input.get("verification_status").and_then(Value::as_str)
+        {
+            parts.push(format!("verification={verification_status}"));
+        }
+        if let Some(observations) = input.get("observations").and_then(Value::as_array) {
+            parts.push(format!("observations={}", observations.len()));
+        }
+        if let Some(edit_evidence) = input.get("edit_evidence").and_then(Value::as_array) {
+            parts.push(format!("edit_evidence={}", edit_evidence.len()));
+        }
+    }
+    vec![parts.join(" ")]
+}
+
+fn model_call_response_log_lines(event: &TraceEvent) -> Vec<String> {
+    if event.action != "model_call" {
+        return Vec::new();
+    }
+    let model = event
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("model"))
+        .and_then(Value::as_str)
+        .unwrap_or("<unknown-model>");
+    let Some(response) = event
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("provider_response"))
+    else {
+        return normalized_model_output_log_lines(event, model);
+    };
+    let Some(message) = response.pointer("/choices/0/message") else {
+        return normalized_model_output_log_lines(event, model);
+    };
+
+    let mut lines = Vec::new();
+    if let Some(thinking) = message
+        .get("reasoning_content")
+        .or_else(|| message.get("thinking"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!(
+            "[air:chat] {} <- {} thinking={:?}",
+            event.agent,
+            model,
+            truncate_log_text(thinking, 2_000)
+        ));
+    }
+    if let Some(content) = message
+        .get("content")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!(
+            "[air:chat] {} <- {} answer={:?}",
+            event.agent,
+            model,
+            truncate_log_text(content, 2_000)
+        ));
+    }
+    if let Some(tool_calls) = message.get("tool_calls").and_then(Value::as_array) {
+        let summary = tool_calls
+            .iter()
+            .take(8)
+            .filter_map(|call| {
+                let name = call.pointer("/function/name").and_then(Value::as_str)?;
+                let arguments = call
+                    .pointer("/function/arguments")
+                    .and_then(Value::as_str)
+                    .unwrap_or("{}");
+                Some(format!("{name}({})", truncate_log_text(arguments, 600)))
+            })
+            .collect::<Vec<_>>();
+        if !summary.is_empty() {
+            lines.push(format!(
+                "[air:chat] {} <- {} tool_calls={}",
+                event.agent,
+                model,
+                summary.join("; ")
+            ));
+        }
+    }
+    if lines.is_empty() {
+        lines.extend(normalized_model_output_log_lines(event, model));
+    }
+    lines
+}
+
+fn normalized_model_output_log_lines(event: &TraceEvent, model: &str) -> Vec<String> {
+    let Some(output) = event.output.as_ref() else {
+        return Vec::new();
+    };
+    let mut lines = Vec::new();
+    if let Some(rationale) = output
+        .get("rationale")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+    {
+        lines.push(format!(
+            "[air:chat] {} <- {} answer={:?}",
+            event.agent,
+            model,
+            truncate_log_text(rationale, 2_000)
+        ));
+    }
+    if let Some(tool_calls) = output.get("tool_calls").and_then(Value::as_array) {
+        let summary = tool_calls
+            .iter()
+            .take(8)
+            .filter_map(|call| {
+                let tool = call.get("tool").and_then(Value::as_str)?;
+                let input = call
+                    .get("input")
+                    .cloned()
+                    .unwrap_or(Value::Object(Default::default()));
+                let input_text =
+                    serde_json::to_string(&input).unwrap_or_else(|_| input.to_string());
+                Some(format!("{tool}({})", truncate_log_text(&input_text, 600)))
+            })
+            .collect::<Vec<_>>();
+        if !summary.is_empty() {
+            lines.push(format!(
+                "[air:chat] {} <- {} tool_calls={}",
+                event.agent,
+                model,
+                summary.join("; ")
+            ));
+        }
+    }
+    lines
+}
+
+fn truncate_log_text(text: &str, max_chars: usize) -> String {
+    let mut result = text.chars().take(max_chars).collect::<String>();
+    if text.chars().count() > max_chars {
+        result.push_str(" [truncated]");
+    }
+    result
 }
 
 fn value_shape(value: &Value) -> String {
@@ -1135,5 +1304,80 @@ mod tests {
         assert!(content.contains("model_call_start"));
         assert!(content.contains("[AIR_REDACTED]"));
         assert!(!content.contains("sk-test-123"));
+    }
+
+    #[test]
+    fn conversation_log_lines_include_model_call_start_context() {
+        let mut event = trace_event("model_call_start", TraceStatus::Ok);
+        event.input = Some(json!({
+            "task": "Refactor the helper",
+            "target_path": "src/lib.rs",
+            "verification_status": "unknown",
+            "observations": [{}, {}],
+            "edit_evidence": [{}],
+        }));
+        event.meta = Some(json!({"model": "code_edit_decider"}));
+
+        let lines = conversation_log_lines(&event);
+
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("[air:chat] agent -> code_edit_decider"));
+        assert!(lines[0].contains("task=\"Refactor the helper\""));
+        assert!(lines[0].contains("target=\"src/lib.rs\""));
+        assert!(lines[0].contains("observations=2"));
+        assert!(lines[0].contains("edit_evidence=1"));
+    }
+
+    #[test]
+    fn conversation_log_lines_include_provider_thinking_answer_and_tool_calls() {
+        let mut event = trace_event("model_call", TraceStatus::Ok);
+        event.meta = Some(json!({
+            "model": "code_edit_decider",
+            "provider_response": {
+                "choices": [{
+                    "message": {
+                        "reasoning_content": "Need one narrow edit.",
+                        "content": "Calling edit.",
+                        "tool_calls": [{
+                            "function": {
+                                "name": "edit",
+                                "arguments": "{\"filePath\":\"src/lib.rs\",\"oldString\":\"a\",\"newString\":\"b\"}"
+                            }
+                        }]
+                    }
+                }]
+            }
+        }));
+
+        let lines = conversation_log_lines(&event);
+
+        assert!(lines
+            .iter()
+            .any(|line| { line.contains("[air:chat] agent <- code_edit_decider thinking=") }));
+        assert!(lines
+            .iter()
+            .any(|line| { line.contains("[air:chat] agent <- code_edit_decider answer=") }));
+        assert!(lines.iter().any(|line| {
+            line.contains("[air:chat] agent <- code_edit_decider tool_calls=edit(")
+        }));
+    }
+
+    #[test]
+    fn conversation_log_lines_fall_back_to_normalized_output() {
+        let mut event = trace_event("model_call", TraceStatus::Ok);
+        event.meta = Some(json!({"model": "fixture_model"}));
+        event.output = Some(json!({
+            "rationale": "Use one edit.",
+            "tool_calls": [{"tool": "edit", "input": {"filePath": "src/lib.rs"}}]
+        }));
+
+        let lines = conversation_log_lines(&event);
+
+        assert!(lines.iter().any(|line| {
+            line.contains("[air:chat] agent <- fixture_model answer=\"Use one edit.\"")
+        }));
+        assert!(lines
+            .iter()
+            .any(|line| { line.contains("[air:chat] agent <- fixture_model tool_calls=edit(") }));
     }
 }

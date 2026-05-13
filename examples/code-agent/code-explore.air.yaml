@@ -108,7 +108,7 @@ tools:
   - name: repo.symbols
     capability: code.read
     timeout_ms: 10000
-  - name: file.read
+  - name: read
     capability: file.read
     timeout_ms: 10000
 
@@ -264,7 +264,7 @@ workflow:
       when: phase == "route_target" && target_path != ""
       actions:
         - kind: tool_call
-          tool: file.read
+          tool: read
           input:
             object:
               path:

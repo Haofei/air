@@ -278,19 +278,63 @@ pub(crate) fn code_search_pattern(query: &str) -> String {
 
 pub(crate) fn code_symbol_query(query: &str) -> String {
     let tokens = code_search_tokens(query);
-    if let Some(token) = tokens.iter().find(|token| {
+    let symbol_candidates = tokens
+        .iter()
+        .filter(|token| !looks_like_new_helper_name(query, token))
+        .collect::<Vec<_>>();
+    let candidates = if symbol_candidates.is_empty() {
+        tokens.iter().collect::<Vec<_>>()
+    } else {
+        symbol_candidates
+    };
+    if let Some(token) = candidates.iter().find(|token| {
         !is_low_signal_search_token(token)
             && token
                 .chars()
                 .any(|character| character.is_ascii_uppercase())
     }) {
-        return token.clone();
+        return (*token).clone();
     }
-    tokens
+    candidates
         .into_iter()
         .filter(|token| !is_low_signal_search_token(token) && token.contains('_'))
         .max_by_key(|token| token.len())
+        .cloned()
         .unwrap_or_default()
+}
+
+fn contains_any_marker(haystack: &str, markers: &[&str]) -> bool {
+    markers.iter().any(|marker| haystack.contains(marker))
+}
+
+fn looks_like_new_helper_name(query: &str, token: &str) -> bool {
+    let normalized_query = query.replace('-', "_").to_ascii_lowercase();
+    let token = token.to_ascii_lowercase();
+    let Some(index) = normalized_query.find(&token) else {
+        return false;
+    };
+    let before_start = index.saturating_sub(64);
+    let before = &normalized_query[before_start..index];
+    let after_start = index + token.len();
+    let after_end = after_start.saturating_add(64).min(normalized_query.len());
+    let after = &normalized_query[after_start..after_end];
+
+    after.contains("helper")
+        && contains_any_marker(
+            before,
+            &[
+                "extract",
+                "extracting",
+                "extracted",
+                "add",
+                "adding",
+                "create",
+                "creating",
+                "new",
+                "named",
+                "called",
+            ],
+        )
 }
 
 fn code_search_tokens(query: &str) -> Vec<String> {

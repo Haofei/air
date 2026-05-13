@@ -121,13 +121,13 @@ tools:
   - name: repo.context
     capability: code.read
     timeout_ms: 10000
-  - name: file.read
+  - name: read
     capability: file.read
     timeout_ms: 10000
-  - name: file.read_many
+  - name: read_many
     capability: file.read
     timeout_ms: 10000
-  - name: file.search
+  - name: grep
     capability: file.read
     timeout_ms: 10000
 
@@ -167,9 +167,9 @@ workflow:
                   - literal: repo.symbols
                   - literal: repo.references
                   - literal: repo.context
-                  - literal: file.read
-                  - literal: file.read_many
-                  - literal: file.search
+                  - literal: read
+                  - literal: read_many
+                  - literal: grep
               tool_specs:
                 array:
                   - object:
@@ -239,7 +239,7 @@ workflow:
                             max_matches: "integer: optional per-call limit capped by tool config"
                   - object:
                       tool:
-                        literal: file.read
+                        literal: read
                       purpose:
                         literal: "Read one known text file or a line range."
                       input_schema:
@@ -252,7 +252,7 @@ workflow:
                             line_numbers: "boolean: include numbered_content"
                   - object:
                       tool:
-                        literal: file.read_many
+                        literal: read_many
                       purpose:
                         literal: "Read several known text files in one bounded call."
                       input_schema:
@@ -264,7 +264,7 @@ workflow:
                             max_bytes_per_file: "integer: optional per-file byte limit capped by tool config"
                   - object:
                       tool:
-                        literal: file.search
+                        literal: grep
                       purpose:
                         literal: "Search within one known file and return matching lines with optional context."
                       input_schema:

@@ -240,7 +240,7 @@ AIR uses OpenAI-compatible model config for real model calls:
 
 `request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout as the request deadline. AIR also records elapsed-time violations in the runtime trace.
 
-OpenAI-compatible providers are not identical. AIR does not hard-code behavior for each model name. The provider uses `async-openai` as the single transport path, with BYOT JSON request bodies so AIR can still pass provider extensions. Use `json_mode` or `response_format` for structured-output support, and use `extra_body` to pass provider-specific request fields such as thinking controls, self-hosted gateway flags, or other vendor extensions. AIR merges `extra_body` into the chat/completions request body without overriding the configured AIR fields. When a provider returns text or a wrapper that does not match the declared AIR output schema, the runtime rejects it with schema feedback so retry attempts can repair the response against the same declared interface.
+OpenAI-compatible providers are not identical. AIR does not hard-code behavior for each model name. The provider uses `async-openai` as the single transport path, with BYOT JSON request bodies so AIR can still pass provider extensions. Use `json_mode` or `response_format` for structured-output support, and use `extra_body` to pass provider-specific request fields such as thinking controls, self-hosted gateway flags, or other vendor extensions. AIR merges `extra_body` into the chat/completions request body without overriding the configured AIR fields. When a provider returns text or a wrapper that does not match the declared AIR output schema, the runtime rejects it with schema feedback so retry attempts can correct the response against the same declared interface.
 
 Set `native_tool_calls` to `true` only for providers that support OpenAI chat-completions function tools. In that mode, AIR converts model input fields named `allowed_tools` and `tool_schemas` into OpenAI `tools`, then normalizes returned `tool_calls` back into AIR's `{complete:false, tool_calls:[...]}` decision shape. This is an opt-in single path, not a fallback; if the provider rejects native tools, the model call fails visibly.
 
@@ -325,6 +325,9 @@ AIR checks:
   tools and receives only its emitted `input` object.
 
 Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
+Tool kinds are lower-level capabilities; the names exposed to a model are application aliases.
+For the code-agent edit loop, prefer the OpenCode-style aliases `glob`, `repo.symbols`,
+`lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `test.run`, and `git.diff`.
 
 | Tool kind | Typical AIR tool name | Input | Output | Notes |
 | --- | --- | --- | --- | --- |
@@ -337,24 +340,22 @@ Common native tools live in the `air-tools` crate and are configured through `--
 | `file_read` | `file.read` | `{ "path": "relative/file.txt", "start_line": 10, "end_line": 80, "line_numbers": true }` or `{ "path": "...", "contains": "symbol", "occurrence": 2, "context_lines": 8 }` | `{ path, content, numbered_content, bytes, start_line, end_line, match_line, contains, occurrence, total_lines, truncated, artifacts[] }` | Read-only and constrained to configured `base_dir`; line ranges, numbered output, and fixed-string `contains` locators are optional. `contains` returns the requested matching line plus bounded surrounding context and fails if the string or occurrence is absent, preventing accidental unrelated reads. Binary and non-UTF-8 files are rejected instead of lossy-decoded into agent context. |
 | `file_read_many` | `file.read_many` | `{ "files": ["src/a.rs", { "path": "src/b.rs", "contains": "fn run", "context_lines": 8 }] }` | `{ files[], file_count, bytes, truncated, artifacts[] }` | Batch variant of `file.read` for bounded multi-file context gathering. Each entry is validated with the same path, UTF-8, binary, range, and `contains` rules as `file.read`; `max_files` keeps one call from flooding context. |
 | `file_write` | `file.write` | `{ "path": "relative/file.txt", "content": "..." }` | `{ path, bytes, created, overwritten, artifacts[] }` | Write tool constrained to configured `base_dir`; optional directory creation, overwrite policy, and read-before-overwrite policy are set in tool config. When `require_read` is enabled, overwrites are rejected if the file changed after the last `file.read`. |
-| `file_edit` | `file.edit` | `{ "path": "relative/file.txt", "old_string": "...", "new_string": "...", "match_strategy": "exact" }` or `{ "path": "...", "edits": [{ "old_string": "...", "new_string": "..." }] }` | `{ path, bytes, replacements, edit_count, match_strategy, match_strategies[], diff, diff_truncated, artifacts[] }` | Edit constrained to configured `base_dir`; requires a fresh prior `file.read` by default. The default `exact` strategy uses literal matching; explicit `line_trimmed` or `indentation_flexible` strategies support conservative whitespace-tolerant block replacement. `edits[]` applies multiple same-file replacements atomically: any failed edit rejects the call without writing. Emits bounded unified-diff output for audit. No-op edits and ambiguous multiple matches are rejected unless `replace_all` is explicitly allowed. |
-| `file_ops` | `file.ops` | `{ "operations": [{ "kind": "edit", "path": "...", "old_string": "...", "new_string": "..." }], "dry_run": true }` | `{ repo, success, checked, applied, files[], file_count, diagnostics[], match_strategies[], diff, diff_truncated, artifacts[] }` | Atomic multi-file structured edits/writes constrained to configured `base_dir`; requires fresh prior reads for existing files when enabled. Edit operations default to conservative `auto` matching: exact first, then whitespace-tolerant strategies only when they identify a safe match. Failed dry-runs return `success:false` diagnostics without mutating files. |
-| `file_patch` | `file.patch` | `{ "patch": "diff --git ...", "dry_run": true }` | `{ repo, success, checked, applied, files[], file_count, diagnostics[], bytes, artifacts[] }` | Applies a unified diff through `git apply --check` then `git apply`; validates changed paths, max files, new/delete policy, and fresh read-before-patch for existing files. In `dry_run` mode failed patch checks return `success:false` with diagnostics instead of mutating files. |
-| `git_diff` | `git.diff` | `{ "path": "...", "paths": ["..."], "files": [{ "path": "..." }], "staged": false }` | `{ repo, diff, bytes, truncated, artifacts[] }` | Read-only diff; path filters must stay inside `repo_dir`. The `files` form accepts `file.patch` changed-file objects so coding agents can audit only the paths they changed instead of the whole dirty workspace. |
+| `file_edit` | `file.edit` | `{ "filePath": "relative/file.txt", "oldString": "...", "newString": "...", "replaceAll": false }` | `{ path, bytes, replacements, edit_count, match_strategy, match_strategies[], diff, diff_truncated, artifacts[] }` | Edit constrained to configured `base_dir`; requires a fresh prior `file.read` by default. The model-facing contract follows the OpenCode-style `filePath` / `oldString` / `newString` shape. AIR keeps fuzzy matching internal: exact matching is tried first, then conservative whitespace-tolerant strategies only when they identify a safe match. Emits bounded unified-diff output for audit. No-op edits and ambiguous multiple matches are rejected unless `replaceAll` is explicitly requested. |
+| `git_diff` | `git.diff` | `{ "path": "...", "paths": ["..."], "files": [{ "path": "..." }], "staged": false }` | `{ repo, diff, bytes, truncated, artifacts[] }` | Read-only diff; path filters must stay inside `repo_dir`. The `files` form accepts changed-file objects with `path` so coding agents can audit only the paths they changed instead of the whole dirty workspace. |
 | `git_status` | `git.status` | `{}` | `{ repo, clean, entries[], file_count, truncated, artifacts[] }` | Read-only workspace status through `git status --porcelain=v1`; returns structured index/worktree entries for review, edit, and final summaries. |
 | `repo_files` | `repo.files` | `{ "query": "...", "path": "optional/dir" }` | `{ repo, query, files[], truncated, artifacts[] }` | Read-only repository file listing through `rg --files`; optional query/path/glob filtering. |
 | `repo_search` | `repo.search` | `{ "query": "...", "mode": "fixed", "path": "optional/dir", "max_matches": 20 }` | `{ repo, query, mode, matches[], truncated, artifacts[] }` | Read-only search through `rg`; defaults to fixed-string mode and supports explicit `mode: "regex"` for grep-style code discovery. Per-call `max_matches` is capped by tool config. Returns path/line/column/text matches. |
 | `repo_symbols` | `repo.symbols` | `{ "query": "...", "path": "optional/dir", "glob": "*.rs" }` | `{ repo, query, symbols[], truncated, artifacts[] }` | Lightweight repository symbol map through `rg`, covering common declarations such as functions, classes, structs, enums, interfaces, types, constants, and variables. This is intentionally simpler than LSP and works without language servers. |
 | `repo_references` | `repo.references` | `{ "symbol": "Identifier", "path": "optional/dir", "glob": "*.rs", "context_lines": 4 }` | `{ repo, symbol, definitions[], references[], snippets[], truncated, artifacts[] }` | LSP-lite identifier lookup through `rg`; filters token boundaries, marks declaration-like matches, and returns nearby snippets without requiring a language server. |
 | `rust_analyzer_references` | `lsp.references` | `{ "path": "src/lib.rs", "symbol": "helper", "include_declaration": true }` | `{ repo, path, symbol, line, character, references[], reference_count, truncated, artifacts[] }` | Optional Rust semantic reference lookup through a cached `rust-analyzer` LSP stdio session. The tool provider reuses one server per `(command, root_dir)` during a run and shuts it down when the task ends. Use when a refactor needs real semantic references instead of regex/token matches. Requires `rust-analyzer` on PATH or a configured command. |
-| `rust_analyzer_diagnostics` | `lsp.diagnostics` | `{ "path": "src/lib.rs", "max_diagnostics": 40 }` | `{ repo, success, status, diagnostics[], diagnostic_count, artifacts[] }` | Optional rust-analyzer diagnostics wrapper for repair loops. It is read-only and bounded by `max_diagnostics`/`max_bytes`; use cargo checks/tests as final verification. |
+| `rust_analyzer_diagnostics` | `lsp.diagnostics` | `{ "path": "src/lib.rs", "max_diagnostics": 40 }` | `{ repo, success, status, diagnostics[], diagnostic_count, artifacts[] }` | Optional rust-analyzer diagnostics wrapper for correction loops. It is read-only and bounded by `max_diagnostics`/`max_bytes`; use cargo checks/tests as final verification. |
 | `repo_context` | `repo.context` | `{ "query": "...", "mode": "fixed", "context_lines": 8 }` | `{ repo, query, mode, matches[], snippets[], truncated, artifacts[] }` | Read-only code context through `rg`; defaults to fixed-string mode and supports explicit `mode: "regex"`. Groups matches by file and returns nearby numbered snippets with a `code_context` artifact. |
 | `diagnostic_context` | `diagnostic.context` | `{ "diagnostics": [{ "path": "src/lib.rs", "line": 42 }], "context_lines": 4 }` | `{ repo, diagnostics[], snippets[], unreadable[], truncated, artifacts[] }` | Converts structured command diagnostics into nearby source snippets. Paths must resolve inside `repo_dir`; unreadable, missing, or out-of-bounds diagnostics are reported in `unreadable[]` instead of leaking outside the repository. |
 | `todo_write` | `todo.write` | `{ "todos": [{ "id": "inspect", "content": "...", "status": "in_progress", "priority": "high" }] }` | `{ todos[], total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts[] }` | Writes a structured task-progress artifact for complex agents. Status must be `pending`, `in_progress`, `completed`, or `cancelled`; priority must be `high`, `medium`, or `low`; at most one item may be `in_progress`. |
 | `todo_read` | `todo.read` | `{}` | `{ todos[], total, open_count, pending_count, in_progress_count, completed_count, cancelled_count, artifacts[] }` | Reads the current in-memory todo list from the configured tool provider. This mirrors opencode-style task tracking without adding task state to the AIR IR. |
 | `context_measure` | `context.measure` | `{ "payload": {...}, "max_context_chars": 200000, "threshold_percent": 80 }` | `{ chars, max_context_chars, threshold_percent, threshold_chars, usage_ratio, should_compact, fields[], artifacts[] }` | Deterministically estimates serialized context size and returns whether a module should route through a semantic compaction step. This is generic and can be used by coding, research, planning, or support agents. |
 | `artifact_validate` | `artifact.validate` | `{ "evidence": {...}, "registered_ids": ["doc-1"], "citations": {...} }` | `{ valid, registered_ids[], cited_ids[], missing_ids[], unused_registered_ids[], registered_artifacts[], artifacts[] }` | Validates that model-produced `source_ids`, `citations`, or `artifact_ids` refer only to registered artifact ids. Set `fail_on_missing: true` in tool config for fail-closed provenance checks after semantic adapters or compaction. |
-| `command_run` | `test.run` | `{ "command": "alias" }` or `{ "command": "alias_with_filter", "test_filter": "module::case" }` | `{ command, argv, success, status, log, diagnostics[], bytes, truncated, full_log_path, truncation_hint, artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Configured argv parts may use constrained `{{parameter}}` placeholders for bounded test names or paths. Extracts common Rust/TypeScript/file-line diagnostics for edit loops. When output is truncated, the complete command output is saved under `.air/tool-output/` and `full_log_path` points to it so agents can inspect targeted sections with `file.search` or bounded `file.read`. Set `truncation_direction: "tail"` in tool config when the end of a test/build log is usually most useful. |
+| `command_run` | `test.run` | `{}` for a single configured command; advanced configs may accept constrained parameters | `{ command, argv, success, status, log, diagnostics[], bytes, truncated, full_log_path, truncation_hint, artifacts[] }` | Runs only allowlisted argv arrays from tool config; no shell interpolation. Code-agent profiles should expose `test.run` as one semantic validation tool rather than asking the model to select validation variants. Configured argv parts may use constrained parameters for bounded test names or paths in specialized tools. Extracts common Rust/TypeScript/file-line diagnostics for edit loops. When output is truncated, the complete command output is saved under `.air/tool-output/` and `full_log_path` points to it so agents can inspect targeted sections with the configured search/read aliases such as `grep` and `read`. Set `truncation_direction: "tail"` in tool config when the end of a test/build log is usually most useful. |
 
 The reusable `modules/std/context/compact.air.yaml` module wraps `context.measure` with conditional
 routing. Under budget it returns the raw payload; over budget it calls the shared `context_compactor`
@@ -369,7 +370,7 @@ Artifact-producing tools return a common shape:
   "artifacts": [
     {
       "id": "doc-1",
-      "kind": "web_page | browser_screenshot | doc_chunk | file_span | file_write | file_edit | file_ops | file_patch | repo_listing | repo_search | repo_symbols | repo_references | code_context | diagnostic_context | todo_list | context_measure | git_diff | git_status | test_log",
+      "kind": "web_page | browser_screenshot | doc_chunk | file_span | file_write | file_edit | repo_listing | repo_search | repo_symbols | repo_references | code_context | diagnostic_context | todo_list | context_measure | git_diff | git_status | test_log",
       "title": "Readable title",
       "uri": "file-or-web-location",
       "content": "Evidence text",
@@ -393,8 +394,12 @@ enforcement.
 The `examples/code-agent` workflows show three coding-agent patterns: explore agents answer
 repository questions without write capability; review agents search external references, inspect
 repository context, run one allowlisted verification command, and cite exact artifact ids; edit
-agents use a bounded loop over declared tools such as `repo.search`, `file.search`, `file.ops`,
-`test.run`, browser audit tools, and `git.diff` to make constrained changes and verify them.
+agents use one OpenCode-style loop over declared tools such as `glob`, `repo.symbols`,
+`lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `test.run`, browser audit tools,
+and `git.diff` to make constrained changes and verify them. The model-facing write contract stays
+small: `edit(filePath, oldString, newString, replaceAll?)`; AIR keeps matching strategy,
+read-before-write checks, write-scope enforcement, formatting, verification, and trace capture in
+the runtime/tool layer while the workflow remains one generic edit loop.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
 
@@ -463,53 +468,44 @@ The tool also accepts per-call overrides in its input, including `query_variants
 domain filters, and result counts so the trace shows whether the agent actually found enough
 evidence.
 
-Example read-only file and git tools:
+Example coding-agent file, search, edit, and git tool aliases:
 
 ```json
 {
   "tools": {
-    "file.read": {
+    "read": {
       "kind": "file_read",
       "capability": "file.read",
       "base_dir": ".",
-      "max_bytes": 262144
+      "max_bytes": 32768
     },
-    "file.write": {
-      "kind": "file_write",
-      "capability": "file.write",
+    "grep": {
+      "kind": "file_search",
+      "capability": "file.read",
       "base_dir": ".",
-      "create_dirs": true,
-      "allow_overwrite": false,
-      "require_read": true,
-      "max_bytes": 262144
+      "max_matches": 40,
+      "max_context_lines": 2,
+      "max_bytes": 32768
     },
-    "file.edit": {
+    "edit": {
       "kind": "file_edit",
       "capability": "file.write",
       "base_dir": ".",
-      "allow_replace_all": false,
-      "max_bytes": 262144
-    },
-    "file.ops": {
-      "kind": "file_ops",
-      "capability": "file.write",
-      "base_dir": ".",
       "require_read": true,
       "allow_new_files": true,
-      "allow_overwrite": true,
-      "allow_replace_all": false,
-      "max_files": 20,
       "max_bytes": 262144
     },
-    "file.patch": {
-      "kind": "file_patch",
-      "capability": "file.write",
+    "glob": {
+      "kind": "repo_files",
+      "capability": "code.read",
       "repo_dir": ".",
-      "require_read": true,
-      "allow_new_files": true,
-      "allow_delete_files": false,
-      "max_files": 20,
-      "max_bytes": 262144
+      "max_files": 100
+    },
+    "repo.symbols": {
+      "kind": "repo_symbols",
+      "capability": "code.read",
+      "repo_dir": ".",
+      "max_symbols": 120
     },
     "git.diff": {
       "kind": "git_diff",
@@ -522,15 +518,6 @@ Example read-only file and git tools:
       "capability": "code.read",
       "repo_dir": ".",
       "max_files": 200
-    },
-    "repo.context": {
-      "kind": "repo_context",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_matches": 80,
-      "max_files": 8,
-      "context_lines": 8,
-      "max_bytes": 262144
     }
   }
 }

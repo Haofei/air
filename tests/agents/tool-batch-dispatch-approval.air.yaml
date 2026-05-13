@@ -42,7 +42,7 @@ tools:
   - name: docs.search
     capability: retrieval.local
     timeout_ms: 1000
-  - name: file.ops
+  - name: edit
     capability: file.write
     timeout_ms: 1000
 

@@ -27,7 +27,7 @@ For coding agents, that means the important questions have first-class places to
 
 | Question | AIR audit surface |
 | --- | --- |
-| Which files changed? | `file.ops`, `git.diff`, edit-loop `workspace_diff`, and session baseline fields distinguish agent changes from pre-existing dirty files |
+| Which files changed? | `edit`, `git.diff`, edit-loop `workspace_diff`, and session baseline fields distinguish agent changes from pre-existing dirty files |
 | Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
@@ -248,15 +248,11 @@ AIR_1_0_REAL=1 scripts/verify_1_0.sh
 ## Documentation
 
 - [AIR User Guide](docs/user_guide.md)
+- [Condition DSL](docs/condition_dsl.md)
 - [Open Deep Research Migration Notes](docs/open_deep_research_migration.md)
-- [AIR 1.0 Audit](docs/air_1_0_audit.md)
 
 ## Roadmap
 
 - [ ] **Whole-program compilation (merge + flatten).** The linker currently composes modules into a plan but preserves module boundaries at runtime. A merge compiler would flatten a multi-module plan into a single state machine with a unified state schema, resolved field names, and merged policies. This simplifies backend lowering—each backend becomes a pure syntax translation instead of needing to understand AIR's module dispatch semantics. Analogous to LLVM LTO or TensorFlow XLA: separate compilation for development, whole-program compilation for output.
-- [ ] **Trace-driven workflow optimization.** Every agent run produces structured traces (model calls, tool calls, retries, budget events, approval decisions). A future analysis layer would aggregate traces across runs to identify failure patterns (high-retry phases, wasted tokens, repeated-tool-policy triggers), generate optimization suggestions (policy tuning, prompt refinement, workflow restructuring), and eventually apply validated improvements back to agent definitions. AIR's structured traces are the raw material; the closed loop from execution → analysis → optimization is the goal.
 - [ ] **Module registry.** A publish/install system for sharing agent modules across projects. Module stores are currently local files; a registry would let teams publish versioned modules (`air publish context.compact@0.2.0`) and consume them via dependency declarations, enabling a shared standard library of reusable agent components.
 - [ ] **Schema conformance testing.** A lightweight test harness that calls real LLMs but only validates output structure against the declared AIR schema—no assertion on specific content. This catches the most common production failure mode (LLM returning wrong shapes) without brittle mock providers. The runtime already has `validate_output`; the test layer just needs a harness that runs a module's model calls against a real provider and reports schema violations per phase.
-- [ ] **Agent mesh (multi-agent communication).** RunPlan is a static DAG today. Real production scenarios need dynamic agent-to-agent communication: an agent discovering a problem and spawning another agent to solve it, agents negotiating via messages rather than fixed edges, teams of agents with role-based coordination. This would extend AIR with a communication protocol IR so that each agent remains a bounded state machine while the mesh layer handles discovery, routing, and lifecycle.
-- [ ] **Agent meta-programming (agents that write agents).** AIR's code agent already produces structured file edits. If it can produce valid `.air.yaml` modules that pass `air verify`, agents can define new agents at runtime. The IR is the constitution; the code agent drafts amendments, `verify` checks them, and approval gates gate them. No new abstractions needed—just the combination of existing structured output, schema validation, and the approval system.
-- [ ] **Agent evolution (trace-driven workflow synthesis).** Beyond optimizing existing workflows from traces, a future layer could discover new workflow patterns from accumulated execution data: identify recurring phase sequences that succeed, auto-generate `.air.yaml` definitions for them, and propose them as reusable modules. The end state is not humans writing agent definitions but systems learning optimal workflows from evidence.

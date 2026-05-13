@@ -18,7 +18,7 @@
         {
           "id": "docs-edit-safety",
           "title": "Edit safety",
-          "content": "Edit loops should avoid raw shell access, require a prior read before writes, validate patches with dry run, and preserve structured diagnostics for audit."
+          "content": "Edit loops should avoid raw shell access, require a prior read before writes, apply constrained edits, and preserve structured diagnostics plus diffs for audit."
         },
         {
           "id": "docs-playwright-timeouts",
@@ -42,20 +42,20 @@
         }
       ]
     },
-    "file.read": {
+    "read": {
       "kind": "file_read",
       "capability": "file.read",
       "base_dir": "../..",
       "max_bytes": 32768
     },
-    "file.read_many": {
+    "read_many": {
       "kind": "file_read_many",
       "capability": "file.read",
       "base_dir": "../..",
       "max_files": 8,
       "max_bytes": 65536
     },
-    "file.search": {
+    "grep": {
       "kind": "file_search",
       "capability": "file.read",
       "base_dir": "../..",
@@ -64,24 +64,17 @@
       "max_line_chars": 2000,
       "max_bytes": 32768
     },
-    "file.edit": {
+    "glob": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 100
+    },
+    "edit": {
       "kind": "file_edit",
       "capability": "file.write",
       "base_dir": "../..",
       "require_read": true,
-      "allow_replace_all": false,
-      "max_bytes": 65536,
-      "max_changed_lines": 80
-    },
-    "file.ops": {
-      "kind": "file_ops",
-      "capability": "file.write",
-      "base_dir": "../..",
-      "require_read": true,
-      "allow_new_files": true,
-      "allow_overwrite": false,
-      "allow_replace_all": false,
-      "max_files": 6,
       "max_bytes": 65536,
       "max_changed_lines": 80
     },
@@ -170,7 +163,7 @@
       "kind": "todo_write",
       "capability": "task.progress",
       "max_items": 8,
-      "max_content_chars": 120
+      "max_content_chars": 240
     },
     "todo.read": {
       "kind": "todo_read",

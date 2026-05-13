@@ -40,7 +40,7 @@ state:
 tools:
   - name: docs.search
     capability: retrieval.local
-  - name: file.ops
+  - name: edit
     capability: file.write
 
 requires:

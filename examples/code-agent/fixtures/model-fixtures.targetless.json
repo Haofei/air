@@ -10,10 +10,9 @@
               "input": {}
             },
             {
-              "tool": "repo.search",
+              "tool": "glob",
               "input": {
-                "pattern": "add",
-                "file_glob": "examples/code-agent/edit-fixture/*.js"
+                "pattern": "examples/code-agent/edit-fixture/*.js"
               }
             },
             {
@@ -21,7 +20,7 @@
               "input": {}
             },
             {
-              "tool": "file.search",
+              "tool": "grep",
               "input": {
                 "path": "examples/code-agent/edit-fixture",
                 "pattern": "add"
@@ -34,7 +33,7 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "file.read_many",
+              "tool": "read_many",
               "input": {
                 "paths": [
                   "examples/code-agent/edit-fixture/math.js",
@@ -49,17 +48,11 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "file.ops",
+              "tool": "edit",
               "input": {
-                "path": "examples/code-agent/edit-fixture/math.js",
-                "ops": [
-                  {
-                    "kind": "replace_lines",
-                    "start_line": 2,
-                    "end_line": 2,
-                    "content": "  return a + b;\n"
-                  }
-                ]
+                "filePath": "examples/code-agent/edit-fixture/math.js",
+                "oldString": "  return a - b;",
+                "newString": "  return a + b;"
               }
             }
           ],
@@ -76,16 +69,6 @@
       "initial_success": false,
       "final_success": true,
       "patch_applied": true,
-      "changed_files": [
-        "examples/code-agent/edit-fixture/math.js"
-      ],
-      "workspace_changed_files": [
-        "examples/code-agent/edit-fixture/math.js"
-      ],
-      "preexisting_changed_files": [],
-      "workspace_diff": {
-        "examples/code-agent/edit-fixture/math.js": "--- a/examples/code-agent/edit-fixture/math.js\n+++ b/examples/code-agent/edit-fixture/math.js\n@@ -2,1 +2,1 @@\n-  return a - b;\n+  return a + b;\n"
-      },
       "rationale": "The targetless edit loop found the fixture files, fixed the add function, and verified the configured validation."
     }
   }

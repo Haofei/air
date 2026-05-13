@@ -1,7 +1,7 @@
 plan:
   name: tool-batch-approval-smoke
   version: 0.1.0
-  description: "Negative conformance test for approval-required tool batch isolation."
+  description: "Conformance test for mixed approval-required tool batches after approval."
 
 requires:
   capabilities: [retrieval.local, file.write]
@@ -21,6 +21,6 @@ outputs:
 
 recipes:
   - id: tool-batch-approval-smoke
-    description: "Reject a mixed batch that includes an approval-required capability."
+    description: "Run a mixed batch that includes an approval-required capability after approval."
     selected: [test.tool_batch_approval_smoke@0.1.0]
-    rationale: "Used by backend conformance tests for tool_batch_dispatch approval isolation."
+    rationale: "Used by backend conformance tests for tool_batch_dispatch approval and write-scope behavior."

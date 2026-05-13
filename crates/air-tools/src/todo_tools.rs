@@ -25,83 +25,109 @@ pub(crate) fn call_todo_write_tool(
 
     let mut seen_ids = BTreeSet::new();
     let mut normalized = Vec::new();
-    let mut pending_count = 0usize;
-    let mut in_progress_count = 0usize;
-    let mut completed_count = 0usize;
-    let mut cancelled_count = 0usize;
+    let mut counts = TodoCounts::default();
 
     for (index, todo) in todos.iter().enumerate() {
-        let object = todo.as_object().ok_or_else(|| {
-            RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}] must be an object"
-            ))
-        })?;
-        let id = required_todo_id(name, object, index)?;
-        let content = required_object_string(name, object, &format!("todos[{index}].content"))?;
-        let status = required_object_string(name, object, &format!("todos[{index}].status"))?;
-        let priority = required_object_string(name, object, &format!("todos[{index}].priority"))?;
-        if id.trim().is_empty() {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}].id must not be empty"
-            )));
-        }
-        if !seen_ids.insert(id.to_string()) {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}].id must be unique"
-            )));
-        }
-        if content.trim().is_empty() {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}].content must not be empty"
-            )));
-        }
-        if content.chars().count() > max_content_chars {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}].content must contain at most {max_content_chars} characters"
-            )));
-        }
-        match status {
-            "pending" => pending_count += 1,
-            "in_progress" => in_progress_count += 1,
-            "completed" => completed_count += 1,
-            "cancelled" => cancelled_count += 1,
-            _ => {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} input.todos[{index}].status must be pending, in_progress, completed, or cancelled"
-                )));
-            }
-        }
-        if !matches!(priority, "high" | "medium" | "low") {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}].priority must be high, medium, or low"
-            )));
-        }
-
-        normalized.push(json!({
-            "id": id,
-            "content": content,
-            "status": status,
-            "priority": priority,
-        }));
+        let result =
+            validate_and_normalize_todo(name, todo, index, max_content_chars, &mut seen_ids)?;
+        counts.record(result.status);
+        normalized.push(result.normalized);
     }
 
-    if in_progress_count > 1 {
+    if counts.in_progress > 1 {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.todos must contain at most one in_progress item"
         )));
     }
 
-    Ok(todo_list_output(
-        name,
-        "todo_write",
+    Ok(todo_list_output(name, "todo_write", normalized, counts))
+}
+
+struct ValidatedTodo {
+    normalized: Value,
+    status: TodoStatusKind,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum TodoStatusKind {
+    Pending,
+    InProgress,
+    Completed,
+    Cancelled,
+}
+
+impl TodoStatusKind {
+    fn parse(name: &str, status: &str, index: usize) -> Result<Self, RuntimeError> {
+        match status {
+            "pending" => Ok(Self::Pending),
+            "in_progress" => Ok(Self::InProgress),
+            "completed" => Ok(Self::Completed),
+            "cancelled" => Ok(Self::Cancelled),
+            _ => Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].status must be pending, in_progress, completed, or cancelled"
+            ))),
+        }
+    }
+}
+
+fn validate_and_normalize_todo(
+    name: &str,
+    todo: &Value,
+    index: usize,
+    max_content_chars: usize,
+    seen_ids: &mut BTreeSet<String>,
+) -> Result<ValidatedTodo, RuntimeError> {
+    let object = todo.as_object().ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}] must be an object"
+        ))
+    })?;
+    let id = required_todo_id(name, object, index)?;
+    let content = required_object_string(name, object, &format!("todos[{index}].content"))?;
+    let status = required_object_string(name, object, &format!("todos[{index}].status"))?;
+    let priority = required_object_string(name, object, &format!("todos[{index}].priority"))?;
+    if id.trim().is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}].id must not be empty"
+        )));
+    }
+    if !seen_ids.insert(id.to_string()) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}].id must be unique"
+        )));
+    }
+    if content.trim().is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}].content must not be empty"
+        )));
+    }
+    if content.chars().count() > max_content_chars {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}].content must contain at most {max_content_chars} characters"
+        )));
+    }
+    let status_kind = TodoStatusKind::parse(name, status, index)?;
+    validate_todo_priority(name, priority, index)?;
+
+    let normalized = json!({
+        "id": id,
+        "content": content,
+        "status": status,
+        "priority": priority,
+    });
+    Ok(ValidatedTodo {
         normalized,
-        TodoCounts {
-            pending: pending_count,
-            in_progress: in_progress_count,
-            completed: completed_count,
-            cancelled: cancelled_count,
-        },
-    ))
+        status: status_kind,
+    })
+}
+
+fn validate_todo_priority(name: &str, priority: &str, index: usize) -> Result<(), RuntimeError> {
+    if !matches!(priority, "high" | "medium" | "low") {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}].priority must be high, medium, or low"
+        )));
+    }
+    Ok(())
 }
 
 fn required_todo_id(
@@ -127,7 +153,7 @@ pub(crate) fn call_todo_read_tool(name: &str, current_todos: &[Value]) -> Value 
     todo_list_output(name, "todo_read", current_todos.to_vec(), counts)
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Default)]
 struct TodoCounts {
     pending: usize,
     in_progress: usize,
@@ -135,24 +161,36 @@ struct TodoCounts {
     cancelled: usize,
 }
 
+impl TodoCounts {
+    fn record(&mut self, status: TodoStatusKind) {
+        match status {
+            TodoStatusKind::Pending => self.pending += 1,
+            TodoStatusKind::InProgress => self.in_progress += 1,
+            TodoStatusKind::Completed => self.completed += 1,
+            TodoStatusKind::Cancelled => self.cancelled += 1,
+        }
+    }
+}
+
+fn todo_status_kind_from_value(value: &Value) -> Option<TodoStatusKind> {
+    match value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+    {
+        "pending" => Some(TodoStatusKind::Pending),
+        "in_progress" => Some(TodoStatusKind::InProgress),
+        "completed" => Some(TodoStatusKind::Completed),
+        "cancelled" => Some(TodoStatusKind::Cancelled),
+        _ => None,
+    }
+}
+
 fn todo_counts(todos: &[Value]) -> TodoCounts {
-    let mut counts = TodoCounts {
-        pending: 0,
-        in_progress: 0,
-        completed: 0,
-        cancelled: 0,
-    };
+    let mut counts = TodoCounts::default();
     for todo in todos {
-        match todo
-            .get("status")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-        {
-            "pending" => counts.pending += 1,
-            "in_progress" => counts.in_progress += 1,
-            "completed" => counts.completed += 1,
-            "cancelled" => counts.cancelled += 1,
-            _ => {}
+        if let Some(status) = todo_status_kind_from_value(todo) {
+            counts.record(status);
         }
     }
     counts

@@ -6,39 +6,29 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "file.ops",
+              "tool": "edit",
               "input": {
-                "operations": [
-                  {
-                    "kind": "edit",
-                    "path": "examples/code-agent/edit-fixture/math.js",
-                    "old_string": "return a - b;",
-                    "new_string": "return a * b;"
-                  }
-                ]
+                "filePath": "examples/code-agent/edit-fixture/math.js",
+                "oldString": "return a - b;",
+                "newString": "return a * b;"
               }
             }
           ],
-          "rationale": "Apply an intentionally wrong edit so auto verification fails and AIR collects diagnostic context before the repair turn."
+          "rationale": "Apply an intentionally wrong edit so auto verification fails and AIR collects diagnostic context before the correction turn."
         },
         {
           "complete": false,
           "tool_calls": [
             {
-              "tool": "file.ops",
+              "tool": "edit",
               "input": {
-                "operations": [
-                  {
-                    "kind": "edit",
-                    "path": "examples/code-agent/edit-fixture/math.js",
-                    "old_string": "return a * b;",
-                    "new_string": "return a + b;"
-                  }
-                ]
+                "filePath": "examples/code-agent/edit-fixture/math.js",
+                "oldString": "return a * b;",
+                "newString": "return a + b;"
               }
             }
           ],
-          "rationale": "Use the diagnostic context from the failed validation to repair the exact failing line."
+          "rationale": "Use the diagnostic context from the failed validation to correct the exact failing line."
         }
       ]
     },
@@ -46,18 +36,7 @@
       "initial_success": false,
       "final_success": true,
       "patch_applied": true,
-      "changed_files": [
-        "examples/code-agent/edit-fixture/math.js"
-      ],
-      "workspace_changed_files": [
-        "examples/code-agent/edit-fixture/math.js"
-      ],
-      "preexisting_changed_files": [],
-      "workspace_diff": {
-        "diff": "diff --git a/examples/code-agent/edit-fixture/math.js b/examples/code-agent/edit-fixture/math.js\n"
-      },
-      "rationale": "The first edit applied but failed auto verification, AIR collected diagnostic.context for the failing line, then the loop repaired the line and validation passed.",
-      "observations": []
+      "rationale": "The first edit applied but failed auto verification, AIR collected diagnostic.context for the failing line, then the loop corrected the line and validation passed."
     }
   }
 }

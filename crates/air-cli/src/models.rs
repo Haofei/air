@@ -396,10 +396,6 @@ mod tests {
             "code_edit_decider prompt must not describe the old patch-only schema"
         );
         assert!(
-            !edit_prompt.contains("file.patch"),
-            "code_edit_decider prompt should keep the edit loop on file.ops instead of exposing patch as a second write primitive"
-        );
-        assert!(
             edit_prompt.contains("available native tools")
                 && edit_prompt.contains("provider schemas"),
             "code_edit_decider prompt must rely on provider-native tool schemas instead of duplicated tool_schemas JSON"
@@ -424,6 +420,12 @@ mod tests {
             edit_prompt.contains("do not keep rereading the same ranges"),
             "code_edit_decider prompt must discourage over-exploration without creating a special targeted mode"
         );
+        assert!(
+            edit_prompt.contains("repository lint style")
+                && edit_prompt.contains("too_many_arguments")
+                && edit_prompt.contains("type_complexity"),
+            "code_edit_decider prompt must steer helper refactors away from common lint failures before the first edit"
+        );
         let summarize_prompt = config
             .models
             .get("code_edit_summarizer")
@@ -431,11 +433,10 @@ mod tests {
             .unwrap_or_default()
             .to_lowercase();
         assert!(
-            summarize_prompt.contains("preexisting_changed_files")
-                && summarize_prompt.contains("array of objects")
-                && summarize_prompt.contains("\"path\": string")
-                && summarize_prompt.contains("must not be an array of strings"),
-            "code_edit_summarizer prompt must match preexisting_changed_files object schema"
+            summarize_prompt.contains("do not generate changed_files")
+                && summarize_prompt.contains("air fills those audit fields deterministically")
+                && summarize_prompt.contains("final_diff_result"),
+            "code_edit_summarizer prompt must leave diff audit fields to AIR"
         );
     }
 

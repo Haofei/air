@@ -51,7 +51,7 @@
               }
             },
             {
-              "tool": "file.search",
+              "tool": "grep",
               "input": {
                 "path": "crates/air-runtime/src/lib.rs",
                 "pattern": "ToolBatchDispatch|ToolBatchExecution",
@@ -61,7 +61,7 @@
               }
             },
             {
-              "tool": "file.read_many",
+              "tool": "read_many",
               "input": {
                 "paths": [
                   "crates/air-core/src/lib.rs",
@@ -71,7 +71,7 @@
               }
             }
           ],
-          "rationale": "Use the first batch to narrow into nearby implementation context, verify exact in-file matches with bounded file.search, and read the key files before summarizing."
+          "rationale": "Use the first batch to narrow into nearby implementation context, verify exact in-file matches with bounded grep, and read the key files before summarizing."
         },
         {
           "complete": true,
@@ -106,7 +106,7 @@
       "source_ids": [],
       "next_steps": [
         "Use this pattern to replace fixed read-only gathering stages with a bounded plan-act-observe batch loop.",
-        "Let the model start with repo.files/repo.search/repo.symbols before narrowing into repo.context or file.read_many.",
+        "Let the model start with repo.files/repo.search/repo.symbols before narrowing into repo.context or read_many.",
         "Keep write tools out of dynamic dispatch until a module has an explicit approval path and narrow patch policy."
       ]
     }

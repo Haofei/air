@@ -1,5 +1,4 @@
 use super::*;
-use std::io::Write;
 
 pub(super) fn call_file_read_tool(
     name: &str,
@@ -7,7 +6,7 @@ pub(super) fn call_file_read_tool(
     base_dir: &Path,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let input_path = required_input_string(name, input, "path")?;
+    let input_path = required_path_input(name, input)?;
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
     let candidate = if Path::new(input_path).is_absolute() {
         PathBuf::from(input_path)
@@ -36,16 +35,34 @@ pub(super) fn call_file_read_tool(
         .to_string();
     let total_lines = full_content.lines().count();
     let lines_range = optional_line_range_input(name, input, "lines")?;
+    let offset = optional_bounded_zero_or_positive_usize_input(name, input, "offset", usize::MAX)?;
+    let limit = optional_positive_usize_input(name, input, "limit")?;
     if lines_range.is_some()
+        && (input.get("start_line").is_some()
+            || input.get("end_line").is_some()
+            || offset.is_some()
+            || limit.is_some())
+    {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.lines cannot be combined with input.start_line, input.end_line, input.offset, or input.limit"
+        )));
+    }
+    if (offset.is_some() || limit.is_some())
         && (input.get("start_line").is_some() || input.get("end_line").is_some())
     {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} input.lines cannot be combined with input.start_line or input.end_line"
+            "tool {name} input.offset/input.limit cannot be combined with input.start_line or input.end_line"
         )));
     }
     let explicit_start_line = optional_positive_usize_input(name, input, "start_line")?;
     let explicit_end_line = optional_positive_usize_input(name, input, "end_line")?;
-    let (start_line, end_line) = if let Some((start, end)) = lines_range {
+    let (start_line, end_line) = if let Some(offset) = offset {
+        let start = offset.saturating_add(1);
+        let end = limit.map(|limit| start.saturating_add(limit).saturating_sub(1));
+        (Some(start), end)
+    } else if let Some(limit) = limit {
+        (Some(1), Some(limit))
+    } else if let Some((start, end)) = lines_range {
         (Some(start), Some(end))
     } else {
         (explicit_start_line, explicit_end_line)
@@ -104,10 +121,13 @@ pub(super) fn call_file_read_tool(
         (start_line, end_line, None)
     };
     let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
-    let (selected_content, truncated, bytes) =
-        bytes_to_limited_text(selected.as_bytes(), effective_max_bytes);
-    let full_output_path =
-        maybe_save_full_output(name, &base, "file-read", selected.as_bytes(), truncated)?;
+    let (selected_content, truncated, bytes, full_output_path) = limit_and_maybe_save(
+        name,
+        &base,
+        "file-read",
+        selected.as_bytes(),
+        effective_max_bytes,
+    )?;
     let content = if line_numbers {
         numbered_content(&selected_content, effective_start_line.unwrap_or(1))
     } else {
@@ -296,7 +316,7 @@ pub(super) fn call_file_search_tool(
     max_context_lines: usize,
     max_line_chars: usize,
 ) -> Result<Value, RuntimeError> {
-    let input_path = required_input_string(name, input, "path")?;
+    let input_path = optional_path_input(name, input)?.unwrap_or(".");
     let (pattern, pattern_source) = file_search_pattern_input(name, input)?;
     if pattern.is_empty() {
         return Err(RuntimeError::Provider(format!(
@@ -317,15 +337,16 @@ pub(super) fn call_file_search_tool(
             "tool {name} input.path is outside configured base_dir"
         )));
     }
-    let context_lines = optional_bounded_zero_or_positive_usize_input(
+    let context_lines = optional_bounded_zero_or_positive_usize_alias_input(
         name,
         input,
         "context_lines",
+        "contextLines",
         max_context_lines,
     )?
     .unwrap_or(0);
     let effective_max_matches =
-        optional_bounded_usize_input(name, input, "max_matches", max_matches)?
+        optional_bounded_usize_alias_input(name, input, "max_matches", "maxMatches", max_matches)?
             .unwrap_or(max_matches);
     let effective_max_line_chars =
         optional_bounded_usize_input(name, input, "max_line_chars", max_line_chars)?
@@ -380,15 +401,8 @@ pub(super) fn call_file_search_tool(
             rendered.push_str(&render_search_line(context));
         }
     }
-    let (artifact_content, content_truncated, bytes) =
-        bytes_to_limited_text(rendered.as_bytes(), max_bytes);
-    let full_output_path = maybe_save_full_output(
-        name,
-        &base,
-        "file-search",
-        rendered.as_bytes(),
-        content_truncated,
-    )?;
+    let (artifact_content, content_truncated, bytes, full_output_path) =
+        limit_and_maybe_save(name, &base, "file-search", rendered.as_bytes(), max_bytes)?;
     let match_truncated = result.total_match_count > result.matches.len();
     let truncated = match_truncated || content_truncated || result.any_line_truncated;
     let truncation_hint = file_search_truncation_hint(
@@ -468,6 +482,18 @@ fn file_search_truncation_hint(
         parts.push("Search matches exceeded max_matches; narrow the pattern/path or increase max_matches only when the broader match set is immediately needed.".to_string());
     }
     Some(parts.join(" "))
+}
+
+fn limit_and_maybe_save(
+    tool_name: &str,
+    base_dir: &Path,
+    prefix: &str,
+    content: &[u8],
+    max_bytes: usize,
+) -> Result<(String, bool, usize, Option<String>), RuntimeError> {
+    let (limited, truncated, bytes) = bytes_to_limited_text(content, max_bytes);
+    let full_output_path = maybe_save_full_output(tool_name, base_dir, prefix, content, truncated)?;
+    Ok((limited, truncated, bytes, full_output_path))
 }
 
 fn maybe_save_full_output(
@@ -714,6 +740,121 @@ fn stable_pattern_id(pattern: &str) -> String {
         .collect::<String>()
 }
 
+fn required_path_input<'a>(tool_name: &str, input: &'a Value) -> Result<&'a str, RuntimeError> {
+    required_input_string_alias(tool_name, input, "path", "filePath")
+}
+
+fn optional_path_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+) -> Result<Option<&'a str>, RuntimeError> {
+    optional_string_alias_input(tool_name, input, "path", "filePath")
+}
+
+fn required_input_string_alias<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    field: &str,
+    alias: &str,
+) -> Result<&'a str, RuntimeError> {
+    if let Some(value) = input.get(field) {
+        return value.as_str().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+        });
+    }
+    if let Some(value) = input.get(alias) {
+        return value.as_str().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{alias} must be a string"))
+        });
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} input.{field} must be a string"
+    )))
+}
+
+fn optional_string_alias_input<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    field: &str,
+    alias: &str,
+) -> Result<Option<&'a str>, RuntimeError> {
+    if let Some(value) = input.get(field) {
+        return value.as_str().map(Some).ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+        });
+    }
+    if let Some(value) = input.get(alias) {
+        return value.as_str().map(Some).ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} input.{alias} must be a string"))
+        });
+    }
+    Ok(None)
+}
+
+fn parse_alias_usize(
+    tool_name: &str,
+    input: &Value,
+    alias: &str,
+    configured_max: usize,
+    integer_qualifier: &str,
+    reject_zero: bool,
+) -> Result<Option<usize>, RuntimeError> {
+    let Some(value) = input.get(alias) else {
+        return Ok(None);
+    };
+    let Some(number) = value.as_u64() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{alias} must be {integer_qualifier} integer"
+        )));
+    };
+    if reject_zero && number == 0 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{alias} must be greater than 0"
+        )));
+    }
+    usize::try_from(number)
+        .map(|value| Some(value.min(configured_max)))
+        .map_err(|_| RuntimeError::Provider(format!("tool {tool_name} input.{alias} is too large")))
+}
+
+fn optional_bounded_usize_alias_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+    alias: &str,
+    configured_max: usize,
+) -> Result<Option<usize>, RuntimeError> {
+    if input.get(field).is_some() {
+        return optional_bounded_usize_input(tool_name, input, field, configured_max);
+    }
+    parse_alias_usize(tool_name, input, alias, configured_max, "a positive", true)
+}
+
+fn optional_bounded_zero_or_positive_usize_alias_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+    alias: &str,
+    configured_max: usize,
+) -> Result<Option<usize>, RuntimeError> {
+    if input.get(field).is_some() {
+        return optional_bounded_zero_or_positive_usize_input(
+            tool_name,
+            input,
+            field,
+            configured_max,
+        );
+    }
+    parse_alias_usize(
+        tool_name,
+        input,
+        alias,
+        configured_max,
+        "a non-negative",
+        false,
+    )
+}
+
 fn optional_bounded_zero_or_positive_usize_input(
     tool_name: &str,
     input: &Value,
@@ -905,7 +1046,7 @@ macro_rules! define_edit_match_strategies {
             ) -> Result<Self, RuntimeError> {
                 let Some(value) = optional_labeled_string_input(tool_name, input, label, "match_strategy")?
                 else {
-                    return Ok(Self::Exact);
+                    return Ok(Self::Auto);
                 };
                 match value {
                     "auto" => Ok(Self::Auto),
@@ -1523,24 +1664,11 @@ pub(super) struct FileWriteOptions<'a> {
     pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
 }
 
-pub(super) struct FileOpsOptions<'a> {
-    pub(super) base_dir: &'a Path,
-    pub(super) max_bytes: usize,
-    pub(super) max_files: usize,
-    pub(super) max_changed_lines: Option<usize>,
-    pub(super) require_read: bool,
-    pub(super) allow_new_files: bool,
-    pub(super) allow_overwrite: bool,
-    pub(super) allow_replace_all: bool,
-    pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
-}
-
 pub(super) struct FileEditOptions<'a> {
     pub(super) base_dir: &'a Path,
     pub(super) max_bytes: usize,
     pub(super) max_changed_lines: Option<usize>,
     pub(super) require_read: bool,
-    pub(super) allow_replace_all: bool,
     pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
 }
 
@@ -1633,160 +1761,6 @@ pub(super) fn call_file_write_tool(
     }))
 }
 
-struct FileOpsPendingFile {
-    path: String,
-    absolute_path: PathBuf,
-    kind: &'static str,
-    content: String,
-}
-
-fn normalize_file_ops_input(input: &Value) -> Result<Value, RuntimeError> {
-    if input.get("operations").is_some() {
-        return normalize_file_ops_array_input(input, "operations");
-    }
-    if let Some(ops) = input.get("ops") {
-        let mut normalized = serde_json::Map::new();
-        normalized.insert(
-            "operations".to_string(),
-            normalize_file_ops_operations_with_default_path(
-                ops,
-                input.get("path").and_then(Value::as_str),
-                input.get("kind").and_then(Value::as_str),
-            )?,
-        );
-        if let Some(dry_run) = input.get("dry_run") {
-            normalized.insert("dry_run".to_string(), dry_run.clone());
-        }
-        preserve_file_ops_scope_fields(input, &mut normalized);
-        return Ok(Value::Object(normalized));
-    }
-    if let Some(edits) = input.get("edits") {
-        let mut normalized = serde_json::Map::new();
-        normalized.insert(
-            "operations".to_string(),
-            normalize_file_ops_operations_with_default_path(
-                edits,
-                input.get("path").and_then(Value::as_str),
-                input.get("kind").and_then(Value::as_str),
-            )?,
-        );
-        if let Some(dry_run) = input.get("dry_run") {
-            normalized.insert("dry_run".to_string(), dry_run.clone());
-        }
-        preserve_file_ops_scope_fields(input, &mut normalized);
-        return Ok(Value::Object(normalized));
-    }
-    let Some(kind) = input.get("kind").and_then(Value::as_str) else {
-        return Ok(input.clone());
-    };
-    let mut operation = serde_json::Map::new();
-    operation.insert("kind".to_string(), Value::String(kind.to_string()));
-    for field in [
-        "path",
-        "old_string",
-        "new_string",
-        "content",
-        "start_line",
-        "end_line",
-        "replace_all",
-        "match_strategy",
-    ] {
-        if let Some(value) = input.get(field) {
-            operation.insert(field.to_string(), value.clone());
-        }
-    }
-    if let Some(args) = input.get("args").or_else(|| input.get("arguments")) {
-        let Some(args) = args.as_object() else {
-            return Ok(input.clone());
-        };
-        merge_file_ops_args(&mut operation, args);
-    }
-    normalize_file_ops_operation_aliases(&mut operation);
-    let mut normalized = serde_json::Map::new();
-    normalized.insert(
-        "operations".to_string(),
-        Value::Array(vec![Value::Object(operation)]),
-    );
-    if let Some(dry_run) = input.get("dry_run") {
-        normalized.insert("dry_run".to_string(), dry_run.clone());
-    }
-    preserve_file_ops_scope_fields(input, &mut normalized);
-    Ok(Value::Object(normalized))
-}
-
-fn normalize_file_ops_array_input(input: &Value, field: &str) -> Result<Value, RuntimeError> {
-    let Some(operations) = input.get(field) else {
-        return Ok(input.clone());
-    };
-    let mut normalized = input.clone();
-    if let Some(object) = normalized.as_object_mut() {
-        object.insert(
-            "operations".to_string(),
-            normalize_file_ops_operations_with_default_path(
-                operations,
-                input.get("path").and_then(Value::as_str),
-                input.get("kind").and_then(Value::as_str),
-            )?,
-        );
-    }
-    Ok(normalized)
-}
-
-fn normalize_file_ops_operations_with_default_path(
-    operations: &Value,
-    default_path: Option<&str>,
-    default_kind: Option<&str>,
-) -> Result<Value, RuntimeError> {
-    let Some(items) = operations.as_array() else {
-        return Ok(operations.clone());
-    };
-    let mut normalized_items = Vec::with_capacity(items.len());
-    for item in items {
-        let Some(object) = item.as_object() else {
-            normalized_items.push(item.clone());
-            continue;
-        };
-        let mut operation = object.clone();
-        if let Some(args) = object
-            .get("args")
-            .or_else(|| object.get("arguments"))
-            .and_then(Value::as_object)
-        {
-            merge_file_ops_args(&mut operation, args);
-        }
-        if let Some(path) = default_path {
-            operation
-                .entry("path".to_string())
-                .or_insert_with(|| Value::String(path.to_string()));
-        }
-        if let Some(kind) = default_kind {
-            operation
-                .entry("kind".to_string())
-                .or_insert_with(|| Value::String(kind.to_string()));
-        }
-        normalize_file_ops_operation_aliases(&mut operation);
-        normalized_items.push(Value::Object(operation));
-    }
-    Ok(Value::Array(normalized_items))
-}
-
-fn merge_file_ops_args(
-    operation: &mut serde_json::Map<String, Value>,
-    args: &serde_json::Map<String, Value>,
-) {
-    for (key, value) in args {
-        operation
-            .entry(key.to_string())
-            .or_insert_with(|| value.clone());
-    }
-}
-
-fn preserve_file_ops_scope_fields(input: &Value, normalized: &mut serde_json::Map<String, Value>) {
-    if let Some(allowed_paths) = input.get("allowed_paths") {
-        normalized.insert("allowed_paths".to_string(), allowed_paths.clone());
-    }
-}
-
 fn allowed_paths_input(
     tool_name: &str,
     input: &Value,
@@ -1838,17 +1812,6 @@ fn enforce_allowed_path(
     )))
 }
 
-fn repair_single_allowed_path(
-    path: &str,
-    allowed_paths: &Option<BTreeSet<String>>,
-) -> Option<String> {
-    let allowed_paths = allowed_paths.as_ref()?;
-    if allowed_paths.contains(path) || allowed_paths.len() != 1 {
-        return None;
-    }
-    allowed_paths.iter().next().cloned()
-}
-
 fn effective_max_changed_lines(
     tool_name: &str,
     input: &Value,
@@ -1890,812 +1853,11 @@ fn count_changed_diff_lines(diff: &str) -> usize {
         .count()
 }
 
-fn normalize_file_ops_operation_aliases(operation: &mut serde_json::Map<String, Value>) {
-    if operation.get("kind").is_none()
-        && operation.get("start_line").is_some()
-        && operation.get("end_line").is_some()
-        && (operation.get("content").is_some()
-            || operation.get("new_lines").is_some()
-            || operation.get("lines").is_some()
-            || operation.get("replacement").is_some())
-    {
-        operation.insert(
-            "kind".to_string(),
-            Value::String("replace_lines".to_string()),
-        );
-    }
-    let kind = operation.get("kind").and_then(Value::as_str);
-    if kind != Some("replace_lines") || operation.contains_key("new_string") {
-        return;
-    }
-    let value = if let Some(lines) = operation
-        .get("new_lines")
-        .or_else(|| operation.get("lines"))
-        .and_then(Value::as_array)
-    {
-        let mut text = String::new();
-        for line in lines {
-            let Some(line) = line.as_str() else {
-                return;
-            };
-            text.push_str(line);
-            text.push('\n');
-        }
-        Some(Value::String(text))
-    } else {
-        operation
-            .get("replacement")
-            .or_else(|| operation.get("content"))
-            .cloned()
-    };
-    let Some(mut value) = value else {
-        return;
-    };
-    if let Some(text) = value.as_str() {
-        if !text.ends_with('\n') {
-            value = Value::String(format!("{text}\n"));
-        }
-    }
-    operation.insert("new_string".to_string(), value);
-}
-
-fn labeled_string_input_with_aliases<'a>(
-    name: &str,
-    input: &'a Value,
-    label: &str,
-    field: &str,
-    aliases: &[&str],
-) -> Result<&'a str, RuntimeError> {
-    if let Some(value) = optional_labeled_string_input(name, input, label, field)? {
-        return Ok(value);
-    }
-    for alias in aliases {
-        if let Some(value) = optional_labeled_string_input(name, input, label, alias)? {
-            return Ok(value);
-        }
-    }
-    Err(RuntimeError::Provider(format!(
-        "tool {name} {label}.{field} must be a string"
-    )))
-}
-
-pub(super) fn call_file_ops_tool(
-    name: &str,
-    input: &Value,
-    options: FileOpsOptions<'_>,
-) -> Result<Value, RuntimeError> {
-    let normalized_input = normalize_file_ops_input(input)?;
-    let input = &normalized_input;
-    let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
-    let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
-    let operations = input
-        .get("operations")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {name} input.operations must be an array"))
-        })?;
-    if operations.is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.operations must contain at least one operation"
-        )));
-    }
-    if operations.len() > options.max_files {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.operations contains {} operations, exceeding max_files={}",
-            operations.len(),
-            options.max_files
-        )));
-    }
-
-    let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
-    let allowed_paths = allowed_paths_input(name, input)?;
-    let mut pending = BTreeMap::<PathBuf, FileOpsPendingFile>::new();
-    let mut diff = String::new();
-    let mut match_strategies = Vec::new();
-    let mut path_repairs = Vec::new();
-
-    for (index, operation) in operations.iter().enumerate() {
-        let label = format!("input.operations[{index}]");
-        let Some(object) = operation.as_object() else {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} {label} must be an object"
-            )));
-        };
-        let kind = required_labeled_string_input(name, operation, &label, "kind")?;
-        let raw_input_path = required_labeled_string_input(name, operation, &label, "path")?;
-        validate_git_pathspec(name, raw_input_path)?;
-        let mut input_path = raw_input_path.to_string();
-        if let Some(repaired_path) = repair_single_allowed_path(&input_path, &allowed_paths) {
-            path_repairs.push(json!({
-                "operation": index,
-                "from": input_path.clone(),
-                "to": repaired_path,
-                "reason": "single_allowed_path"
-            }));
-            input_path = repaired_path;
-        } else {
-            enforce_allowed_path(name, &format!("{label}.path"), &input_path, &allowed_paths)?;
-        }
-        let candidate = base.join(&input_path);
-
-        match kind {
-            "edit" => {
-                let path = canonicalize_tool_path(name, &format!("{label}.path"), &candidate)?;
-                if !path.starts_with(&base) {
-                    return Err(RuntimeError::Provider(format!(
-                        "tool {name} {label}.path is outside configured base_dir"
-                    )));
-                }
-                if options.require_read {
-                    require_fresh_read(
-                        name,
-                        &format!("{label}.path"),
-                        "edit",
-                        &path,
-                        options.read_snapshots,
-                    )?;
-                }
-                let current = match pending.get(&path) {
-                    Some(file) => file.content.clone(),
-                    None => fs::read_to_string(&path).map_err(|error| {
-                        RuntimeError::Provider(format!("tool {name} read file: {error}"))
-                    })?,
-                };
-                let old_string =
-                    required_labeled_string_input(name, operation, &label, "old_string")?;
-                let new_string = labeled_string_input_with_aliases(
-                    name,
-                    operation,
-                    &label,
-                    "new_string",
-                    &["replacement", "content"],
-                )?;
-                validate_file_edit_operation(name, &label, old_string, new_string)?;
-                let replace_all =
-                    optional_labeled_bool_input(name, operation, &label, "replace_all")?
-                        .unwrap_or(false);
-                if replace_all && !options.allow_replace_all {
-                    return Err(RuntimeError::Provider(format!(
-                        "tool {name} {label}.replace_all is true but allow_replace_all is false"
-                    )));
-                }
-                let match_strategy = if object.get("match_strategy").is_some() {
-                    EditMatchStrategy::from_labeled_input(name, operation, &label)?
-                } else {
-                    EditMatchStrategy::Auto
-                };
-                let (effective_match_strategy, matches) =
-                    find_edit_matches(&current, old_string, match_strategy);
-                if matches.is_empty() {
-                    let anchor_line = old_string_anchor_line(&current, old_string);
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "edit",
-                            "old_string",
-                            format!(
-                                "{label}.old_string was not found with match_strategy={}",
-                                match_strategy.as_str()
-                            ),
-                        )
-                        .with_match_strategy(match_strategy.as_str())
-                        .with_match_count(0)
-                        .with_anchor_line(anchor_line),
-                    ));
-                }
-                if matches.len() > 1 && !replace_all {
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "edit",
-                            "old_string",
-                            format!(
-                            "{label}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
-                        matches.len(),
-                        effective_match_strategy.as_str()
-                            ),
-                        )
-                        .with_match_strategy(match_strategy.as_str())
-                        .with_effective_match_strategy(effective_match_strategy.as_str())
-                        .with_match_count(matches.len()),
-                    ));
-                }
-                let selected = selected_edit_matches(&matches, replace_all);
-                match_strategies.push(effective_match_strategy.as_str());
-                diff.push_str(&edit_unified_diff(
-                    &input_path,
-                    &current,
-                    &selected,
-                    new_string,
-                ));
-                let updated = apply_selected_edit_matches(&current, &selected, new_string);
-                if updated.len() > options.max_bytes {
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "edit",
-                            "new_string",
-                            format!(
-                                "{label} edited content exceeds max_bytes={}",
-                                options.max_bytes
-                            ),
-                        ),
-                    ));
-                }
-                pending.insert(
-                    path.clone(),
-                    FileOpsPendingFile {
-                        path: input_path.to_string(),
-                        absolute_path: path,
-                        kind: "existing",
-                        content: updated,
-                    },
-                );
-            }
-            "replace_lines" => {
-                let path = canonicalize_tool_path(name, &format!("{label}.path"), &candidate)?;
-                if !path.starts_with(&base) {
-                    return Err(RuntimeError::Provider(format!(
-                        "tool {name} {label}.path is outside configured base_dir"
-                    )));
-                }
-                if options.require_read {
-                    require_fresh_read(
-                        name,
-                        &format!("{label}.path"),
-                        "replace_lines",
-                        &path,
-                        options.read_snapshots,
-                    )?;
-                }
-                let current = match pending.get(&path) {
-                    Some(file) => file.content.clone(),
-                    None => fs::read_to_string(&path).map_err(|error| {
-                        RuntimeError::Provider(format!("tool {name} read file: {error}"))
-                    })?,
-                };
-                let start_line =
-                    required_labeled_usize_input(name, operation, &label, "start_line")?;
-                let end_line = required_labeled_usize_input(name, operation, &label, "end_line")?;
-                let new_string = labeled_string_input_with_aliases(
-                    name,
-                    operation,
-                    &label,
-                    "new_string",
-                    &["replacement", "content"],
-                )?;
-                let Some(line_match) = line_range_edit_match(&current, start_line, end_line) else {
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "replace_lines",
-                            "start_line",
-                            format!(
-                                "{label}.start_line/{label}.end_line must select an existing inclusive line range"
-                            ),
-                        ),
-                    ));
-                };
-                let old_string = &current[line_match.start..line_match.end];
-                validate_file_edit_operation(name, &label, old_string, new_string)?;
-                let replacement = replace_lines_replacement(old_string, new_string);
-                diff.push_str(&edit_unified_diff(
-                    &input_path,
-                    &current,
-                    &[line_match],
-                    &replacement,
-                ));
-                let updated = apply_selected_edit_matches(&current, &[line_match], &replacement);
-                if updated.len() > options.max_bytes {
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "replace_lines",
-                            "new_string",
-                            format!(
-                                "{label} edited content exceeds max_bytes={}",
-                                options.max_bytes
-                            ),
-                        ),
-                    ));
-                }
-                pending.insert(
-                    path.clone(),
-                    FileOpsPendingFile {
-                        path: input_path.to_string(),
-                        absolute_path: path,
-                        kind: "existing",
-                        content: updated,
-                    },
-                );
-            }
-            "write" => {
-                let content = required_labeled_string_input(name, operation, &label, "content")?;
-                if content.len() > options.max_bytes {
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "write",
-                            "content",
-                            format!("{label}.content exceeds max_bytes={}", options.max_bytes),
-                        ),
-                    ));
-                }
-                let (path, existed, old_content) =
-                    resolve_file_ops_write_path(name, &label, &base, &input_path)?;
-                if existed {
-                    if !options.allow_overwrite {
-                        return Ok(file_ops_failure_output(
-                            name,
-                            &base,
-                            operations.len(),
-                            &pending,
-                            &diff,
-                            FileOpsDiagnostic::new(
-                                index,
-                                label.clone(),
-                                &input_path,
-                                "write",
-                                "path",
-                                format!(
-                                    "{label}.path already exists and allow_overwrite is false; use kind=edit or kind=replace_lines for existing files"
-                                ),
-                            ),
-                        ));
-                    }
-                    if options.require_read {
-                        require_fresh_read(
-                            name,
-                            &format!("{label}.path"),
-                            "overwrite",
-                            &path,
-                            options.read_snapshots,
-                        )?;
-                    }
-                } else if !options.allow_new_files {
-                    return Ok(file_ops_failure_output(
-                        name,
-                        &base,
-                        operations.len(),
-                        &pending,
-                        &diff,
-                        FileOpsDiagnostic::new(
-                            index,
-                            label.clone(),
-                            &input_path,
-                            "write",
-                            "path",
-                            format!("{label}.path does not exist and allow_new_files is false"),
-                        ),
-                    ));
-                }
-                diff.push_str(&write_unified_diff(
-                    &input_path,
-                    old_content.as_deref(),
-                    content,
-                ));
-                pending.insert(
-                    path.clone(),
-                    FileOpsPendingFile {
-                        path: input_path.to_string(),
-                        absolute_path: path,
-                        kind: if existed { "existing" } else { "new" },
-                        content: content.to_string(),
-                    },
-                );
-            }
-            _ => {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} {label}.kind must be edit, replace_lines, or write"
-                )));
-            }
-        }
-    }
-
-    if pending.len() > options.max_files {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.operations changes {} files, exceeding max_files={}",
-            pending.len(),
-            options.max_files
-        )));
-    }
-    enforce_max_changed_lines(name, "input.operations", &diff, max_changed_lines)?;
-
-    if !dry_run {
-        for file in pending.values() {
-            if let Some(parent) = file.absolute_path.parent() {
-                fs::create_dir_all(parent).map_err(|error| {
-                    RuntimeError::Provider(format!(
-                        "tool {name} create parent directories for {}: {error}",
-                        file.path
-                    ))
-                })?;
-            }
-            fs::write(&file.absolute_path, file.content.as_bytes()).map_err(|error| {
-                RuntimeError::Provider(format!("tool {name} write {}: {error}", file.path))
-            })?;
-        }
-    }
-
-    let files = pending
-        .values()
-        .map(|file| {
-            json!({
-                "path": file.path,
-                "kind": file.kind
-            })
-        })
-        .collect::<Vec<_>>();
-    let (diff_content, diff_truncated, diff_bytes) =
-        bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
-    Ok(json!({
-        "repo": base.display().to_string(),
-        "success": true,
-        "checked": true,
-        "applied": !dry_run,
-        "files": files,
-        "file_count": pending.len(),
-        "diagnostics": [],
-        "match_strategies": match_strategies,
-        "path_repairs": path_repairs,
-        "bytes": diff_bytes,
-        "diff": diff_content,
-        "diff_truncated": diff_truncated,
-        "artifacts": [{
-            "id": format!("file-ops:{}:{}", base.display(), pending.len()),
-            "kind": "file_ops",
-            "title": format!("{} structured file operation(s)", operations.len()),
-            "uri": base.display().to_string(),
-            "content": diff_content.clone(),
-            "metadata": {
-                "provider": "file_ops",
-                "repo": base.display().to_string(),
-                "success": true,
-                "checked": true,
-                "applied": !dry_run,
-                "dry_run": dry_run,
-                "operation_count": operations.len(),
-                "file_count": pending.len(),
-                "match_strategies": match_strategies,
-                "diff_bytes": diff_bytes,
-                "diff_truncated": diff_truncated
-            }
-        }]
-    }))
-}
-
-fn file_ops_failure_output(
-    name: &str,
-    base: &Path,
-    operation_count: usize,
-    pending: &BTreeMap<PathBuf, FileOpsPendingFile>,
-    diff: &str,
-    diagnostic: FileOpsDiagnostic,
-) -> Value {
-    let files = pending
-        .values()
-        .map(|file| {
-            json!({
-                "path": file.path,
-                "kind": file.kind
-            })
-        })
-        .collect::<Vec<_>>();
-    let (diff_content, diff_truncated, diff_bytes) =
-        bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
-    let diagnostic = diagnostic.into_json(name);
-    json!({
-        "repo": base.display().to_string(),
-        "success": false,
-        "checked": true,
-        "applied": false,
-        "files": files,
-        "file_count": pending.len(),
-        "diagnostics": [diagnostic],
-        "bytes": diff_bytes,
-        "diff": diff_content,
-        "diff_truncated": diff_truncated,
-        "artifacts": [{
-            "id": format!("file-ops:{}:failed", base.display()),
-            "kind": "file_ops",
-            "title": "structured file operations failed validation",
-            "uri": base.display().to_string(),
-            "content": diff_content.clone(),
-            "metadata": {
-                "provider": "file_ops",
-                "repo": base.display().to_string(),
-                "success": false,
-                "checked": true,
-                "applied": false,
-                "operation_count": operation_count,
-                "file_count": pending.len(),
-                "diff_bytes": diff_bytes,
-                "diff_truncated": diff_truncated
-            }
-        }]
-    })
-}
-
-fn required_labeled_usize_input(
-    tool_name: &str,
-    input: &Value,
-    label: &str,
-    field: &str,
-) -> Result<usize, RuntimeError> {
-    let Some(value) = input.get(field) else {
-        return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} {label}.{field} must be a positive integer"
-        )));
-    };
-    let Some(number) = value.as_u64() else {
-        return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} {label}.{field} must be a positive integer"
-        )));
-    };
-    if number == 0 {
-        return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} {label}.{field} must be greater than 0"
-        )));
-    }
-    usize::try_from(number).map_err(|_| {
-        RuntimeError::Provider(format!("tool {tool_name} {label}.{field} is too large"))
-    })
-}
-
-fn line_range_edit_match(content: &str, start_line: usize, end_line: usize) -> Option<EditMatch> {
-    if start_line == 0 || end_line < start_line || content.is_empty() {
-        return None;
-    }
-    let lines = split_lines_with_offsets(content);
-    if start_line > lines.len() || end_line > lines.len() {
-        return None;
-    }
-    let end = if end_line < lines.len() {
-        lines[end_line].start
-    } else {
-        content.len()
-    };
-    Some(EditMatch {
-        start: lines[start_line - 1].start,
-        end,
-    })
-}
-
-fn replace_lines_replacement(old_string: &str, new_string: &str) -> String {
-    if old_string.ends_with('\n') && !new_string.ends_with('\n') {
-        format!("{new_string}\n")
-    } else {
-        new_string.to_string()
-    }
-}
-
-#[derive(Debug, Clone)]
-struct FileOpsDiagnostic {
-    operation_index: usize,
-    operation_label: String,
-    path: String,
-    kind: String,
-    field: String,
-    message: String,
-    match_strategy: Option<String>,
-    effective_match_strategy: Option<String>,
-    match_count: Option<usize>,
-    line: Option<usize>,
-    line_source: Option<String>,
-}
-
-impl FileOpsDiagnostic {
-    fn new(
-        operation_index: usize,
-        operation_label: String,
-        path: &str,
-        kind: &str,
-        field: &str,
-        message: String,
-    ) -> Self {
-        Self {
-            operation_index,
-            operation_label,
-            path: path.to_string(),
-            kind: kind.to_string(),
-            field: field.to_string(),
-            message,
-            match_strategy: None,
-            effective_match_strategy: None,
-            match_count: None,
-            line: None,
-            line_source: None,
-        }
-    }
-
-    fn with_match_strategy(mut self, strategy: &str) -> Self {
-        self.match_strategy = Some(strategy.to_string());
-        self
-    }
-
-    fn with_effective_match_strategy(mut self, strategy: &str) -> Self {
-        self.effective_match_strategy = Some(strategy.to_string());
-        self
-    }
-
-    fn with_match_count(mut self, count: usize) -> Self {
-        self.match_count = Some(count);
-        self
-    }
-
-    fn with_anchor_line(mut self, line: Option<usize>) -> Self {
-        if let Some(line) = line {
-            self.line = Some(line);
-            self.line_source = Some("old_string_anchor".to_string());
-        }
-        self
-    }
-
-    fn into_json(self, source: &str) -> Value {
-        json!({
-            "source": source,
-            "severity": "error",
-            "message": self.message,
-            "operation_index": self.operation_index,
-            "operation_label": self.operation_label,
-            "path": self.path,
-            "kind": self.kind,
-            "field": self.field,
-            "match_strategy": self.match_strategy,
-            "effective_match_strategy": self.effective_match_strategy,
-            "match_count": self.match_count,
-            "line": self.line,
-            "line_source": self.line_source
-        })
-    }
-}
-
-fn old_string_anchor_line(content: &str, old_string: &str) -> Option<usize> {
-    old_string
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                return None;
-            }
-            let matches = content
-                .lines()
-                .enumerate()
-                .filter_map(|(index, content_line)| {
-                    (content_line.trim() == trimmed).then_some(index + 1)
-                })
-                .collect::<Vec<_>>();
-            if matches.len() == 1 {
-                Some((matches[0], trimmed.len()))
-            } else {
-                None
-            }
-        })
-        .max_by_key(|(_, len)| *len)
-        .map(|(line, _)| line)
-}
-
-fn resolve_file_ops_write_path(
-    name: &str,
-    label: &str,
-    base: &Path,
-    input_path: &str,
-) -> Result<(PathBuf, bool, Option<String>), RuntimeError> {
-    let candidate = base.join(input_path);
-    if candidate.exists() {
-        let path = canonicalize_tool_path(name, &format!("{label}.path"), &candidate)?;
-        if !path.starts_with(base) {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} {label}.path is outside configured base_dir"
-            )));
-        }
-        let content = fs::read_to_string(&path).map_err(|error| {
-            RuntimeError::Provider(format!("tool {name} read existing file: {error}"))
-        })?;
-        return Ok((path, true, Some(content)));
-    }
-
-    let parent = candidate.parent().ok_or_else(|| {
-        RuntimeError::Provider(format!(
-            "tool {name} {label}.path must have a parent directory"
-        ))
-    })?;
-    let parent = canonicalize_tool_path(name, &format!("{label}.path parent"), parent)?;
-    if !parent.starts_with(base) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} {label}.path is outside configured base_dir"
-        )));
-    }
-    let file_name = candidate.file_name().ok_or_else(|| {
-        RuntimeError::Provider(format!("tool {name} {label}.path must include a file name"))
-    })?;
-    Ok((parent.join(file_name), false, None))
-}
-
-fn write_unified_diff(path: &str, old_content: Option<&str>, new_content: &str) -> String {
-    let old = old_content.unwrap_or("");
-    let mut diff = if old_content.is_some() {
-        format!("--- a/{path}\n+++ b/{path}\n")
-    } else {
-        format!("--- /dev/null\n+++ b/{path}\n")
-    };
-    diff.push_str(&format!(
-        "@@ -{},{} +{},{} @@\n",
-        if old_content.is_some() { 1 } else { 0 },
-        if old_content.is_some() {
-            diff_line_count(old)
-        } else {
-            0
-        },
-        1,
-        diff_line_count(new_content)
-    ));
-    for line in diff_lines(old) {
-        diff.push('-');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    for line in diff_lines(new_content) {
-        diff.push('+');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    diff
-}
-
 fn parse_file_edit_operations<'a>(
     name: &str,
     input: &'a Value,
-    allow_replace_all: bool,
 ) -> Result<Vec<FileEditOperation<'a>>, RuntimeError> {
     let global_replace_all = optional_bool_input(name, input, "replace_all")?.unwrap_or(false);
-    if global_replace_all && !allow_replace_all {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.replace_all is true but allow_replace_all is false"
-        )));
-    }
     let global_match_strategy = EditMatchStrategy::from_input(name, input)?;
 
     if let Some(edits_value) = input.get("edits") {
@@ -2729,11 +1891,6 @@ fn parse_file_edit_operations<'a>(
             let new_string = required_labeled_string_input(name, edit, &label, "new_string")?;
             let replace_all = optional_labeled_bool_input(name, edit, &label, "replace_all")?
                 .unwrap_or(global_replace_all);
-            if replace_all && !allow_replace_all {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} {label}.replace_all is true but allow_replace_all is false"
-                )));
-            }
             let match_strategy = if edit.get("match_strategy").is_some() {
                 EditMatchStrategy::from_labeled_input(name, edit, &label)?
             } else {
@@ -2751,8 +1908,8 @@ fn parse_file_edit_operations<'a>(
         return Ok(operations);
     }
 
-    let old_string = required_input_string(name, input, "old_string")?;
-    let new_string = required_input_string(name, input, "new_string")?;
+    let old_string = required_input_string_alias(name, input, "old_string", "oldString")?;
+    let new_string = required_input_string_alias(name, input, "new_string", "newString")?;
     validate_file_edit_operation(name, "input", old_string, new_string)?;
     Ok(vec![FileEditOperation {
         label: "input".to_string(),
@@ -2782,16 +1939,116 @@ fn validate_file_edit_operation(
     Ok(())
 }
 
+fn edit_anchor_line(content: &str, old_string: &str) -> Option<usize> {
+    old_string
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            let matches = content
+                .lines()
+                .enumerate()
+                .filter_map(|(index, content_line)| {
+                    (content_line.trim() == trimmed).then_some(index + 1)
+                })
+                .collect::<Vec<_>>();
+            if matches.len() == 1 {
+                Some((matches[0], trimmed.len()))
+            } else {
+                None
+            }
+        })
+        .max_by_key(|(_, len)| *len)
+        .map(|(line, _)| line)
+}
+
+struct EditDiagnostic {
+    label: String,
+    path: String,
+    field: &'static str,
+    message: String,
+    match_strategy: Option<&'static str>,
+    effective_match_strategy: Option<&'static str>,
+    match_count: Option<usize>,
+    line: Option<usize>,
+}
+
+impl EditDiagnostic {
+    fn into_json(self, source: &str) -> Value {
+        json!({
+            "source": source,
+            "severity": "error",
+            "message": self.message,
+            "operation_label": self.label,
+            "path": self.path,
+            "kind": "edit",
+            "field": self.field,
+            "match_strategy": self.match_strategy,
+            "effective_match_strategy": self.effective_match_strategy,
+            "match_count": self.match_count,
+            "line": self.line,
+            "line_source": self.line.map(|_| "old_string_anchor")
+        })
+    }
+}
+
+fn file_edit_failure_output(
+    name: &str,
+    base: &Path,
+    path: &Path,
+    input_path: &str,
+    diff: &str,
+    diagnostic: EditDiagnostic,
+) -> Value {
+    let (diff_content, diff_truncated, diff_bytes) =
+        bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
+    json!({
+        "repo": base.display().to_string(),
+        "path": path.display().to_string(),
+        "success": false,
+        "checked": true,
+        "applied": false,
+        "files": [{
+            "path": input_path,
+            "kind": "existing"
+        }],
+        "file_count": 1,
+        "diagnostics": [diagnostic.into_json(name)],
+        "bytes": diff_bytes,
+        "diff": diff_content,
+        "diff_truncated": diff_truncated,
+        "artifacts": [{
+            "id": format!("file-edit:{}:failed", path.display()),
+            "kind": "file_edit",
+            "title": "file edit failed validation",
+            "uri": path.display().to_string(),
+            "content": diff_content.clone(),
+            "metadata": {
+                "provider": "file_edit",
+                "path": path.display().to_string(),
+                "repo": base.display().to_string(),
+                "success": false,
+                "checked": true,
+                "applied": false,
+                "diff_bytes": diff_bytes,
+                "diff_truncated": diff_truncated
+            }
+        }]
+    })
+}
+
 pub(super) fn call_file_edit_tool(
     name: &str,
     input: &Value,
     options: FileEditOptions<'_>,
 ) -> Result<Value, RuntimeError> {
-    let input_path = required_input_string(name, input, "path")?;
+    let input_path = required_path_input(name, input)?;
     validate_git_pathspec(name, input_path)?;
     let allowed_paths = allowed_paths_input(name, input)?;
     enforce_allowed_path(name, "input.path", input_path, &allowed_paths)?;
-    let operations = parse_file_edit_operations(name, input, options.allow_replace_all)?;
+    let operations = parse_file_edit_operations(name, input)?;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
     let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
 
@@ -2817,19 +2074,51 @@ pub(super) fn call_file_edit_tool(
         let (effective_match_strategy, matches) =
             find_edit_matches(&updated, operation.old_string, operation.match_strategy);
         if matches.is_empty() {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} {}.old_string was not found with match_strategy={}",
-                operation.label,
-                operation.match_strategy.as_str()
-            )));
+            return Ok(file_edit_failure_output(
+                name,
+                &base,
+                &path,
+                input_path,
+                &diff,
+                EditDiagnostic {
+                    label: operation.label.clone(),
+                    path: input_path.to_string(),
+                    field: "old_string",
+                    message: format!(
+                        "{}.old_string was not found with match_strategy={}",
+                        operation.label,
+                        operation.match_strategy.as_str()
+                    ),
+                    match_strategy: Some(operation.match_strategy.as_str()),
+                    effective_match_strategy: None,
+                    match_count: Some(0),
+                    line: edit_anchor_line(&updated, operation.old_string),
+                },
+            ));
         }
         if matches.len() > 1 && !operation.replace_all {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} {}.old_string matched {} times with match_strategy={}; set replace_all=true only when all matches should change",
-                operation.label,
-                matches.len(),
-                effective_match_strategy.as_str()
-            )));
+            return Ok(file_edit_failure_output(
+                name,
+                &base,
+                &path,
+                input_path,
+                &diff,
+                EditDiagnostic {
+                    label: operation.label.clone(),
+                    path: input_path.to_string(),
+                    field: "old_string",
+                    message: format!(
+                        "{}.old_string matched {} times with match_strategy={}; set replaceAll=true only when all matches should change",
+                        operation.label,
+                        matches.len(),
+                        effective_match_strategy.as_str()
+                    ),
+                    match_strategy: Some(operation.match_strategy.as_str()),
+                    effective_match_strategy: Some(effective_match_strategy.as_str()),
+                    match_count: Some(matches.len()),
+                    line: None,
+                },
+            ));
         }
         let selected_matches = selected_edit_matches(&matches, operation.replace_all);
         diff.push_str(&edit_unified_diff(
@@ -2845,10 +2134,23 @@ pub(super) fn call_file_edit_tool(
 
     let updated_bytes = updated.as_bytes();
     if updated_bytes.len() > options.max_bytes {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} edited content exceeds max_bytes={}",
-            options.max_bytes
-        )));
+        return Ok(file_edit_failure_output(
+            name,
+            &base,
+            &path,
+            input_path,
+            &diff,
+            EditDiagnostic {
+                label: "input".to_string(),
+                path: input_path.to_string(),
+                field: "new_string",
+                message: format!("edited content exceeds max_bytes={}", options.max_bytes),
+                match_strategy: None,
+                effective_match_strategy: None,
+                match_count: None,
+                line: None,
+            },
+        ));
     }
     let (diff_content, diff_truncated, diff_bytes) =
         bytes_to_limited_text(diff.as_bytes(), 64 * 1024);
@@ -2909,350 +2211,4 @@ pub(super) fn call_file_edit_tool(
             }
         }]
     }))
-}
-
-pub(super) struct FilePatchOptions<'a> {
-    pub(super) repo_dir: &'a Path,
-    pub(super) max_bytes: usize,
-    pub(super) max_files: usize,
-    pub(super) max_changed_lines: Option<usize>,
-    pub(super) require_read: bool,
-    pub(super) allow_new_files: bool,
-    pub(super) allow_delete_files: bool,
-    pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum PatchPathKind {
-    Existing,
-    New,
-    Delete,
-}
-
-pub(super) fn call_file_patch_tool(
-    name: &str,
-    input: &Value,
-    options: FilePatchOptions<'_>,
-) -> Result<Value, RuntimeError> {
-    let patch = required_input_string(name, input, "patch")?;
-    let patch = patch.replace("\r\n", "\n").replace('\r', "\n");
-    let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
-    if patch.trim().is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.patch must not be empty"
-        )));
-    }
-    if patch.len() > options.max_bytes {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.patch exceeds max_bytes={}",
-            options.max_bytes
-        )));
-    }
-    let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
-    enforce_max_changed_lines(name, "input.patch", &patch, max_changed_lines)?;
-
-    let repo = canonicalize_tool_path(name, "repo_dir", options.repo_dir)?;
-    let changed = extract_patch_paths(name, &patch)?;
-    let allowed_paths = allowed_paths_input(name, input)?;
-    if changed.is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.patch did not declare any changed files"
-        )));
-    }
-    if changed.len() > options.max_files {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.patch changes {} files, exceeding max_files={}",
-            changed.len(),
-            options.max_files
-        )));
-    }
-
-    for (path, kind) in &changed {
-        enforce_allowed_path(name, "input.patch path", path, &allowed_paths)?;
-        if *kind == PatchPathKind::New && !options.allow_new_files {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.patch creates {path}, but allow_new_files is false"
-            )));
-        }
-        if *kind == PatchPathKind::Delete && !options.allow_delete_files {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.patch deletes {path}, but allow_delete_files is false"
-            )));
-        }
-        validate_git_pathspec(name, path)?;
-        let candidate = repo.join(path);
-        if candidate.exists() {
-            let existing = canonicalize_tool_path(name, "input.patch path", &candidate)?;
-            if !existing.starts_with(&repo) {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} input.patch path is outside configured repo_dir"
-                )));
-            }
-            if options.require_read {
-                require_fresh_read(
-                    name,
-                    &format!("input.patch path {path}"),
-                    "patch",
-                    &existing,
-                    options.read_snapshots,
-                )?;
-            }
-        } else if *kind != PatchPathKind::New {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.patch references missing file {path}"
-            )));
-        }
-    }
-
-    let patch_file = write_temp_patch_file(name, &patch)?;
-    let check = Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("apply")
-        .arg("--check")
-        .arg(&patch_file)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} git apply --check: {error}")));
-    let check = match check {
-        Ok(output) => output,
-        Err(error) => {
-            let _ = fs::remove_file(&patch_file);
-            return Err(error);
-        }
-    };
-    if !check.status.success() {
-        let diagnostic = patch_diagnostic_from_stderr(&String::from_utf8_lossy(&check.stderr));
-        let _ = fs::remove_file(&patch_file);
-        if dry_run {
-            return Ok(file_patch_output(
-                &repo,
-                &changed,
-                patch,
-                false,
-                true,
-                false,
-                vec![diagnostic],
-            ));
-        }
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} git apply --check failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&check.stderr))
-        )));
-    }
-
-    if dry_run {
-        let _ = fs::remove_file(&patch_file);
-        return Ok(file_patch_output(
-            &repo,
-            &changed,
-            patch,
-            true,
-            true,
-            false,
-            Vec::new(),
-        ));
-    }
-
-    let apply = Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .arg("apply")
-        .arg(&patch_file)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} git apply: {error}")));
-    let _ = fs::remove_file(&patch_file);
-    let apply = apply?;
-    if !apply.status.success() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} git apply failed after successful check: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&apply.stderr))
-        )));
-    }
-
-    Ok(file_patch_output(
-        &repo,
-        &changed,
-        patch,
-        true,
-        true,
-        true,
-        Vec::new(),
-    ))
-}
-
-fn file_patch_output(
-    repo: &Path,
-    changed: &BTreeMap<String, PatchPathKind>,
-    patch: String,
-    success: bool,
-    checked: bool,
-    applied: bool,
-    diagnostics: Vec<Value>,
-) -> Value {
-    let diagnostics_count = diagnostics.len();
-    let patch_bytes = patch.len();
-    let files = changed
-        .iter()
-        .map(|(path, kind)| {
-            json!({
-                "path": path,
-                "kind": match kind {
-                    PatchPathKind::Existing => "existing",
-                    PatchPathKind::New => "new",
-                    PatchPathKind::Delete => "delete",
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-    json!({
-        "repo": repo.display().to_string(),
-        "success": success,
-        "checked": checked,
-        "applied": applied,
-        "files": files,
-        "file_count": changed.len(),
-        "bytes": patch_bytes,
-        "diagnostics": diagnostics,
-        "artifacts": [{
-            "id": format!("file-patch:{}:{}", repo.display(), changed.keys().cloned().collect::<Vec<_>>().join(",")),
-            "kind": "file_patch",
-            "title": "file patch",
-            "uri": repo.display().to_string(),
-            "content": patch,
-            "metadata": {
-                "provider": "file_patch",
-                "repo": repo.display().to_string(),
-                "file_count": changed.len(),
-                "success": success,
-                "checked": checked,
-                "applied": applied,
-                "diagnostics_count": diagnostics_count
-            }
-        }]
-    })
-}
-
-fn patch_diagnostic_from_stderr(stderr: &str) -> Value {
-    let message = provider_error_snippet(stderr);
-    json!({
-        "source": "file_patch",
-        "severity": "error",
-        "message": message,
-        "raw": message
-    })
-}
-
-fn extract_patch_paths(
-    name: &str,
-    patch: &str,
-) -> Result<BTreeMap<String, PatchPathKind>, RuntimeError> {
-    let mut paths = BTreeMap::new();
-    let mut pending_old_is_null = false;
-    let mut pending_old_path = None;
-    for line in patch.lines() {
-        if let Some(rest) = line.strip_prefix("diff --git ") {
-            let parts = rest.split_whitespace().collect::<Vec<_>>();
-            if parts.len() != 2 {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} input.patch has unsupported diff --git header"
-                )));
-            }
-            let old_path = patch_path_from_token(name, parts[0], "a/")?;
-            let new_path = patch_path_from_token(name, parts[1], "b/")?;
-            if old_path != "/dev/null" {
-                paths.entry(old_path).or_insert(PatchPathKind::Existing);
-            }
-            if new_path != "/dev/null" {
-                paths.entry(new_path).or_insert(PatchPathKind::Existing);
-            }
-        } else if let Some(rest) = line.strip_prefix("--- ") {
-            let token = rest.split_whitespace().next().unwrap_or_default();
-            pending_old_is_null = token == "/dev/null";
-            if !pending_old_is_null {
-                let path = patch_path_from_token(name, token, "a/")?;
-                pending_old_path = Some(path.clone());
-                paths.entry(path).or_insert(PatchPathKind::Existing);
-            } else {
-                pending_old_path = None;
-            }
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            let token = rest.split_whitespace().next().unwrap_or_default();
-            if token == "/dev/null" {
-                let Some(path) = pending_old_path.take() else {
-                    return Err(RuntimeError::Provider(format!(
-                        "tool {name} input.patch deletes a file without a path"
-                    )));
-                };
-                paths.insert(path, PatchPathKind::Delete);
-            } else {
-                let path = patch_path_from_token(name, token, "b/")?;
-                let kind = if pending_old_is_null {
-                    PatchPathKind::New
-                } else {
-                    PatchPathKind::Existing
-                };
-                paths.insert(path, kind);
-            }
-            pending_old_is_null = false;
-            pending_old_path = None;
-        }
-    }
-    Ok(paths)
-}
-
-fn patch_path_from_token(
-    name: &str,
-    token: &str,
-    expected_prefix: &str,
-) -> Result<String, RuntimeError> {
-    if token == "/dev/null" {
-        return Ok(token.to_string());
-    }
-    if token.starts_with('"') || token.contains('\\') {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.patch paths must be unquoted relative paths without escapes"
-        )));
-    }
-    let Some(path) = token.strip_prefix(expected_prefix) else {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.patch paths must use {expected_prefix} prefixes"
-        )));
-    };
-    validate_git_pathspec(name, path)?;
-    Ok(path.to_string())
-}
-
-fn write_temp_patch_file(name: &str, patch: &str) -> Result<PathBuf, RuntimeError> {
-    let temp_dir = std::env::temp_dir();
-    let process_id = std::process::id();
-    for attempt in 0..1024u16 {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_err(|error| RuntimeError::Provider(format!("tool {name} system clock: {error}")))?
-            .as_nanos();
-        let path = temp_dir.join(format!(
-            "air-tool-patch-{process_id}-{nonce}-{attempt}.patch"
-        ));
-        let mut file = match fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(error) => {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} write temp patch: {error}"
-                )));
-            }
-        };
-        file.write_all(patch.as_bytes()).map_err(|error| {
-            let _ = fs::remove_file(&path);
-            RuntimeError::Provider(format!("tool {name} write temp patch: {error}"))
-        })?;
-        return Ok(path);
-    }
-    Err(RuntimeError::Provider(format!(
-        "tool {name} failed to allocate a unique temp patch file"
-    )))
 }

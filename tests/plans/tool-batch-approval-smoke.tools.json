@@ -4,7 +4,7 @@
     "file.write": {
       "approved": true,
       "approver": "conformance",
-      "reason": "approval isolation conformance test"
+      "reason": "mixed approval-required batch conformance test"
     }
   }
 }

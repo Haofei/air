@@ -50,17 +50,17 @@ modules:
     path: examples/code-agent/code-edit-loop.air.yaml
     kind: composite
     visibility: public
-    description: "Bounded opencode-style code edit loop using small model-selected tool batches, constrained file.ops, and retest."
-    tags: [coding, edit, tool_loop, diagnostics, file_ops, test]
-    covers: [code_edit, bounded_tool_loop, diagnostics_loop, bounded_file_ops, retest]
+    description: "Bounded opencode-style code edit loop using small model-selected tool batches, constrained edit calls, and retest."
+    tags: [coding, edit, tool_loop, diagnostics, edit, test]
+    covers: [code_edit, bounded_tool_loop, diagnostics_loop, bounded_edit, retest]
     priority: 80
 
 recipes:
   - id: code.edit_loop@0.1.0
     visibility: public
     description: "Core coding-agent edit loop for known target/test tasks: repeatedly choose bounded tools, apply constrained file operations, and verify."
-    tags: [coding, edit, tool_loop, diagnostics, file_ops, test]
-    covers: [code_edit, bounded_tool_loop, diagnostics_loop, bounded_file_ops, retest]
+    tags: [coding, edit, tool_loop, diagnostics, edit, test]
+    covers: [code_edit, bounded_tool_loop, diagnostics_loop, bounded_edit, retest]
     priority: 85
     plan:
       plan:

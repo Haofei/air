@@ -22,11 +22,12 @@ use command_diagnostics::extract_command_diagnostics;
 mod context_tools;
 use context_tools::call_context_measure_tool;
 use file_tools::{
-    call_file_edit_tool, call_file_ops_tool, call_file_patch_tool, call_file_read_many_tool,
-    call_file_read_tool, call_file_search_tool, call_file_write_tool, file_modified_time,
-    is_likely_binary, FileEditOptions, FileOpsOptions, FilePatchOptions, FileWriteOptions,
+    call_file_edit_tool, call_file_read_many_tool, call_file_read_tool, call_file_search_tool,
+    call_file_write_tool, file_modified_time, is_likely_binary, FileEditOptions, FileWriteOptions,
 };
-use git_tools::git_diff_paths;
+use git_tools::{
+    git_diff_changed_files, git_diff_paths, git_diff_preexisting_changed_files, git_status_label,
+};
 mod helpdesk;
 use helpdesk::helpdesk_docs;
 mod provider;
@@ -39,7 +40,6 @@ mod todo_tools;
 use todo_tools::{call_todo_read_tool, call_todo_write_tool};
 mod artifact_tools;
 use artifact_tools::call_artifact_validate_tool;
-use git_tools::git_status_label;
 mod repo_reference_tools;
 use repo_reference_tools::call_repo_references_tool;
 mod diagnostic_context_tools;
@@ -51,6 +51,16 @@ static GIT_BASELINE_DIFF_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 type GitDiffBaseline = BTreeMap<String, Option<Vec<u8>>>;
 type GitDiffBaselines = BTreeMap<PathBuf, GitDiffBaseline>;
+
+struct GitDiffOutput {
+    paths: Vec<String>,
+    untracked_files: Vec<String>,
+    changed_files: Vec<String>,
+    preexisting_changed_files: Vec<Value>,
+    diff: String,
+    truncated: bool,
+    bytes: usize,
+}
 
 #[derive(Debug, Deserialize)]
 struct ToolConfigFile {
@@ -284,60 +294,6 @@ enum ToolConfig {
 
         #[serde(default)]
         require_read: Option<bool>,
-
-        #[serde(default)]
-        allow_replace_all: Option<bool>,
-    },
-    FileOps {
-        #[serde(default)]
-        capability: Option<String>,
-
-        base_dir: PathBuf,
-
-        #[serde(default)]
-        max_bytes: Option<usize>,
-
-        #[serde(default)]
-        max_files: Option<usize>,
-
-        #[serde(default)]
-        max_changed_lines: Option<usize>,
-
-        #[serde(default)]
-        require_read: Option<bool>,
-
-        #[serde(default)]
-        allow_new_files: Option<bool>,
-
-        #[serde(default)]
-        allow_overwrite: Option<bool>,
-
-        #[serde(default)]
-        allow_replace_all: Option<bool>,
-    },
-    FilePatch {
-        #[serde(default)]
-        capability: Option<String>,
-
-        repo_dir: PathBuf,
-
-        #[serde(default)]
-        max_bytes: Option<usize>,
-
-        #[serde(default)]
-        max_files: Option<usize>,
-
-        #[serde(default)]
-        max_changed_lines: Option<usize>,
-
-        #[serde(default)]
-        require_read: Option<bool>,
-
-        #[serde(default)]
-        allow_new_files: Option<bool>,
-
-        #[serde(default)]
-        allow_delete_files: Option<bool>,
     },
     GitDiff {
         #[serde(default)]
@@ -594,8 +550,6 @@ impl ToolConfig {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
-            | ToolConfig::FileOps { capability, .. }
-            | ToolConfig::FilePatch { capability, .. }
             | ToolConfig::GitDiff { capability, .. }
             | ToolConfig::GitStatus { capability, .. }
             | ToolConfig::RepoFiles { capability, .. }
@@ -1241,48 +1195,6 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
-                validate_positive_usize(
-                    path,
-                    &format!("tools.{name}.max_changed_lines"),
-                    *max_changed_lines,
-                )?;
-            }
-            ToolConfig::FileOps {
-                base_dir,
-                max_bytes,
-                max_files,
-                max_changed_lines,
-                ..
-            } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
-                validate_positive_usize(
-                    path,
-                    &format!("tools.{name}.max_changed_lines"),
-                    *max_changed_lines,
-                )?;
-            }
-            ToolConfig::FilePatch {
-                repo_dir,
-                max_bytes,
-                max_files,
-                max_changed_lines,
-                ..
-            } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.max_changed_lines"),
@@ -1953,7 +1865,6 @@ impl ToolProvider for ConfigTools {
                 max_bytes,
                 max_changed_lines,
                 require_read,
-                allow_replace_all,
             } => {
                 let output = call_file_edit_tool(
                     name,
@@ -1963,97 +1874,11 @@ impl ToolProvider for ConfigTools {
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         max_changed_lines,
                         require_read: require_read.unwrap_or(true),
-                        allow_replace_all: allow_replace_all.unwrap_or(false),
                         read_snapshots: &self.read_snapshots,
                     },
                 )?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
                     self.remember_read_snapshot(Path::new(path))?;
-                }
-                Ok(output)
-            }
-            ToolConfig::FileOps {
-                capability: _,
-                base_dir,
-                max_bytes,
-                max_files,
-                max_changed_lines,
-                require_read,
-                allow_new_files,
-                allow_overwrite,
-                allow_replace_all,
-            } => {
-                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
-                let output = call_file_ops_tool(
-                    name,
-                    input,
-                    FileOpsOptions {
-                        base_dir: &base_dir,
-                        max_bytes: max_bytes.unwrap_or(256 * 1024),
-                        max_files: max_files.unwrap_or(8),
-                        max_changed_lines,
-                        require_read: require_read.unwrap_or(true),
-                        allow_new_files: allow_new_files.unwrap_or(false),
-                        allow_overwrite: allow_overwrite.unwrap_or(false),
-                        allow_replace_all: allow_replace_all.unwrap_or(false),
-                        read_snapshots: &self.read_snapshots,
-                    },
-                )?;
-                if output
-                    .get("applied")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    if let Some(files) = output.get("files").and_then(Value::as_array) {
-                        for file in files {
-                            if let Some(path) = file.get("path").and_then(Value::as_str) {
-                                self.remember_read_snapshot(&base_dir.join(path))?;
-                            }
-                        }
-                    }
-                }
-                Ok(output)
-            }
-            ToolConfig::FilePatch {
-                capability: _,
-                repo_dir,
-                max_bytes,
-                max_files,
-                max_changed_lines,
-                require_read,
-                allow_new_files,
-                allow_delete_files,
-            } => {
-                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
-                let output = call_file_patch_tool(
-                    name,
-                    input,
-                    FilePatchOptions {
-                        repo_dir: &repo_dir,
-                        max_bytes: max_bytes.unwrap_or(256 * 1024),
-                        max_files: max_files.unwrap_or(20),
-                        max_changed_lines,
-                        require_read: require_read.unwrap_or(true),
-                        allow_new_files: allow_new_files.unwrap_or(true),
-                        allow_delete_files: allow_delete_files.unwrap_or(false),
-                        read_snapshots: &self.read_snapshots,
-                    },
-                )?;
-                if output
-                    .get("applied")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false)
-                {
-                    if let Some(files) = output.get("files").and_then(Value::as_array) {
-                        for file in files {
-                            if file.get("kind").and_then(Value::as_str) == Some("delete") {
-                                continue;
-                            }
-                            if let Some(path) = file.get("path").and_then(Value::as_str) {
-                                self.remember_read_snapshot(&repo_dir.join(path))?;
-                            }
-                        }
-                    }
                 }
                 Ok(output)
             }
@@ -2307,8 +2132,6 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
-            | ToolConfig::FileOps { capability, .. }
-            | ToolConfig::FilePatch { capability, .. }
             | ToolConfig::GitDiff { capability, .. }
             | ToolConfig::GitStatus { capability, .. }
             | ToolConfig::RepoFiles { capability, .. }
@@ -2939,11 +2762,15 @@ fn call_git_diff_tool(
         return Ok(git_diff_output(
             &repo,
             input,
-            &paths,
-            &[],
-            String::new(),
-            false,
-            0,
+            GitDiffOutput {
+                paths,
+                untracked_files: Vec::new(),
+                changed_files: Vec::new(),
+                preexisting_changed_files: Vec::new(),
+                diff: String::new(),
+                truncated: false,
+                bytes: 0,
+            },
         ));
     }
     let staged = input
@@ -2977,27 +2804,33 @@ fn call_git_diff_tool(
     } else {
         Vec::new()
     };
+    let changed_files = git_diff_changed_files(&raw_diff);
+    let preexisting_changed_files =
+        git_diff_preexisting_changed_files(baseline, &paths, has_filter, &changed_files);
     let (diff, truncated, bytes) = bytes_to_limited_text(raw_diff.as_bytes(), max_bytes);
     Ok(git_diff_output(
         &repo,
         input,
-        &paths,
-        &untracked_files,
-        diff,
-        truncated,
-        bytes,
+        GitDiffOutput {
+            paths,
+            untracked_files,
+            changed_files,
+            preexisting_changed_files,
+            diff,
+            truncated,
+            bytes,
+        },
     ))
 }
 
-fn git_diff_output(
-    repo: &Path,
-    input: &Value,
-    paths: &[String],
-    untracked_files: &[String],
-    diff: String,
-    truncated: bool,
-    bytes: usize,
-) -> Value {
+fn git_diff_output(repo: &Path, input: &Value, output: GitDiffOutput) -> Value {
+    let paths = output.paths;
+    let untracked_files = output.untracked_files;
+    let changed_files = output.changed_files;
+    let preexisting_changed_files = output.preexisting_changed_files;
+    let diff = output.diff;
+    let bytes = output.bytes;
+    let truncated = output.truncated;
     let artifact_id = format!(
         "git-diff:{}:{}:{}",
         repo.display(),
@@ -3012,17 +2845,23 @@ fn git_diff_output(
         "diff": diff.clone(),
         "bytes": bytes,
         "truncated": truncated,
+        "changed_files": changed_files,
+        "workspace_changed_files": changed_files,
+        "preexisting_changed_files": preexisting_changed_files,
         "artifacts": [{
             "id": artifact_id.clone(),
             "kind": "git_diff",
             "title": "git diff",
             "uri": repo.display().to_string(),
-            "content": diff.clone(),
+            "content": diff,
             "metadata": {
                 "provider": "git_diff",
                 "repo": repo.display().to_string(),
                 "paths": paths,
                 "untracked_files": untracked_files,
+                "changed_files": changed_files,
+                "workspace_changed_files": changed_files,
+                "preexisting_changed_files": preexisting_changed_files,
                 "bytes": bytes,
                 "truncated": truncated
             }
@@ -3064,7 +2903,11 @@ fn git_diff_against_baseline(
         }
     }
 
-    let mut diff = run_git_diff_raw(name, repo, &normal_paths, false)?;
+    let mut diff = if normal_paths.is_empty() {
+        String::new()
+    } else {
+        run_git_diff_raw(name, repo, &normal_paths, false)?
+    };
     for path in baseline_paths {
         let before = baseline.get(&path).cloned().unwrap_or(None);
         let current_path = repo.join(&path);
@@ -3172,7 +3015,9 @@ fn normalize_no_index_diff_paths(
 ) -> String {
     let before = before_path.to_string_lossy();
     let after = after_path.to_string_lossy();
-    diff.replace(before.as_ref(), repo_path)
+    diff.replace(&format!("a{before}"), &format!("a/{repo_path}"))
+        .replace(&format!("b{after}"), &format!("b/{repo_path}"))
+        .replace(before.as_ref(), repo_path)
         .replace(after.as_ref(), repo_path)
 }
 

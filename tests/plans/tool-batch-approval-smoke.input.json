@@ -1,13 +1,11 @@
 {
   "choices": [
     {
-      "tool": "file.ops",
+      "tool": "edit",
       "input": {
-        "path": "example.txt",
-        "kind": "replace_lines",
-        "start_line": 1,
-        "end_line": 1,
-        "content": "patched"
+        "filePath": "example.txt",
+        "oldString": "before",
+        "newString": "patched"
       }
     },
     {

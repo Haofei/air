@@ -94,7 +94,7 @@ impl ToolProvider for BatchApprovalTools {
             "docs.search" => Ok(json!({
                 "query": input["query"],
             })),
-            "file.ops" => Ok(json!({
+            "edit" => Ok(json!({
                 "applied": true,
                 "path": input["path"],
             })),
@@ -123,7 +123,7 @@ struct ScopedWriteTools {
 
 impl ToolProvider for ScopedWriteTools {
     fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        assert_eq!(name, "file.ops");
+        assert_eq!(name, "edit");
         self.inputs.borrow_mut().push(input.clone());
         Ok(json!({
             "applied": true,
@@ -194,9 +194,9 @@ impl ModelProvider for UnsafeDispatchModels {
     fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
         assert_eq!(name, "dispatcher");
         Ok(json!({
-            "tool": "file.patch",
+            "tool": "shell.run",
             "input": {
-                "patch": input["text"]
+                "command": input["text"]
             }
         }))
     }
@@ -860,7 +860,7 @@ fn rejects_model_selected_undeclared_tool_dispatch() {
     assert!(matches!(
         error,
         RuntimeError::UndeclaredTool { module, tool }
-            if module == "tool-dispatch-agent" && tool == "file.patch"
+            if module == "tool-dispatch-agent" && tool == "shell.run"
     ));
     assert_eq!(vm.tools.calls, 0);
 }
@@ -959,7 +959,7 @@ fn tool_batch_dispatch_injects_write_scope_into_write_tools() {
     let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
     module.tools.clear();
     module.tools.push(air_core::ToolSpec {
-        name: "file.ops".to_string(),
+        name: "edit".to_string(),
         capability: Some("file.write".to_string()),
         timeout_ms: Some(1000),
     });
@@ -985,14 +985,11 @@ fn tool_batch_dispatch_injects_write_scope_into_write_tools() {
         },
         models: BatchDispatchModels {
             choices: json!([{
-                "tool": "file.ops",
+                "tool": "edit",
                 "input": {
-                    "operations": [{
-                        "kind": "edit",
-                        "path": "other.rs",
-                        "old_string": "a",
-                        "new_string": "b"
-                    }]
+                    "filePath": "other.rs",
+                    "oldString": "a",
+                    "newString": "b"
                 }
             }]),
         },
@@ -1340,69 +1337,18 @@ fn rejects_repeated_identical_tool_batch_items_when_policy_is_set() {
 }
 
 #[test]
-fn rejects_mixed_approval_required_tool_batch_before_provider_calls() {
+fn allows_mixed_approval_required_tool_batch_after_approval() {
     let module = load_agent("tests/agents/tool-batch-dispatch-approval.air.yaml");
     let mut vm = Vm {
         tools: BatchApprovalTools { calls: 0 },
         models: BatchDispatchModels {
             choices: json!([
                 {
-                    "tool": "file.ops",
+                    "tool": "edit",
                     "input": {
-                        "path": "example.txt",
-                        "kind": "replace_lines",
-                        "start_line": 1,
-                        "end_line": 1,
-                        "content": "patched"
-                    }
-                },
-                {"tool": "docs.search", "input": {"query": "alpha"}}
-            ]),
-        },
-    };
-
-    let error = vm
-        .run(
-            &module,
-            State::from_iter([("text".to_string(), json!("mixed write and search"))]),
-        )
-        .unwrap_err();
-
-    assert!(matches!(
-        error,
-        RuntimeError::ToolBatchDispatchApprovalIsolation {
-            capability,
-            attempted: 2
-        } if capability == "file.write"
-    ));
-    assert_eq!(vm.tools.calls, 0);
-}
-
-#[test]
-fn tool_batch_dispatch_can_observe_approval_isolation_errors() {
-    let mut module = load_agent("tests/agents/tool-batch-dispatch-approval.air.yaml");
-    let Workflow::StateMachine(workflow) = &mut module.workflow else {
-        panic!("expected state machine");
-    };
-    let StateAction::ToolBatchDispatch { on_error, .. } =
-        workflow.rules[2].actions.first_mut().unwrap()
-    else {
-        panic!("expected tool_batch_dispatch action");
-    };
-    *on_error = air_core::ToolErrorMode::Observe;
-
-    let mut vm = Vm {
-        tools: BatchApprovalTools { calls: 0 },
-        models: BatchDispatchModels {
-            choices: json!([
-                {
-                    "tool": "file.ops",
-                    "input": {
-                        "path": "example.txt",
-                        "kind": "replace_lines",
-                        "start_line": 1,
-                        "end_line": 1,
-                        "content": "patched"
+                        "filePath": "example.txt",
+                        "oldString": "before",
+                        "newString": "patched"
                     }
                 },
                 {"tool": "docs.search", "input": {"query": "alpha"}}
@@ -1417,20 +1363,14 @@ fn tool_batch_dispatch_can_observe_approval_isolation_errors() {
         )
         .unwrap();
 
-    assert_eq!(vm.tools.calls, 0);
-    assert_eq!(result.outputs["observations"][0]["tool"], json!("<batch>"));
-    assert_eq!(result.outputs["observations"][0]["status"], json!("error"));
-    assert!(result.outputs["observations"][0]["error"]
-        .as_str()
-        .is_some_and(|error| error.contains("must be isolated")));
-    assert!(result.trace.iter().any(|event| {
-        event.action == "tool_batch_dispatch"
-            && event.status == TraceStatus::Ok
-            && event
-                .meta
-                .as_ref()
-                .is_some_and(|meta| meta["error_count"] == 1)
-    }));
+    assert_eq!(vm.tools.calls, 2);
+    assert_eq!(result.outputs["observations"][0]["tool"], json!("edit"));
+    assert_eq!(result.outputs["observations"][0]["status"], json!("ok"));
+    assert_eq!(
+        result.outputs["observations"][1]["tool"],
+        json!("docs.search")
+    );
+    assert_eq!(result.outputs["observations"][1]["status"], json!("ok"));
 }
 
 #[test]
@@ -2083,6 +2023,15 @@ fn model_call_trace_records_provider_request_stats_when_available() {
                 provider_request_bytes: 1234,
                 provider_user_content_bytes: 456,
                 provider_tools_bytes: 789,
+                provider_request: Some(json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })),
+                provider_response: Some(json!({
+                    "choices": [{
+                        "message": {"content": "{\"ok\":true}"}
+                    }]
+                })),
             }),
         },
     };
@@ -2103,6 +2052,14 @@ fn model_call_trace_records_provider_request_stats_when_available() {
     assert_eq!(complete_meta["provider_request_bytes"], json!(1234));
     assert_eq!(complete_meta["provider_user_content_bytes"], json!(456));
     assert_eq!(complete_meta["provider_tools_bytes"], json!(789));
+    assert_eq!(
+        complete_meta["provider_request"]["model"],
+        json!("test-model")
+    );
+    assert_eq!(
+        complete_meta["provider_response"]["choices"][0]["message"]["content"],
+        json!("{\"ok\":true}")
+    );
 }
 
 #[test]

@@ -23,10 +23,12 @@ fi
 
 echo "[air-1.0] docs"
 test -f docs/user_guide.md
-test -f docs/air_1_0_audit.md
 test -f docs/condition_dsl.md
+test -f docs/open_deep_research_migration.md
+test ! -f docs/dev-log.md
+test ! -f docs/air_1_0_audit.md
 grep -q "scripts/verify_1_0.sh" docs/user_guide.md
-grep -q "Current completion" docs/air_1_0_audit.md
+grep -q "OpenCode-style loop" docs/user_guide.md
 grep -q "condition  :=" docs/condition_dsl.md
 
 echo "[air-1.0] packaged examples"

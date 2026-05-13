@@ -10,8 +10,8 @@ comparison point:
 - Start from a real or deterministic failing run, preferably with a trace, before adding behavior.
 - Check how opencode handles the same class of problem when the issue is tool feedback, repeated
   calls, model formatting variance, context growth, step limits, or edit verification.
-- Add the smallest AIR primitive or tool behavior that preserves the generic IR. Do not add
-  task-shaped agent modes such as separate repair/refactor/build primitives.
+- Add the smallest AIR primitive or tool behavior that preserves the generic IR. Keep coding
+  behavior in one generic edit loop; task shape belongs in prompt, context, tools, and policy.
 - Use TDD: add the failing fixture or contract test first, then implement, then run the code-agent
   gate.
 - Keep the final evidence inspectable: trace stats, model/tool call sequence, verification command,
@@ -47,26 +47,32 @@ It runs as:
 init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 ```
 
-The fixed structure is only the loop boundary. The model chooses one to four planning/discovery/read/search/edit/test/diff tool calls per turn through declared tools such as `todo.write`, `todo.read`, `repo.files`, `repo.search`, `repo.symbols`, `repo.references`, `lsp.references`, `lsp.diagnostics`, `file.read`, `file.search`, `file.ops`, `code.assert`, `test.run`, and `git.diff`.
+The fixed structure is only the loop boundary. The model chooses the planning/discovery/read/search/edit/test/diff tool calls needed for the next concrete step through declared tools such as `todo.write`, `todo.read`, `glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `code.assert`, `test.run`, and `git.diff`.
 
 `tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands, so the model can ask for `format.run` or `test.run` without choosing a command variant. The default self-validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes.
 
-Completion is blocked until formatting and verification have passed. After a `file.ops` write, AIR automatically runs `format.run` and then `test.run`; the model does not choose formatter timing. The loop does not transition to `summarize -> done` until verification returns `success: true`. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
+Completion is blocked until formatting and verification have passed. After an `edit` write, AIR automatically runs `format.run` and then `test.run`; the model does not choose formatter timing. The loop does not transition to `summarize -> done` until verification returns `success: true`. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
 The default edit budget is sized for real bounded coding work rather than a smoke test: `max_steps: 160`, `max_model_calls: 40`, `max_tool_calls: 200`, `max_repeated_tool_calls: 3`, and a compacted observation window. This gives the loop room for repeated explore -> edit -> verify -> fix cycles while AIR still enforces approval, tool, and trace boundaries, and repeated identical tool calls receive OpenCode-style loop feedback quickly.
 
 The edit loop receives the current step budget through the `_air` runtime context. When the state-machine step budget is nearly exhausted, the model summarizes instead of choosing more tools, ensuring the loop closes cleanly within its allocated budget.
 
-When `test.run` output is truncated (`output.truncated == true`), the full log is written to the path reported in `output.full_log_path`. Use `file.search` or a narrow `file.read` range on that path to inspect hidden lines instead of re-running only to recover truncated output.
+When `test.run` output is truncated (`output.truncated == true`), the full log is written to the path reported in `output.full_log_path`. Use `grep` or a narrow `read` range on that path to inspect hidden lines instead of re-running only to recover truncated output.
 
-When `file.ops` `edit` validation fails (e.g. `old_string` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `old_string` does not match but one of its lines is present, the diagnostic includes an `old_string_anchor` line for a precise retry location.
+When `edit` validation fails (for example `oldString` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `oldString` does not match but one of its lines is present, the diagnostic includes an anchor line for a precise retry location.
 
 The edit loop runs `candidate.validate` automatically during preflight when `target_path` is known, catching misconfigured paths before any edit attempt.
 Use `code.assert` for structural postconditions that tests may not prove directly, such as `symbol_absent`, `symbol_present`, `file_contains`, or `file_not_contains`.
 
-Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic references matter, then make explicit `file.ops` edits and let validation diagnostics close the loop.
+Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic references matter, then make explicit `edit(filePath, oldString, newString)` calls and let validation diagnostics close the loop.
 
-Use `lsp.references` before larger refactors when regex references are too weak. The current bundled implementation uses rust-analyzer and keeps that LSP session alive inside the tool provider for the duration of the run, so repeated semantic lookups do not restart the language server. `lsp.diagnostics` exposes language-server diagnostics for the next repair step.
+Use `lsp.references` before larger refactors when regex references are too weak. The current bundled implementation uses rust-analyzer and keeps that LSP session alive inside the tool provider for the duration of the run, so repeated semantic lookups do not restart the language server. `lsp.diagnostics` exposes language-server diagnostics for the next correction step.
+
+When debugging model behavior, set `trace_provider_io: true` on the relevant OpenAI-compatible
+model alias and run with `--trace-raw`. This records the exact provider request and response under
+each `model_call` trace event; raw traces can contain prompts and source snippets, so keep the
+default redacted trace mode for normal runs. When `trace_provider_io` is enabled, `--log` also
+prints the model thinking, answer, and native tool calls during dogfood debugging.
 
 Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
 
