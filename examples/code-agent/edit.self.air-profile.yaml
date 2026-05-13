@@ -1,4 +1,0 @@
-plan: code-edit.air-plan.yaml
-store: module-store.air-store.yaml
-model_config: ../bigmodel-openai-compatible.json
-tool_config: tools.self.json

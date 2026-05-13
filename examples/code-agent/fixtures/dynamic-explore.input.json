@@ -1,5 +1,0 @@
-{
-  "task": "Explore how AIR dispatches model-selected tools while keeping tool calls governed.",
-  "query": "tool_dispatch",
-  "target_path": "crates/air-runtime/src/lib.rs"
-}

@@ -872,7 +872,7 @@ fn run(
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if let Some(model_config) = model_config {
-        let models = ModelProviderChoice::from_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
         let mut vm = Vm { tools, models };
         if observe {
             let result = vm.run_with_observer(&module, inputs, |event| {
@@ -951,7 +951,7 @@ fn run_system(
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if let Some(model_config) = model_config {
-        let models = ModelProviderChoice::from_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
         if observe {
             let result = air_linker::run_system_with_observer(
                 &system,
@@ -1306,7 +1306,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_request_ranks_dynamic_code_explore_for_plan_act_observe_tasks() {
+    fn planner_request_ranks_code_explore_for_plan_act_observe_tasks() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
             root.join("examples/code-agent/module-store.air-store.yaml"),
@@ -1325,7 +1325,7 @@ mod tests {
 
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["id"],
-            json!("code.dynamic_explore@0.1.0")
+            json!("code.explore@0.1.0")
         );
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["source"],

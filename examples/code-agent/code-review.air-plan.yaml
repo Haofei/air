@@ -1,38 +1,65 @@
 plan:
   name: code-review
   version: 0.1.0
-  description: "Single bounded coding agent that combines search, file context, and git diff."
+  description: "Grounded code review composed from evidence gathering, the AIR standard context compactor, and final analysis."
 
 requires:
-  capabilities: [task.progress, context.manage, network.search, file.read, code.read, code.test]
+  capabilities: [task.progress, context.manage, provenance.validate, network.search, file.read, code.read, code.test]
 
 nodes:
-  - id: review
-    module: code.review@0.1.0
+  - id: gather
+    module: code.review_gather@0.1.0
+  - id: compact
+    module: context.compact@0.1.0
+  - id: analyze
+    module: code.review_analyze@0.1.0
 
-entry: review
+entry: gather
+
+edges:
+  - from: gather
+    to: compact
+  - from: compact
+    to: analyze
 
 connect:
   - from: $input.task
-    to: review.task
+    to: gather.task
   - from: $input.search_query
-    to: review.search_query
+    to: gather.search_query
   - from: $input.repo_query
-    to: review.repo_query
+    to: gather.repo_query
   - from: $input.required_terms
-    to: review.required_terms
+    to: gather.required_terms
   - from: $input.target_file
-    to: review.target_file
-  - to: review.related_files
+    to: gather.target_file
+  - to: gather.related_files
     value:
       coalesce:
         - from: $input.related_files
         - literal: []
+  - from: gather.evidence
+    to: compact.payload
+  - to: compact.compact_for
+    value:
+      literal: a downstream code-review agent that needs concise, source-grounded repository evidence
+  - to: compact.max_context_chars
+    value:
+      literal: 200000
+  - to: compact.threshold_percent
+    value:
+      literal: 80
+  - from: $input.task
+    to: analyze.task
+  - from: $input.target_file
+    to: analyze.target_file
+  - from: compact.context
+    to: analyze.context
 
 outputs:
-  review: review.review
+  review: analyze.review
 
 decisions:
-  - id: choose-code-review-agent
-    rationale: "The task asks for grounded coding guidance, so use the bounded code review module with network search, file read, and git diff evidence."
-    selected: [review]
+  - id: compose-code-review-with-std-compact
+    rationale: "Use the standard AIR context compaction module between evidence gathering and final analysis, rather than embedding compaction logic inside one coding agent."
+    selected: [code.review_gather@0.1.0, context.compact@0.1.0, code.review_analyze@0.1.0]

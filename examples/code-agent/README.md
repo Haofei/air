@@ -49,7 +49,7 @@ init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 
 The fixed structure is only the loop boundary. The model chooses the planning/discovery/read/search/edit/test/diff tool calls needed for the next concrete step through declared tools such as `todo.write`, `todo.read`, `glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `code.assert`, `test.run`, and `git.diff`.
 
-`tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `test.run`; `format.run` is reserved for the automatic post-write loop. The default self-validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes.
+`tools.dogfood.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `test.run`; `format.run` is reserved for the automatic post-write loop. The default dogfood validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes. Dogfood does not define a separate self profile; it reuses the standard edit recipe with model and tool config overrides.
 
 Completion is blocked until formatting and verification have passed. After an `edit` write, AIR automatically runs `format.run` and then `test.run`; the model does not choose formatter timing. The loop does not transition to `summarize -> done` until verification returns `success: true`. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
@@ -68,18 +68,18 @@ Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic re
 
 Use `lsp.references` before larger refactors when regex references are too weak. The current bundled implementation uses rust-analyzer and keeps that LSP session alive inside the tool provider for the duration of the run, so repeated semantic lookups do not restart the language server. `lsp.diagnostics` exposes language-server diagnostics for the next correction step.
 
-When debugging model behavior, set `trace_provider_io: true` on the relevant OpenAI-compatible
-model alias and run with `--trace-raw`. This records the exact provider request and response under
-each `model_call` trace event; raw traces can contain prompts and source snippets, so keep the
-default redacted trace mode for normal runs. When `trace_provider_io` is enabled, `--log` also
-prints the model thinking, answer, and native tool calls during dogfood debugging.
+When debugging model behavior, run with `--log` to print each model turn, answer, and native
+tool call to the terminal as it happens. Set `trace_provider_io: true` on a model alias only when
+you also want the exact provider request/response stored in `--trace-out --trace-raw`; raw traces
+can contain prompts and source snippets, so keep the default redacted trace mode for normal runs.
 
-Use `edit.self.air-profile.yaml` when dogfooding AIR itself with a real OpenAI-compatible model:
+Use the same edit recipe with model/tool overrides when dogfooding AIR itself with a real OpenAI-compatible model:
 
 ```bash
 cargo run -p air-cli -- code "update the AIR code-agent docs and run the code-agent gate" \
   --recipe edit \
-  --profile examples/code-agent/edit.self.air-profile.yaml \
+  --model-config examples/bigmodel-openai-compatible.json \
+  --tool-config examples/code-agent/tools.dogfood.json \
   --target examples/code-agent/README.md
 ```
 
@@ -100,14 +100,14 @@ cargo run -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.
 
 ## Review
 
-Run the default review profile:
+Run the default review profile. Review is intentionally composed as `gather -> context.compact -> analyze` instead of one large review state machine:
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
 cargo run -p air-cli -- run-plan --profile examples/code-agent/review.air-profile.yaml --log
 ```
 
-The default review example stays simple: one bounded review module, deterministic local search tools, and a single profile. Browser-backed search and composed review variants remain under `fixtures/` for internal verification.
+The default review example stays small at each AIR boundary: evidence gathering and final analysis are bounded modules, while reusable context compaction is linked through the standard module store. Browser-backed search variants remain under `fixtures/` for internal verification.
 
 Run through the user-facing wrapper:
 

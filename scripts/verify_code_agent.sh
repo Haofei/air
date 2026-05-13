@@ -8,10 +8,8 @@ mkdir -p target/generated
 
 echo "[code-agent] validate current primitive recipes"
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/fixtures/dynamic-explore.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.self.air-profile.yaml
 
 echo "[code-agent] real-model timeout budget checks"
 "${PYTHON:-python3}" - <<'PY'
@@ -117,7 +115,7 @@ assert "repository lint style" in decider_prompt, decider_prompt
 assert "too_many_arguments" in decider_prompt, decider_prompt
 assert "type_complexity" in decider_prompt, decider_prompt
 
-self_tools = json.loads(Path("examples/code-agent/tools.self.json").read_text())
+self_tools = json.loads(Path("examples/code-agent/tools.dogfood.json").read_text())
 max_changed_lines = self_tools["tools"]["edit"].get("max_changed_lines")
 assert max_changed_lines is not None and max_changed_lines >= 800, ("edit", max_changed_lines)
 assert "format.run" in self_tools["tools"]
@@ -125,7 +123,7 @@ assert "format.run" in self_tools["tools"]
 for path in (
     "examples/code-agent/tools.json",
     "examples/code-agent/fixtures/tools.core.json",
-    "examples/code-agent/tools.self.json",
+    "examples/code-agent/tools.dogfood.json",
     "examples/code-agent/fixtures/tools.playwright.json",
 ):
     tools = json.loads(Path(path).read_text())["tools"]
@@ -191,7 +189,8 @@ assert isinstance(exploration["findings"], list), exploration
 
 with open("target/generated/code_agent_explore.trace.jsonl", encoding="utf-8") as handle:
     events = [json.loads(line) for line in handle if line.strip()]
-assert any(event.get("rule") == "skip-target-read" for event in events), events
+assert any(event.get("rule") == "choose" for event in events), events
+assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
 PY
 
 echo "[code-agent] edit loop offline run"
@@ -976,24 +975,25 @@ assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profil
 assert "test_command" not in output["input"], output
 PY
 
-echo "[code-agent] user-facing self edit command explain"
+echo "[code-agent] user-facing dogfood edit command explain"
 cargo run -q -p air-cli -- code "update AIR code-agent docs and run the code-agent gate" \
   --recipe edit \
-  --profile examples/code-agent/edit.self.air-profile.yaml \
+  --model-config examples/bigmodel-openai-compatible.json \
+  --tool-config examples/code-agent/tools.dogfood.json \
   --target examples/code-agent/README.md \
   --explain \
-  > target/generated/code_agent_edit_self_explain.output.json
+  > target/generated/code_agent_edit_dogfood_explain.output.json
 
 "${PYTHON:-python3}" - <<'PY'
 import json
 
-with open("target/generated/code_agent_edit_self_explain.output.json", encoding="utf-8") as handle:
+with open("target/generated/code_agent_edit_dogfood_explain.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
 assert output["resolved_recipe"] == "edit", output
-assert output["profile"] == "examples/code-agent/edit.self.air-profile.yaml", output
+assert output["profile"] == "examples/code-agent/edit.air-profile.yaml", output
 assert output["pack"]["recipe"] == "edit", output
 assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profile.yaml", output
-assert output["pack"]["profile_override"] is True, output
+assert output["pack"]["profile_override"] is False, output
 assert output["input"]["target_path"] == "examples/code-agent/README.md", output
 assert "test_command" not in output["input"], output
 PY

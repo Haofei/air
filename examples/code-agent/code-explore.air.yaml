@@ -1,7 +1,7 @@
 agent:
   name: code-explore-agent
   version: 0.1.0
-  description: "Read-only code exploration subagent for open-ended repository questions. target_path may be an empty string when no target is known yet."
+  description: "Bounded plan-act-observe code exploration with model-selected declared tools."
 
 inputs:
   task: string
@@ -41,20 +41,39 @@ outputs:
         items: string
 
 requires:
-  capabilities: [task.progress, network.search, file.read, code.read]
+  capabilities: [file.read, code.read]
 
 state:
   phase:
     type: enum
-    enum: [init, plan, web_search, list_files, search_repo, read_context, inspect_symbols, route_target, read_target, read_todos, analyze, done, failed]
-  plan_status: object
-  todo_snapshot: object
-  web_results: object
-  repo_files: object
-  repo_search: object
-  repo_context: object
-  repo_symbols: object
-  target_context: object
+    enum: [init, choose, route, done, failed]
+  observations:
+    type: array
+    items: object
+  decision:
+    type: object
+    required: [complete, tool_calls, rationale]
+    properties:
+      complete: boolean
+      tool_calls:
+        type: array
+        max_items: 4
+        items:
+          type: object
+          required: [tool, input]
+          properties:
+            tool: string
+            input: object
+      rationale: string
+  observation:
+    type: array
+    items:
+      type: object
+      required: [tool, input, output]
+      properties:
+        tool: string
+        input: object
+        output: object
   exploration:
     type: object
     required: [summary, relevant_files, findings, source_ids, next_steps]
@@ -87,35 +106,35 @@ state:
         items: string
 
 tools:
-  - name: todo.write
-    capability: task.progress
-    timeout_ms: 10000
-  - name: todo.read
-    capability: task.progress
-    timeout_ms: 10000
-  - name: web.search
-    capability: network.search
-    timeout_ms: 120000
   - name: repo.files
     capability: code.read
     timeout_ms: 10000
   - name: repo.search
     capability: code.read
     timeout_ms: 10000
-  - name: repo.context
-    capability: code.read
-    timeout_ms: 10000
   - name: repo.symbols
     capability: code.read
     timeout_ms: 10000
+  - name: repo.references
+    capability: code.read
+    timeout_ms: 10000
+  - name: repo.context
+    capability: code.read
+    timeout_ms: 10000
   - name: read
+    capability: file.read
+    timeout_ms: 10000
+  - name: read_many
+    capability: file.read
+    timeout_ms: 10000
+  - name: grep
     capability: file.read
     timeout_ms: 10000
 
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 14
+  max_steps: 8
   terminal: [done, failed]
   rules:
     - id: init
@@ -123,197 +142,14 @@ workflow:
       actions:
         - kind: set
           values:
-            phase: plan
+            observations: []
+            phase: choose
 
-    - id: plan
-      when: phase == "plan"
-      actions:
-        - kind: tool_call
-          tool: todo.write
-          input:
-            object:
-              todos:
-                array:
-                  - object:
-                      id:
-                        literal: explore-context
-                      content:
-                        literal: Gather repository and external context for the requested code question.
-                      status:
-                        literal: in_progress
-                      priority:
-                        literal: high
-                  - object:
-                      id:
-                        literal: synthesize-answer
-                      content:
-                        literal: Summarize findings with exact source ids and next steps.
-                      status:
-                        literal: pending
-                      priority:
-                        literal: medium
-          output: plan_status
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: web_search
-
-    - id: web-search
-      when: phase == "web_search"
-      actions:
-        - kind: tool_call
-          tool: web.search
-          input:
-            object:
-              query:
-                ref: query
-              required_terms:
-                array:
-                  - ref: query
-              max_results:
-                literal: 4
-          output: web_results
-          timeout_seconds: 120
-        - kind: set
-          values:
-            phase: list_files
-
-    - id: list-files
-      when: phase == "list_files"
-      actions:
-        - kind: tool_call
-          tool: repo.files
-          input:
-            object:
-              query:
-                ref: query
-              mode:
-                literal: smart
-              include_all:
-                literal: true
-              max_files:
-                literal: 40
-          output: repo_files
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: search_repo
-
-    - id: search-repo
-      when: phase == "search_repo"
-      actions:
-        - kind: tool_call
-          tool: repo.search
-          input:
-            object:
-              query:
-                ref: query
-              mode:
-                literal: smart
-              max_matches:
-                literal: 40
-          output: repo_search
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: read_context
-
-    - id: read-context
-      when: phase == "read_context"
-      actions:
-        - kind: tool_call
-          tool: repo.context
-          input:
-            object:
-              query:
-                ref: query
-              mode:
-                literal: smart
-              max_matches:
-                literal: 40
-              max_files:
-                literal: 6
-              context_lines:
-                literal: 6
-          output: repo_context
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: inspect_symbols
-
-    - id: inspect-symbols
-      when: phase == "inspect_symbols"
-      actions:
-        - kind: tool_call
-          tool: repo.symbols
-          input:
-            object:
-              query:
-                ref: query
-              mode:
-                literal: smart
-              max_symbols:
-                literal: 80
-          output: repo_symbols
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: route_target
-
-    - id: read-target
-      when: phase == "route_target" && target_path != ""
-      actions:
-        - kind: tool_call
-          tool: read
-          input:
-            object:
-              path:
-                ref: target_path
-              numbered:
-                literal: true
-              max_bytes:
-                literal: 40000
-          output: target_context
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: read_todos
-
-    - id: skip-target-read
-      when: phase == "route_target" && target_path == ""
-      actions:
-        - kind: set
-          values:
-            target_context:
-              object:
-                path:
-                  literal: ""
-                content:
-                  literal: ""
-                artifacts:
-                  array: []
-                truncated:
-                  literal: false
-            phase: read_todos
-
-    - id: read-todos
-      when: phase == "read_todos"
-      actions:
-        - kind: tool_call
-          tool: todo.read
-          input:
-            literal: {}
-          output: todo_snapshot
-          timeout_seconds: 10
-        - kind: set
-          values:
-            phase: analyze
-
-    - id: analyze
-      when: phase == "analyze"
+    - id: choose
+      when: phase == "choose"
       actions:
         - kind: model_call
-          model: code_explorer
+          model: code_tool_planner
           input:
             object:
               task:
@@ -322,24 +158,175 @@ workflow:
                 ref: query
               target_path:
                 ref: target_path
-              web_results:
-                ref: web_results
-              repo_files:
-                ref: repo_files
-              repo_search:
-                ref: repo_search
-              repo_context:
-                ref: repo_context
-              repo_symbols:
-                ref: repo_symbols
-              target_context:
-                ref: target_context
-              todo_snapshot:
-                ref: todo_snapshot
+              observations:
+                ref: observations
+              allowed_tools:
+                array:
+                  - literal: repo.files
+                  - literal: repo.search
+                  - literal: repo.symbols
+                  - literal: repo.references
+                  - literal: repo.context
+                  - literal: read
+                  - literal: read_many
+                  - literal: grep
+              tool_specs:
+                array:
+                  - object:
+                      tool:
+                        literal: repo.files
+                      purpose:
+                        literal: "List repository files before selecting a narrower read target."
+                      input_schema:
+                        literal:
+                          required: []
+                          optional:
+                            query: "string: filename/path token to filter files"
+                            path: "string: optional repo-relative directory"
+                            max_files: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.search
+                      purpose:
+                        literal: "Search file contents across the repository and return matching lines."
+                      input_schema:
+                        literal:
+                          required:
+                            query: "string: regex or fixed search text"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            mode: "string: fixed or regex"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.symbols
+                      purpose:
+                        literal: "Find likely code symbols by name before reading files."
+                      input_schema:
+                        literal:
+                          required:
+                            query: "string: symbol or identifier fragment"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            glob: "string: optional filename glob"
+                            max_symbols: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.references
+                      purpose:
+                        literal: "Find references and nearby snippets for one symbol."
+                      input_schema:
+                        literal:
+                          required:
+                            symbol: "string: exact symbol or identifier"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            context_lines: "integer: optional per-call context capped by tool config"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: repo.context
+                      purpose:
+                        literal: "Return contextual snippets around repository search hits."
+                      input_schema:
+                        literal:
+                          required:
+                            query: "string: regex or fixed search text"
+                          optional:
+                            path: "string: optional repo-relative scope"
+                            mode: "string: fixed or regex"
+                            context_lines: "integer: optional per-call context capped by tool config"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: read
+                      purpose:
+                        literal: "Read one known text file or a line range."
+                      input_schema:
+                        literal:
+                          required:
+                            path: "string: repo-relative file path"
+                          optional:
+                            start_line: "integer: first 1-based line"
+                            end_line: "integer: last 1-based line"
+                            line_numbers: "boolean: include numbered_content"
+                  - object:
+                      tool:
+                        literal: read_many
+                      purpose:
+                        literal: "Read several known text files in one bounded call."
+                      input_schema:
+                        literal:
+                          required:
+                            files: "array: repo-relative file paths or objects with path"
+                          optional:
+                            line_numbers: "boolean: include numbered_content per file"
+                            max_bytes_per_file: "integer: optional per-file byte limit capped by tool config"
+                  - object:
+                      tool:
+                        literal: grep
+                      purpose:
+                        literal: "Search within one known file and return matching lines with optional context."
+                      input_schema:
+                        literal:
+                          required:
+                            path: "string: repo-relative file path"
+                            pattern: "string: regular expression"
+                          optional:
+                            context_lines: "integer: optional context capped by tool config"
+                            max_matches: "integer: optional per-call limit capped by tool config"
+                            max_line_chars: "integer: optional per-line limit capped by tool config"
+          output: decision
+          timeout_seconds: 30
+        - kind: set
+          values:
+            phase: route
+
+    - id: act
+      when: phase == "route" && decision.complete == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            path: decision.tool_calls
+          output: observation
+          max_calls: 4
+          timeout_seconds: 10
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              tool:
+                literal: batch
+              input:
+                path: decision.tool_calls
+              rationale:
+                path: decision.rationale
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: summarize
+      when: phase == "route" && decision.complete == true
+      actions:
+        - kind: model_call
+          model: code_dynamic_summarizer
+          input:
+            object:
+              task:
+                ref: task
+              query:
+                ref: query
+              target_path:
+                ref: target_path
+              observations:
+                ref: observations
+              final_decision:
+                ref: decision
           output: exploration
-          timeout_seconds: 120
-          retry:
-            max_attempts: 2
+          timeout_seconds: 30
         - kind: set
           values:
             phase: done
@@ -351,9 +338,6 @@ workflow:
           output: exploration
 
 policy:
-  timeout_seconds: 240
-  max_model_calls: 2
+  max_model_calls: 4
   max_tool_calls: 8
-
-observability:
-  traces: true
+  max_repeated_tool_calls: 2

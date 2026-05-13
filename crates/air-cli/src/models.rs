@@ -73,12 +73,24 @@ impl ModelProviderChoice {
         Ok(Self::OpenAi(OpenAiCompatibleModelProvider::new(config)?))
     }
 
-    pub(crate) fn from_config_file(path: PathBuf) -> Result<Self> {
+    pub(crate) fn from_config_file_with_provider_io(
+        path: PathBuf,
+        force_provider_io: bool,
+    ) -> Result<Self> {
         if let Some(fixtures) = parse_fixture_model_config(&path)? {
             return Ok(Self::Fixture(FixtureModels { fixtures }));
         }
-        let config = air_backend_openai::parse_config_file(path)?;
+        let mut config = air_backend_openai::parse_config_file(path)?;
+        if force_provider_io {
+            force_trace_provider_io(&mut config);
+        }
         Self::openai(config)
+    }
+}
+
+fn force_trace_provider_io(config: &mut OpenAiCompatibleConfig) {
+    for model in config.models.values_mut() {
+        model.trace_provider_io = Some(true);
     }
 }
 
@@ -256,7 +268,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut provider = ModelProviderChoice::from_config_file(path).unwrap();
+        let mut provider =
+            ModelProviderChoice::from_config_file_with_provider_io(path, false).unwrap();
         let output = provider
             .call_model("reviewer", &json!({"ignored": true}))
             .unwrap();
@@ -291,7 +304,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut provider = ModelProviderChoice::from_config_file(path).unwrap();
+        let mut provider =
+            ModelProviderChoice::from_config_file_with_provider_io(path, false).unwrap();
         let output = provider
             .call_model("html_fixture", &json!({"ignored": true}))
             .unwrap();
@@ -317,7 +331,8 @@ mod tests {
         )
         .unwrap();
 
-        let mut provider = ModelProviderChoice::from_config_file(path).unwrap();
+        let mut provider =
+            ModelProviderChoice::from_config_file_with_provider_io(path, false).unwrap();
         let first = provider.call_model("planner", &json!({})).unwrap();
         let second = provider.call_model("planner", &json!({})).unwrap();
         let third = provider.call_model("planner", &json!({})).unwrap();
@@ -325,6 +340,57 @@ mod tests {
         assert_eq!(first["step"], json!(1));
         assert_eq!(second["step"], json!(2));
         assert_eq!(third["step"], json!(2));
+    }
+
+    #[test]
+    fn force_trace_provider_io_enables_all_model_aliases() {
+        let mut config = OpenAiCompatibleConfig {
+            models: BTreeMap::from([
+                (
+                    "decider".to_string(),
+                    air_backend_openai::OpenAiModelConfig {
+                        base_url: None,
+                        base_url_env: None,
+                        api_key_env: None,
+                        model: "glm-5.1".to_string(),
+                        model_env: None,
+                        temperature: None,
+                        request_timeout_seconds: None,
+                        system_prompt: None,
+                        json_mode: None,
+                        response_format: None,
+                        extra_body: None,
+                        native_tool_calls: None,
+                        trace_provider_io: None,
+                    },
+                ),
+                (
+                    "summarizer".to_string(),
+                    air_backend_openai::OpenAiModelConfig {
+                        base_url: None,
+                        base_url_env: None,
+                        api_key_env: None,
+                        model: "glm-5.1".to_string(),
+                        model_env: None,
+                        temperature: None,
+                        request_timeout_seconds: None,
+                        system_prompt: None,
+                        json_mode: None,
+                        response_format: None,
+                        extra_body: None,
+                        native_tool_calls: None,
+                        trace_provider_io: Some(false),
+                    },
+                ),
+            ]),
+        };
+
+        force_trace_provider_io(&mut config);
+
+        assert!(config
+            .models
+            .values()
+            .all(|model| model.trace_provider_io == Some(true)));
     }
 
     #[test]
@@ -443,11 +509,9 @@ mod tests {
     fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
         let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
         for relative in [
-            "examples/code-agent/fixtures/code-dynamic-explore.air.yaml",
             "examples/code-agent/code-edit-loop.air.yaml",
             "examples/code-agent/code-explore.air.yaml",
-            "examples/code-agent/fixtures/code-review-analyze.air.yaml",
-            "examples/code-agent/code-review.air.yaml",
+            "examples/code-agent/code-review-analyze.air.yaml",
         ] {
             let module = air_parser::parse_air_file(root.join(relative)).unwrap();
             for (alias, required) in model_output_required_keys_by_alias(&module) {

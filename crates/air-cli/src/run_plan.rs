@@ -295,7 +295,7 @@ pub(crate) fn run_plan_with_inputs_capture(
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if parallel {
         if let Some(model_config) = model_config {
-            let models = ModelProviderChoice::from_config_file(model_config)?;
+            let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
             run_plan_parallel(
                 &plan,
                 &store,
@@ -327,7 +327,7 @@ pub(crate) fn run_plan_with_inputs_capture(
             )?
         }
     } else if let Some(model_config) = model_config {
-        let models = ModelProviderChoice::from_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
         if observe {
             let result = air_linker::run_run_plan_with_observer_and_checkpoint(
                 &plan,
@@ -750,7 +750,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if let Some(model_config) = model_config {
-        let models = ModelProviderChoice::from_config_file(model_config)?;
+        let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
         if observe {
             let result = air_linker::resume_run_plan_with_observer_and_checkpoint(
                 &plan,

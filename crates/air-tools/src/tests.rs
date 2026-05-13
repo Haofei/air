@@ -3017,7 +3017,7 @@ fn candidate_validate_accepts_existing_target_and_related_file() {
 #[test]
 fn code_agent_self_tools_validate_project_paths() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let config_path = root.join("examples/code-agent/tools.self.json");
+    let config_path = root.join("examples/code-agent/tools.dogfood.json");
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
