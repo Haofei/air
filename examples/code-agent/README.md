@@ -49,7 +49,7 @@ init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 
 The fixed structure is only the loop boundary. The model chooses the planning/discovery/read/search/edit/test/diff tool calls needed for the next concrete step through declared tools such as `todo.write`, `todo.read`, `glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `code.assert`, `test.run`, and `git.diff`.
 
-`tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands, so the model can ask for `format.run` or `test.run` without choosing a command variant. The default self-validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes.
+`tools.self.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `test.run`; `format.run` is reserved for the automatic post-write loop. The default self-validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes.
 
 Completion is blocked until formatting and verification have passed. After an `edit` write, AIR automatically runs `format.run` and then `test.run`; the model does not choose formatter timing. The loop does not transition to `summarize -> done` until verification returns `success: true`. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
