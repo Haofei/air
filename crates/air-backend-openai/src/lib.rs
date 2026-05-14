@@ -698,19 +698,12 @@ fn input_to_native_tool_content(input: &Value) -> Result<String, RuntimeError> {
     for (key, value) in object {
         match key.as_str() {
             "allowed_tools" | "tool_schemas" => {}
-            "observations" | "edit_evidence" => {
+            "observations" => {
                 let compacted = compact_observation_history(value);
                 if let Some(section) = render_tool_transcript(key, &compacted) {
                     transcript.push(section);
                 }
-                projected.insert(
-                    if key == "observations" {
-                        "recent_tool_results".to_string()
-                    } else {
-                        key.clone()
-                    },
-                    compacted,
-                );
+                projected.insert("recent_tool_results".to_string(), compacted);
             }
             "tool_policy" => {
                 projected.insert("guidance".to_string(), compact_prompt_value(value));
@@ -2031,8 +2024,8 @@ mod tests {
     fn native_tool_content_preserves_symbol_navigation_output() {
         let input = json!({
             "task": "inspect helper",
-            "edit_evidence": [{
-                "action": "code_context_evidence",
+            "observations": [{
+                "action": "code_context",
                 "requested": [{
                     "tool": "repo.symbols",
                     "input": {
@@ -2068,7 +2061,7 @@ mod tests {
 
         let content = input_to_native_tool_content(&input).unwrap();
         let projected: Value = serde_json::from_str(&content).unwrap();
-        let output = &projected["edit_evidence"][0]["result"][0]["output"];
+        let output = &projected["recent_tool_results"][0]["result"][0]["output"];
 
         assert_eq!(output["effective_query"], json!("maybe_save_full_output"));
         assert_eq!(
@@ -2083,8 +2076,8 @@ mod tests {
     fn native_tool_content_renders_read_many_files_as_file_snippets() {
         let input = json!({
             "task": "move helper",
-            "edit_evidence": [{
-                "action": "file_read_many_evidence",
+            "observations": [{
+                "action": "file_read_many",
                 "requested": [{
                     "tool": "read_many",
                     "input": {
@@ -2123,7 +2116,7 @@ mod tests {
 
         let content = input_to_native_tool_content(&input).unwrap();
         let projected: Value = serde_json::from_str(&content).unwrap();
-        let compacted = &projected["edit_evidence"][0]["result"][0]["output"];
+        let compacted = &projected["recent_tool_results"][0]["result"][0]["output"];
         let transcript = projected["tool_transcript"].as_str().unwrap();
 
         assert_eq!(compacted["files"][0]["path"], json!("src/lib.rs"));

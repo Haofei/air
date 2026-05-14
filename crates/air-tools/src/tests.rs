@@ -889,6 +889,49 @@ fn file_search_accepts_opencode_grep_aliases() {
 }
 
 #[test]
+fn file_search_treats_exact_include_as_scope() {
+    let dir = temp_dir("air-tools-file-search-include-scope");
+    fs::write(dir.join("note.txt"), "alpha\nuse serde_json::Value;\n").unwrap();
+    fs::write(
+        dir.join("other.txt"),
+        "use serde_json::Map;\nshould not be returned\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "grep",
+            &json!({"pattern": "use serde_json", "include": "note.txt"}),
+        )
+        .unwrap();
+
+    assert!(output["path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("note.txt")));
+    assert_eq!(output["directory"], json!(false));
+    assert_eq!(output["match_count"], json!(1));
+    assert_eq!(
+        output["matches"][0]["line"],
+        json!("use serde_json::Value;")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_accepts_query_alias_for_pattern() {
     let dir = temp_dir("air-tools-file-search-query-alias");
     fs::write(dir.join("note.txt"), "alpha\nneedle\n").unwrap();

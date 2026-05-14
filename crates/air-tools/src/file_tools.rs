@@ -8,7 +8,7 @@ pub(super) fn call_file_read_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_path_input(name, input)?;
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
-    let candidate = if Path::new(input_path).is_absolute() {
+    let candidate = if Path::new(&input_path).is_absolute() {
         PathBuf::from(input_path)
     } else {
         base.join(input_path)
@@ -316,7 +316,6 @@ pub(super) fn call_file_search_tool(
     max_context_lines: usize,
     max_line_chars: usize,
 ) -> Result<Value, RuntimeError> {
-    let input_path = optional_path_input(name, input)?.unwrap_or(".");
     let (pattern, pattern_source) = file_search_pattern_input(name, input)?;
     if pattern.is_empty() {
         return Err(RuntimeError::Provider(format!(
@@ -326,10 +325,11 @@ pub(super) fn call_file_search_tool(
     let regex = regex::Regex::new(pattern)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} invalid regex: {error}")))?;
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
-    let candidate = if Path::new(input_path).is_absolute() {
-        PathBuf::from(input_path)
+    let input_path = file_search_path_input(name, input, &base)?.unwrap_or_else(|| ".".to_string());
+    let candidate = if Path::new(&input_path).is_absolute() {
+        PathBuf::from(&input_path)
     } else {
-        base.join(input_path)
+        base.join(&input_path)
     };
     let path = canonicalize_tool_path(name, "input.path", &candidate)?;
     if !path.starts_with(&base) {
@@ -552,6 +552,36 @@ fn file_search_pattern_input<'a>(
     }
     Err(RuntimeError::Provider(format!(
         "tool {name} input.pattern must be a string"
+    )))
+}
+
+fn file_search_path_input(
+    tool_name: &str,
+    input: &Value,
+    base: &Path,
+) -> Result<Option<String>, RuntimeError> {
+    if let Some(path) = optional_path_input(tool_name, input)? {
+        return Ok(Some(path.to_string()));
+    }
+    let Some(value) = input.get("include") else {
+        return Ok(None);
+    };
+    let include = value.as_str().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.include must be a string"))
+    })?;
+    if include.trim().is_empty() {
+        return Ok(None);
+    }
+    let candidate = if Path::new(include).is_absolute() {
+        PathBuf::from(include)
+    } else {
+        base.join(include)
+    };
+    if candidate.exists() {
+        return Ok(Some(include.to_string()));
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} input.include only supports an exact file or directory scope; use input.path for exact scope"
     )))
 }
 

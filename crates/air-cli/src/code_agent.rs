@@ -1431,11 +1431,11 @@ mod tests {
         }
         assert!(
             declared_tools.contains("format.run"),
-            "formatter must be declared for the automatic post-write loop"
+            "formatter must be declared for model-selected and final-gate validation"
         );
         assert!(
-            !allowed_tools.contains("format.run"),
-            "formatter should be automatic, not a model-selected tool"
+            allowed_tools.contains("format.run"),
+            "formatter should be model-selected like OpenCode, with AIR still enforcing the final gate"
         );
     }
 
@@ -1480,6 +1480,7 @@ mod tests {
             "grep",
             "edit",
             "git.diff",
+            "format.run",
             "test.run",
         ] {
             assert!(
@@ -1490,155 +1491,87 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_prefers_preflight_symbols_for_targeted_context() {
+    fn edit_loop_uses_direct_phase_kernel() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
-        let symbol_rule = rules
+        let rule_ids = rules
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("preflight-target-symbols"))
-            .unwrap();
-        let symbol_read_rule = rules
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("preflight-target-symbol-read"))
-            .unwrap();
-        let search_rule = rules
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("preflight-target-search"))
-            .unwrap();
-        let read_rule = rules
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("preflight-target-read"))
-            .unwrap();
-
+            .map(|rule| rule["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
         assert_eq!(
-            symbol_rule["actions"][0]["input"]["array"][0]["object"]["tool"]["literal"],
-            serde_yaml::Value::String("repo.symbols".to_string())
-        );
-        assert_eq!(
-            symbol_rule["actions"][0]["max_calls"],
-            serde_yaml::Value::Number(1.into())
-        );
-        assert_eq!(
-            symbol_rule["actions"][3]["values"]["phase"],
-            serde_yaml::Value::String("preflight_symbol_read".to_string())
-        );
-        assert_eq!(
-            symbol_read_rule["actions"][0]["input"]["array"][0]["object"]["tool"]["literal"],
-            serde_yaml::Value::String("read".to_string())
-        );
-        assert_eq!(
-            symbol_read_rule["actions"][0]["input"]["array"][0]["object"]["input"]["object"]
-                ["start_line"]["ref"],
-            serde_yaml::Value::String(
-                "initial_target_context[0].output.symbols[0].line".to_string()
-            )
-        );
-        assert_eq!(
-            symbol_read_rule["actions"][0]["input"]["array"][0]["object"]["input"]["object"]
-                ["end_line"]["ref"],
-            serde_yaml::Value::String(
-                "initial_target_context[0].output.symbols[0].end_line".to_string()
-            )
-        );
-        assert_eq!(
-            symbol_read_rule["actions"][2]["target"],
-            serde_yaml::Value::String("edit_evidence".to_string())
-        );
-        assert_eq!(
-            symbol_read_rule["actions"][2]["value"]["object"]["action"]["literal"],
-            serde_yaml::Value::String("initial_target_symbol_range_evidence".to_string())
-        );
-        assert_eq!(
-            symbol_rule["actions"][0]["input"]["array"][0]["object"]["input"]["object"]["query"]
-                ["ref"],
-            serde_yaml::Value::String("target_symbol_query".to_string())
-        );
-        assert_eq!(
-            symbol_rule["when"],
-            serde_yaml::Value::String(
-                "phase == \"preflight\" && target_path != \"\" && target_symbol_query != \"\""
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            search_rule["when"],
-            serde_yaml::Value::String(
-                "phase == \"preflight\" && target_path != \"\" && target_symbol_query == \"\" && target_search_pattern != \"\""
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            search_rule["actions"][0]["input"]["array"][1]["object"]["tool"]["literal"],
-            serde_yaml::Value::String("read".to_string())
-        );
-        assert_eq!(
-            search_rule["actions"][0]["max_calls"],
-            serde_yaml::Value::Number(2.into())
-        );
-        assert_eq!(
-            search_rule["actions"][2]["target"],
-            serde_yaml::Value::String("edit_evidence".to_string())
-        );
-        assert_eq!(
-            search_rule["actions"][2]["value"]["object"]["action"]["literal"],
-            serde_yaml::Value::String("initial_target_search_evidence".to_string())
-        );
-        assert_eq!(
-            read_rule["when"],
-            serde_yaml::Value::String(
-                "phase == \"preflight\" && target_path != \"\" && target_symbol_query == \"\" && target_search_pattern == \"\""
-                    .to_string()
-            )
-        );
-        assert_eq!(
-            read_rule["actions"][1]["value"]["object"]["result"]["object"]["evidence"]["literal"],
-            serde_yaml::Value::String("initial_target_context".to_string())
-        );
-        assert_eq!(
-            read_rule["actions"][2]["target"],
-            serde_yaml::Value::String("edit_evidence".to_string())
+            rule_ids,
+            vec![
+                "init",
+                "summarize-at-step-limit",
+                "choose",
+                "act",
+                "edit-applied",
+                "manual-format-failed",
+                "manual-format-passed",
+                "final-format-before-complete",
+                "final-format-tool-error",
+                "final-format-failed",
+                "final-verify-after-format",
+                "final-verify-truncated-failed",
+                "final-verify-failed",
+                "final-verify-passed-with-assertions",
+                "final-acceptance-assertions-failed",
+                "final-acceptance-assertions-passed",
+                "acceptance-assertions-failed",
+                "acceptance-assertions-passed",
+                "final-verify-passed",
+                "manual-test-failed",
+                "manual-test-passed-with-assertions",
+                "manual-test-passed",
+                "edit-validation-failed",
+                "continue-after-act",
+                "summarize",
+                "done",
+            ]
         );
     }
 
     #[test]
-    fn edit_loop_returns_doom_loop_feedback_to_choose() {
+    fn edit_loop_records_tool_results_as_the_single_model_context_stream() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
-        let doom_loop_rule = rules
+        let act_rule = rules
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-opencode-doom-loop-warning"))
+            .find(|rule| rule["id"].as_str() == Some("act"))
             .unwrap();
+
         assert_eq!(
-            doom_loop_rule["actions"][1]["values"]["phase"],
-            serde_yaml::Value::String("choose".to_string()),
-            "doom-loop feedback must return to the normal choose loop without restricting tools"
+            act_rule["actions"][1]["target"],
+            serde_yaml::Value::String("observations".to_string())
         );
-        let policy_error_rule_index = rules
-            .iter()
-            .position(|rule| rule["id"].as_str() == Some("record-doom-loop-policy-error"))
-            .unwrap();
-        let path_error_rule_index = rules
-            .iter()
-            .position(|rule| rule["id"].as_str() == Some("record-file-read-path-error-hint"))
-            .unwrap();
-        assert!(
-            policy_error_rule_index < path_error_rule_index,
-            "OpenCode doom-loop policy errors must be classified before read path hints"
+        assert_eq!(
+            act_rule["actions"][1]["value"]["object"]["action"]["literal"],
+            serde_yaml::Value::String("tool_result".to_string())
         );
-        assert!(
-            rules[policy_error_rule_index]["when"]
-                .as_str()
-                .unwrap()
-                .contains("observation[0].error_code == \"doom_loop\""),
-            "repeated tool calls should surface as doom_loop feedback, not path errors"
+        assert_eq!(
+            act_rule["actions"][1]["value"]["object"]["result"]["ref"],
+            serde_yaml::Value::String("observation".to_string())
+        );
+
+        let choose_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose"))
+            .unwrap();
+        let choose_input = choose_rule["actions"][0]["input"]["object"]
+            .as_mapping()
+            .unwrap();
+        let observations_key = serde_yaml::Value::String("observations".to_string());
+        assert_eq!(
+            choose_input[&observations_key]["take_last_within_bytes"]["ref"],
+            serde_yaml::Value::String("observations".to_string())
         );
     }
 
@@ -1687,40 +1620,32 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_preserves_search_and_symbol_context_as_edit_evidence() {
+    fn edit_loop_context_policy_discourages_broad_repeated_reads() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
-        let evidence_rule = rules
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-code-context-evidence"))
-            .unwrap();
-        let when = evidence_rule["when"].as_str().unwrap();
-
-        for tool in ["repo.symbols", "grep", "glob", "lsp.references"] {
-            assert!(
-                when.contains(tool),
-                "edit loop should keep {tool} evidence instead of forcing rediscovery"
-            );
-        }
-        assert_eq!(
-            evidence_rule["actions"][0]["target"],
-            serde_yaml::Value::String("edit_evidence".to_string())
-        );
-
-        let choose_rule = rules
+        let choose_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
             .iter()
             .find(|rule| rule["id"].as_str() == Some("choose"))
             .unwrap();
-        let max_items = choose_rule["actions"][0]["input"]["object"]["edit_evidence"]["max_items"]
+        let max_items = choose_rule["actions"][0]["input"]["object"]["observations"]["max_items"]
             .as_u64()
             .unwrap();
         assert!(
             max_items >= 6,
-            "edit evidence needs room for read plus search/symbol context"
+            "recent observations need room for search, read, edit, and validation feedback"
+        );
+        let policy = choose_rule["actions"][0]["input"]["object"]["tool_policy"]["literal"]
+            ["context"]
+            .as_str()
+            .unwrap();
+        assert!(
+            policy.contains("Do not repeat the same read/search"),
+            "model context policy should prevent read-only loops: {policy}"
         );
     }
 
@@ -1735,9 +1660,9 @@ mod tests {
             .as_sequence()
             .unwrap()
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-auto-verify-passed"))
+            .find(|rule| rule["id"].as_str() == Some("summarize"))
             .unwrap();
-        let diff_action = &record_rule["actions"][1];
+        let diff_action = &record_rule["actions"][0];
 
         assert_eq!(
             diff_action["input"]["array"][0]["object"]["tool"]["literal"],
@@ -1764,15 +1689,15 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            summarize_rule["actions"][0]["output"],
+            summarize_rule["actions"][2]["output"],
             serde_yaml::Value::String("edit_summary".to_string())
         );
         assert_eq!(
-            summarize_rule["actions"][1]["values"]["edit"]["object"]["changed_files"]["ref"],
+            summarize_rule["actions"][3]["values"]["edit"]["object"]["changed_files"]["ref"],
             serde_yaml::Value::String("final_diff_result[0].output.changed_files".to_string())
         );
         assert_eq!(
-            summarize_rule["actions"][1]["values"]["edit"]["object"]["workspace_diff"]["ref"],
+            summarize_rule["actions"][3]["values"]["edit"]["object"]["workspace_diff"]["ref"],
             serde_yaml::Value::String("final_diff_result[0].output".to_string())
         );
     }
@@ -1791,7 +1716,7 @@ mod tests {
             .find(|rule| rule["id"].as_str() == Some("summarize"))
             .unwrap();
 
-        let observations = &summarize_rule["actions"][0]["input"]["object"]["observations"];
+        let observations = &summarize_rule["actions"][2]["input"]["object"]["observations"];
         assert_eq!(
             observations["take_last_within_bytes"]["ref"],
             serde_yaml::Value::String("observations".to_string())
@@ -1805,13 +1730,13 @@ mod tests {
             "summarizer should not receive the full edit-loop observation history"
         );
         assert_eq!(
-            summarize_rule["actions"][0]["input"]["object"]["final_diff_result"]["ref"],
+            summarize_rule["actions"][2]["input"]["object"]["final_diff_result"]["ref"],
             serde_yaml::Value::String("final_diff_result".to_string())
         );
     }
 
     #[test]
-    fn edit_loop_handles_auto_verify_tool_errors_before_output_checks() {
+    fn edit_loop_handles_failed_final_verify_before_success() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1823,23 +1748,67 @@ mod tests {
             .iter()
             .filter_map(|rule| rule["id"].as_str())
             .collect::<Vec<_>>();
-        let failed_tool = rule_ids
-            .iter()
-            .position(|id| *id == "record-auto-verify-failed-tool")
-            .unwrap();
         let failed_output = rule_ids
             .iter()
-            .position(|id| *id == "record-auto-verify-failed-output")
+            .position(|id| *id == "final-verify-failed")
+            .unwrap();
+        let passed = rule_ids
+            .iter()
+            .position(|id| *id == "final-verify-passed")
             .unwrap();
 
         assert!(
-            failed_tool < failed_output,
-            "tool-error branch must run before reading auto_verify_result[0].output.success"
+            failed_output < passed,
+            "failed verification should be classified before the generic success branch"
         );
     }
 
     #[test]
-    fn edit_loop_collects_diagnostic_context_after_failed_auto_verify() {
+    fn edit_loop_successful_manual_verification_returns_to_model_before_summary() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
+
+        for id in ["acceptance-assertions-passed", "manual-test-passed"] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule["id"].as_str() == Some(id))
+                .unwrap();
+            assert_eq!(
+                rule["actions"][0]["values"]["verification_status"],
+                serde_yaml::Value::String("passed".to_string()),
+                "{id} should mark verification as passed"
+            );
+            assert_eq!(
+                rule["actions"][0]["values"]["phase"],
+                serde_yaml::Value::String("choose".to_string()),
+                "{id} should let the model decide whether more edits remain before summarize"
+            );
+        }
+
+        for id in ["final-verify-passed", "final-acceptance-assertions-passed"] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule["id"].as_str() == Some(id))
+                .unwrap();
+            assert_eq!(
+                rule["actions"][0]["values"]["verification_status"],
+                serde_yaml::Value::String("passed".to_string()),
+                "{id} should mark verification as passed"
+            );
+            assert_eq!(
+                rule["actions"][0]["values"]["phase"],
+                serde_yaml::Value::String("summarize".to_string()),
+                "{id} should summarize immediately after a user-requested final verification gate passes"
+            );
+        }
+    }
+
+    #[test]
+    fn edit_loop_collects_diagnostic_context_after_failed_final_verify() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1849,7 +1818,7 @@ mod tests {
             .as_sequence()
             .unwrap()
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-auto-verify-failed-output"))
+            .find(|rule| rule["id"].as_str() == Some("final-verify-failed"))
             .unwrap();
         let actions = rule["actions"].as_sequence().unwrap();
         let diagnostic_dispatch = actions
@@ -1872,11 +1841,11 @@ mod tests {
         );
         assert_eq!(
             tool["input"]["object"]["diagnostics"]["ref"],
-            serde_yaml::Value::String("auto_verify_result[0].output.diagnostics".to_string())
+            serde_yaml::Value::String("verify_result[0].output.diagnostics".to_string())
         );
         assert_eq!(
             actions[diagnostic_dispatch + 1]["value"]["object"]["action"]["literal"],
-            serde_yaml::Value::String("auto_verify_diagnostic_context".to_string())
+            serde_yaml::Value::String("verification_context".to_string())
         );
     }
 
@@ -1895,7 +1864,7 @@ mod tests {
             .collect::<Vec<_>>();
         let edit_failed = rule_ids
             .iter()
-            .position(|id| *id == "record-edit-validation-failed")
+            .position(|id| *id == "edit-validation-failed")
             .unwrap();
         let continue_after_act = rule_ids
             .iter()
@@ -1910,84 +1879,59 @@ mod tests {
             .as_sequence()
             .unwrap()
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-edit-validation-failed"))
+            .find(|rule| rule["id"].as_str() == Some("edit-validation-failed"))
             .unwrap();
-        let edit_rationale = edit_rule["actions"][0]["value"]["object"]["rationale"]["literal"]
-            .as_str()
-            .unwrap();
-        assert!(
-            edit_rationale.contains("oldString"),
-            "edit validation failures should steer recovery toward corrected OpenCode-style anchors"
-        );
-    }
-
-    #[test]
-    fn edit_loop_write_tool_errors_preserve_policy_error_context() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../..")
-            .join("examples/code-agent/code-edit-loop.air.yaml");
-        let yaml: serde_yaml::Value =
-            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let rules = yaml["workflow"]["rules"].as_sequence().unwrap();
-        let edit_rule = rules
-            .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-edit-write-path-error-hint"))
-            .unwrap();
-        let rationale = edit_rule["actions"][0]["value"]["object"]["rationale"]["literal"]
-            .as_str()
-            .unwrap();
-        let result = &edit_rule["actions"][0]["value"]["object"]["result"]["object"];
-
-        assert!(
-            rationale.contains("max_changed_lines"),
-            "write tool policy errors should tell the model to split oversized edits"
+        assert_eq!(
+            edit_rule["actions"][0]["input"]["array"][0]["object"]["tool"]["literal"],
+            serde_yaml::Value::String("diagnostic.context".to_string())
         );
         assert_eq!(
-            result["failed_error"]["ref"],
-            serde_yaml::Value::String("observation[0].error".to_string())
+            edit_rule["actions"][1]["value"]["object"]["action"]["literal"],
+            serde_yaml::Value::String("edit_validation_context".to_string())
         );
     }
 
     #[test]
-    fn edit_loop_handles_batch_dispatch_errors_before_continue() {
+    fn edit_loop_preserves_tool_errors_in_raw_observations() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
         let yaml: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
-        let rule_ids = yaml["workflow"]["rules"]
+        let act_rule = yaml["workflow"]["rules"]
             .as_sequence()
             .unwrap()
             .iter()
-            .filter_map(|rule| rule["id"].as_str())
-            .collect::<Vec<_>>();
-        let batch_error = rule_ids
-            .iter()
-            .position(|id| *id == "record-batch-dispatch-error")
-            .unwrap();
-        let continue_after_act = rule_ids
-            .iter()
-            .position(|id| *id == "continue-after-act")
+            .find(|rule| rule["id"].as_str() == Some("act"))
             .unwrap();
 
-        assert!(
-            batch_error < continue_after_act,
-            "batch dispatch errors must be explained before the generic post_act transition"
+        assert_eq!(
+            act_rule["actions"][1]["value"]["object"]["result"]["ref"],
+            serde_yaml::Value::String("observation".to_string()),
+            "raw tool results, including errors, should flow back into the single observation stream"
         );
+    }
+
+    #[test]
+    fn edit_loop_generic_post_act_returns_to_choose() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
         let rule = yaml["workflow"]["rules"]
             .as_sequence()
             .unwrap()
             .iter()
-            .find(|rule| rule["id"].as_str() == Some("record-batch-dispatch-error"))
+            .find(|rule| rule["id"].as_str() == Some("continue-after-act"))
             .unwrap();
-        let rationale = rule["actions"][0]["value"]["object"]["rationale"]["literal"]
-            .as_str()
-            .unwrap();
-        assert!(
-            rationale.contains("invalid tool name")
-                && rationale.contains("write scope")
-                && rationale.contains("max_calls"),
-            "batch errors should explain fixable tool-call validity issues"
+        assert_eq!(
+            rule["when"],
+            serde_yaml::Value::String("phase == \"post_act\"".to_string())
+        );
+        assert_eq!(
+            rule["actions"][0]["values"]["phase"],
+            serde_yaml::Value::String("choose".to_string())
         );
     }
 

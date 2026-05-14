@@ -47,13 +47,13 @@ It runs as:
 init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 ```
 
-The fixed structure is only the loop boundary. The model chooses the planning/discovery/read/search/edit/test/diff tool calls needed for the next concrete step through declared tools such as `todo.write`, `todo.read`, `glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `code.assert`, `test.run`, and `git.diff`.
+The fixed structure is only the loop boundary. The model chooses the planning/discovery/read/search/edit/format/test/diff tool calls needed for the next concrete step through declared tools such as `todo.write`, `todo.read`, `glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `code.assert`, `format.run`, `test.run`, and `git.diff`.
 
-`tools.dogfood.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `test.run`; `format.run` is reserved for the automatic post-write loop. The default dogfood validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes. Dogfood does not define a separate self profile; it reuses the standard edit recipe with model and tool config overrides.
+`tools.dogfood.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `format.run` and `test.run`; both are fixed commands rather than arbitrary shell access. The default dogfood validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes. Dogfood does not define a separate self profile; it reuses the standard edit recipe with model and tool config overrides.
 
-Completion is blocked until formatting and verification have passed. After an `edit` write, AIR automatically runs `format.run` and then `test.run`; the model does not choose formatter timing. The loop does not transition to `summarize -> done` until verification returns `success: true`. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
+Completion is blocked until formatting and verification have passed. After an `edit` write, AIR returns control to the model instead of immediately validating, so the model can finish a coherent patch before paying the formatter/test cost. The model can call `format.run` and `test.run` when ready; if it returns `complete=true` before `verification_status=passed`, AIR runs the final `format.run -> test.run` gate before summarizing. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
-The default edit budget is sized for real bounded coding work rather than a smoke test: `max_steps: 160`, `max_model_calls: 40`, `max_tool_calls: 200`, `max_repeated_tool_calls: 3`, and a compacted observation window. This gives the loop room for repeated explore -> edit -> verify -> fix cycles while AIR still enforces approval, tool, and trace boundaries, and repeated identical tool calls receive OpenCode-style loop feedback quickly.
+The default edit budget is sized for real bounded coding work rather than a smoke test: `max_steps: 120`, `max_model_calls: 40`, `max_tool_calls: 200`, `max_repeated_tool_calls: 3`, and a compacted observation window. This gives the loop room for repeated explore -> edit -> verify -> fix cycles while AIR still enforces approval, tool, and trace boundaries.
 
 The edit loop receives the current step budget through the `_air` runtime context. When the state-machine step budget is nearly exhausted, the model summarizes instead of choosing more tools, ensuring the loop closes cleanly within its allocated budget.
 
@@ -61,7 +61,7 @@ When `test.run` output is truncated (`output.truncated == true`), the full log i
 
 When `edit` validation fails (for example `oldString` not found), the AIR edit loop automatically collects `diagnostic.context` before the next decision so the model sees the surrounding lines and can correct the anchor. If the full `oldString` does not match but one of its lines is present, the diagnostic includes an anchor line for a precise retry location.
 
-The edit loop runs `candidate.validate` automatically during preflight when `target_path` is known, catching misconfigured paths before any edit attempt.
+The edit loop does not run a deterministic preflight pipeline. If path validation is useful, the model can call `candidate.validate`; otherwise it should use the same direct read/search/edit loop as OpenCode.
 Use `code.assert` for structural postconditions that tests may not prove directly, such as `symbol_absent`, `symbol_present`, `file_contains`, or `file_not_contains`.
 
 Use `repo.symbols` for cheap symbol ranges and `lsp.references` when semantic references matter, then make explicit `edit(filePath, oldString, newString)` calls and let validation diagnostics close the loop.

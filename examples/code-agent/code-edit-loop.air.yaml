@@ -1,7 +1,7 @@
 agent:
   name: code-edit-loop-agent
-  version: 0.1.0
-  description: "Bounded opencode-style code edit loop: model chooses declared tool calls, AIR executes them under policy, and every observation is traced."
+  version: 0.2.0
+  description: "Bounded OpenCode-style code edit loop: one model chooses read/search/edit/test tools, AIR enforces policy and audit."
 
 inputs:
   task: string
@@ -49,11 +49,8 @@ requires:
 state:
   phase:
     type: enum
-    enum: [init, preflight, preflight_symbol_read, preflight_candidate, choose, act, post_act, post_format, post_verify, post_accept, summarize, done, failed]
+    enum: [init, choose, act, post_act, post_final_format, post_final_verify, post_accept, post_final_accept, summarize, done]
   observations:
-    type: array
-    items: object
-  edit_evidence:
     type: array
     items: object
   verification_status:
@@ -75,41 +72,25 @@ state:
       rationale: string
   observation:
     type: array
-    items:
-      type: object
-  auto_verify_result:
+    items: object
+  format_result:
     type: array
-    items:
-      type: object
-  auto_format_result:
+    items: object
+  verify_result:
     type: array
-    items:
-      type: object
-  auto_verify_diagnostic_context:
+    items: object
+  diagnostic_context:
     type: array
-    items:
-      type: object
-  auto_verify_full_log_context:
+    items: object
+  full_log_context:
     type: array
-    items:
-      type: object
-  manual_test_full_log_context:
-    type: array
-    items:
-      type: object
-  edit_validation_context:
-    type: array
-    items:
-      type: object
-  write_error_context:
-    type: array
-    items:
-      type: object
-  exploration_warning_sent: boolean
+    items: object
   final_diff_result:
     type: array
-    items:
-      type: object
+    items: object
+  acceptance_assert_result:
+    type: array
+    items: object
   edit_summary:
     type: object
     additional_properties: false
@@ -119,22 +100,6 @@ state:
       final_success: boolean
       patch_applied: boolean
       rationale: string
-  acceptance_assert_result:
-    type: array
-    items:
-      type: object
-  initial_target_context:
-    type: array
-    items:
-      type: object
-  initial_target_read_context:
-    type: array
-    items:
-      type: object
-  initial_candidate_validation:
-    type: array
-    items:
-      type: object
   edit:
     type: object
     required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
@@ -214,8 +179,8 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 160
-  terminal: [done, failed]
+  max_steps: 120
+  terminal: [done]
   rules:
     - id: init
       when: phase == "init"
@@ -225,430 +190,7 @@ workflow:
         - kind: set
           values:
             observations: []
-            edit_evidence: []
-            exploration_warning_sent: false
             verification_status: unknown
-            phase: preflight
-
-    - id: preflight-target-symbols
-      when: phase == "preflight" && target_path != "" && target_symbol_query != ""
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: repo.symbols
-                  input:
-                    object:
-                      path:
-                        ref: target_path
-                      query:
-                        ref: target_symbol_query
-                      max_symbols:
-                        literal: 16
-          output: initial_target_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: initial_target_symbols
-              rationale:
-                literal: Deterministically locate target symbols before the first model decision so targeted edits start from concrete symbol ranges instead of broad text search.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: repo.symbols
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-                          query:
-                            ref: target_symbol_query
-              result:
-                object:
-                  evidence:
-                    literal: initial_target_context
-                  target_path:
-                    ref: target_path
-                  target_symbol_query:
-                    ref: target_symbol_query
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: initial_target_symbols_evidence
-              rationale:
-                literal: Preserved preflight symbol ranges before the exact target range read.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: repo.symbols
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-                          query:
-                            ref: target_symbol_query
-              result:
-                ref: initial_target_context
-        - kind: set
-          values:
-            phase: preflight_symbol_read
-
-    - id: preflight-target-symbol-read
-      when: phase == "preflight_symbol_read" && initial_target_context[0].output.symbols != []
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: read
-                  input:
-                    object:
-                      path:
-                        ref: initial_target_context[0].output.symbols[0].path
-                      start_line:
-                        ref: initial_target_context[0].output.symbols[0].line
-                      end_line:
-                        ref: initial_target_context[0].output.symbols[0].end_line
-                      line_numbers:
-                        literal: true
-                      max_bytes:
-                        literal: 32768
-          output: initial_target_read_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: initial_target_symbol_range_read
-              rationale:
-                literal: Deterministically read the exact target symbol range after repo.symbols so the first model decision sees focused code instead of a whole file.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: initial_target_context[0].output.symbols[0].path
-                          start_line:
-                            ref: initial_target_context[0].output.symbols[0].line
-                          end_line:
-                            ref: initial_target_context[0].output.symbols[0].end_line
-              result:
-                object:
-                  symbols:
-                    ref: initial_target_context
-                  symbol_context:
-                    ref: initial_target_read_context
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: initial_target_symbol_range_evidence
-              rationale:
-                literal: Preserved the exact target symbol range as stable edit evidence before the first model decision.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: repo.symbols
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-                          query:
-                            ref: target_symbol_query
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: initial_target_context[0].output.symbols[0].path
-                          start_line:
-                            ref: initial_target_context[0].output.symbols[0].line
-                          end_line:
-                            ref: initial_target_context[0].output.symbols[0].end_line
-              result:
-                array:
-                  - object:
-                      tool:
-                        literal: repo.symbols
-                      status:
-                        literal: ok
-                      output:
-                        ref: initial_target_context[0].output
-                  - object:
-                      tool:
-                        literal: read
-                      status:
-                        literal: ok
-                      output:
-                        ref: initial_target_read_context[0].output
-        - kind: set
-          values:
-            phase: preflight_candidate
-
-    - id: preflight-target-symbol-read-skip
-      when: phase == "preflight_symbol_read"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: initial_target_symbol_range_missing
-              rationale:
-                literal: repo.symbols did not return a concrete symbol range, so AIR proceeds with the symbol search observation and lets the model choose the next narrow read/search step.
-              result:
-                ref: initial_target_context
-        - kind: set
-          values:
-            phase: preflight_candidate
-
-    - id: preflight-target-search
-      when: phase == "preflight" && target_path != "" && target_symbol_query == "" && target_search_pattern != ""
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: grep
-                  input:
-                    object:
-                      path:
-                        ref: target_path
-                      pattern:
-                        ref: target_search_pattern
-                      context_lines:
-                        literal: 2
-                      max_matches:
-                        literal: 8
-              - object:
-                  tool:
-                    literal: read
-                  input:
-                    object:
-                      path:
-                        ref: target_path
-                      line_numbers:
-                        literal: true
-                      max_bytes:
-                        literal: 32768
-          output: initial_target_context
-          max_calls: 2
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: initial_target_search
-              rationale:
-                literal: Deterministically search target_path before the first model decision with bounded context so large files start from narrow, task-relevant evidence.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: grep
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-                          pattern:
-                            ref: target_search_pattern
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-              result:
-                object:
-                  evidence:
-                    literal: initial_target_context
-                  target_path:
-                    ref: target_path
-                  target_search_pattern:
-                    ref: target_search_pattern
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: initial_target_search_evidence
-              rationale:
-                literal: Preserved preflight grep matches and the bounded target file read as stable edit evidence before the first model decision.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: grep
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-                          pattern:
-                            ref: target_search_pattern
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-              result:
-                ref: initial_target_context
-        - kind: set
-          values:
-            phase: preflight_candidate
-
-    - id: preflight-target-read
-      when: phase == "preflight" && target_path != "" && target_symbol_query == "" && target_search_pattern == ""
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: read
-                  input:
-                    object:
-                      path:
-                        ref: target_path
-                      line_numbers:
-                        literal: true
-                      max_bytes:
-                        literal: 32768
-          output: initial_target_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: initial_target_read
-              rationale:
-                literal: Deterministically read target_path before the first model decision so the edit loop starts from exact repository context.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-              result:
-                object:
-                  evidence:
-                    literal: initial_target_context
-                  target_path:
-                    ref: target_path
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: initial_target_read_evidence
-              rationale:
-                literal: Preserved the bounded target file read as stable edit evidence before the first model decision.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: target_path
-              result:
-                ref: initial_target_context
-        - kind: set
-          values:
-            phase: preflight_candidate
-
-    - id: preflight-candidate-validate
-      when: phase == "preflight_candidate" && target_path != ""
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: candidate.validate
-                  input:
-                    object:
-                      candidate:
-                        object:
-                          target_path:
-                            ref: target_path
-                          related_files:
-                            ref: related_files
-          output: initial_candidate_validation
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: initial_candidate_validation
-              rationale:
-                literal: Deterministically validate the target path before the first model edit decision.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: candidate.validate
-                      input:
-                        object:
-                          candidate:
-                            object:
-                              target_path:
-                                ref: target_path
-                              related_files:
-                                ref: related_files
-              result:
-                ref: initial_candidate_validation
-        - kind: set
-          values:
-            phase: choose
-
-    - id: preflight-candidate-skip
-      when: phase == "preflight_candidate"
-      actions:
-        - kind: set
-          values:
-            phase: choose
-
-    - id: preflight-targetless
-      when: phase == "preflight" && target_path == ""
-      actions:
-        - kind: set
-          values:
             phase: choose
 
     - id: summarize-at-step-limit
@@ -660,10 +202,6 @@ workflow:
             object:
               action:
                 literal: step_budget_reached
-              rationale:
-                literal: The AIR state-machine step budget is nearly exhausted. Stop tool use and produce an audited summary with completed work, remaining work, and verification state.
-              requested:
-                array: []
               result:
                 object:
                   runtime:
@@ -683,7 +221,7 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 3
+                max_items: 6
                 max_bytes: 40000
               final_decision:
                 literal:
@@ -731,37 +269,6 @@ workflow:
                   ref: edit_summary.rationale
             phase: done
 
-    - id: record-opencode-doom-loop-warning
-      when: phase == "choose" && exploration_warning_sent == false && _air.model_calls >= 6 && verification_status != "passed"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: opencode_doom_loop_warning
-              rationale:
-                literal: "OpenCode-style loop feedback: the agent has spent several model turns on exploration without verified completion. This is not a write-only gate; continue reading only for a new, immediately necessary fact, otherwise use todo.write for a concrete checklist or apply the next smallest edit and let diagnostics guide the following turn."
-              requested:
-                array: []
-              result:
-                object:
-                  runtime:
-                    ref: _air
-                  allowed_next_tools:
-                    array:
-                      - literal: todo.write
-                      - literal: read
-                      - literal: grep
-                      - literal: repo.symbols
-                      - literal: lsp.references
-                      - literal: edit
-                      - literal: test.run
-        - kind: set
-          values:
-            exploration_warning_sent: true
-            phase: choose
-
     - id: choose
       when: phase == "choose"
       actions:
@@ -783,18 +290,13 @@ workflow:
                 ref: related_files
               write_paths:
                 ref: write_paths
+              verification_status:
+                ref: verification_status
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 4
-                max_bytes: 24000
-              edit_evidence:
-                take_last_within_bytes:
-                  ref: edit_evidence
                 max_items: 6
-                max_bytes: 30000
-              verification_status:
-                ref: verification_status
+                max_bytes: 36000
               runtime:
                 ref: _air
               allowed_tools:
@@ -814,6 +316,7 @@ workflow:
                   - literal: candidate.validate
                   - literal: git.status
                   - literal: git.diff
+                  - literal: format.run
                   - literal: test.run
               tool_schemas:
                 literal:
@@ -825,7 +328,7 @@ workflow:
                     optional: {}
                   glob:
                     required:
-                      pattern: "glob/path pattern such as examples/code-agent/**/*.js"
+                      pattern: "glob/path pattern such as crates/air-tools/src/*.rs"
                     optional:
                       query: "substring filter"
                       max_files: "bounded result limit"
@@ -860,6 +363,8 @@ workflow:
                       start_line: "1-based start line"
                       end_line: "1-based end line"
                       lines: "single line or start-end range"
+                      contains: "substring anchor; returns context around a match"
+                      context_lines: "context around contains"
                       line_numbers: "boolean"
                       max_bytes: "bounded byte limit"
                   read_many:
@@ -872,7 +377,7 @@ workflow:
                       pattern: "regular expression; query is accepted as an alias"
                     optional:
                       path: "repo-relative file or directory; defaults to repo root"
-                      include: "optional file include hint"
+                      include: "OpenCode alias for an exact file or directory scope when path is omitted; globs are rejected"
                       context_lines: "bounded context lines"
                       contextLines: "alias for context_lines"
                       max_matches: "bounded result limit"
@@ -884,6 +389,7 @@ workflow:
                       newString: "replacement text"
                     optional:
                       replaceAll: "replace every occurrence only when all matches should change"
+                      edits: "array of {old_string,new_string,replace_all?} for several replacements in the same file"
                   diagnostic.context:
                     required: {}
                     optional:
@@ -906,20 +412,20 @@ workflow:
                     optional:
                       paths: "array of repo-relative paths"
                       include_untracked: "boolean"
+                  format.run:
+                    required: {}
+                    optional: {}
                   test.run:
                     required: {}
                     optional: {}
               tool_policy:
                 literal:
-                  plan: "Use todo.write/read when the task clearly spans multiple files or repeated verification cycles, even if target_path is set. Skip todo tools only for trivial single-file edits."
-                  discover: "Use glob for path discovery, grep for text search, repo.symbols for cheap definitions and symbol start/end lines, and lsp.references for semantic references when available."
-                  paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, or artifact metadata. Include full extensions such as .json; never abbreviate, truncate, or rewrite path suffixes."
-                  read_first: "Call read, grep, or diagnostic.context before edits."
-                  small_steps: "Choose the tool calls needed for the next concrete step, and batch independent legal calls when they share the same evidence context. Do not request whole large files. Use repo.symbols once to get start/end lines when names are known, then read exact ranges instead of rediscovering boundaries repeatedly. If target_symbol_query is set or preflight already returned target ranges, the next turn must either write or read at most one additional immediately-needed range; do not expand into helper archaeology."
-                  edits: "Use repo.symbols/lsp.references to locate exact ranges when helpful, then call edit with filePath, oldString, and newString. Include enough oldString context to make the replacement unique. Multiple independent edit calls are allowed in the same turn when each one has already been grounded by prior read/search/symbol evidence and each call stays inside write_paths. Do not repeat reads of the same ranges instead of making an allowed edit."
-                  tests: "Use test.run for the configured project validation. A test.run tool event can have status=ok while output.success=false; treat output.success=false as a failed verification and fix diagnostics before any completion. If output.truncated=true, use output.full_log_path with grep or a narrow read range instead of trying to inspect the whole log."
-                  verify: "Before complete=true, normally choose code.assert for useful structural postconditions, plus test.run and git.diff so the final summary can prove the outcome."
-                  finish: "Return complete=true with tool_calls=[] only after the edit/no-op decision is verified."
+                  loop: "Work as a direct coding tool loop: choose the next read/search/edit/test action yourself from current observations. Do not wait for a separate planner."
+                  context: "Keep context narrow. Prefer grep, repo.symbols, read contains+context_lines, or read exact line ranges over whole-file reads. Do not repeat the same read/search unless the previous result was missing a specific fact."
+                  edits: "After you have enough local context for a concrete change, edit. Keep editing while the patch is incomplete; do not validate after every tiny edit. Use multiple edits only through edit.edits when they target the same file and are grounded by prior context."
+                  paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, related_files, or tool output metadata."
+                  diagnostics: "If validation fails, use returned diagnostics and diagnostic.context to make the smallest correction. Do not restart broad exploration."
+                  finish: "When the patch is coherent, call format.run and test.run yourself, or return complete=true with tool_calls=[] to let AIR run the final format/test gate. Finish only after verification_status is passed or the task truly needs no code change."
           output: decision
           timeout_seconds: 180
           retry:
@@ -945,19 +451,40 @@ workflow:
           value:
             object:
               action:
-                literal: tool_batch_dispatch
+                literal: tool_result
               rationale:
                 path: decision.rationale
-              requested:
-                path: decision.tool_calls
               result:
                 ref: observation
         - kind: set
           values:
             phase: post_act
 
-    - id: auto-verify-edit
+    - id: edit-applied
       when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == true
+      actions:
+        - kind: set
+          values:
+            verification_status: unknown
+            phase: choose
+
+    - id: manual-format-failed
+      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == false
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: manual-format-passed
+      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true
+      actions:
+        - kind: set
+          values:
+            phase: choose
+
+    - id: final-format-before-complete
+      when: phase == "act" && decision.complete == true && verification_status != "passed"
       actions:
         - kind: tool_batch_dispatch
           input:
@@ -967,34 +494,41 @@ workflow:
                     literal: format.run
                   input:
                     literal: {}
-          output: auto_format_result
+          output: format_result
           max_calls: 1
           timeout_seconds: 120
           on_error: observe
-        - kind: set
-          values:
-            phase: post_format
-
-    - id: auto-verify-after-format
-      when: phase == "post_format" && auto_format_result[0].status == "ok" && auto_format_result[0].output.success == true
-      actions:
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: auto_format_passed
-              rationale:
-                literal: Automatically ran formatter after a workspace edit before validation.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: format.run
-                      input:
-                        literal: {}
+                literal: final_format_result
               result:
-                ref: auto_format_result
+                ref: format_result
+        - kind: set
+          values:
+            phase: post_final_format
+
+    - id: final-format-tool-error
+      when: phase == "post_final_format" && format_result[0].status != "ok"
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: final-format-failed
+      when: phase == "post_final_format" && format_result[0].status == "ok" && format_result[0].output.success == false
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: final-verify-after-format
+      when: phase == "post_final_format" && format_result[0].status == "ok" && format_result[0].output.success == true
+      actions:
         - kind: tool_batch_dispatch
           input:
             array:
@@ -1003,84 +537,25 @@ workflow:
                     literal: test.run
                   input:
                     literal: {}
-          output: auto_verify_result
+          output: verify_result
           max_calls: 1
           timeout_seconds: 120
           on_error: observe
-        - kind: set
-          values:
-            phase: post_verify
-
-    - id: record-auto-format-failed
-      when: phase == "post_format"
-      actions:
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: auto_format_failed
-              rationale:
-                literal: Automatically ran formatter after a workspace edit; formatting failed and must be fixed before validation can run.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: format.run
-                      input:
-                        literal: {}
+                literal: final_verify_result
               result:
-                ref: auto_format_result
+                ref: verify_result
         - kind: set
           values:
-            verification_status: failed
-            phase: choose
+            phase: post_final_verify
 
-    - id: record-auto-verify-failed-tool
-      when: phase == "post_verify" && auto_verify_result[0].status == "error"
+    - id: final-verify-truncated-failed
+      when: phase == "post_final_verify" && verify_result[0].output.success == false && verify_result[0].output.truncated == true
       actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: auto_verify_failed
-              rationale:
-                literal: Automatically ran validation after a workspace edit; the validation tool returned an error and must be fixed before completion.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: test.run
-                      input:
-                        literal: {}
-              result:
-                ref: auto_verify_result
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: record-auto-verify-failed-output-truncated
-      when: phase == "post_verify" && auto_verify_result[0].output.success == false && auto_verify_result[0].output.truncated == true
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: auto_verify_failed
-              rationale:
-                literal: Automatically ran validation after a workspace edit; output.success=false, so diagnostics must be fixed before completion.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: test.run
-                      input:
-                        literal: {}
-              result:
-                ref: auto_verify_result
         - kind: tool_batch_dispatch
           input:
             array:
@@ -1090,7 +565,7 @@ workflow:
                   input:
                     object:
                       diagnostics:
-                        ref: auto_verify_result[0].output.diagnostics
+                        ref: verify_result[0].output.diagnostics
                       context_lines:
                         literal: 6
               - object:
@@ -1099,14 +574,14 @@ workflow:
                   input:
                     object:
                       path:
-                        ref: auto_verify_result[0].output.full_log_path
+                        ref: verify_result[0].output.full_log_path
                       pattern:
                         literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
                       context_lines:
                         literal: 3
                       max_matches:
                         literal: 20
-          output: auto_verify_full_log_context
+          output: full_log_context
           max_calls: 2
           timeout_seconds: 120
           on_error: observe
@@ -1115,60 +590,17 @@ workflow:
           value:
             object:
               action:
-                literal: auto_verify_full_log_context
-              rationale:
-                literal: The validation log was truncated, so AIR searched the persisted full_log_path before the next correction decision. Use this log context together with diagnostics instead of re-running only to recover hidden output.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: diagnostic.context
-                      input:
-                        object:
-                          diagnostics:
-                            ref: auto_verify_result[0].output.diagnostics
-                          context_lines:
-                            literal: 6
-                  - object:
-                      tool:
-                        literal: grep
-                      input:
-                        object:
-                          path:
-                            ref: auto_verify_result[0].output.full_log_path
-                          pattern:
-                            literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
-                          context_lines:
-                            literal: 3
-                          max_matches:
-                            literal: 20
+                literal: verification_context
               result:
-                ref: auto_verify_full_log_context
+                ref: full_log_context
         - kind: set
           values:
             verification_status: failed
             phase: choose
 
-    - id: record-auto-verify-failed-output
-      when: phase == "post_verify" && auto_verify_result[0].output.success == false && auto_verify_result[0].output.truncated != true
+    - id: final-verify-failed
+      when: phase == "post_final_verify" && verify_result[0].output.success == false && verify_result[0].output.truncated != true
       actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: auto_verify_failed
-              rationale:
-                literal: Automatically ran validation after a workspace edit; output.success=false, so diagnostics must be fixed before completion.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: test.run
-                      input:
-                        literal: {}
-              result:
-                ref: auto_verify_result
         - kind: tool_batch_dispatch
           input:
             array:
@@ -1178,10 +610,10 @@ workflow:
                   input:
                     object:
                       diagnostics:
-                        ref: auto_verify_result[0].output.diagnostics
+                        ref: verify_result[0].output.diagnostics
                       context_lines:
                         literal: 6
-          output: auto_verify_diagnostic_context
+          output: diagnostic_context
           max_calls: 1
           timeout_seconds: 120
           on_error: observe
@@ -1190,47 +622,17 @@ workflow:
           value:
             object:
               action:
-                literal: auto_verify_diagnostic_context
-              rationale:
-                literal: Automatically collected source context around validation diagnostics before the next correction decision so fixes can target the failing scope instead of broad searching.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: diagnostic.context
-                      input:
-                        object:
-                          diagnostics:
-                            ref: auto_verify_result[0].output.diagnostics
-                          context_lines:
-                            literal: 6
+                literal: verification_context
               result:
-                ref: auto_verify_diagnostic_context
+                ref: diagnostic_context
         - kind: set
           values:
             verification_status: failed
             phase: choose
 
-    - id: record-auto-verify-passed-with-assertions
-      when: phase == "post_verify" && auto_verify_result[0].output.success == true && acceptance_assertions != []
+    - id: final-verify-passed-with-assertions
+      when: phase == "post_final_verify" && verify_result[0].output.success == true && acceptance_assertions != []
       actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: auto_verify_passed
-              rationale:
-                literal: Automatically ran the configured validation after the workspace edit and it passed.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: test.run
-                      input:
-                        literal: {}
-              result:
-                ref: auto_verify_result
         - kind: tool_batch_dispatch
           input:
             array:
@@ -1250,437 +652,125 @@ workflow:
           value:
             object:
               action:
-                literal: acceptance_assertions_observed
-              rationale:
-                literal: Automatically checked structural postconditions after validation passed so a structural edit cannot complete solely because tests passed.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: code.assert
-                      input:
-                        object:
-                          assertions:
-                            ref: acceptance_assertions
+                literal: acceptance_assertions
+              result:
+                ref: acceptance_assert_result
+        - kind: set
+          values:
+            phase: post_final_accept
+
+    - id: final-acceptance-assertions-failed
+      when: phase == "post_final_accept" && acceptance_assert_result[0].output.passed == false
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: final-acceptance-assertions-passed
+      when: phase == "post_final_accept" && acceptance_assert_result[0].output.passed == true
+      actions:
+        - kind: set
+          values:
+            verification_status: passed
+            phase: summarize
+
+    - id: acceptance-assertions-failed
+      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == false
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: acceptance-assertions-passed
+      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == true
+      actions:
+        - kind: set
+          values:
+            verification_status: passed
+            phase: choose
+
+    - id: final-verify-passed
+      when: phase == "post_final_verify" && verify_result[0].output.success == true && acceptance_assertions == []
+      actions:
+        - kind: set
+          values:
+            verification_status: passed
+            phase: summarize
+
+    - id: manual-test-failed
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: diagnostic.context
+                  input:
+                    object:
+                      diagnostics:
+                        ref: observation[0].output.diagnostics
+                      context_lines:
+                        literal: 6
+          output: diagnostic_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_context
+              result:
+                ref: diagnostic_context
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: manual-test-passed-with-assertions
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == true && acceptance_assertions != []
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: code.assert
+                  input:
+                    object:
+                      assertions:
+                        ref: acceptance_assertions
+          output: acceptance_assert_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: acceptance_assertions
               result:
                 ref: acceptance_assert_result
         - kind: set
           values:
             phase: post_accept
 
-    - id: record-acceptance-assertions-failed
-      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == false
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: acceptance_assertions_failed
-              rationale:
-                literal: Structural postconditions failed even though tests passed; fix the edit before completion.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: code.assert
-                      input:
-                        object:
-                          assertions:
-                            ref: acceptance_assertions
-              result:
-                ref: acceptance_assert_result
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: record-acceptance-assertions-passed
-      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == true
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: git.diff
-                  input:
-                    object:
-                      paths:
-                        ref: write_paths
-          output: final_diff_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: final_diff_observed
-              rationale:
-                literal: Automatically captured the workspace diff after validation passed so the summary can cite the audited patch.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: git.diff
-                      input:
-                        object:
-                          paths:
-                            ref: write_paths
-              result:
-                ref: final_diff_result
-        - kind: set
-          values:
-            verification_status: passed
-            phase: summarize
-
-    - id: record-auto-verify-passed
-      when: phase == "post_verify" && auto_verify_result[0].output.success == true && acceptance_assertions == []
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: auto_verify_passed
-              rationale:
-                literal: Automatically ran the configured validation after the workspace edit and it passed.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: test.run
-                      input:
-                        literal: {}
-              result:
-                ref: auto_verify_result
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: git.diff
-                  input:
-                    object:
-                      paths:
-                        ref: write_paths
-          output: final_diff_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: final_diff_observed
-              rationale:
-                literal: Automatically captured the workspace diff after validation passed so the summary can cite the audited patch.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: git.diff
-                      input:
-                        object:
-                          paths:
-                            ref: write_paths
-              result:
-                ref: final_diff_result
-        - kind: set
-          values:
-            verification_status: passed
-            phase: summarize
-
-    - id: record-manual-test-failed-output-truncated
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.truncated == true
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: diagnostic.context
-                  input:
-                    object:
-                      diagnostics:
-                        ref: observation[0].output.diagnostics
-                      context_lines:
-                        literal: 6
-              - object:
-                  tool:
-                    literal: grep
-                  input:
-                    object:
-                      path:
-                        ref: observation[0].output.full_log_path
-                      pattern:
-                        literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
-                      context_lines:
-                        literal: 3
-                      max_matches:
-                        literal: 20
-          output: manual_test_full_log_context
-          max_calls: 2
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: manual_test_full_log_context
-              rationale:
-                literal: A manual validation run failed with truncated output, so AIR searched the persisted full_log_path and collected diagnostic context before the next correction decision.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: diagnostic.context
-                      input:
-                        object:
-                          diagnostics:
-                            ref: observation[0].output.diagnostics
-                          context_lines:
-                            literal: 6
-                  - object:
-                      tool:
-                        literal: grep
-                      input:
-                        object:
-                          path:
-                            ref: observation[0].output.full_log_path
-                          pattern:
-                            literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
-                          context_lines:
-                            literal: 3
-                          max_matches:
-                            literal: 20
-              result:
-                ref: manual_test_full_log_context
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: record-manual-test-failed-output
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.truncated != true
-      actions:
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: record-manual-test-passed
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == true
+    - id: manual-test-passed
+      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == true && acceptance_assertions == []
       actions:
         - kind: set
           values:
             verification_status: passed
             phase: choose
 
-    - id: record-manual-test-tool-failed
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "error"
-      actions:
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: record-doom-loop-policy-error
-      when: phase == "post_act" && observation[0].error_code == "doom_loop"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: opencode_doom_loop_permission
-              rationale:
-                literal: "OpenCode-style doom_loop feedback: AIR blocked a repeated identical tool call. Reuse existing observations or choose a different next action; do not retry the same tool input."
-              requested:
-                ref: decision.tool_calls
-              result:
-                object:
-                  failed_tool:
-                    ref: observation[0].tool
-                  failed_input:
-                    ref: observation[0].input
-                  error_code:
-                    path: observation[0].error_code
-                  permission:
-                    path: observation[0].permission
-                  message:
-                    path: observation[0].message
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-file-read-path-error-hint
-      when: phase == "post_act" && observation[0].tool == "read" && observation[0].status == "error" && target_path != ""
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: path_error_hint
-              rationale:
-                literal: A read call failed. Reuse the exact target_path or rediscover the path with glob before retrying; do not repeat the same failing path.
-              requested:
-                ref: decision.tool_calls
-              result:
-                object:
-                  target_path:
-                    ref: target_path
-                  failed_tool:
-                    ref: observation[0].tool
-                  failed_input:
-                    ref: observation[0].input
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-file-read-evidence
-      when: phase == "post_act" && observation[0].tool == "read" && observation[0].status == "ok"
-      actions:
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: file_read_evidence
-              rationale:
-                literal: Preserved a successful read result as stable edit evidence so later edit decisions keep the exact line-numbered source context even when general observations are compacted.
-              requested:
-                ref: decision.tool_calls
-              result:
-                ref: observation
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-file-read-many-evidence
-      when: phase == "post_act" && observation[0].tool == "read_many" && observation[0].status == "ok"
-      actions:
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: file_read_many_evidence
-              rationale:
-                literal: Preserved a successful read_many result as stable edit evidence so later edit decisions keep source context even when general observations are compacted.
-              requested:
-                ref: decision.tool_calls
-              result:
-                ref: observation
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-code-context-evidence
-      when: phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "repo.symbols" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "grep" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "glob" || phase == "post_act" && observation[0].status == "ok" && observation[0].tool == "lsp.references"
-      actions:
-        - kind: append
-          target: edit_evidence
-          value:
-            object:
-              action:
-                literal: code_context_evidence
-              rationale:
-                literal: Preserved successful symbol/search/context evidence so later edit decisions keep the useful code locations instead of rediscovering them after observations compact.
-              requested:
-                ref: decision.tool_calls
-              result:
-                ref: observation
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-edit-write-path-error-hint
-      when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "error"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: write_path_error_hint
-              rationale:
-                literal: A write tool call failed AIR write policy. If the error is about path policy, retry with paths copied exactly from write_paths. If it is about max_changed_lines or size, split the change into smaller edit calls.
-              requested:
-                ref: decision.tool_calls
-              result:
-                object:
-                  write_paths:
-                    ref: write_paths
-                  failed_tool:
-                    ref: observation[0].tool
-                  failed_input:
-                    ref: observation[0].input
-                  failed_error:
-                    ref: observation[0].error
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: read
-                  input:
-                    object:
-                      path:
-                        ref: observation[0].input.filePath
-                      max_bytes:
-                        literal: 60000
-                      line_numbers:
-                        literal: true
-          output: write_error_context
-          max_calls: 1
-          allowed_tools:
-            - read
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: write_error_context
-              rationale:
-                literal: AIR re-read the failed write path after a write-policy error so the next edit decision has a fresh snapshot instead of looping on stale-read rejection.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: read
-                      input:
-                        object:
-                          path:
-                            ref: observation[0].input.filePath
-              result:
-                ref: write_error_context
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-edit-validation-failed
+    - id: edit-validation-failed
       when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == false
       actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: edit_validation_failed
-              rationale:
-                literal: An edit failed validation before applying. Read the diagnostics, re-read the exact affected lines if needed, and do not repeat the same invalid oldString.
-              requested:
-                ref: decision.tool_calls
-              result:
-                ref: observation
         - kind: tool_batch_dispatch
           input:
             array:
@@ -1693,7 +783,7 @@ workflow:
                         ref: observation[0].output.diagnostics
                       context_lines:
                         literal: 6
-          output: edit_validation_context
+          output: diagnostic_context
           max_calls: 1
           timeout_seconds: 120
           on_error: observe
@@ -1703,44 +793,8 @@ workflow:
             object:
               action:
                 literal: edit_validation_context
-              rationale:
-                literal: An edit failed validation, so AIR automatically collected source context around the diagnostic path before the next edit decision.
-              requested:
-                array:
-                  - object:
-                      tool:
-                        literal: diagnostic.context
-                      input:
-                        object:
-                          diagnostics:
-                            ref: observation[0].output.diagnostics
-                          context_lines:
-                            literal: 6
               result:
-                ref: edit_validation_context
-        - kind: set
-          values:
-            phase: choose
-
-    - id: record-batch-dispatch-error
-      when: phase == "post_act" && observation[0].tool == "<batch>" && observation[0].status == "error"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: batch_dispatch_error
-              rationale:
-                literal: A tool batch was rejected before individual tools ran. Fix the invalid tool name, input shape, repeated-call issue, write scope, or max_calls issue before retrying.
-              requested:
-                ref: decision.tool_calls
-              result:
-                object:
-                  failed_error:
-                    ref: observation[0].error
-                  failed_input:
-                    ref: observation[0].input
+                ref: diagnostic_context
         - kind: set
           values:
             phase: choose
@@ -1752,30 +806,31 @@ workflow:
           values:
             phase: choose
 
-    - id: block-complete-without-passed-verification
-      when: phase == "act" && decision.complete == true && verification_status != "passed"
+    - id: summarize
+      when: phase == "summarize" || phase == "act" && decision.complete == true && verification_status == "passed"
       actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: git.diff
+                  input:
+                    object:
+                      paths:
+                        ref: write_paths
+          output: final_diff_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: completion_blocked
-              rationale:
-                literal: Completion was blocked because verification_status is not passed. Run the configured validation or fix failing diagnostics before finishing.
-              requested:
-                array: []
+                literal: final_diff_observed
               result:
-                object:
-                  verification_status:
-                    ref: verification_status
-        - kind: set
-          values:
-            phase: choose
-
-    - id: summarize
-      when: phase == "summarize" || phase == "act" && decision.complete == true && verification_status == "passed"
-      actions:
+                ref: final_diff_result
         - kind: model_call
           model: code_edit_summarizer
           input:
@@ -1784,8 +839,6 @@ workflow:
                 ref: task
               target_path:
                 ref: target_path
-              target_symbol_query:
-                ref: target_symbol_query
               write_paths:
                 ref: write_paths
               observations:

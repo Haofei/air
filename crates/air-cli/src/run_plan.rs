@@ -1006,9 +1006,6 @@ fn model_call_start_log_lines(event: &TraceEvent) -> Vec<String> {
         if let Some(observations) = input.get("observations").and_then(Value::as_array) {
             parts.push(format!("observations={}", observations.len()));
         }
-        if let Some(edit_evidence) = input.get("edit_evidence").and_then(Value::as_array) {
-            parts.push(format!("edit_evidence={}", edit_evidence.len()));
-        }
     }
     vec![parts.join(" ")]
 }
@@ -1314,7 +1311,6 @@ mod tests {
             "target_path": "src/lib.rs",
             "verification_status": "unknown",
             "observations": [{}, {}],
-            "edit_evidence": [{}],
         }));
         event.meta = Some(json!({"model": "code_edit_decider"}));
 
@@ -1325,7 +1321,6 @@ mod tests {
         assert!(lines[0].contains("task=\"Refactor the helper\""));
         assert!(lines[0].contains("target=\"src/lib.rs\""));
         assert!(lines[0].contains("observations=2"));
-        assert!(lines[0].contains("edit_evidence=1"));
     }
 
     #[test]
