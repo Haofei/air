@@ -3327,27 +3327,12 @@ fn repo_files_glob_input<'a>(
     input: &'a Value,
     pattern_glob: Option<&'a str>,
 ) -> Result<RepoFilesGlobInput<'a>, RuntimeError> {
-    if let Some(glob) = input.get("glob") {
-        return glob
-            .as_str()
-            .map(|g| RepoFilesGlobInput {
-                glob: Some(g),
-                glob_source: "glob",
-            })
-            .ok_or_else(|| {
-                RuntimeError::Provider(format!("tool {tool_name} input.glob must be a string"))
-            });
-    }
-    if let Some(glob) = input.get("file_glob") {
-        return glob
-            .as_str()
-            .map(|g| RepoFilesGlobInput {
-                glob: Some(g),
-                glob_source: "file_glob",
-            })
-            .ok_or_else(|| {
-                RuntimeError::Provider(format!("tool {tool_name} input.file_glob must be a string"))
-            });
+    if let Some((glob, glob_source)) = first_string_alias(tool_name, input, &["glob", "file_glob"])?
+    {
+        return Ok(RepoFilesGlobInput {
+            glob: Some(glob),
+            glob_source,
+        });
     }
     Ok(RepoFilesGlobInput {
         glob: pattern_glob,
@@ -4147,40 +4132,32 @@ fn required_input_string<'a>(
     })
 }
 
+fn first_string_alias<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    aliases: &[&'static str],
+) -> Result<Option<(&'a str, &'static str)>, RuntimeError> {
+    for &alias in aliases {
+        if let Some(value) = input.get(alias) {
+            return value.as_str().map(|s| Some((s, alias))).ok_or_else(|| {
+                RuntimeError::Provider(format!("tool {tool_name} input.{alias} must be a string"))
+            });
+        }
+    }
+    Ok(None)
+}
+
 fn repo_search_query_input<'a>(
     tool_name: &str,
     input: &'a Value,
 ) -> Result<(&'a str, &'static str), RuntimeError> {
-    if let Some(query) = input.get("query") {
-        return query.as_str().map(|query| (query, "query")).ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
-        });
-    }
-    if let Some(pattern) = input.get("pattern") {
-        return pattern
-            .as_str()
-            .map(|pattern| (pattern, "pattern"))
-            .ok_or_else(|| {
-                RuntimeError::Provider(format!("tool {tool_name} input.pattern must be a string"))
-            });
-    }
-    Err(RuntimeError::Provider(format!(
-        "tool {tool_name} input.query must be a string"
-    )))
+    first_string_alias(tool_name, input, &["query", "pattern"])?.ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
+    })
 }
 
 fn repo_glob_input<'a>(tool_name: &str, input: &'a Value) -> Result<Option<&'a str>, RuntimeError> {
-    if let Some(glob) = input.get("glob") {
-        return glob.as_str().map(Some).ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {tool_name} input.glob must be a string"))
-        });
-    }
-    if let Some(glob) = input.get("file_glob") {
-        return glob.as_str().map(Some).ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {tool_name} input.file_glob must be a string"))
-        });
-    }
-    Ok(None)
+    Ok(first_string_alias(tool_name, input, &["glob", "file_glob"])?.map(|(v, _)| v))
 }
 
 fn optional_string_input<'a>(

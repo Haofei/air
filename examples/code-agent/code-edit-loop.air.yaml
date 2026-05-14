@@ -369,7 +369,7 @@ workflow:
                       path: "repo-relative scope"
                   code.assert:
                     required:
-                      assertions: "array of postconditions; kinds: symbol_present, symbol_absent, file_contains, file_not_contains, command_passes"
+                      assertions: "array of assertion objects. file_contains/file_not_contains require {kind,path,pattern,mode?}; use pattern, not value or file_contains as a field. symbol_present/symbol_absent require {kind,path,name}. command_passes requires {kind,result:{success:boolean}} or {kind,success:boolean}."
                     optional:
                       checks: "alias for assertions"
                   candidate.validate:
@@ -422,6 +422,10 @@ workflow:
             object:
               action:
                 literal: tool_result
+              assistant:
+                ref: decision
+              requested:
+                ref: decision.tool_calls
               result:
                 ref: observation
         - kind: set

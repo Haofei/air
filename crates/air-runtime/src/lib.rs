@@ -1471,6 +1471,9 @@ where
                     "error_code": null,
                     "output": result,
                 }));
+                if let Some(output_object) = item_output.as_mut().and_then(Value::as_object_mut) {
+                    copy_tool_dispatch_metadata(&raw_dispatch, output_object);
+                }
                 break;
             }
             if let Some(item_output) = item_output {
@@ -2194,6 +2197,17 @@ fn resolve_tool_batch_dispatch_items(
             (item.clone(), resolved)
         })
         .collect())
+}
+
+fn copy_tool_dispatch_metadata(raw_dispatch: &Value, output_object: &mut Map<String, Value>) {
+    let Some(object) = raw_dispatch.as_object() else {
+        return;
+    };
+    for field in ["_air_tool_call_id", "_air_tool_name"] {
+        if let Some(value) = object.get(field) {
+            output_object.insert(field.to_string(), value.clone());
+        }
+    }
 }
 
 fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value {
@@ -2953,6 +2967,9 @@ fn compact_observation_context(object: &Map<String, Value>) -> Value {
     for field in ["action", "rationale"] {
         copy_context_field(&mut compact, object, field);
     }
+    if let Some(assistant) = object.get("assistant") {
+        compact.insert("assistant".to_string(), compact_context_value(assistant));
+    }
     if let Some(requested) = object.get("requested") {
         compact.insert("requested".to_string(), compact_context_value(requested));
     }
@@ -3173,7 +3190,11 @@ fn condition_clause_matches(
         return Err(RuntimeError::UnsupportedCondition(clause.to_string()));
     };
 
-    let actual = read_path(state, outputs, left.trim())?;
+    let actual = match read_path(state, outputs, left.trim()) {
+        Ok(value) => value,
+        Err(RuntimeError::MissingField(_)) => return Ok(false),
+        Err(error) => return Err(error),
+    };
     let expected = parse_condition_literal(right.trim())?;
     match operator {
         "==" => Ok(actual == &expected),
@@ -3334,6 +3355,28 @@ mod tests {
     }
 
     #[test]
+    fn condition_matches_treats_missing_nested_path_as_false() {
+        let mut state = State::new();
+        state.insert("phase".to_string(), json!("post_act"));
+        state.insert(
+            "observation".to_string(),
+            json!([{
+                "tool": "format.run",
+                "status": "ok",
+                "output": {"success": true}
+            }]),
+        );
+        let outputs = State::new();
+
+        assert!(!condition_matches(
+            &state,
+            &outputs,
+            "phase == \"post_act\" && observation[1].tool == \"test.run\"",
+        )
+        .unwrap());
+    }
+
+    #[test]
     fn validates_batch_allowed_tools() {
         assert!(validate_batch_allowed_tool("edit", &["edit".to_string()]).is_ok());
 
@@ -3485,6 +3528,16 @@ mod tests {
         let evidence = json!([{
             "action": "tool_result",
             "rationale": "read target function",
+            "assistant": {
+                "_air_assistant": {
+                    "content": "I will read the narrow target function."
+                },
+                "complete": false,
+                "tool_calls": [{
+                    "tool": "read",
+                    "input": {"filePath": "src/lib.rs", "start_line": 10, "end_line": 12}
+                }]
+            },
             "result": [{
                 "tool": "read",
                 "status": "ok",
@@ -3511,6 +3564,10 @@ mod tests {
         let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
+        assert!(
+            rendered.contains("I will read the narrow target function"),
+            "{rendered}"
+        );
         assert!(rendered.contains("\"content\""), "{rendered}");
         assert!(rendered.contains("fn target"), "{rendered}");
         assert!(

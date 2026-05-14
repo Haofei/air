@@ -384,22 +384,8 @@ fn build_chat_completion_body(
     model_name: String,
     input: &Value,
 ) -> Result<ChatCompletionBody, RuntimeError> {
-    let content = input_to_request_content(model_config, input)?;
-    let mut messages = Vec::new();
-    if let Some(system_prompt) = &model_config.system_prompt {
-        messages.push(json!({
-            "role": "system",
-            "content": system_prompt
-        }));
-    }
-    messages.push(json!({
-        "role": "user",
-        "content": content
-    }));
-
     let mut body = json!({
-        "model": model_name,
-        "messages": messages
+        "model": model_name
     });
 
     if let Some(extra_body) = &model_config.extra_body {
@@ -413,6 +399,7 @@ fn build_chat_completion_body(
     } else {
         BTreeMap::new()
     };
+    body["messages"] = Value::Array(build_chat_messages(model_config, input, &tool_name_map)?);
     if tool_name_map.is_empty() {
         if let Some(response_format) = resolved_response_format(model_config) {
             body["response_format"] = response_format;
@@ -423,6 +410,32 @@ fn build_chat_completion_body(
         body,
         tool_name_map,
     })
+}
+
+fn build_chat_messages(
+    model_config: &OpenAiModelConfig,
+    input: &Value,
+    tool_name_map: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, RuntimeError> {
+    let mut messages = Vec::new();
+    if let Some(system_prompt) = &model_config.system_prompt {
+        messages.push(json!({
+            "role": "system",
+            "content": system_prompt
+        }));
+    }
+    if model_config.native_tool_calls == Some(true) {
+        messages.extend(input_to_native_tool_messages_with_names(
+            input,
+            tool_name_map,
+        )?);
+    } else {
+        messages.push(json!({
+            "role": "user",
+            "content": input_to_content(input)?
+        }));
+    }
+    Ok(messages)
 }
 
 fn chat_completion_request_stats(body: &Value, trace_provider_io: bool) -> ModelRequestStats {
@@ -666,17 +679,6 @@ fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
 }
 
-fn input_to_request_content(
-    model_config: &OpenAiModelConfig,
-    input: &Value,
-) -> Result<String, RuntimeError> {
-    if model_config.native_tool_calls == Some(true) {
-        input_to_native_tool_content(input)
-    } else {
-        input_to_content(input)
-    }
-}
-
 fn resolved_response_format(model_config: &OpenAiModelConfig) -> Option<Value> {
     if let Some(response_format) = &model_config.response_format {
         return Some(response_format.clone());
@@ -703,81 +705,213 @@ fn input_to_content(input: &Value) -> Result<String, RuntimeError> {
     }
 }
 
-fn input_to_native_tool_content(input: &Value) -> Result<String, RuntimeError> {
+fn input_to_native_user_content(input: &Value) -> Result<String, RuntimeError> {
     let Some(object) = input.as_object() else {
         return input_to_content(input);
     };
-
-    let mut sections = Vec::new();
     if let Some(task) = object
         .get("task")
         .or_else(|| object.get("query"))
         .and_then(Value::as_str)
     {
-        sections.push(format!("<task>\n{}\n</task>", truncate_text(task, 8_000)));
+        return Ok(truncate_text(task, 8_000));
     }
-    if let Some(status) = object.get("verification_status").and_then(Value::as_str) {
-        sections.push(format!(
-            "<verification_status>{status}</verification_status>"
-        ));
-    }
-    if let Some(observations) = object.get("observations") {
-        let compacted = compact_observation_history(observations);
-        if let Some(section) = render_tool_transcript("tool_results", &compacted) {
-            sections.push(section);
-        }
-    }
-    if sections.is_empty() {
-        return input_to_content(input);
-    }
-    Ok(truncate_text(&sections.join("\n\n"), 64_000))
+    input_to_content(input)
 }
 
-fn render_tool_transcript(label: &str, value: &Value) -> Option<String> {
-    let items = value.as_array()?;
-    let mut lines = vec![format!("<{label}>")];
-    for item in items {
-        render_observation_transcript(item, &mut lines);
-    }
-    lines.push(format!("</{label}>"));
-    Some(lines.join("\n"))
-}
-
-fn render_observation_transcript(value: &Value, lines: &mut Vec<String>) {
-    let Some(object) = value.as_object() else {
-        return;
+fn input_to_native_tool_messages_with_names(
+    input: &Value,
+    tool_name_map: &BTreeMap<String, String>,
+) -> Result<Vec<Value>, RuntimeError> {
+    let Some(object) = input.as_object() else {
+        return Ok(vec![json!({
+            "role": "user",
+            "content": input_to_content(input)?
+        })]);
     };
-    if let Some(action) = object.get("action").and_then(Value::as_str) {
-        lines.push(format!("action: {action}"));
-    }
-    if let Some(results) = object.get("result").and_then(Value::as_array) {
-        for result in results {
-            render_tool_result_transcript(result, lines);
+
+    let mut messages = vec![json!({
+        "role": "user",
+        "content": input_to_native_user_content(input)?
+    })];
+    let Some(observations) = object.get("observations") else {
+        return Ok(messages);
+    };
+    let compacted = compact_observation_history(observations);
+    let Some(items) = compacted.as_array() else {
+        return Ok(messages);
+    };
+
+    for (observation_index, observation) in items.iter().enumerate() {
+        let Some(results) = observation.get("result").and_then(Value::as_array) else {
+            continue;
+        };
+        let mut tool_calls = Vec::new();
+        let mut tool_messages = Vec::new();
+        for (result_index, result) in results.iter().enumerate() {
+            let Some(result_object) = result.as_object() else {
+                continue;
+            };
+            let tool = result_object
+                .get("tool")
+                .and_then(Value::as_str)
+                .unwrap_or("tool");
+            let requested = observation
+                .get("requested")
+                .and_then(Value::as_array)
+                .and_then(|items| items.get(result_index));
+            let safe_name = native_history_tool_name(result_object, requested, tool, tool_name_map);
+            let call_id = native_history_tool_call_id(
+                result_object,
+                requested,
+                observation_index,
+                result_index,
+                &safe_name,
+            );
+            let arguments = result_object
+                .get("input")
+                .cloned()
+                .unwrap_or_else(|| json!({}));
+
+            tool_calls.push(json!({
+                "id": call_id,
+                "type": "function",
+                "function": {
+                    "name": safe_name,
+                    "arguments": compact_json(&arguments)
+                }
+            }));
+            tool_messages.push(json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "name": safe_name,
+                "content": render_native_tool_message_content(result)
+            }));
         }
+        if tool_calls.is_empty() {
+            continue;
+        }
+        let assistant_content = observation_assistant_content(observation)
+            .map(Value::String)
+            .unwrap_or(Value::Null);
+        messages.push(json!({
+            "role": "assistant",
+            "content": assistant_content,
+            "tool_calls": tool_calls
+        }));
+        messages.extend(tool_messages);
     }
+
+    Ok(messages)
 }
 
-fn render_tool_result_transcript(value: &Value, lines: &mut Vec<String>) {
+fn native_history_tool_name(
+    result: &Map<String, Value>,
+    requested: Option<&Value>,
+    fallback_tool: &str,
+    tool_name_map: &BTreeMap<String, String>,
+) -> String {
+    result
+        .get("_air_tool_name")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            requested
+                .and_then(|value| value.get("_air_tool_name"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| safe_openai_tool_name_for_history(fallback_tool, tool_name_map))
+}
+
+fn native_history_tool_call_id(
+    result: &Map<String, Value>,
+    requested: Option<&Value>,
+    observation_index: usize,
+    result_index: usize,
+    safe_name: &str,
+) -> String {
+    result
+        .get("_air_tool_call_id")
+        .and_then(Value::as_str)
+        .or_else(|| {
+            requested
+                .and_then(|value| value.get("_air_tool_call_id"))
+                .and_then(Value::as_str)
+        })
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            generated_native_history_tool_call_id(observation_index, result_index, safe_name)
+        })
+}
+
+fn observation_assistant_content(observation: &Value) -> Option<String> {
+    observation
+        .pointer("/assistant/_air_assistant/content")
+        .or_else(|| observation.pointer("/assistant/content"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(|content| truncate_text(content, 8_000))
+}
+
+fn safe_openai_tool_name_for_history(
+    original_name: &str,
+    tool_name_map: &BTreeMap<String, String>,
+) -> String {
+    if let Some((safe_name, _)) = tool_name_map
+        .iter()
+        .find(|(_, mapped_name)| mapped_name.as_str() == original_name)
+    {
+        return safe_name.clone();
+    }
+    let mut used_names = BTreeMap::new();
+    safe_openai_tool_name(original_name, &mut used_names)
+}
+
+fn generated_native_history_tool_call_id(
+    observation_index: usize,
+    result_index: usize,
+    safe_name: &str,
+) -> String {
+    let mut name = safe_name
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '_' | '-') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if name.len() > 32 {
+        name.truncate(32);
+    }
+    format!("call_air_{observation_index}_{result_index}_{name}")
+}
+
+fn render_native_tool_message_content(value: &Value) -> String {
     let Some(object) = value.as_object() else {
-        return;
+        return truncate_text(&compact_json(value), 12_000);
     };
     let tool = object.get("tool").and_then(Value::as_str).unwrap_or("tool");
     let status = object
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    lines.push(format!("<tool_result tool=\"{tool}\" status=\"{status}\">"));
-
-    if let Some(input) = object.get("input") {
-        lines.push(format!("input: {}", compact_json(input)));
+    let mut lines = Vec::new();
+    if !matches!(status, "ok" | "success") {
+        lines.push(format!("status: {status}"));
     }
     if let Some(error) = object.get("error").and_then(Value::as_str) {
         lines.push(format!("error: {}", truncate_text(error, 1_000)));
     }
     if let Some(output) = object.get("output") {
-        render_tool_output_transcript(tool, output, lines);
+        render_tool_output_transcript(tool, output, &mut lines);
     }
-    lines.push("</tool_result>".to_string());
+    if lines.is_empty() {
+        lines.push(truncate_text(&compact_json(value), 4_000));
+    }
+    truncate_text(&lines.join("\n"), 12_000)
 }
 
 fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<String>) {
@@ -836,31 +970,72 @@ fn render_file_read_many_transcript(output: &Value, lines: &mut Vec<String>) {
 
 fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
     let match_count = output
-        .get("matches")
-        .and_then(Value::as_array)
-        .map(Vec::len)
+        .get("match_count")
+        .and_then(Value::as_u64)
+        .map(|count| count as usize)
+        .or_else(|| {
+            output
+                .get("matches")
+                .and_then(Value::as_array)
+                .map(Vec::len)
+        })
         .unwrap_or(0);
     lines.push(format!("Found {match_count} matches"));
     let Some(matches) = output.get("matches").and_then(Value::as_array) else {
         return;
     };
     for item in matches.iter().take(40) {
-        let Some(object) = item.as_object() else {
-            continue;
-        };
-        let path = object.get("path").and_then(Value::as_str).unwrap_or("");
-        let line = object
-            .get("line")
-            .or_else(|| object.get("line_number"))
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        let text = object
-            .get("text")
-            .or_else(|| object.get("line_text"))
-            .and_then(Value::as_str)
-            .unwrap_or("");
-        lines.push(format!("{path}:{line}: {}", truncate_text(text, 500)));
+        render_file_search_match(item, None, lines);
     }
+}
+
+fn render_file_search_match(value: &Value, fallback_path: Option<&str>, lines: &mut Vec<String>) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .or(fallback_path)
+        .unwrap_or("");
+    if let Some(before) = object.get("before").and_then(Value::as_array) {
+        for item in before {
+            render_file_search_match_line(item, Some(path), lines);
+        }
+    }
+    render_file_search_match_line(value, Some(path), lines);
+    if let Some(after) = object.get("after").and_then(Value::as_array) {
+        for item in after {
+            render_file_search_match_line(item, Some(path), lines);
+        }
+    }
+}
+
+fn render_file_search_match_line(
+    value: &Value,
+    fallback_path: Option<&str>,
+    lines: &mut Vec<String>,
+) {
+    let Some(object) = value.as_object() else {
+        return;
+    };
+    let path = object
+        .get("path")
+        .and_then(Value::as_str)
+        .or(fallback_path)
+        .unwrap_or("");
+    let line = object
+        .get("line_number")
+        .or_else(|| object.get("line"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let text = object
+        .get("text")
+        .or_else(|| object.get("line_text"))
+        .or_else(|| object.get("line"))
+        .and_then(Value::as_str)
+        .unwrap_or("");
+    lines.push(format!("{path}:{line}: {}", truncate_text(text, 500)));
 }
 
 fn render_symbols_transcript(output: &Value, lines: &mut Vec<String>) {
@@ -917,6 +1092,7 @@ fn compact_observation(value: &Value) -> Value {
     };
     let mut compact = Map::new();
     copy_compact_field(&mut compact, object, "action");
+    copy_compact_field(&mut compact, object, "assistant");
     if let Some(requested) = object.get("requested") {
         compact.insert("requested".to_string(), compact_tool_requests(requested));
     }
@@ -944,7 +1120,9 @@ fn compact_tool_requests(value: &Value) -> Value {
                     return compact_prompt_value(item);
                 };
                 let mut compact = Map::new();
-                copy_compact_field(&mut compact, object, "tool");
+                for field in ["tool", "_air_tool_call_id", "_air_tool_name"] {
+                    copy_compact_field(&mut compact, object, field);
+                }
                 if let Some(input) = object.get("input") {
                     compact.insert("input".to_string(), compact_tool_input(input));
                 }
@@ -966,7 +1144,15 @@ fn compact_tool_result(value: &Value) -> Value {
         return compact_prompt_value(value);
     };
     let mut compact = Map::new();
-    for field in ["tool", "status", "error_code", "permission", "message"] {
+    for field in [
+        "tool",
+        "status",
+        "error_code",
+        "permission",
+        "message",
+        "_air_tool_call_id",
+        "_air_tool_name",
+    ] {
         copy_compact_field(&mut compact, object, field);
     }
     if let Some(input) = object.get("input") {
@@ -1000,7 +1186,14 @@ fn prune_old_tool_result_content(value: &Value) -> Value {
         return value.clone();
     };
     let mut compact = Map::new();
-    for field in ["tool", "status", "input", "error"] {
+    for field in [
+        "tool",
+        "status",
+        "input",
+        "error",
+        "_air_tool_call_id",
+        "_air_tool_name",
+    ] {
         if let Some(value) = object.get(field) {
             compact.insert(field.to_string(), value.clone());
         }
@@ -1061,9 +1254,10 @@ fn compact_tool_output(value: &Value) -> Value {
         "locations",
     ] {
         if let Some(value) = object.get(field) {
+            let depth = if field == "matches" { 5 } else { 3 };
             compact.insert(
                 field.to_string(),
-                compact_json_value_for_prompt(value, 3, 8, 2_000),
+                compact_json_value_for_prompt(value, depth, 8, 2_000),
             );
         }
     }
@@ -1316,10 +1510,20 @@ fn parse_native_tool_calls(
             ))
         })?;
         let input = normalize_native_tool_arguments(input);
-        normalized_calls.push(json!({
-            "tool": original_name,
-            "input": input
-        }));
+        let mut normalized_call = Map::new();
+        normalized_call.insert("tool".to_string(), Value::String(original_name));
+        normalized_call.insert("input".to_string(), input);
+        normalized_call.insert(
+            "_air_tool_name".to_string(),
+            Value::String(safe_name.to_string()),
+        );
+        if let Some(call_id) = call.get("id").and_then(Value::as_str) {
+            normalized_call.insert(
+                "_air_tool_call_id".to_string(),
+                Value::String(call_id.to_string()),
+            );
+        }
+        normalized_calls.push(Value::Object(normalized_call));
     }
     if normalized_calls.is_empty() {
         return Err(RuntimeError::Provider(
@@ -1327,10 +1531,47 @@ fn parse_native_tool_calls(
         ));
     }
 
-    Ok(Some(json!({
-        "complete": false,
-        "tool_calls": normalized_calls
-    })))
+    let mut decision = Map::new();
+    decision.insert("complete".to_string(), Value::Bool(false));
+    decision.insert("tool_calls".to_string(), Value::Array(normalized_calls));
+    if let Some(assistant) = native_assistant_metadata(response) {
+        decision.insert("_air_assistant".to_string(), assistant);
+    }
+
+    Ok(Some(Value::Object(decision)))
+}
+
+fn native_assistant_metadata(response: &Value) -> Option<Value> {
+    let content = response
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|content| !content.is_empty());
+    let reasoning = response
+        .pointer("/choices/0/message/reasoning_content")
+        .or_else(|| response.pointer("/choices/0/message/reasoning"))
+        .or_else(|| response.pointer("/choices/0/message/thinking"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|reasoning| !reasoning.is_empty());
+    if content.is_none() && reasoning.is_none() {
+        return None;
+    }
+
+    let mut assistant = Map::new();
+    if let Some(content) = content {
+        assistant.insert(
+            "content".to_string(),
+            Value::String(truncate_text(content, 8_000)),
+        );
+    }
+    if let Some(reasoning) = reasoning {
+        assistant.insert(
+            "reasoning".to_string(),
+            Value::String(truncate_text(reasoning, 8_000)),
+        );
+    }
+    Some(Value::Object(assistant))
 }
 
 fn normalize_native_tool_arguments(value: Value) -> Value {
@@ -1898,20 +2139,19 @@ mod tests {
                 .is_some()
         );
         let content = request.body["messages"][0]["content"].as_str().unwrap();
-        assert!(content.contains("choose tools"));
+        assert_eq!(content, "choose tools");
         assert!(
             !content.contains("tool_schemas") && !content.contains("allowed_tools"),
             "native tool mode must pass tool definitions through provider tools, not duplicate them in user content"
         );
-        assert!(content.contains("<task>\nchoose tools\n</task>"));
         assert!(
             serde_json::from_str::<Value>(content).is_err(),
-            "native tool content should be an OpenCode-style text transcript, not an AIR JSON envelope"
+            "native tool content should be OpenCode-style user text, not an AIR JSON envelope"
         );
     }
 
     #[test]
-    fn native_tool_content_compacts_tool_observations() {
+    fn native_tool_messages_replay_observations_as_tool_history() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
@@ -1938,15 +2178,31 @@ mod tests {
             },
             "observations": [{
                 "action": "tool_batch_dispatch",
-                "rationale": "read file",
+                "assistant": {
+                    "_air_assistant": {
+                        "content": "I will inspect the narrow target file first.",
+                        "reasoning": "Need the current implementation before editing."
+                    },
+                    "complete": false,
+                    "tool_calls": [{
+                        "tool": "file.read",
+                        "input": {"path": "src/lib.rs"},
+                        "_air_tool_name": "file_read",
+                        "_air_tool_call_id": "call_original_123"
+                    }]
+                },
                 "requested": [{
                     "tool": "file.read",
-                    "input": {"path": "src/lib.rs", "irrelevant": long_content}
+                    "input": {"path": "src/lib.rs", "irrelevant": long_content},
+                    "_air_tool_name": "file_read",
+                    "_air_tool_call_id": "call_original_123"
                 }],
                 "result": [{
                     "tool": "file.read",
                     "status": "ok",
                     "input": {"path": "src/lib.rs"},
+                    "_air_tool_name": "file_read",
+                    "_air_tool_call_id": "call_original_123",
                     "output": {
                         "path": "src/lib.rs",
                         "start_line": 1,
@@ -1959,7 +2215,27 @@ mod tests {
         });
 
         let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
-        let content = request.body["messages"][0]["content"].as_str().unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+        assert_eq!(messages.len(), 3);
+        assert_eq!(messages[0]["role"], json!("user"));
+        assert_eq!(messages[0]["content"], json!("inspect"));
+        assert_eq!(messages[1]["role"], json!("assistant"));
+        assert_eq!(
+            messages[1]["content"],
+            json!("I will inspect the narrow target file first.")
+        );
+        assert_eq!(
+            messages[1]["tool_calls"][0]["function"]["name"],
+            json!("file_read")
+        );
+        assert_eq!(
+            messages[1]["tool_calls"][0]["id"],
+            json!("call_original_123")
+        );
+        assert_eq!(messages[2]["role"], json!("tool"));
+        assert_eq!(messages[2]["name"], json!("file_read"));
+        assert_eq!(messages[2]["tool_call_id"], json!("call_original_123"));
+        let content = messages[2]["content"].as_str().unwrap();
 
         assert!(content.contains("<file path=\"src/lib.rs\">"), "{content}");
         assert!(content.contains("[AIR_COMPACTED]"));
@@ -1973,7 +2249,7 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_content_preserves_structured_tool_error_feedback() {
+    fn native_tool_messages_preserve_structured_tool_error_feedback() {
         let input = json!({
             "task": "avoid loop",
             "observations": [{
@@ -1999,20 +2275,23 @@ mod tests {
             }]
         });
 
-        let content = input_to_native_tool_content(&input).unwrap();
-        assert!(content.contains("<tool_results>"), "{content}");
+        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+        assert_eq!(messages[1]["role"], json!("assistant"));
+        assert_eq!(messages[2]["role"], json!("tool"));
+        assert!(!content.contains("<tool_results>"), "{content}");
         assert!(content.contains("error_code"), "{content}");
         assert!(content.contains("doom_loop"), "{content}");
         assert!(content.contains("permission"), "{content}");
         assert!(content.contains("different next action"), "{content}");
         assert!(
-            serde_json::from_str::<Value>(&content).is_err(),
-            "native tool content should be transcript text"
+            serde_json::from_str::<Value>(content).is_err(),
+            "native tool result content should be plain text"
         );
     }
 
     #[test]
-    fn native_tool_content_preserves_symbol_navigation_output() {
+    fn native_tool_messages_preserve_symbol_navigation_output() {
         let input = json!({
             "task": "inspect helper",
             "observations": [{
@@ -2050,7 +2329,8 @@ mod tests {
             }]
         });
 
-        let content = input_to_native_tool_content(&input).unwrap();
+        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
         assert!(content.contains("symbols:"), "{content}");
         assert!(
             content.contains(
@@ -2062,7 +2342,62 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_content_renders_read_many_files_as_file_snippets() {
+    fn native_tool_messages_render_file_search_lines_and_context() {
+        let input = json!({
+            "task": "find helper",
+            "observations": [{
+                "action": "tool_result",
+                "result": [{
+                    "tool": "grep",
+                    "status": "ok",
+                    "input": {
+                        "path": "src/lib.rs",
+                        "pattern": "repo_search_query_input",
+                        "contextLines": 1
+                    },
+                    "output": {
+                        "match_count": 1,
+                        "matches": [{
+                            "path": "src/lib.rs",
+                            "line_number": 42,
+                            "line": "fn repo_search_query_input() {}",
+                            "before": [{
+                                "path": "src/lib.rs",
+                                "line_number": 41,
+                                "line": "fn required_input_string() {}"
+                            }],
+                            "after": [{
+                                "path": "src/lib.rs",
+                                "line_number": 43,
+                                "line": "fn repo_glob_input() {}"
+                            }]
+                        }]
+                    }
+                }]
+            }]
+        });
+
+        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert!(content.contains("Found 1 matches"), "{content}");
+        assert!(
+            content.contains("src/lib.rs:41: fn required_input_string() {}"),
+            "{content}"
+        );
+        assert!(
+            content.contains("src/lib.rs:42: fn repo_search_query_input() {}"),
+            "{content}"
+        );
+        assert!(
+            content.contains("src/lib.rs:43: fn repo_glob_input() {}"),
+            "{content}"
+        );
+        assert!(!content.contains(":0:"), "{content}");
+    }
+
+    #[test]
+    fn native_tool_messages_render_read_many_files_as_file_snippets() {
         let input = json!({
             "task": "move helper",
             "observations": [{
@@ -2103,7 +2438,8 @@ mod tests {
             }]
         });
 
-        let content = input_to_native_tool_content(&input).unwrap();
+        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
 
         assert!(content.contains("<file path=\"src/lib.rs\">"), "{content}");
         assert!(content.contains("fn old_helper"), "{content}");
@@ -2115,7 +2451,7 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_content_prunes_old_tool_results_like_opencode() {
+    fn native_tool_messages_prune_old_tool_results_like_opencode() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
@@ -2171,7 +2507,14 @@ mod tests {
         });
 
         let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
-        let content = request.body["messages"][0]["content"].as_str().unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+        assert_eq!(messages[0]["content"], json!("inspect"));
+        let content = messages
+            .iter()
+            .filter(|message| message.get("role").and_then(Value::as_str) == Some("tool"))
+            .filter_map(|message| message.get("content").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
 
         assert!(content.contains(OLD_TOOL_RESULT_CLEARED));
         assert!(
@@ -2196,6 +2539,7 @@ mod tests {
                     "message": {
                         "content": "Need an edit.",
                         "tool_calls": [{
+                            "id": "call_edit_1",
                             "type": "function",
                             "function": {
                                 "name": "edit",
@@ -2213,8 +2557,13 @@ mod tests {
             value,
             json!({
                 "complete": false,
+                "_air_assistant": {
+                    "content": "Need an edit."
+                },
                 "tool_calls": [{
                     "tool": "edit",
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_edit_1",
                     "input": {
                         "filePath": "src/lib.rs",
                         "oldString": "old",

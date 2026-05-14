@@ -1197,7 +1197,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_records_tool_results_as_the_single_model_context_stream() {
+    fn edit_loop_records_tool_results_for_provider_tool_history() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1220,6 +1220,14 @@ mod tests {
         assert_eq!(
             act_rule["actions"][1]["value"]["object"]["result"]["ref"],
             serde_yaml::Value::String("observation".to_string())
+        );
+        assert_eq!(
+            act_rule["actions"][1]["value"]["object"]["assistant"]["ref"],
+            serde_yaml::Value::String("decision".to_string())
+        );
+        assert_eq!(
+            act_rule["actions"][1]["value"]["object"]["requested"]["ref"],
+            serde_yaml::Value::String("decision.tool_calls".to_string())
         );
 
         let choose_rule = rules
@@ -1326,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_does_not_replay_model_rationale_as_context() {
+    fn edit_loop_replays_provider_assistant_turn_without_rationale_wrapper() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1351,7 +1359,13 @@ mod tests {
             act_rule["actions"][1]["value"]["object"]
                 .get("rationale")
                 .is_none(),
-            "provider reasoning/answer belongs in trace, not replayed observations"
+            "OpenCode-style tool loops should replay the assistant turn, not a separate rationale field"
+        );
+        assert!(
+            act_rule["actions"][1]["value"]["object"]
+                .get("assistant")
+                .is_some(),
+            "provider assistant content/tool calls should be replayed with tool results"
         );
     }
 
