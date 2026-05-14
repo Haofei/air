@@ -454,29 +454,6 @@ def _air_value_kind(value: Any) -> str:
     return type(value).__name__
 
 
-def _air_apply_write_scope(tool_name: str, input_value: Any, write_scope: Any) -> Any:
-    if tool_name not in {"file.write", "file.edit", "edit"} or write_scope is None:
-        return input_value
-    if isinstance(write_scope, str):
-        allowed_paths = [write_scope.strip()] if write_scope.strip() else []
-    elif isinstance(write_scope, list):
-        allowed_paths = []
-        for path in write_scope:
-            if not isinstance(path, str):
-                raise ValueError("tool_batch_dispatch write_scope entries must be strings")
-            if path.strip():
-                allowed_paths.append(path.strip())
-    else:
-        raise ValueError("tool_batch_dispatch write_scope must be a string or array of strings")
-    if not allowed_paths:
-        return input_value
-    if not isinstance(input_value, dict):
-        raise ValueError(f"tool {tool_name} input must be an object")
-    scoped = dict(input_value)
-    scoped["allowed_paths"] = allowed_paths
-    return scoped
-
-
 "#,
     );
 }
@@ -680,7 +657,6 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
         }
         StateAction::ToolBatchDispatch {
             input,
-            write_scope,
             output: output_field,
             max_calls,
             on_error,
@@ -688,14 +664,6 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
         } => {
             let observe_errors = *on_error == ToolErrorMode::Observe;
             output.push_str(&format!("    batch_value = {}\n", input_expr(input)?));
-            if let Some(write_scope) = write_scope {
-                output.push_str(&format!(
-                    "    write_scope_value = {}\n",
-                    input_expr(write_scope)?
-                ));
-            } else {
-                output.push_str("    write_scope_value = None\n");
-            }
             output.push_str("    if not isinstance(batch_value, list):\n");
             output.push_str(
                 "        raise ValueError(\"tool_batch_dispatch input must be an array\")\n",
@@ -717,7 +685,7 @@ fn push_action(output: &mut String, action: &StateAction) -> Result<(), LangGrap
                 output.push_str("            raise error\n");
             }
             output.push_str("        tool_name, _requested_tool = _air_normalize_model_selected_tool_name(AIR_MODULE, tool_name)\n");
-            output.push_str("        tool_input = _air_apply_write_scope(tool_name, dispatch_value.get(\"input\", {}), write_scope_value)\n");
+            output.push_str("        tool_input = dispatch_value.get(\"input\", {})\n");
             output.push_str("        if not any(tool.get(\"name\") == tool_name for tool in AIR_MODULE.get(\"tools\", [])):\n");
             output.push_str("            error = RuntimeError(f\"tool {tool_name} is not declared by module {AIR_MODULE.get('agent', {}).get('name', '<unknown>')}\")\n");
             if observe_errors {
@@ -1289,29 +1257,6 @@ def _air_normalize_model_selected_tool_name(module: dict[str, Any], tool_name: s
     if normalized != tool_name and any(tool.get("name") == normalized for tool in module.get("tools", [])):
         return normalized, tool_name
     return tool_name, None
-
-
-def _air_apply_write_scope(tool_name: str, input_value: Any, write_scope: Any) -> Any:
-    if tool_name not in {"file.write", "file.edit", "edit"} or write_scope is None:
-        return input_value
-    if isinstance(write_scope, str):
-        allowed_paths = [write_scope.strip()] if write_scope.strip() else []
-    elif isinstance(write_scope, list):
-        allowed_paths = []
-        for path in write_scope:
-            if not isinstance(path, str):
-                raise ValueError("tool_batch_dispatch write_scope entries must be strings")
-            if path.strip():
-                allowed_paths.append(path.strip())
-    else:
-        raise ValueError("tool_batch_dispatch write_scope must be a string or array of strings")
-    if not allowed_paths:
-        return input_value
-    if not isinstance(input_value, dict):
-        raise ValueError(f"tool {tool_name} input must be an object")
-    scoped = dict(input_value)
-    scoped["allowed_paths"] = allowed_paths
-    return scoped
 
 
 def _air_enforce_repeated_tool_policy(

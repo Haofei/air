@@ -17,27 +17,20 @@ comparison point:
 - Keep the final evidence inspectable: trace stats, model/tool call sequence, verification command,
   and any remaining limitation should be visible from the run output or checked artifacts.
 
-The public recipes are:
+The public interface is one command:
 
-- `explore`: read-only repository exploration.
-- `review`: grounded review over repository, diff, test, and optional search evidence.
-- `edit`: the only workspace-writing primitive. The model chooses one declared tool per turn; AIR executes it, appends the observation, enforces capability/budget policy, and records the trace.
+```bash
+cargo run -p air-cli -- code "fix the failing add function and retest"
+```
 
-`edit` covers bug fixes, behavior-preserving changes, small feature edits, and bounded file creation. Those are task intents, not separate agent primitives. A target file is useful but optional for explicit edit runs; when omitted, the loop must discover and read the file before any write.
+There is no user-facing recipe selector and no target-file hint. The generic loop covers
+exploration, review, edits, bounded file creation, formatting, and verification. The model must
+discover the relevant files through tools before it writes; AIR records each model turn, tool call,
+diff, and verification result.
 
 Top-level files are the public entrypoints. `fixtures/` contains deterministic model configs, alternate tool configs, and internal verification variants used by tests and dogfood scripts.
 
-## Explore
-
-`explore` is read-only and can start without a known target file. When no `--target` is supplied, AIR passes an empty `target_path`; the module skips direct file read and relies on repository search, symbol lookup, and context snippets to find the relevant entry points.
-
-```bash
-cargo run -p air-cli -- code "explore the code-agent edit loop architecture" \
-  --recipe explore \
-  --query "code agent edit loop architecture"
-```
-
-## Edit Loop
+## Code Loop
 
 The edit module is `code-edit-loop.air.yaml`, wired by `code-edit.air-plan.yaml` and `edit.air-profile.yaml`.
 
@@ -49,7 +42,11 @@ init -> choose -> tool_batch_dispatch -> choose -> ... -> summarize -> done
 
 The fixed structure is only the loop boundary. The model chooses the planning/discovery/read/search/edit/format/test/diff tool calls needed for the next concrete step through declared tools such as `todo.write`, `todo.read`, `glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `code.assert`, `format.run`, `test.run`, and `git.diff`.
 
-`tools.dogfood.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `format.run` and `test.run`; both are fixed commands rather than arbitrary shell access. The default dogfood validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes. Dogfood does not define a separate self profile; it reuses the standard edit recipe with model and tool config overrides.
+`tools.dogfood.json` is the stricter AIR dogfood tool config. It keeps shell access behind fixed formatter and verification commands. The model can ask for `format.run` and `test.run`; both are fixed commands rather than arbitrary shell access. The default dogfood validation runs workspace tests and clippy, matching the CI failure modes that matter for AIR changes.
+
+The loop does not restrict writes to guessed paths. Write permission is governed by the configured workspace tool root, capability approval, path traversal checks, and the final git diff audit. This lets the agent fix diagnostics in adjacent files when verification proves they are part of the same task.
+
+The default tool configs set `"workspace_dir": "."`, so `base_dir`, `repo_dir`, `root_dir`, and command `cwd` point at the current git workspace root instead of relying on brittle paths relative to this example directory.
 
 Completion is blocked until formatting and verification have passed. After an `edit` write, AIR returns control to the model instead of immediately validating, so the model can finish a coherent patch before paying the formatter/test cost. The model can call `format.run` and `test.run` when ready; if it returns `complete=true` before `verification_status=passed`, AIR runs the final `format.run -> test.run` gate before summarizing. If formatting or tests fail, the model must continue iterating — reading diagnostics, adjusting code, and re-testing — before the loop can finish.
 
@@ -73,22 +70,12 @@ tool call to the terminal as it happens. Set `trace_provider_io: true` on a mode
 you also want the exact provider request/response stored in `--trace-out --trace-raw`; raw traces
 can contain prompts and source snippets, so keep the default redacted trace mode for normal runs.
 
-Use the same edit recipe with model/tool overrides when dogfooding AIR itself with a real OpenAI-compatible model:
+Use model/tool overrides when dogfooding AIR itself with a real OpenAI-compatible model:
 
 ```bash
 cargo run -p air-cli -- code "update the AIR code-agent docs and run the code-agent gate" \
-  --recipe edit \
   --model-config examples/bigmodel-openai-compatible.json \
-  --tool-config examples/code-agent/tools.dogfood.json \
-  --target examples/code-agent/README.md
-```
-
-For targetless edit, let the loop discover the file and run the configured validation:
-
-```bash
-cargo run -p air-cli -- code "fix the failing add function" \
-  --recipe edit \
-  --query "edit fixture add function test"
+  --tool-config examples/code-agent/tools.dogfood.json
 ```
 
 Run the deterministic fixture:
@@ -98,30 +85,10 @@ cargo run -p air-cli -- validate-plan --profile examples/code-agent/edit.air-pro
 cargo run -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.yaml --log
 ```
 
-## Review
-
-Run the default review profile. Review is intentionally composed as `gather -> context.compact -> analyze` instead of one large review state machine:
-
-```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/code-agent/review.air-profile.yaml --log
-```
-
-The default review example stays small at each AIR boundary: evidence gathering and final analysis are bounded modules, while reusable context compaction is linked through the standard module store. Browser-backed search variants remain under `fixtures/` for internal verification.
-
-Run through the user-facing wrapper:
-
-```bash
-cargo run -p air-cli -- code "edit the failing add function and retest" \
-  --recipe edit \
-  --target examples/code-agent/edit-fixture/math.js \
-  --related examples/code-agent/edit-fixture/test.js
-```
-
 ## Verification
 
 ```bash
 bash scripts/verify_code_agent.sh
 ```
 
-The gate validates current profiles, tool coverage, pack routing, prompt/schema alignment, and the edit loop trace shape.
+The gate validates the current profile, tool coverage, prompt/schema alignment, and the edit loop trace shape.

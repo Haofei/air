@@ -249,12 +249,11 @@ For deterministic offline smoke tests, the native CLI also accepts fixture model
 ```json
 {
   "fixtures": {
-    "code_reviewer": {
-      "summary": "fixture review",
-      "findings": [],
-      "source_ids": [],
-      "search_quality": { "sufficient": true, "gaps": [] },
-      "next_steps": []
+    "code_edit_summarizer": {
+      "initial_success": false,
+      "final_success": true,
+      "patch_applied": true,
+      "rationale": "fixture edit summary"
     }
   }
 }
@@ -297,6 +296,7 @@ Tool config:
 
 ```json
 {
+  "workspace_dir": ".",
   "tools": {
     "docs.search": {
       "kind": "local_docs_search",
@@ -391,14 +391,13 @@ passed through semantic compaction or adapter layers and wants to validate again
 `source_ids`. Existing modules without artifact-producing tools continue to run without citation
 enforcement.
 
-The `examples/code-agent` workflows show three coding-agent patterns: explore agents answer
-repository questions without write capability; review agents search external references, inspect
-repository context, run one allowlisted verification command, and cite exact artifact ids; edit
-agents use one OpenCode-style loop over declared tools such as `glob`, `repo.symbols`,
-`lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `test.run`, browser audit tools,
-and `git.diff` to make constrained changes and verify them. The model-facing write contract stays
+The `examples/code-agent` workflow exposes one OpenCode-style loop over declared tools such as
+`glob`, `repo.symbols`, `lsp.references`, `lsp.diagnostics`, `read`, `grep`, `edit`, `test.run`,
+browser audit tools, and `git.diff`. The same loop handles exploration, review, editing,
+formatting, and verification from a single task prompt; the model discovers relevant files through
+tools instead of receiving target-file hints from the CLI. The model-facing write contract stays
 small: `edit(filePath, oldString, newString, replaceAll?)`; AIR keeps matching strategy,
-read-before-write checks, write-scope enforcement, formatting, verification, and trace capture in
+read-before-write checks, formatting, verification, and trace capture in
 the runtime/tool layer while the workflow remains one generic edit loop.
 
 For production-shaped adapters, AIR also supports an HTTP JSON tool provider in the native VM:
@@ -492,7 +491,6 @@ Example coding-agent file, search, edit, and git tool aliases:
       "capability": "file.write",
       "base_dir": ".",
       "require_read": true,
-      "allow_new_files": true,
       "max_bytes": 262144
     },
     "glob": {
@@ -522,6 +520,11 @@ Example coding-agent file, search, edit, and git tool aliases:
   }
 }
 ```
+
+When `workspace_dir` is set, relative `base_dir`, `repo_dir`, `root_dir`, and command `cwd`
+values are resolved from that workspace. `workspace_dir: "."` resolves to the current git
+workspace root when one is available, so the same config works from subdirectories. Without
+it, relative tool paths remain relative to the tool config file for small colocated examples.
 
 ## 8. Approvals
 

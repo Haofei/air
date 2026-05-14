@@ -585,7 +585,6 @@ impl Verifier {
                 timeout_seconds,
                 max_calls,
                 allowed_tools,
-                write_scope,
                 retry,
                 ..
             } => {
@@ -616,14 +615,6 @@ impl Verifier {
                     }
                 }
                 self.verify_input_spec(rule_id, "tool_batch_dispatch input", input, module);
-                if let Some(write_scope) = write_scope {
-                    self.verify_input_spec(
-                        rule_id,
-                        "tool_batch_dispatch write_scope",
-                        write_scope,
-                        module,
-                    );
-                }
                 self.verify_control_field_write(rule_id, "tool_batch_dispatch output", output);
                 self.verify_state_ref(rule_id, "tool_batch_dispatch output", output, module);
                 self.verify_timeout(rule_id, "tool_batch_dispatch", *timeout_seconds);

@@ -5,16 +5,6 @@ agent:
 
 inputs:
   task: string
-  query: string
-  target_path: string
-  target_search_pattern: string
-  target_symbol_query: string
-  related_files:
-    type: array
-    items: string
-  write_paths:
-    type: array
-    items: string
   acceptance_assertions:
     type: array
     items: object
@@ -214,10 +204,6 @@ workflow:
             object:
               task:
                 ref: task
-              target_path:
-                ref: target_path
-              write_paths:
-                ref: write_paths
               observations:
                 take_last_within_bytes:
                   ref: observations
@@ -278,18 +264,6 @@ workflow:
             object:
               task:
                 ref: task
-              query:
-                ref: query
-              target_path:
-                ref: target_path
-              target_search_pattern:
-                ref: target_search_pattern
-              target_symbol_query:
-                ref: target_symbol_query
-              related_files:
-                ref: related_files
-              write_paths:
-                ref: write_paths
               verification_status:
                 ref: verification_status
               observations:
@@ -359,7 +333,7 @@ workflow:
                     optional:
                       path: "alias for filePath"
                       offset: "zero-based line offset"
-                      limit: "maximum lines to read"
+                      limit: "maximum lines to read; may be combined with offset or start_line"
                       start_line: "1-based start line"
                       end_line: "1-based end line"
                       lines: "single line or start-end range"
@@ -377,7 +351,7 @@ workflow:
                       pattern: "regular expression; query is accepted as an alias"
                     optional:
                       path: "repo-relative file or directory; defaults to repo root"
-                      include: "OpenCode alias for an exact file or directory scope when path is omitted; globs are rejected"
+                      include: "OpenCode alias for an exact file, directory, or glob scope when path is omitted"
                       context_lines: "bounded context lines"
                       contextLines: "alias for context_lines"
                       max_matches: "bounded result limit"
@@ -385,11 +359,11 @@ workflow:
                   edit:
                     required:
                       filePath: "repo-relative file path"
-                      oldString: "exact text to replace; include enough context to be unique"
-                      newString: "replacement text"
                     optional:
+                      oldString: "exact text to replace for a single edit; include enough context to be unique"
+                      newString: "replacement text for a single edit"
                       replaceAll: "replace every occurrence only when all matches should change"
-                      edits: "array of {old_string,new_string,replace_all?} for several replacements in the same file"
+                      edits: "array of {oldString,newString,replaceAll?} for several replacements in the same file"
                   diagnostic.context:
                     required: {}
                     optional:
@@ -402,7 +376,7 @@ workflow:
                       checks: "alias for assertions"
                   candidate.validate:
                     required:
-                      candidate: "{target_path, related_files?}; checks paths before committing to an edit route"
+                      candidate: "object with discovered file paths; checks paths before committing to an edit route"
                     optional: {}
                   git.status:
                     required: {}
@@ -421,9 +395,9 @@ workflow:
               tool_policy:
                 literal:
                   loop: "Work as a direct coding tool loop: choose the next read/search/edit/test action yourself from current observations. Do not wait for a separate planner."
-                  context: "Keep context narrow. Prefer grep, repo.symbols, read contains+context_lines, or read exact line ranges over whole-file reads. Do not repeat the same read/search unless the previous result was missing a specific fact."
+                  context: "Keep context narrow. Prefer grep, repo.symbols, read contains+context_lines, read start_line+limit, or exact line ranges over whole-file reads. If repo.symbols returns the target function line/end_line, read that range once and edit from that context instead of rereading overlapping ranges. Do not repeat the same read/search unless the previous result was missing a specific fact."
                   edits: "After you have enough local context for a concrete change, edit. Keep editing while the patch is incomplete; do not validate after every tiny edit. Use multiple edits only through edit.edits when they target the same file and are grounded by prior context."
-                  paths: "Copy repository paths exactly byte-for-byte from target_path, write_paths, related_files, or tool output metadata."
+                  paths: "Copy repository paths exactly byte-for-byte from tool output metadata. If verification points to another workspace file, edit it when needed."
                   diagnostics: "If validation fails, use returned diagnostics and diagnostic.context to make the smallest correction. Do not restart broad exploration."
                   finish: "When the patch is coherent, call format.run and test.run yourself, or return complete=true with tool_calls=[] to let AIR run the final format/test gate. Finish only after verification_status is passed or the task truly needs no code change."
           output: decision
@@ -440,8 +414,6 @@ workflow:
         - kind: tool_batch_dispatch
           input:
             path: decision.tool_calls
-          write_scope:
-            ref: write_paths
           output: observation
           max_calls: 200
           timeout_seconds: 120
@@ -689,7 +661,7 @@ workflow:
         - kind: set
           values:
             verification_status: passed
-            phase: choose
+            phase: summarize
 
     - id: final-verify-passed
       when: phase == "post_final_verify" && verify_result[0].output.success == true && acceptance_assertions == []
@@ -766,7 +738,7 @@ workflow:
         - kind: set
           values:
             verification_status: passed
-            phase: choose
+            phase: summarize
 
     - id: edit-validation-failed
       when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == false
@@ -816,9 +788,7 @@ workflow:
                   tool:
                     literal: git.diff
                   input:
-                    object:
-                      paths:
-                        ref: write_paths
+                    literal: {}
           output: final_diff_result
           max_calls: 1
           timeout_seconds: 120
@@ -837,10 +807,6 @@ workflow:
             object:
               task:
                 ref: task
-              target_path:
-                ref: target_path
-              write_paths:
-                ref: write_paths
               observations:
                 take_last_within_bytes:
                   ref: observations

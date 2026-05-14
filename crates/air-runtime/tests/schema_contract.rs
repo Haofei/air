@@ -117,21 +117,6 @@ impl ToolProvider for BatchApprovalTools {
     }
 }
 
-struct ScopedWriteTools {
-    inputs: Rc<RefCell<Vec<Value>>>,
-}
-
-impl ToolProvider for ScopedWriteTools {
-    fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        assert_eq!(name, "edit");
-        self.inputs.borrow_mut().push(input.clone());
-        Ok(json!({
-            "applied": true,
-            "allowed_paths": input["allowed_paths"],
-        }))
-    }
-}
-
 struct DispatchModels;
 
 impl ModelProvider for DispatchModels {
@@ -952,61 +937,6 @@ fn dispatches_bounded_model_selected_tool_batch() {
         .iter()
         .any(|event| event.action == "tool_batch_dispatch"
             && event.meta.as_ref().is_some_and(|meta| meta["count"] == 2)));
-}
-
-#[test]
-fn tool_batch_dispatch_injects_write_scope_into_write_tools() {
-    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
-    module.tools.clear();
-    module.tools.push(air_core::ToolSpec {
-        name: "edit".to_string(),
-        capability: Some("file.write".to_string()),
-        timeout_ms: Some(1000),
-    });
-    module.requires.capabilities = vec!["file.write".to_string()];
-    let Workflow::StateMachine(workflow) = &mut module.workflow else {
-        panic!("expected state machine");
-    };
-    let StateAction::ToolBatchDispatch { write_scope, .. } =
-        workflow.rules[2].actions.first_mut().unwrap()
-    else {
-        panic!("expected tool_batch_dispatch action");
-    };
-    *write_scope = Some(air_core::InputSpec::Expr(air_core::Expr::Array {
-        array: vec![air_core::Expr::Ref {
-            reference: "text".to_string(),
-        }],
-    }));
-
-    let inputs = Rc::new(RefCell::new(Vec::new()));
-    let mut vm = Vm {
-        tools: ScopedWriteTools {
-            inputs: Rc::clone(&inputs),
-        },
-        models: BatchDispatchModels {
-            choices: json!([{
-                "tool": "edit",
-                "input": {
-                    "filePath": "other.rs",
-                    "oldString": "a",
-                    "newString": "b"
-                }
-            }]),
-        },
-    };
-
-    let result = vm
-        .run(
-            &module,
-            State::from_iter([("text".to_string(), json!("src/lib.rs"))]),
-        )
-        .unwrap();
-
-    assert_eq!(inputs.borrow()[0]["allowed_paths"], json!(["src/lib.rs"]));
-    assert_eq!(
-        result.outputs["observations"][0]["input"]["allowed_paths"],
-        json!(["src/lib.rs"])
-    );
 }
 
 #[test]

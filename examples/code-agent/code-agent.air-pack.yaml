@@ -1,58 +1,14 @@
 agent:
   name: air-code-agent
   version: 0.2.0
-  description: "Pack manifest for AIR's bounded coding-agent recipes."
-
-routing:
-  auto:
-    - recipe: review
-      when:
-        any_present: [search_query, repo_query, required_terms]
-    - recipe: edit
-      when:
-        any_present: [target, write]
-    - recipe: explore
-      fallback: true
+  description: "Pack manifest for AIR's bounded coding-agent loop."
 
 recipes:
-  - id: auto
-    default_profile: explore.air-profile.yaml
-    intent: "Fallback read-only exploration profile used before CLI recipe inference."
-    input:
-      required: [task]
-      optional: [target, write, query, related, search_query, repo_query, required_terms]
-    completion:
-      any:
-        - exists: /exploration
-  - id: explore
-    default_profile: explore.air-profile.yaml
-    intent: "Read-only repository exploration."
-    input:
-      required: [task]
-      optional: [query, target]
-    completion:
-      any:
-        - exists: /exploration
-  - id: review
-    default_profile: review.air-profile.yaml
-    intent: "Grounded code review with repository and external evidence."
-    input:
-      required: [task, target]
-      optional: [query, related, search_query, repo_query, required_terms]
-    completion:
-      any:
-        - equals:
-            path: /review/search_quality/sufficient
-            value: true
-        - all:
-            - missing: /review/search_quality/sufficient
-            - exists: /review
   - id: edit
     default_profile: edit.air-profile.yaml
-    intent: "Run the unified bounded code edit loop with configured validation; target may be known or discovered before writing."
+    intent: "Run the unified bounded code loop with model-selected discovery, review, edit, format, and verification."
     input:
       required: [task]
-      optional: [query, target, write, related, target_search_pattern, target_symbol_query]
     completion:
       any:
         - equals:

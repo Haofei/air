@@ -147,9 +147,6 @@ pub enum StateAction {
         allowed_tools: Vec<String>,
 
         #[serde(default)]
-        write_scope: Option<InputSpec>,
-
-        #[serde(default)]
         retry: Option<RetryPolicy>,
 
         #[serde(default)]

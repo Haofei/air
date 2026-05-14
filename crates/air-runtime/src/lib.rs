@@ -967,20 +967,14 @@ where
                 timeout_seconds,
                 max_calls,
                 allowed_tools,
-                write_scope,
                 retry,
                 on_error,
             } => {
                 let batch = resolve_input(context.state, context.outputs, input)?;
-                let write_scope = write_scope
-                    .as_ref()
-                    .map(|scope| resolve_input(context.state, context.outputs, scope))
-                    .transpose()?;
                 self.execute_tool_batch_dispatch(
                     context,
                     ToolBatchExecution {
                         input: batch,
-                        write_scope,
                         output,
                         timeout_seconds: *timeout_seconds,
                         max_calls: *max_calls,
@@ -1226,7 +1220,6 @@ where
     ) -> Result<(), RuntimeError> {
         let ToolBatchExecution {
             input,
-            write_scope,
             output,
             timeout_seconds,
             max_calls,
@@ -1293,8 +1286,6 @@ where
                     return Err(error);
                 }
             };
-            let tool_input =
-                apply_write_scope_to_tool_input(&tool, tool_input, write_scope.as_ref())?;
             if let Err(error) = validate_batch_allowed_tool(&tool, allowed_tools) {
                 let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
                 insert_batch_item_meta(&mut meta, index);
@@ -1568,7 +1559,7 @@ fn model_result_for_output_schema(
     match validate_output(module, output, &value) {
         Ok(()) => Ok(value),
         Err(error) => {
-            for parsed in model_content_json_candidates(&value).into_iter().rev() {
+            for parsed in model_output_schema_candidates(&value).into_iter().rev() {
                 if validate_output(module, output, &parsed).is_ok() {
                     return Ok(parsed);
                 }
@@ -1576,6 +1567,33 @@ fn model_result_for_output_schema(
             let error = provider_content_wrapper_schema_error(&value, error);
             Err(ModelOutputSchemaError { value, error })
         }
+    }
+}
+
+fn model_output_schema_candidates(value: &Value) -> Vec<Value> {
+    let mut candidates = model_content_json_candidates(value);
+    candidates.extend(single_field_model_wrapper_candidates(value));
+    candidates
+}
+
+fn single_field_model_wrapper_candidates(value: &Value) -> Vec<Value> {
+    let Some(object) = value.as_object() else {
+        return Vec::new();
+    };
+    if object.len() != 1 {
+        return Vec::new();
+    }
+    let Some((key, wrapped)) = object.iter().next() else {
+        return Vec::new();
+    };
+    if !matches!(key.as_str(), "answer" | "result" | "output") {
+        return Vec::new();
+    }
+    if wrapped.is_string() {
+        let wrapper = json!({"content": wrapped});
+        model_content_json_candidates(&wrapper)
+    } else {
+        vec![wrapped.clone()]
     }
 }
 
@@ -1604,14 +1622,20 @@ fn model_content_json_candidates(value: &Value) -> Vec<Value> {
     let normalized = strip_model_content_code_fence(content).unwrap_or(content);
     let mut values = Vec::new();
     if let Ok(value) = serde_json::from_str(normalized) {
-        values.push(value);
+        push_unique_json_candidate(&mut values, value);
     }
     for slice in json_object_slices(normalized) {
         if let Ok(value) = serde_json::from_str(slice) {
-            values.push(value);
+            push_unique_json_candidate(&mut values, value);
         }
     }
     values
+}
+
+fn push_unique_json_candidate(values: &mut Vec<Value>, value: Value) {
+    if !values.iter().any(|candidate| candidate == &value) {
+        values.push(value);
+    }
 }
 
 fn json_object_slices(input: &str) -> Vec<&str> {
@@ -2172,55 +2196,6 @@ fn resolve_tool_batch_dispatch_items(
         .collect())
 }
 
-fn apply_write_scope_to_tool_input(
-    tool: &str,
-    input: Value,
-    write_scope: Option<&Value>,
-) -> Result<Value, RuntimeError> {
-    if !matches!(tool, "file.write" | "file.edit" | "edit") {
-        return Ok(input);
-    }
-    let Some(write_scope) = write_scope else {
-        return Ok(input);
-    };
-    let allowed_paths = normalize_write_scope_paths(write_scope)?;
-    if allowed_paths.is_empty() {
-        return Ok(input);
-    }
-    let mut object = input.as_object().cloned().ok_or_else(|| {
-        RuntimeError::SchemaViolation(format!("tool {tool} input must be an object"))
-    })?;
-    object.insert("allowed_paths".to_string(), Value::Array(allowed_paths));
-    Ok(Value::Object(object))
-}
-
-fn normalize_write_scope_paths(write_scope: &Value) -> Result<Vec<Value>, RuntimeError> {
-    let values = match write_scope {
-        Value::String(path) => vec![path.as_str()],
-        Value::Array(paths) => paths
-            .iter()
-            .map(|path| {
-                path.as_str().ok_or_else(|| {
-                    RuntimeError::SchemaViolation(
-                        "tool_batch_dispatch write_scope entries must be strings".to_string(),
-                    )
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?,
-        _ => {
-            return Err(RuntimeError::SchemaViolation(
-                "tool_batch_dispatch write_scope must be a string or array of strings".to_string(),
-            ))
-        }
-    };
-    Ok(values
-        .into_iter()
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(|path| Value::String(path.to_string()))
-        .collect())
-}
-
 fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value {
     json!({
         "tool": tool,
@@ -2453,7 +2428,6 @@ struct ToolExecution<'a> {
 
 struct ToolBatchExecution<'a> {
     input: Value,
-    write_scope: Option<Value>,
     output: &'a str,
     timeout_seconds: u64,
     max_calls: u32,
@@ -2904,10 +2878,10 @@ fn take_last_within_bytes_value(
     let mut selected = Vec::new();
     let mut selected_bytes = 0usize;
     for value in values.iter().rev().take(max_items) {
-        let mut candidate = value.clone();
+        let mut candidate = compact_context_payload(value, max_bytes);
         let mut candidate_bytes = json_value_size_bytes(&candidate);
         if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
-            candidate = compact_context_payload(value, max_bytes);
+            candidate = compact_json_value(&candidate, max_bytes);
             candidate_bytes = json_value_size_bytes(&candidate);
         }
         if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
@@ -2945,7 +2919,7 @@ fn compact_context_value(value: &Value) -> Value {
         Value::Object(object)
             if object.get("content").is_some() || object.get("content_preview").is_some() =>
         {
-            compact_file_like_context(object, 4_000)
+            compact_file_like_context(object, 12_000)
         }
         Value::Object(object) => {
             let mut compact = Map::new();
@@ -3010,7 +2984,7 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
         return compact_file_collection_context(object);
     }
     if object.get("content").is_some() || object.get("content_preview").is_some() {
-        return compact_file_like_context(object, 4_000);
+        return compact_file_like_context(object, 12_000);
     }
 
     let mut compact = Map::new();
@@ -3077,7 +3051,7 @@ fn compact_file_collection_context(object: &Map<String, Value>) -> Value {
                     .iter()
                     .take(8)
                     .filter_map(Value::as_object)
-                    .map(|file| compact_file_like_context(file, 3_000))
+                    .map(|file| compact_file_like_context(file, 8_000))
                     .collect(),
             ),
         );
@@ -3106,11 +3080,15 @@ fn compact_file_like_context(object: &Map<String, Value>, max_content_chars: usi
     ] {
         copy_context_field(&mut compact, object, field);
     }
-    if let Some(content) = object
-        .get("content_preview")
-        .or_else(|| object.get("content"))
-        .and_then(Value::as_str)
-    {
+    if let Some(content) = object.get("content").and_then(Value::as_str) {
+        compact.insert(
+            "content".to_string(),
+            Value::String(compact_context_string_for_model_input(
+                content,
+                max_content_chars,
+            )),
+        );
+    } else if let Some(content) = object.get("content_preview").and_then(Value::as_str) {
         compact.insert(
             "content_preview".to_string(),
             Value::String(compact_context_string_for_model_input(
@@ -3273,6 +3251,36 @@ mod tests {
 
         assert!(!candidates.is_empty());
         assert_eq!(candidates[0]["patch"], json!("diff"));
+    }
+
+    #[test]
+    fn extracts_schema_candidates_from_answer_wrapper() {
+        let value = json!({
+            "answer": {
+                "complete": true,
+                "tool_calls": [],
+                "rationale": "done"
+            }
+        });
+
+        let candidates = model_output_schema_candidates(&value);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["complete"], json!(true));
+        assert_eq!(candidates[0]["rationale"], json!("done"));
+    }
+
+    #[test]
+    fn extracts_schema_candidates_from_string_answer_wrapper() {
+        let value = json!({
+            "answer": "{\"complete\":true,\"tool_calls\":[],\"rationale\":\"done\"}"
+        });
+
+        let candidates = model_output_schema_candidates(&value);
+
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0]["complete"], json!(true));
+        assert_eq!(candidates[0]["rationale"], json!("done"));
     }
 
     #[test]
@@ -3463,13 +3471,53 @@ mod tests {
 
         assert!(rendered.contains("\"files\""), "{rendered}");
         assert!(rendered.contains("src/lib.rs"), "{rendered}");
-        assert!(rendered.contains("content_preview"), "{rendered}");
+        assert!(rendered.contains("\"content\""), "{rendered}");
         assert!(rendered.contains("Use a narrower range"), "{rendered}");
         assert!(
             !rendered.contains("\"result\":{\"_air_truncated\":true}"),
             "{rendered}"
         );
         assert!(rendered.len() <= 18_000, "compacted evidence is too large");
+    }
+
+    #[test]
+    fn take_last_within_bytes_compacts_tool_observations_before_budgeting() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "rationale": "read target function",
+            "result": [{
+                "tool": "read",
+                "status": "ok",
+                "input": {
+                    "filePath": "src/lib.rs",
+                    "start_line": 10,
+                    "end_line": 12
+                },
+                "output": {
+                    "path": "src/lib.rs",
+                    "content": "00010| fn target() {\n00011|     work();\n00012| }",
+                    "content_format": "line_numbered",
+                    "start_line": 10,
+                    "end_line": 12,
+                    "artifacts": [{
+                        "id": "file:src/lib.rs",
+                        "kind": "file_span",
+                        "content": "large duplicate artifact payload"
+                    }]
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"content\""), "{rendered}");
+        assert!(rendered.contains("fn target"), "{rendered}");
+        assert!(
+            !rendered.contains("large duplicate artifact payload"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("\"artifacts\""), "{rendered}");
     }
 
     #[test]
@@ -3485,8 +3533,8 @@ mod tests {
             })),
             output: None,
             meta: Some(json!({
-                "model": "code_explorer",
-                "output": "exploration",
+                "model": "code_edit_decider",
+                "output": "decision",
                 "attempt": 1,
                 "approval_for": ["file.write"],
                 "nested": {"large": "omitted"}
@@ -3511,7 +3559,7 @@ mod tests {
         );
         assert_eq!(
             compact.meta.as_ref().unwrap()["model"],
-            json!("code_explorer")
+            json!("code_edit_decider")
         );
         assert_eq!(
             compact.meta.as_ref().unwrap()["approval_for"],

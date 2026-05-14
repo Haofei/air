@@ -13,7 +13,7 @@ mod planner;
 mod profile;
 mod run_plan;
 mod tools;
-use crate::code_agent::{code, code_session, CodeOptions, CodeRecipe, CodeSessionOptions};
+use crate::code_agent::{code, code_session, CodeOptions, CodeSessionOptions};
 use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
@@ -48,48 +48,16 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Run an AIR coding-agent recipe from a task and typed context.
+    /// Run the AIR coding agent from a task prompt.
     Code {
         /// Natural-language coding task.
         task: String,
-
-        /// Coding recipe to run.
-        #[arg(long, value_enum, default_value = "auto")]
-        recipe: CodeRecipe,
-
-        /// Primary file the coding agent is allowed to inspect.
-        #[arg(long)]
-        target: Option<PathBuf>,
-
-        /// Extra file the edit loop is allowed to modify. May be repeated.
-        #[arg(long)]
-        write: Vec<PathBuf>,
-
-        /// Optional search/query string. Defaults to the task.
-        #[arg(long)]
-        query: Option<String>,
-
-        /// Extra related file to read. May be repeated.
-        #[arg(long)]
-        related: Vec<PathBuf>,
-
-        /// External search query for review recipes. Defaults to the task.
-        #[arg(long)]
-        search_query: Option<String>,
-
-        /// Repository search query for review recipes. Defaults to --query or --target.
-        #[arg(long)]
-        repo_query: Option<String>,
-
-        /// Required review term. May be repeated.
-        #[arg(long = "required-term")]
-        required_terms: Vec<String>,
 
         /// Code-agent pack manifest. Defaults to examples/code-agent/code-agent.air-pack.yaml.
         #[arg(long)]
         pack: Option<PathBuf>,
 
-        /// Coding-agent run profile. Defaults from --recipe.
+        /// Coding-agent run profile. Defaults to the generic edit loop profile.
         #[arg(long)]
         profile: Option<PathBuf>,
 
@@ -133,11 +101,11 @@ enum Command {
         #[arg(long)]
         log: bool,
 
-        /// Print the resolved recipe, profile, and typed input without running.
+        /// Print the resolved loop, profile, and typed input without running.
         #[arg(long)]
         explain: bool,
 
-        /// Re-run the selected coding recipe until its completion signal passes or the loop budget is exhausted.
+        /// Re-run the coding loop until its completion signal passes or the loop budget is exhausted.
         #[arg(long = "loop")]
         loop_enabled: bool,
 
@@ -522,14 +490,6 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Code {
             task,
-            recipe,
-            target,
-            write,
-            query,
-            related,
-            search_query,
-            repo_query,
-            required_terms,
             pack,
             profile,
             model_config,
@@ -550,14 +510,6 @@ fn main() -> Result<()> {
             tool_config,
         } => code(CodeOptions {
             task,
-            recipe,
-            target,
-            write,
-            query,
-            related,
-            search_query,
-            repo_query,
-            required_terms,
             pack,
             profile,
             model_config,
@@ -1278,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_request_ranks_code_explore_for_open_ended_code_questions() {
+    fn planner_request_ranks_code_edit_loop_for_open_ended_code_questions() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
             root.join("examples/code-agent/module-store.air-store.yaml"),
@@ -1297,7 +1249,7 @@ mod tests {
 
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["id"],
-            json!("code.explore@0.1.0")
+            json!("code.edit_loop@0.1.0")
         );
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["tier"],
@@ -1306,7 +1258,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_request_ranks_code_explore_for_plan_act_observe_tasks() {
+    fn planner_request_ranks_code_edit_loop_for_plan_act_observe_tasks() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
             root.join("examples/code-agent/module-store.air-store.yaml"),
@@ -1325,11 +1277,11 @@ mod tests {
 
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["id"],
-            json!("code.explore@0.1.0")
+            json!("code.edit_loop@0.1.0")
         );
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["source"],
-            json!("module")
+            json!("recipe")
         );
     }
 
@@ -1344,7 +1296,7 @@ mod tests {
         for (task, expected_id, expected_source) in [
             (
                 "Review the command_run implementation for safety, provenance, and diagnostics.",
-                "code.review_with_std_context@0.1.0",
+                "code.edit_loop@0.1.0",
                 "recipe",
             ),
             (
@@ -1354,8 +1306,8 @@ mod tests {
             ),
             (
                 "Explore how command_run is implemented and identify relevant repository files.",
-                "code.explore@0.1.0",
-                "module",
+                "code.edit_loop@0.1.0",
+                "recipe",
             ),
         ] {
             let catalog = module_catalog(&store, &root, true).unwrap();
@@ -1649,22 +1601,11 @@ mod tests {
 
     #[test]
     fn code_command_accepts_minimal_typed_edit_input() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code",
-            "fix the failing add function and retest",
-            "--target",
-            "examples/code-agent/edit-fixture/math.js",
-            "--related",
-            "examples/code-agent/edit-fixture/test.js",
-        ])
-        .unwrap();
+        let cli = Cli::try_parse_from(["air", "code", "fix the failing add function and retest"])
+            .unwrap();
 
         let Command::Code {
             task,
-            recipe,
-            target,
-            related,
             profile,
             explain,
             ..
@@ -1674,105 +1615,25 @@ mod tests {
         };
 
         assert_eq!(task, "fix the failing add function and retest");
-        assert_eq!(recipe, CodeRecipe::Auto);
-        assert_eq!(
-            target,
-            Some(std::path::PathBuf::from(
-                "examples/code-agent/edit-fixture/math.js"
-            ))
-        );
-        assert_eq!(
-            related,
-            vec![std::path::PathBuf::from(
-                "examples/code-agent/edit-fixture/test.js"
-            )]
-        );
         assert_eq!(profile, None);
         assert!(!explain);
     }
 
     #[test]
-    fn code_command_accepts_review_recipe_input() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code",
-            "review the search tool",
-            "--recipe",
-            "review",
-            "--target",
-            "scripts/playwright_search.cjs",
-            "--query",
-            "playwright_search",
-            "--search-query",
-            "Playwright timeout behavior",
-            "--required-term",
-            "playwright",
-        ])
-        .unwrap();
-
-        let Command::Code {
-            recipe,
-            target,
-            query,
-            search_query,
-            required_terms,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code command");
-        };
-
-        assert_eq!(recipe, CodeRecipe::Review);
-        assert_eq!(
-            target,
-            Some(std::path::PathBuf::from("scripts/playwright_search.cjs"))
-        );
-        assert_eq!(query, Some("playwright_search".to_string()));
-        assert_eq!(
-            search_query,
-            Some("Playwright timeout behavior".to_string())
-        );
-        assert_eq!(required_terms, vec!["playwright".to_string()]);
-    }
-
-    #[test]
-    fn code_command_accepts_edit_recipe_input() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code",
-            "change sum while keeping tests passing",
-            "--recipe",
-            "edit",
-            "--target",
-            "examples/code-agent/edit-fixture/math.js",
-            "--related",
-            "examples/code-agent/edit-fixture/test.js",
-        ])
-        .unwrap();
-
-        let Command::Code {
-            recipe,
-            target,
-            related,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code command");
-        };
-
-        assert_eq!(recipe, CodeRecipe::Edit);
-        assert_eq!(
-            target,
-            Some(std::path::PathBuf::from(
+    fn code_command_rejects_manual_recipe_and_path_hints() {
+        for flag in ["--recipe", "--target", "--related", "--query"] {
+            let mut args = vec!["air", "code", "fix the failing add function"];
+            args.push(flag);
+            args.push(if flag == "--recipe" {
+                "edit"
+            } else {
                 "examples/code-agent/edit-fixture/math.js"
-            ))
-        );
-        assert_eq!(
-            related,
-            vec![std::path::PathBuf::from(
-                "examples/code-agent/edit-fixture/test.js"
-            )]
-        );
+            });
+            assert!(
+                Cli::try_parse_from(args).is_err(),
+                "air code should not expose {flag}"
+            );
+        }
     }
 
     #[test]
@@ -1781,20 +1642,14 @@ mod tests {
             "air",
             "code",
             "fix the failing add function and retest",
-            "--target",
-            "examples/code-agent/edit-fixture/math.js",
             "--explain",
         ])
         .unwrap();
 
-        let Command::Code {
-            recipe, explain, ..
-        } = cli.command
-        else {
+        let Command::Code { explain, .. } = cli.command else {
             panic!("expected code command");
         };
 
-        assert_eq!(recipe, CodeRecipe::Auto);
         assert!(explain);
     }
 
@@ -1804,8 +1659,6 @@ mod tests {
             "air",
             "code",
             "fix the failing add function until tests pass",
-            "--target",
-            "examples/code-agent/edit-fixture/math.js",
             "--loop",
             "--max-iterations",
             "2",
@@ -1831,10 +1684,6 @@ mod tests {
             "air",
             "code",
             "review command_run budget usage",
-            "--recipe",
-            "review",
-            "--target",
-            "crates/air-tools/src/lib.rs",
             "--max-iterations",
             "2",
             "--max-estimated-model-calls",
@@ -1845,7 +1694,6 @@ mod tests {
         .unwrap();
 
         let Command::Code {
-            recipe,
             max_iterations,
             max_estimated_model_calls,
             max_estimated_tool_calls,
@@ -1855,7 +1703,6 @@ mod tests {
             panic!("expected code command");
         };
 
-        assert_eq!(recipe, CodeRecipe::Review);
         assert_eq!(max_iterations, 2);
         assert_eq!(max_estimated_model_calls, Some(8));
         assert_eq!(max_estimated_tool_calls, Some(24));

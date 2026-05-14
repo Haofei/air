@@ -33,20 +33,10 @@ PY
 
 echo "[code-agent-bench] route primary task shapes"
 run_route \
-  "review" \
-  "Review the command_run implementation for safety, provenance, and diagnostics." \
-  "code.review_with_std_context@0.1.0" \
-  "recipe"
-run_route \
   "edit" \
-  "Edit a failing test using OpenCode-style read/edit/verify steps, and retest." \
+  "Use an OpenCode-style read/edit/verify loop to fix a failing test and retest." \
   "code.edit_loop@0.1.0" \
   "recipe"
-run_route \
-  "explore" \
-  "Explore how command_run is implemented and identify relevant repository files." \
-  "code.explore@0.1.0" \
-  "module"
 
 echo "[code-agent-bench] offline edit loop"
 fixture="examples/code-agent/edit-fixture/math.js"

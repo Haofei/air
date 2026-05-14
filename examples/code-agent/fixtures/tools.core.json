@@ -188,7 +188,7 @@
     "file.write": {
       "approved": true,
       "approver": "code-agent-fixture",
-      "reason": "bounded code-agent write is allowed after AIR approval gate"
+      "reason": "workspace code-agent write is allowed after AIR approval gate"
     }
   }
 }

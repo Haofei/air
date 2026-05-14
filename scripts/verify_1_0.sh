@@ -35,7 +35,7 @@ echo "[air-1.0] packaged examples"
 cargo run -q -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/context-compact/profile.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
+cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
 cargo run -q -p air-cli -- run-plan examples/context-compact/context-compact.air-plan.yaml \
   --store modules/std/module-store.air-store.yaml \
   --input examples/context-compact/input.json \

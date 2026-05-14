@@ -47,16 +47,15 @@ pub(super) fn call_file_read_tool(
             "tool {name} input.lines cannot be combined with input.start_line, input.end_line, input.offset, or input.limit"
         )));
     }
-    if (offset.is_some() || limit.is_some())
-        && (input.get("start_line").is_some() || input.get("end_line").is_some())
-    {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.offset/input.limit cannot be combined with input.start_line or input.end_line"
-        )));
-    }
     let explicit_start_line = optional_positive_usize_input(name, input, "start_line")?;
     let explicit_end_line = optional_positive_usize_input(name, input, "end_line")?;
-    let (start_line, end_line) = if let Some(offset) = offset {
+    let (start_line, end_line) = if explicit_start_line.is_some() || explicit_end_line.is_some() {
+        let start = explicit_start_line;
+        let end = explicit_end_line.or_else(|| {
+            start.and_then(|start| limit.map(|limit| start.saturating_add(limit).saturating_sub(1)))
+        });
+        (start, end)
+    } else if let Some(offset) = offset {
         let start = offset.saturating_add(1);
         let end = limit.map(|limit| start.saturating_add(limit).saturating_sub(1));
         (Some(start), end)
@@ -65,7 +64,7 @@ pub(super) fn call_file_read_tool(
     } else if let Some((start, end)) = lines_range {
         (Some(start), Some(end))
     } else {
-        (explicit_start_line, explicit_end_line)
+        (None, None)
     };
     let contains = optional_string_input(name, input, "contains")?;
     let context_lines = optional_positive_usize_input(name, input, "context_lines")?.unwrap_or(0);
@@ -325,7 +324,8 @@ pub(super) fn call_file_search_tool(
     let regex = regex::Regex::new(pattern)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} invalid regex: {error}")))?;
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
-    let input_path = file_search_path_input(name, input, &base)?.unwrap_or_else(|| ".".to_string());
+    let (input_path, include_glob) = file_search_path_input(name, input, &base)?;
+    let input_path = input_path.unwrap_or_else(|| ".".to_string());
     let candidate = if Path::new(&input_path).is_absolute() {
         PathBuf::from(&input_path)
     } else {
@@ -360,6 +360,11 @@ pub(super) fn call_file_search_tool(
                 .unwrap_or(file.as_path())
                 .to_string_lossy()
                 .replace('\\', "/");
+            if let Some(include_glob) = &include_glob {
+                if !file_search_glob_matches(include_glob, &relative_path) {
+                    continue;
+                }
+            }
             search_file_path(
                 &file,
                 Some(&relative_path),
@@ -426,6 +431,7 @@ pub(super) fn call_file_search_tool(
             "directory": directory,
             "pattern": pattern,
             "pattern_source": pattern_source,
+            "include_glob": include_glob,
             "match_count": result.total_match_count,
             "returned_match_count": result.matches.len(),
             "total_lines": result.total_lines,
@@ -445,6 +451,7 @@ pub(super) fn call_file_search_tool(
         "directory": directory,
         "pattern": pattern,
         "pattern_source": pattern_source,
+        "include_glob": include_glob,
         "matches": result.matches,
         "match_count": result.total_match_count,
         "returned_match_count": result.matches.len(),
@@ -559,18 +566,18 @@ fn file_search_path_input(
     tool_name: &str,
     input: &Value,
     base: &Path,
-) -> Result<Option<String>, RuntimeError> {
+) -> Result<(Option<String>, Option<String>), RuntimeError> {
     if let Some(path) = optional_path_input(tool_name, input)? {
-        return Ok(Some(path.to_string()));
+        return Ok((Some(path.to_string()), None));
     }
     let Some(value) = input.get("include") else {
-        return Ok(None);
+        return Ok((None, None));
     };
     let include = value.as_str().ok_or_else(|| {
         RuntimeError::Provider(format!("tool {tool_name} input.include must be a string"))
     })?;
     if include.trim().is_empty() {
-        return Ok(None);
+        return Ok((None, None));
     }
     let candidate = if Path::new(include).is_absolute() {
         PathBuf::from(include)
@@ -578,11 +585,45 @@ fn file_search_path_input(
         base.join(include)
     };
     if candidate.exists() {
-        return Ok(Some(include.to_string()));
+        return Ok((Some(include.to_string()), None));
     }
-    Err(RuntimeError::Provider(format!(
-        "tool {tool_name} input.include only supports an exact file or directory scope; use input.path for exact scope"
-    )))
+    super::validate_git_pathspec(tool_name, include)?;
+    Ok((Some(".".to_string()), Some(include.to_string())))
+}
+
+fn file_search_glob_matches(glob: &str, relative_path: &str) -> bool {
+    let glob = glob.replace('\\', "/");
+    let relative_path = relative_path.replace('\\', "/");
+    if file_search_wildcard_matches(&glob, &relative_path) {
+        return true;
+    }
+    if glob.contains('/') {
+        return false;
+    }
+    relative_path
+        .rsplit('/')
+        .next()
+        .is_some_and(|file_name| file_search_wildcard_matches(&glob, file_name))
+}
+
+fn file_search_wildcard_matches(pattern: &str, text: &str) -> bool {
+    let pattern = pattern.as_bytes();
+    let text = text.as_bytes();
+    let mut dp = vec![false; text.len() + 1];
+    dp[0] = true;
+    for &token in pattern {
+        if token == b'*' {
+            for index in 1..=text.len() {
+                dp[index] = dp[index] || dp[index - 1];
+            }
+            continue;
+        }
+        for index in (1..=text.len()).rev() {
+            dp[index] = dp[index - 1] && (token == b'?' || token == text[index - 1]);
+        }
+        dp[0] = false;
+    }
+    dp[text.len()]
 }
 
 #[derive(Default)]
@@ -802,6 +843,28 @@ fn required_input_string_alias<'a>(
     )))
 }
 
+fn required_labeled_string_alias<'a>(
+    tool_name: &str,
+    input: &'a Value,
+    label: &str,
+    field: &str,
+    alias: &str,
+) -> Result<&'a str, RuntimeError> {
+    if let Some(value) = input.get(field) {
+        return value.as_str().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} {label}.{field} must be a string"))
+        });
+    }
+    if let Some(value) = input.get(alias) {
+        return value.as_str().ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {tool_name} {label}.{alias} must be a string"))
+        });
+    }
+    Err(RuntimeError::Provider(format!(
+        "tool {tool_name} {label}.{field} must be a string"
+    )))
+}
+
 fn optional_string_alias_input<'a>(
     tool_name: &str,
     input: &'a Value,
@@ -819,6 +882,43 @@ fn optional_string_alias_input<'a>(
         });
     }
     Ok(None)
+}
+
+fn optional_bool_alias_input(
+    tool_name: &str,
+    input: &Value,
+    field: &str,
+    alias: &str,
+) -> Result<Option<bool>, RuntimeError> {
+    if input.get(field).is_some() {
+        return optional_bool_input(tool_name, input, field);
+    }
+    let Some(value) = input.get(alias) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.{alias} must be a boolean"))
+    })
+}
+
+fn optional_labeled_bool_alias_input(
+    tool_name: &str,
+    input: &Value,
+    label: &str,
+    field: &str,
+    alias: &str,
+) -> Result<Option<bool>, RuntimeError> {
+    if input.get(field).is_some() {
+        return optional_labeled_bool_input(tool_name, input, label, field);
+    }
+    let Some(value) = input.get(alias) else {
+        return Ok(None);
+    };
+    value.as_bool().map(Some).ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "tool {tool_name} {label}.{alias} must be a boolean"
+        ))
+    })
 }
 
 fn parse_alias_usize(
@@ -1709,8 +1809,6 @@ pub(super) fn call_file_write_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
     validate_git_pathspec(name, input_path)?;
-    let allowed_paths = allowed_paths_input(name, input)?;
-    enforce_allowed_path(name, "input.path", input_path, &allowed_paths)?;
     let content = required_input_string(name, input, "content")?;
     let content_bytes = content.as_bytes();
     if content_bytes.len() > options.max_bytes {
@@ -1791,57 +1889,6 @@ pub(super) fn call_file_write_tool(
     }))
 }
 
-fn allowed_paths_input(
-    tool_name: &str,
-    input: &Value,
-) -> Result<Option<BTreeSet<String>>, RuntimeError> {
-    let Some(allowed_paths) = input.get("allowed_paths") else {
-        return Ok(None);
-    };
-    let Some(paths) = allowed_paths.as_array() else {
-        return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} input.allowed_paths must be an array of strings"
-        )));
-    };
-    let mut normalized = BTreeSet::new();
-    for (index, path) in paths.iter().enumerate() {
-        let Some(path) = path.as_str() else {
-            return Err(RuntimeError::Provider(format!(
-                "tool {tool_name} input.allowed_paths[{index}] must be a string"
-            )));
-        };
-        let path = path.trim();
-        if path.is_empty() {
-            continue;
-        }
-        validate_git_pathspec(tool_name, path)?;
-        normalized.insert(path.to_string());
-    }
-    Ok(Some(normalized))
-}
-
-fn enforce_allowed_path(
-    tool_name: &str,
-    label: &str,
-    path: &str,
-    allowed_paths: &Option<BTreeSet<String>>,
-) -> Result<(), RuntimeError> {
-    let Some(allowed_paths) = allowed_paths else {
-        return Ok(());
-    };
-    if allowed_paths.contains(path) {
-        return Ok(());
-    }
-    let allowed = allowed_paths
-        .iter()
-        .map(|path| format!("'{path}'"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    Err(RuntimeError::Provider(format!(
-        "tool {tool_name} {label} {path} is outside allowed_paths; allowed_paths=[{allowed}]"
-    )))
-}
-
 fn effective_max_changed_lines(
     tool_name: &str,
     input: &Value,
@@ -1887,7 +1934,8 @@ fn parse_file_edit_operations<'a>(
     name: &str,
     input: &'a Value,
 ) -> Result<Vec<FileEditOperation<'a>>, RuntimeError> {
-    let global_replace_all = optional_bool_input(name, input, "replace_all")?.unwrap_or(false);
+    let global_replace_all =
+        optional_bool_alias_input(name, input, "replace_all", "replaceAll")?.unwrap_or(false);
     let global_match_strategy = EditMatchStrategy::from_input(name, input)?;
 
     if let Some(edits_value) = input.get("edits") {
@@ -1917,10 +1965,13 @@ fn parse_file_edit_operations<'a>(
                     "tool {name} {label} must be an object"
                 )));
             }
-            let old_string = required_labeled_string_input(name, edit, &label, "old_string")?;
-            let new_string = required_labeled_string_input(name, edit, &label, "new_string")?;
-            let replace_all = optional_labeled_bool_input(name, edit, &label, "replace_all")?
-                .unwrap_or(global_replace_all);
+            let old_string =
+                required_labeled_string_alias(name, edit, &label, "old_string", "oldString")?;
+            let new_string =
+                required_labeled_string_alias(name, edit, &label, "new_string", "newString")?;
+            let replace_all =
+                optional_labeled_bool_alias_input(name, edit, &label, "replace_all", "replaceAll")?
+                    .unwrap_or(global_replace_all);
             let match_strategy = if edit.get("match_strategy").is_some() {
                 EditMatchStrategy::from_labeled_input(name, edit, &label)?
             } else {
@@ -2076,8 +2127,6 @@ pub(super) fn call_file_edit_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_path_input(name, input)?;
     validate_git_pathspec(name, input_path)?;
-    let allowed_paths = allowed_paths_input(name, input)?;
-    enforce_allowed_path(name, "input.path", input_path, &allowed_paths)?;
     let operations = parse_file_edit_operations(name, input)?;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
     let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;

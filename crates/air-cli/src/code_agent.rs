@@ -5,17 +5,12 @@ use crate::code_context::default_context_budget_chars;
 use crate::code_input::build_input;
 pub(crate) use crate::code_input::CodeRecipe;
 use crate::code_input::{
-    build_input_with_pack, default_profile, path_ref_to_input_string, recipe_name, resolve_recipe,
-    CodeInputOptions,
+    build_input_with_pack, default_profile, path_ref_to_input_string, recipe_name, CodeInputOptions,
 };
 #[cfg(test)]
 use crate::code_loop::{code_loop_feedback, code_loop_iteration_input};
 use crate::code_loop::{code_outputs_complete, iteration_path, run_code_loop, CodeLoopOptions};
-#[cfg(test)]
-use crate::code_pack::CodeAgentRouteFacts;
-use crate::code_pack::{
-    load_code_agent_pack, CodeAgentInputFacts, CodeAgentPackContext, CodeAgentRouteDecision,
-};
+use crate::code_pack::{load_code_agent_pack, CodeAgentInputFacts, CodeAgentPackContext};
 use crate::code_session::{
     code_session_feedback, code_session_turn_id, code_session_turn_index,
     code_session_workspace_revert, CodeSessionPart, CodeSessionPatchSet, CodeSessionState,
@@ -36,14 +31,6 @@ use std::path::{Path, PathBuf};
 
 pub(crate) struct CodeOptions {
     pub(crate) task: String,
-    pub(crate) recipe: CodeRecipe,
-    pub(crate) target: Option<PathBuf>,
-    pub(crate) write: Vec<PathBuf>,
-    pub(crate) query: Option<String>,
-    pub(crate) related: Vec<PathBuf>,
-    pub(crate) search_query: Option<String>,
-    pub(crate) repo_query: Option<String>,
-    pub(crate) required_terms: Vec<String>,
     pub(crate) pack: Option<PathBuf>,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
@@ -76,14 +63,6 @@ pub(crate) struct CodeSessionOptions {
 pub(crate) fn code(options: CodeOptions) -> Result<()> {
     let CodeOptions {
         task,
-        recipe,
-        target,
-        write,
-        query,
-        related,
-        search_query,
-        repo_query,
-        required_terms,
         pack,
         profile,
         model_config,
@@ -109,53 +88,19 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
     };
     let pack = load_code_agent_pack(pack)?;
 
-    let requested_recipe = recipe;
-    let recipe_resolution = resolve_recipe(
-        &pack,
-        &task,
-        recipe,
-        target.as_ref(),
-        !write.is_empty(),
-        search_query.as_ref(),
-        repo_query.as_ref(),
-        &required_terms,
-    )?;
-    let recipe = recipe_resolution.recipe;
+    let requested_recipe = CodeRecipe::Edit;
+    let recipe = CodeRecipe::Edit;
     pack.validate_recipe_input_facts(
         recipe_name(recipe),
         &CodeAgentInputFacts {
             task: !task.trim().is_empty(),
-            target: target.is_some(),
-            write: !write.is_empty(),
-            query: query.as_ref().is_some_and(|value| !value.trim().is_empty()),
-            related: !related.is_empty(),
-            search_query: search_query
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            repo_query: repo_query
-                .as_ref()
-                .is_some_and(|value| !value.trim().is_empty()),
-            required_terms: !required_terms.is_empty(),
         },
     )?;
     let profile = match profile {
         Some(profile) => profile,
         None => default_profile(&pack, recipe)?,
     };
-    let mut input = build_input_with_pack(
-        &pack,
-        CodeInputOptions {
-            task,
-            recipe,
-            target,
-            write,
-            query,
-            related,
-            search_query,
-            repo_query,
-            required_terms,
-        },
-    )?;
+    let mut input = build_input_with_pack(&pack, CodeInputOptions { task })?;
     let mut session_state = match session.as_ref() {
         Some(path) => Some(CodeSessionState::read(path)?),
         None => None,
@@ -166,9 +111,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
 
     if explain {
         print_explain(CodePrintExplainOptions {
-            requested_recipe,
             resolved_recipe: recipe,
-            routing_decision: recipe_resolution.routing_decision.clone(),
             pack: &pack,
             profile: &profile,
             input: &input,
@@ -278,12 +221,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
             requested_recipe: Some(recipe_name(requested_recipe).to_string()),
             recipe: recipe_name(recipe).to_string(),
             profile: path_ref_to_input_string(&profile),
-            pack: code_session_turn_pack(
-                &pack,
-                recipe,
-                &profile,
-                recipe_resolution.routing_decision.clone(),
-            ),
+            pack: code_session_turn_pack(&pack, recipe, &profile),
             input: Value::Object(session_input),
             completed: code_outputs_complete(&pack, recipe, &outputs)?,
             trace_files: trace_files
@@ -381,7 +319,6 @@ fn code_session_turn_pack(
     pack: &CodeAgentPackContext,
     recipe: CodeRecipe,
     active_profile: &Path,
-    routing_decision: Option<CodeAgentRouteDecision>,
 ) -> Option<CodeSessionTurnPack> {
     let recipe = pack.recipe_for_id(recipe_name(recipe)).ok()?;
     let default_profile = path_ref_to_input_string(&recipe.default_profile);
@@ -393,7 +330,6 @@ fn code_session_turn_pack(
         default_profile,
         intent: recipe.intent,
         completion: recipe.completion,
-        routing_decision,
     })
 }
 
@@ -751,9 +687,7 @@ fn artifact_field_values(value: Option<&Value>, field: &str) -> Vec<String> {
 }
 
 struct CodePrintExplainOptions<'a> {
-    requested_recipe: CodeRecipe,
     resolved_recipe: CodeRecipe,
-    routing_decision: Option<CodeAgentRouteDecision>,
     pack: &'a CodeAgentPackContext,
     profile: &'a Path,
     input: &'a Map<String, Value>,
@@ -764,9 +698,7 @@ struct CodePrintExplainOptions<'a> {
 
 fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
     let CodePrintExplainOptions {
-        requested_recipe,
         resolved_recipe,
-        routing_decision,
         pack,
         profile,
         input,
@@ -789,18 +721,13 @@ fn print_explain(options: CodePrintExplainOptions<'_>) -> Result<()> {
     let explanation = json!({
         "command": "code",
         "will_run": false,
-        "requested_recipe": recipe_name(requested_recipe),
-        "resolved_recipe": recipe_name(resolved_recipe),
         "pack": {
             "path": path_ref_to_input_string(&pack.path),
-            "recipe": pack_recipe.id,
             "default_profile": pack_default_profile,
             "profile_override": active_profile != pack_default_profile,
             "intent": pack_recipe.intent,
             "input": pack_recipe.input,
             "completion": pack_recipe.completion,
-            "routing": pack.pack.routing,
-            "routing_decision": routing_decision,
         },
         "profile": active_profile,
         "plan": path_ref_to_input_string(&metadata.plan),
@@ -923,15 +850,15 @@ fn code_session_turn_input(
 mod tests {
     use super::*;
 
+    fn assert_code_input_keys(input: &Map<String, Value>) {
+        let keys = input.keys().map(String::as_str).collect::<HashSet<_>>();
+        assert_eq!(keys, HashSet::from(["task", "acceptance_assertions"]));
+    }
+
     #[test]
     fn code_agent_pack_declares_all_default_profiles() {
         let pack = load_code_agent_pack(None).unwrap();
-        let recipes = [
-            CodeRecipe::Auto,
-            CodeRecipe::Explore,
-            CodeRecipe::Review,
-            CodeRecipe::Edit,
-        ];
+        let recipes = [CodeRecipe::Edit];
 
         let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         assert_eq!(pack.pack.recipes.len(), recipes.len());
@@ -959,282 +886,72 @@ mod tests {
     fn builds_edit_input() {
         let input = build_input(CodeInputOptions {
             task: "fix it".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: None,
-            related: vec![PathBuf::from("src/test.rs")],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
 
         assert_eq!(input["task"], Value::String("fix it".to_string()));
-        assert_eq!(input["query"], Value::String("fix it".to_string()));
-        assert_eq!(
-            input["target_search_pattern"],
-            Value::String("fix".to_string())
-        );
-        assert_eq!(
-            input["target_path"],
-            Value::String("src/lib.rs".to_string())
-        );
-        assert_eq!(
-            input["related_files"],
-            Value::Array(vec![Value::String("src/test.rs".to_string())])
-        );
-        assert_eq!(
-            input["write_paths"],
-            Value::Array(vec![Value::String("src/lib.rs".to_string())])
-        );
+        assert_eq!(input["acceptance_assertions"], Value::Array(Vec::new()));
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn edit_input_accepts_explicit_extra_write_paths() {
+    fn edit_input_uses_task_as_the_only_request() {
         let input = build_input(CodeInputOptions {
             task: "move shared helper".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("src/runtime.rs")),
-            write: vec![
-                PathBuf::from("src/core.rs"),
-                PathBuf::from("src/runtime.rs"),
-            ],
-            query: None,
-            related: vec![PathBuf::from("src/core.rs")],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
 
-        assert_eq!(
-            input["write_paths"],
-            Value::Array(vec![
-                Value::String("src/runtime.rs".to_string()),
-                Value::String("src/core.rs".to_string())
-            ])
-        );
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn auto_recipe_selects_edit_when_target_and_test_are_present() {
+    fn edit_input_keeps_source_paths_inside_task_text() {
         let input = build_input(CodeInputOptions {
-            task: "fix it".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
+            task: "Refactor crates/air-tools/src/file_tools.rs by extracting a shared helper for resolving and validating a repo-relative input path inside base_dir, then use it from file_write and file_edit without changing behavior.".to_string(),
         })
         .unwrap();
 
-        assert_eq!(
-            input["target_path"],
-            Value::String("src/lib.rs".to_string())
-        );
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn edit_input_builds_code_search_pattern_from_query() {
-        let input = build_input(CodeInputOptions {
-            task: "Refactor provider".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: Some("EchoTools ToolProviderChoice provider module air-tools".to_string()),
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["target_search_pattern"],
-            Value::String("EchoTools|ToolProviderChoice|provider|module|air_tools".to_string())
-        );
-        assert_eq!(
-            input["target_symbol_query"],
-            Value::String("EchoTools".to_string())
-        );
-    }
-
-    #[test]
-    fn edit_input_prefers_high_signal_code_search_pattern_tokens() {
-        let input = build_input(CodeInputOptions {
-            task: "Add a hidden --stats option to air replay. When --stats is set and --specialize-run-plan is not set, replay should print JSON with event_count, error_count, model_call_count, tool_call_count, and final_output instead of only the final output.".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("crates/air-cli/src/run_plan.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["target_search_pattern"],
-            Value::String(
-                "stats|replay|specialize_run_plan|event_count|error_count|model_call_count|tool_call_count|final_output".to_string()
-            )
-        );
-        assert_eq!(
-            input["target_symbol_query"],
-            Value::String("specialize_run_plan".to_string())
-        );
-    }
-
-    #[test]
-    fn edit_input_keeps_symbol_query_exact_for_multi_file_split_tasks() {
-        let input = build_input(CodeInputOptions {
-            task: "Split the repo_symbols implementation into a module".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
-            write: vec![PathBuf::from("crates/air-tools/src/repo_symbols.rs")],
-            query: Some("repo_symbols rg fallback module split".to_string()),
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["target_symbol_query"],
-            Value::String("repo_symbols".to_string())
-        );
-    }
-
-    #[test]
-    fn edit_input_does_not_broaden_when_extract_only_appears_inside_symbol_name() {
-        let input = build_input(CodeInputOptions {
-            task: "Relocate the extract_command_diagnostics parser helpers into command_diagnostics.rs".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("crates/air-tools/src/lib.rs")),
-            write: vec![PathBuf::from("crates/air-tools/src/command_diagnostics.rs")],
-            query: Some("extract_command_diagnostics diagnostics parser helpers relocate".to_string()),
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["target_symbol_query"],
-            Value::String("extract_command_diagnostics".to_string())
-        );
-    }
-
-    #[test]
-    fn edit_input_does_not_target_new_extracted_helper_name_as_symbol_query() {
-        let input = build_input(CodeInputOptions {
-            task: "Refactor crates/air-tools/src/git_tools.rs to reduce duplicate files.insert(clean_git_diff_path(...)) logic in git_diff_changed_files by extracting a small insert_clean_diff_path helper.".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: Some(PathBuf::from("crates/air-tools/src/git_tools.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["target_symbol_query"],
-            Value::String("git_diff_changed_files".to_string())
-        );
-    }
-
-    #[test]
-    fn explicit_edit_can_start_without_known_target() {
+    fn code_input_preserves_open_ended_task_text() {
         let input = build_input(CodeInputOptions {
             task: "fix the failing add function".to_string(),
-            recipe: CodeRecipe::Edit,
-            target: None,
-            write: vec![],
-            query: Some("edit fixture add function test".to_string()),
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
 
         assert_eq!(
-            input["query"],
-            Value::String("edit fixture add function test".to_string())
+            input["task"],
+            Value::String("fix the failing add function".to_string())
         );
-        assert_eq!(input["target_path"], Value::String(String::new()));
-        assert_eq!(
-            input["target_search_pattern"],
-            Value::String("edit|fixture|add|function|test".to_string())
-        );
-        assert_eq!(input["target_symbol_query"], Value::String(String::new()));
-        assert!(input.get("test_command").is_none());
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn auto_recipe_selects_edit_for_any_targeted_write_task() {
+    fn code_input_uses_single_loop_for_write_task() {
         let input = build_input(CodeInputOptions {
             task: "change the provider and keep tests passing".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
-        assert!(input.get("test_command").is_none());
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn auto_recipe_selects_review_when_review_flags_are_present() {
+    fn code_input_uses_unified_loop_even_with_review_words() {
         let input = build_input(CodeInputOptions {
             task: "review it".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: Some("library docs".to_string()),
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
 
-        assert_eq!(
-            input["search_query"],
-            Value::String("library docs".to_string())
-        );
-        assert_eq!(
-            input["target_file"],
-            Value::String("src/lib.rs".to_string())
-        );
+        assert_eq!(input["task"], Value::String("review it".to_string()));
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn auto_recipe_selects_explore_without_target() {
+    fn code_input_uses_unified_loop_for_analysis_tasks() {
         let input = build_input(CodeInputOptions {
             task: "understand the next code-agent milestone".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: None,
-            write: vec![],
-            query: Some("code agent repository exploration".to_string()),
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
 
@@ -1242,81 +959,30 @@ mod tests {
             input["task"],
             Value::String("understand the next code-agent milestone".to_string())
         );
-        assert_eq!(
-            input["query"],
-            Value::String("code agent repository exploration".to_string())
-        );
-        assert_eq!(input["target_path"], Value::String(String::new()));
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn auto_recipe_defaults_to_read_only_explore() {
+    fn code_input_does_not_route_to_read_only_explore() {
         let input = build_input(CodeInputOptions {
             task: "understand this".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
 
-        assert_eq!(input["query"], Value::String("understand this".to_string()));
-        assert_eq!(
-            input["target_path"],
-            Value::String("src/lib.rs".to_string())
-        );
-        assert!(input.get("test_command").is_none());
+        assert_code_input_keys(&input);
     }
 
     #[test]
-    fn explicit_explore_can_start_without_known_target() {
-        let input = build_input(CodeInputOptions {
-            task: "explore the code-agent architecture".to_string(),
-            recipe: CodeRecipe::Explore,
-            target: None,
-            write: vec![],
-            query: Some("code agent edit loop architecture".to_string()),
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["query"],
-            Value::String("code agent edit loop architecture".to_string())
-        );
-        assert_eq!(input["target_path"], Value::String(String::new()));
-        assert!(input.get("test_command").is_none());
-    }
-
-    #[test]
-    fn explain_payload_reports_requested_and_resolved_recipe() {
+    fn explain_payload_reports_unified_code_loop() {
         let input = build_input(CodeInputOptions {
             task: "fix it".to_string(),
-            recipe: CodeRecipe::Auto,
-            target: Some(PathBuf::from("src/lib.rs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
         })
         .unwrap();
         let explanation = json!({
             "command": "code",
             "will_run": false,
-            "requested_recipe": recipe_name(CodeRecipe::Auto),
-            "resolved_recipe": recipe_name(CodeRecipe::Edit),
             "pack": {
                 "path": crate::code_pack::CODE_AGENT_PACK_PATH,
-                "recipe": "edit",
                 "default_profile": path_ref_to_input_string(
                     &default_profile(&load_code_agent_pack(None).unwrap(), CodeRecipe::Edit)
                         .unwrap()
@@ -1335,14 +1001,8 @@ mod tests {
             "input": Value::Object(input),
         });
 
-        assert_eq!(
-            explanation["requested_recipe"],
-            Value::String("auto".to_string())
-        );
-        assert_eq!(
-            explanation["resolved_recipe"],
-            Value::String("edit".to_string())
-        );
+        assert!(explanation.get("requested_recipe").is_none());
+        assert!(explanation.get("resolved_recipe").is_none());
         assert_eq!(
             explanation["profile"],
             Value::String("examples/code-agent/edit.air-profile.yaml".to_string())
@@ -1351,16 +1011,14 @@ mod tests {
             explanation["pack"]["path"],
             Value::String("examples/code-agent/code-agent.air-pack.yaml".to_string())
         );
-        assert_eq!(
-            explanation["pack"]["recipe"],
-            Value::String("edit".to_string())
-        );
+        assert!(explanation["pack"].get("recipe").is_none());
         assert_eq!(
             explanation["pack"]["default_profile"],
             Value::String("examples/code-agent/edit.air-profile.yaml".to_string())
         );
         assert_eq!(explanation["pack"]["profile_override"], Value::Bool(false));
-        assert!(explanation["input"].get("test_command").is_none());
+        let input = explanation["input"].as_object().unwrap();
+        assert_code_input_keys(input);
     }
 
     #[test]
@@ -1593,22 +1251,26 @@ mod tests {
         let required = edit_contract["required"].as_mapping().unwrap();
         let optional = edit_contract["optional"].as_mapping().unwrap();
 
-        for key in ["filePath", "oldString", "newString"] {
+        assert!(
+            required.contains_key(serde_yaml::Value::String("filePath".to_string())),
+            "edit tool contract should expose OpenCode-style required key filePath"
+        );
+        for key in ["oldString", "newString", "edits", "replaceAll"] {
             assert!(
-                required.contains_key(serde_yaml::Value::String(key.to_string())),
-                "edit tool contract should expose OpenCode-style required key {key}"
+                optional.contains_key(serde_yaml::Value::String(key.to_string())),
+                "edit tool contract should expose OpenCode-style optional key {key}"
             );
         }
         assert!(
-            optional.contains_key(serde_yaml::Value::String("replaceAll".to_string())),
-            "replaceAll should remain available for intentional rename-style edits"
+            !required.contains_key(serde_yaml::Value::String("oldString".to_string()))
+                && !required.contains_key(serde_yaml::Value::String("newString".to_string())),
+            "edit should allow multi-edit calls that provide edits instead of top-level oldString/newString"
         );
         for key in [
             "path",
             "old_string",
             "new_string",
             "dry_run",
-            "allowed_paths",
             "max_changed_lines",
             "match_strategy",
         ] {
@@ -1650,7 +1312,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_scopes_auto_final_diff_to_write_paths() {
+    fn edit_loop_records_workspace_diff_without_write_path_scope() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1669,8 +1331,9 @@ mod tests {
             serde_yaml::Value::String("git.diff".to_string())
         );
         assert_eq!(
-            diff_action["input"]["array"][0]["object"]["input"]["object"]["paths"]["ref"],
-            serde_yaml::Value::String("write_paths".to_string())
+            diff_action["input"]["array"][0]["object"]["input"]["literal"],
+            serde_yaml::Value::Mapping(Default::default()),
+            "code agent should audit actual workspace changes instead of restricting final diff to guessed write_paths"
         );
     }
 
@@ -1764,7 +1427,7 @@ mod tests {
     }
 
     #[test]
-    fn edit_loop_successful_manual_verification_returns_to_model_before_summary() {
+    fn edit_loop_successful_manual_verification_summarizes_without_extra_decider_step() {
         let path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .join("examples/code-agent/code-edit-loop.air.yaml");
@@ -1784,8 +1447,8 @@ mod tests {
             );
             assert_eq!(
                 rule["actions"][0]["values"]["phase"],
-                serde_yaml::Value::String("choose".to_string()),
-                "{id} should let the model decide whether more edits remain before summarize"
+                serde_yaml::Value::String("summarize".to_string()),
+                "{id} should summarize immediately after model-selected verification passes"
             );
         }
 
@@ -2126,7 +1789,7 @@ mod tests {
                 "files": [{"path": "src/lib.rs"}],
                 "artifacts": [{"id": "artifact:1", "kind": "git_diff"}]
             })),
-            meta: Some(json!({"model": "code_reviewer"})),
+            meta: Some(json!({"model": "code_edit_decider"})),
             status: TraceStatus::Ok,
             error: None,
         };
@@ -2135,7 +1798,7 @@ mod tests {
 
         assert_eq!(part.kind, "model_call");
         assert_eq!(part.trace_file, "trace.jsonl");
-        assert_eq!(part.model, Some("code_reviewer".to_string()));
+        assert_eq!(part.model, Some("code_edit_decider".to_string()));
         assert!(part.input_keys.iter().any(|key| key == "task"));
         assert!(part.output_keys.iter().any(|key| key == "summary"));
         assert_eq!(part.files, vec!["src/lib.rs"]);
@@ -2181,7 +1844,7 @@ mod tests {
                 rule: "analyze".to_string(),
                 action: "model_call".to_string(),
                 status: "ok".to_string(),
-                model: Some("code_reviewer".to_string()),
+                model: Some("code_edit_decider".to_string()),
                 tool: None,
                 approval_for: Vec::new(),
                 files: Vec::new(),
@@ -2234,7 +1897,7 @@ mod tests {
         assert_eq!(summary.model_call_count, 1);
         assert_eq!(summary.tool_call_count, 1);
         assert_eq!(summary.approval_count, 1);
-        assert_eq!(summary.models, vec!["code_reviewer"]);
+        assert_eq!(summary.models, vec!["code_edit_decider"]);
         assert_eq!(summary.tools, vec!["edit"]);
         assert_eq!(summary.approvals, vec!["file.write"]);
         assert_eq!(summary.files, vec!["src/lib.rs"]);
@@ -2245,10 +1908,6 @@ mod tests {
     fn loop_iteration_input_appends_previous_outputs_to_task() {
         let mut input = Map::new();
         input.insert("task".to_string(), Value::String("fix it".to_string()));
-        input.insert(
-            "target_path".to_string(),
-            Value::String("src/lib.rs".to_string()),
-        );
         let iterations = vec![json!({
             "iteration": 1,
             "completed": false,
@@ -2262,7 +1921,7 @@ mod tests {
 
         let next = code_loop_iteration_input(&input, &iterations);
 
-        assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
+        assert!(next.get("target_path").is_none());
         let task = next["task"].as_str().unwrap();
         assert!(task.starts_with("fix it"));
         assert!(task.contains("AIR loop context from previous iterations"));
@@ -2294,10 +1953,6 @@ mod tests {
             "task".to_string(),
             Value::String("continue investigation".to_string()),
         );
-        input.insert(
-            "target_path".to_string(),
-            Value::String("src/lib.rs".to_string()),
-        );
         let turns = vec![CodeSessionTurn {
             id: "turn-000001".to_string(),
             time: CodeSessionTurnTime {
@@ -2305,15 +1960,15 @@ mod tests {
                 updated: 1,
             },
             task: "inspect repo".to_string(),
-            requested_recipe: Some("auto".to_string()),
-            recipe: "explore".to_string(),
-            profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
+            requested_recipe: Some("edit".to_string()),
+            recipe: "edit".to_string(),
+            profile: "examples/code-agent/edit.air-profile.yaml".to_string(),
             pack: None,
             input: json!({"task": "inspect repo"}),
             completed: true,
             trace_files: Vec::new(),
             summary: CodeSessionTurnSummary {
-                models: vec!["code_explorer".to_string()],
+                models: vec!["code_edit_decider".to_string()],
                 tools: vec!["repo.search".to_string()],
                 files: vec!["src/lib.rs".to_string()],
                 model_call_count: 1,
@@ -2324,8 +1979,8 @@ mod tests {
             patch_sets: Vec::new(),
             recovery: None,
             outputs: json!({
-                "exploration": {
-                    "summary": "Found the dispatch implementation",
+                "edit": {
+                    "rationale": "Found the dispatch implementation",
                     "source_ids": ["repo:lib"]
                 }
             }),
@@ -2333,12 +1988,11 @@ mod tests {
 
         let next = code_session_turn_input(&input, &turns);
 
-        assert_eq!(next["target_path"], Value::String("src/lib.rs".to_string()));
+        assert!(next.get("target_path").is_none());
         let task = next["task"].as_str().unwrap();
         assert!(task.starts_with("continue investigation"));
         assert!(task.contains("AIR session context from previous turns"));
-        assert!(task.contains("requested_recipe=auto"));
-        assert!(task.contains("models=code_explorer"));
+        assert!(task.contains("models=code_edit_decider"));
         assert!(task.contains("tools=repo.search"));
         assert!(task.contains("files=src/lib.rs"));
         assert!(task.contains("Found the dispatch implementation"));
@@ -2355,7 +2009,7 @@ mod tests {
                 "input": {},
                 "output": null,
                 "meta": {
-                    "model": "code_reviewer",
+                    "model": "code_edit_decider",
                     "output": "review",
                     "timeout_seconds": 120
                 },
@@ -2386,7 +2040,7 @@ mod tests {
                 .map(ToString::to_string);
         }
 
-        assert_eq!(part.model, Some("code_reviewer".to_string()));
+        assert_eq!(part.model, Some("code_edit_decider".to_string()));
     }
 
     #[test]
@@ -2401,8 +2055,8 @@ mod tests {
                 },
                 task: "old".to_string(),
                 requested_recipe: None,
-                recipe: "explore".to_string(),
-                profile: "examples/code-agent/explore.air-profile.yaml".to_string(),
+                recipe: "edit".to_string(),
+                profile: "examples/code-agent/edit.air-profile.yaml".to_string(),
                 pack: None,
                 input: json!({"task": "old"}),
                 completed: true,
@@ -2469,13 +2123,6 @@ mod tests {
         ));
         let mut state = CodeSessionState::default();
         let pack = load_code_agent_pack(None).unwrap();
-        let routing_decision = pack
-            .resolve_auto_recipe_decision(&CodeAgentRouteFacts {
-                task: "fix it".to_string(),
-                target: true,
-                ..CodeAgentRouteFacts::default()
-            })
-            .unwrap();
         state.append_turn(CodeSessionTurn {
             id: code_session_turn_id(1),
             time: CodeSessionTurnTime {
@@ -2483,7 +2130,7 @@ mod tests {
                 updated: 42,
             },
             task: "fix it".to_string(),
-            requested_recipe: Some("auto".to_string()),
+            requested_recipe: Some("edit".to_string()),
             recipe: "edit".to_string(),
             profile: "examples/code-agent/edit.air-profile.yaml".to_string(),
             pack: Some(
@@ -2491,7 +2138,6 @@ mod tests {
                     &pack,
                     CodeRecipe::Edit,
                     Path::new("examples/code-agent/edit.air-profile.yaml"),
-                    Some(routing_decision),
                 )
                 .unwrap(),
             ),
@@ -2517,7 +2163,7 @@ mod tests {
         assert_eq!(roundtrip.turns[0].recipe, "edit");
         assert_eq!(
             roundtrip.turns[0].requested_recipe,
-            Some("auto".to_string())
+            Some("edit".to_string())
         );
         let pack = roundtrip.turns[0].pack.as_ref().unwrap();
         assert_eq!(pack.path, crate::code_pack::CODE_AGENT_PACK_PATH);
@@ -2531,10 +2177,6 @@ mod tests {
             serde_json::to_value(&pack.completion).unwrap()["any"][0]["equals"]["path"],
             Value::String("/edit/final_success".to_string())
         );
-        assert_eq!(
-            serde_json::to_value(&pack.routing_decision).unwrap()["route_index"],
-            Value::Number(1.into())
-        );
         assert!(!roundtrip.turns[0].completed);
     }
 
@@ -2544,7 +2186,6 @@ mod tests {
             &load_code_agent_pack(None).unwrap(),
             CodeRecipe::Edit,
             Path::new("examples/code-agent/custom-edit.air-profile.yaml"),
-            None,
         )
         .unwrap();
 
@@ -2628,60 +2269,5 @@ mod tests {
         assert!(!summary.applied);
         assert_eq!(summary.patch_set_count, 0);
         assert!(summary.results.is_empty());
-    }
-
-    #[test]
-    fn builds_review_input() {
-        let input = build_input(CodeInputOptions {
-            task: "review search".to_string(),
-            recipe: CodeRecipe::Review,
-            target: Some(PathBuf::from("scripts/search.cjs")),
-            write: vec![],
-            query: Some("search".to_string()),
-            related: vec![PathBuf::from("scripts/search.test.cjs")],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec!["playwright".to_string()],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["search_query"],
-            Value::String("review search".to_string())
-        );
-        assert_eq!(input["repo_query"], Value::String("search".to_string()));
-        assert_eq!(
-            input["target_file"],
-            Value::String("scripts/search.cjs".to_string())
-        );
-        assert_eq!(
-            input["related_files"],
-            Value::Array(vec![Value::String("scripts/search.test.cjs".to_string())])
-        );
-        assert_eq!(
-            input["required_terms"],
-            Value::Array(vec![Value::String("playwright".to_string())])
-        );
-    }
-
-    #[test]
-    fn review_input_defaults_related_files_to_target() {
-        let input = build_input(CodeInputOptions {
-            task: "review search".to_string(),
-            recipe: CodeRecipe::Review,
-            target: Some(PathBuf::from("scripts/search.cjs")),
-            write: vec![],
-            query: None,
-            related: vec![],
-            search_query: None,
-            repo_query: None,
-            required_terms: vec![],
-        })
-        .unwrap();
-
-        assert_eq!(
-            input["related_files"],
-            Value::Array(vec![Value::String("scripts/search.cjs".to_string())])
-        );
     }
 }

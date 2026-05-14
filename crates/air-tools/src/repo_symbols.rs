@@ -35,10 +35,17 @@ pub(crate) fn call_repo_symbols_tool(
     } else {
         Vec::new()
     };
+    let fixed_terms = if mode == "fixed" {
+        fixed_symbol_query_terms(raw_query)
+    } else {
+        Vec::new()
+    };
     let effective_query = if mode == "smart" {
         smart_terms.join("|")
     } else if !names.is_empty() {
         names.join("|")
+    } else if !fixed_terms.is_empty() {
+        fixed_terms.join("|")
     } else {
         query.clone()
     };
@@ -60,6 +67,7 @@ pub(crate) fn call_repo_symbols_tool(
         &name_filters,
         mode,
         &query,
+        &fixed_terms,
         &smart_terms,
         effective_max_symbols,
     )?;
@@ -121,10 +129,11 @@ fn repo_symbols_rg(
     name_filters: &BTreeSet<String>,
     mode: &str,
     query: &str,
+    fixed_terms: &[String],
     smart_terms: &[String],
     max_symbols: usize,
 ) -> Result<Vec<Value>, RuntimeError> {
-    let pattern = r"^\s*(pub\s+|pub\([^)]*\)\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+|const\s+|let\s+|var\s+)";
+    let pattern = r"^\s*(pub\s+|pub\([^)]*\)\s+|export\s+|async\s+|static\s+|final\s+|private\s+|protected\s+|public\s+|unsafe\s+)*(impl(\s+|<)|fn\s+|function\s+|def\s+|class\s+|struct\s+|enum\s+|trait\s+|interface\s+|type\s+)";
     let mut command = Command::new("rg");
     command.args([
         "--line-number",
@@ -171,6 +180,10 @@ fn repo_symbols_rg(
             {
                 continue;
             }
+        } else if !fixed_terms.is_empty() {
+            if !repo_symbol_matches_any_term(&item, &symbol_name, text, fixed_terms) {
+                continue;
+            }
         } else if !query.is_empty()
             && !symbol_name.to_lowercase().contains(query)
             && !item["path"]
@@ -206,6 +219,20 @@ fn repo_symbols_rg(
         }
     }
     Ok(symbols)
+}
+
+fn fixed_symbol_query_terms(query: &str) -> Vec<String> {
+    let terms = query
+        .split(|character: char| character.is_whitespace() || character == ',' || character == '|')
+        .map(str::trim)
+        .filter(|term| term.len() >= 3)
+        .map(str::to_ascii_lowercase)
+        .collect::<BTreeSet<_>>();
+    if terms.len() <= 1 {
+        Vec::new()
+    } else {
+        terms.into_iter().collect()
+    }
 }
 
 fn repo_symbol_lines_by_path(raw: &str) -> BTreeMap<String, Vec<u64>> {
@@ -280,20 +307,10 @@ fn is_rust_brace_block_declaration(path: &str, declaration_text: &str) -> bool {
         return false;
     }
     let trimmed = declaration_text.trim_start();
-    parse_rust_impl_symbol_name(trimmed).is_some()
-        || trimmed.starts_with("fn ")
-        || trimmed.starts_with("pub fn ")
-        || trimmed.starts_with("pub(crate) fn ")
-        || trimmed.starts_with("async fn ")
-        || trimmed.starts_with("pub async fn ")
-        || trimmed.starts_with("unsafe fn ")
-        || trimmed.starts_with("pub unsafe fn ")
-        || trimmed.starts_with("struct ")
-        || trimmed.starts_with("pub struct ")
-        || trimmed.starts_with("enum ")
-        || trimmed.starts_with("pub enum ")
-        || trimmed.starts_with("trait ")
-        || trimmed.starts_with("pub trait ")
+    matches!(
+        parse_symbol_declaration(trimmed).map(|(kind, _)| kind),
+        Some("impl" | "function" | "struct" | "enum" | "interface")
+    )
 }
 
 fn rust_brace_block_end_line(content: &str, start_line: u64) -> Option<u64> {

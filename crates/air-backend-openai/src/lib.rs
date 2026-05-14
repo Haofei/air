@@ -544,7 +544,7 @@ fn native_tool_description(original_name: &str, schema: Option<&Value>) -> Strin
             return "Search file contents with a regex or literal pattern and return matching line locations.".to_string();
         }
         "edit" => {
-            return "Edit one file by replacing an exact oldString with newString. Read or search the target first.".to_string();
+            return "Edit one file by replacing exact strings. Use edits for several replacements in the same file. Read or search the target first.".to_string();
         }
         _ => {}
     }
@@ -597,15 +597,30 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "type": "object",
                 "properties": {
                     "filePath": {"type": "string", "description": "Repo-relative file path to edit."},
-                    "oldString": {"type": "string", "description": "Exact text to replace. Include enough surrounding context to be unique."},
-                    "newString": {"type": "string", "description": "Replacement text."},
+                    "oldString": {"type": "string", "description": "Exact text to replace for a single edit. Include enough surrounding context to be unique."},
+                    "newString": {"type": "string", "description": "Replacement text for a single edit."},
+                    "edits": {
+                        "type": "array",
+                        "description": "Several replacements in the same file. Use this instead of oldString/newString when applying multiple localized edits.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "oldString": {"type": "string", "description": "Exact text to replace. Include enough surrounding context to be unique."},
+                                "newString": {"type": "string", "description": "Replacement text."},
+                                "replaceAll": {"type": "boolean", "description": "Replace every occurrence only when all matches should change."},
+                                "match_strategy": {"type": "string", "description": "Optional AIR edit matching strategy."}
+                            },
+                            "required": ["oldString", "newString"],
+                            "additionalProperties": true
+                        }
+                    },
                     "replaceAll": {"type": "boolean", "description": "Replace every occurrence only when all matches should change."},
                     "path": {"type": "string", "description": "Alias for filePath."},
                     "old_string": {"type": "string", "description": "Alias for oldString."},
                     "new_string": {"type": "string", "description": "Alias for newString."},
                     "match_strategy": {"type": "string", "description": "Optional AIR edit matching strategy."}
                 },
-                "required": ["filePath", "oldString", "newString"],
+                "required": ["filePath"],
                 "additionalProperties": true
             });
         }
@@ -1906,7 +1921,12 @@ mod tests {
         assert_eq!(request.body["tool_choice"], json!("auto"));
         assert_eq!(
             request.body["tools"][0]["function"]["parameters"]["required"],
-            json!(["filePath", "oldString", "newString"])
+            json!(["filePath"])
+        );
+        assert!(
+            request.body["tools"][0]["function"]["parameters"]["properties"]
+                .get("edits")
+                .is_some()
         );
         let content = request.body["messages"][0]["content"].as_str().unwrap();
         assert!(content.contains("choose tools"));

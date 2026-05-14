@@ -65,6 +65,9 @@ struct GitDiffOutput {
 #[derive(Debug, Deserialize)]
 struct ToolConfigFile {
     #[serde(default)]
+    workspace_dir: Option<PathBuf>,
+
+    #[serde(default)]
     tools: BTreeMap<String, ToolConfig>,
 
     #[serde(default)]
@@ -601,6 +604,7 @@ pub struct ConfigTools {
     tools: BTreeMap<String, ToolConfig>,
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
+    workspace_dir: PathBuf,
     read_snapshots: BTreeMap<PathBuf, SystemTime>,
     git_diff_baselines: GitDiffBaselines,
     current_todos: Vec<Value>,
@@ -613,6 +617,7 @@ impl Clone for ConfigTools {
             tools: self.tools.clone(),
             approvals: self.approvals.clone(),
             config_dir: self.config_dir.clone(),
+            workspace_dir: self.workspace_dir.clone(),
             read_snapshots: self.read_snapshots.clone(),
             git_diff_baselines: self.git_diff_baselines.clone(),
             current_todos: self.current_todos.clone(),
@@ -632,11 +637,17 @@ impl ConfigTools {
             .parent()
             .unwrap_or_else(|| Path::new("."))
             .to_path_buf();
-        let git_diff_baselines = capture_git_diff_baselines(&config, &config_dir)?;
+        let workspace_dir = if config.workspace_dir.is_some() {
+            resolve_workspace_dir(config.workspace_dir.as_deref())?
+        } else {
+            config_dir.clone()
+        };
+        let git_diff_baselines = capture_git_diff_baselines(&config, &workspace_dir)?;
         Ok(Self {
             tools: config.tools,
             approvals: config.approvals,
             config_dir,
+            workspace_dir,
             read_snapshots: BTreeMap::new(),
             git_diff_baselines,
             current_todos: Vec::new(),
@@ -664,6 +675,7 @@ impl ConfigTools {
             )]),
             approvals: BTreeMap::new(),
             config_dir: PathBuf::from("."),
+            workspace_dir: PathBuf::from("."),
             read_snapshots: BTreeMap::new(),
             git_diff_baselines: BTreeMap::new(),
             current_todos: Vec::new(),
@@ -794,6 +806,16 @@ fn current_git_diff_paths(repo: &Path) -> Result<Vec<String>> {
 }
 
 fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
+    if config
+        .workspace_dir
+        .as_ref()
+        .is_some_and(|workspace_dir| workspace_dir.as_os_str().is_empty())
+    {
+        anyhow::bail!(
+            "tool config {} workspace_dir must not be empty",
+            path.display()
+        );
+    }
     for (name, tool) in &config.tools {
         if name.trim().is_empty() {
             anyhow::bail!(
@@ -1735,7 +1757,7 @@ impl ToolProvider for ConfigTools {
                     fetch_pages,
                     cache_dir: cache_dir
                         .as_deref()
-                        .map(|path| resolve_config_path(&self.config_dir, path)),
+                        .map(|path| resolve_config_path(&self.workspace_dir, path)),
                     cache_ttl_seconds,
                     timeout_seconds,
                     action_timeout: Some(timeout),
@@ -1758,10 +1780,10 @@ impl ToolProvider for ConfigTools {
                 input,
                 PlaywrightPageAuditConfig {
                     script_path: &resolve_config_path(&self.config_dir, &script_path),
-                    base_dir: &resolve_config_path(&self.config_dir, &base_dir),
+                    base_dir: &resolve_config_path(&self.workspace_dir, &base_dir),
                     screenshot_dir: screenshot_dir
                         .as_deref()
-                        .map(|path| resolve_config_path(&self.config_dir, path)),
+                        .map(|path| resolve_config_path(&self.workspace_dir, path)),
                     viewports: viewports.as_deref(),
                     required_text: required_text.as_deref(),
                     forbidden_text: forbidden_text.as_deref(),
@@ -1777,7 +1799,7 @@ impl ToolProvider for ConfigTools {
                 base_dir,
                 max_bytes,
             } => {
-                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output =
                     call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
@@ -1791,7 +1813,7 @@ impl ToolProvider for ConfigTools {
                 max_bytes,
                 max_files,
             } => {
-                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output = call_file_read_many_tool(
                     name,
                     input,
@@ -1818,7 +1840,7 @@ impl ToolProvider for ConfigTools {
                 max_context_lines,
                 max_line_chars,
             } => {
-                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output = call_file_search_tool(
                     name,
                     input,
@@ -1841,7 +1863,7 @@ impl ToolProvider for ConfigTools {
                 allow_overwrite,
                 require_read,
             } => {
-                let base_dir = resolve_config_path(&self.config_dir, &base_dir);
+                let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output = call_file_write_tool(
                     name,
                     input,
@@ -1870,7 +1892,7 @@ impl ToolProvider for ConfigTools {
                     name,
                     input,
                     FileEditOptions {
-                        base_dir: &resolve_config_path(&self.config_dir, &base_dir),
+                        base_dir: &resolve_config_path(&self.workspace_dir, &base_dir),
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         max_changed_lines,
                         require_read: require_read.unwrap_or(true),
@@ -1887,7 +1909,7 @@ impl ToolProvider for ConfigTools {
                 repo_dir,
                 max_bytes,
             } => {
-                let repo = resolve_config_path(&self.config_dir, &repo_dir);
+                let repo = resolve_config_path(&self.workspace_dir, &repo_dir);
                 let canonical_repo = canonicalize_tool_path(name, "repo_dir", &repo)?;
                 let baseline = self.git_diff_baselines.get(&canonical_repo);
                 call_git_diff_tool(
@@ -1904,7 +1926,7 @@ impl ToolProvider for ConfigTools {
                 max_files,
             } => call_git_status_tool(
                 name,
-                &resolve_config_path(&self.config_dir, &repo_dir),
+                &resolve_config_path(&self.workspace_dir, &repo_dir),
                 max_files.unwrap_or(200),
             ),
             ToolConfig::RepoFiles {
@@ -1914,7 +1936,7 @@ impl ToolProvider for ConfigTools {
             } => call_repo_files_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
+                &resolve_config_path(&self.workspace_dir, &repo_dir),
                 max_files.unwrap_or(200),
             ),
             ToolConfig::RepoSearch {
@@ -1923,7 +1945,7 @@ impl ToolProvider for ConfigTools {
                 max_matches,
                 max_bytes,
             } => {
-                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let repo_dir = resolve_config_path(&self.workspace_dir, &repo_dir);
                 let output = call_repo_search_tool(
                     name,
                     input,
@@ -1942,7 +1964,7 @@ impl ToolProvider for ConfigTools {
                 context_lines,
                 max_bytes,
             } => {
-                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let repo_dir = resolve_config_path(&self.workspace_dir, &repo_dir);
                 let output = call_repo_context_tool(
                     name,
                     input,
@@ -1963,7 +1985,7 @@ impl ToolProvider for ConfigTools {
             } => call_repo_symbols_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, &repo_dir),
+                &resolve_config_path(&self.workspace_dir, &repo_dir),
                 max_symbols.unwrap_or(200),
                 max_bytes.unwrap_or(256 * 1024),
             ),
@@ -1975,7 +1997,7 @@ impl ToolProvider for ConfigTools {
                 context_lines,
                 max_bytes,
             } => {
-                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let repo_dir = resolve_config_path(&self.workspace_dir, &repo_dir);
                 let output = call_repo_references_tool(
                     name,
                     input,
@@ -1995,7 +2017,7 @@ impl ToolProvider for ConfigTools {
                 max_results,
                 max_bytes,
             } => {
-                let root_dir = resolve_config_path(&self.config_dir, &root_dir);
+                let root_dir = resolve_config_path(&self.workspace_dir, &root_dir);
                 let command = command.as_deref().unwrap_or("rust-analyzer");
                 let max_results = max_results.unwrap_or(120);
                 let max_bytes = max_bytes.unwrap_or(256 * 1024);
@@ -2011,7 +2033,7 @@ impl ToolProvider for ConfigTools {
             } => call_lsp_diagnostics_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, &root_dir),
+                &resolve_config_path(&self.workspace_dir, &root_dir),
                 command.as_deref().unwrap_or("rust-analyzer"),
                 max_diagnostics.unwrap_or(80),
                 max_bytes.unwrap_or(256 * 1024),
@@ -2023,7 +2045,7 @@ impl ToolProvider for ConfigTools {
                 context_lines,
                 max_bytes,
             } => {
-                let repo_dir = resolve_config_path(&self.config_dir, &repo_dir);
+                let repo_dir = resolve_config_path(&self.workspace_dir, &repo_dir);
                 let output = call_diagnostic_context_tool(
                     name,
                     input,
@@ -2043,7 +2065,7 @@ impl ToolProvider for ConfigTools {
             } => call_code_assert_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, &base_dir),
+                &resolve_config_path(&self.workspace_dir, &base_dir),
                 max_assertions.unwrap_or(20),
                 max_bytes.unwrap_or(64 * 1024),
             ),
@@ -2094,7 +2116,7 @@ impl ToolProvider for ConfigTools {
             } => call_candidate_validate_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, &base_dir),
+                &resolve_config_path(&self.workspace_dir, &base_dir),
             ),
             ToolConfig::CommandRun {
                 capability: _,
@@ -2107,7 +2129,7 @@ impl ToolProvider for ConfigTools {
             } => call_command_run_tool(
                 name,
                 input,
-                &resolve_config_path(&self.config_dir, &cwd),
+                &resolve_config_path(&self.workspace_dir, &cwd),
                 &commands,
                 &parameters,
                 CommandRunOptions {
@@ -4161,17 +4183,6 @@ fn repo_glob_input<'a>(tool_name: &str, input: &'a Value) -> Result<Option<&'a s
     Ok(None)
 }
 
-fn required_labeled_string_input<'a>(
-    tool_name: &str,
-    input: &'a Value,
-    label: &str,
-    field: &str,
-) -> Result<&'a str, RuntimeError> {
-    input.get(field).and_then(Value::as_str).ok_or_else(|| {
-        RuntimeError::Provider(format!("tool {tool_name} {label}.{field} must be a string"))
-    })
-}
-
 fn optional_string_input<'a>(
     tool_name: &str,
     input: &'a Value,
@@ -4379,6 +4390,29 @@ fn resolve_config_path(config_dir: &Path, path: &Path) -> PathBuf {
     } else {
         config_dir.join(path)
     }
+}
+
+fn resolve_workspace_dir(path: Option<&Path>) -> Result<PathBuf> {
+    let Some(path) = path else {
+        return Ok(PathBuf::from("."));
+    };
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        let candidate = std::env::current_dir()?.join(path);
+        if path == Path::new(".") {
+            Ok(nearest_git_root(&candidate).unwrap_or(candidate))
+        } else {
+            Ok(candidate)
+        }
+    }
+}
+
+fn nearest_git_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|ancestor| ancestor.join(".git").exists())
+        .map(Path::to_path_buf)
 }
 
 fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {

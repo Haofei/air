@@ -1,5 +1,5 @@
 use crate::code_context::{recent_context_feedback, ContextFeedbackEntry};
-use crate::code_pack::{CodeAgentCompletion, CodeAgentRouteDecision};
+use crate::code_pack::CodeAgentCompletion;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -55,8 +55,6 @@ pub(crate) struct CodeSessionTurnPack {
     pub(crate) intent: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) completion: Option<CodeAgentCompletion>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) routing_decision: Option<CodeAgentRouteDecision>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]

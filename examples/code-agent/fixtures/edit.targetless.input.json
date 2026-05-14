@@ -1,10 +1,4 @@
 {
   "task": "fix the failing add function using the unified bounded edit loop",
-  "query": "edit fixture add function test",
-  "target_path": "",
-  "target_search_pattern": "edit|fixture|add|function|test",
-  "target_symbol_query": "",
-  "related_files": [],
-  "acceptance_assertions": [],
-  "write_paths": []
+  "acceptance_assertions": []
 }

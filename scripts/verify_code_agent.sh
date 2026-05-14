@@ -7,8 +7,6 @@ cd "$ROOT"
 mkdir -p target/generated
 
 echo "[code-agent] validate primitive profiles"
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/explore.air-profile.yaml
-cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/review.air-profile.yaml
 cargo run -q -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
 
 echo "[code-agent] OpenCode-style edit kernel checks"
@@ -80,11 +78,12 @@ edit_contract = re.search(
 )
 assert edit_contract, "choose rule must expose the edit tool contract"
 edit_contract_body = edit_contract.group("body")
-for key in ("filePath", "oldString", "newString", "replaceAll"):
+for key in ("filePath", "oldString", "newString", "replaceAll", "edits"):
     assert key in edit_contract_body, (key, edit_contract_body)
 assert "literal: format.run" in module, "formatter tool must be declared and used"
 assert "literal: test.run" in module, "validation tool must be declared and used"
 assert "literal: git.diff" in module, "summary must capture final diff"
+assert "Copy repository paths exactly byte-for-byte from tool output metadata" in module, "path policy should not depend on user-supplied hints"
 
 summarize = re.search(r"- id:\s*summarize\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
 assert summarize, "missing summarize rule"
@@ -133,7 +132,6 @@ echo "[code-agent] Rust regression tests"
 cargo test -q -p air-cli code_agent_pack_declares_all_default_profiles
 cargo test -q -p air-cli pack_validation_rejects
 cargo test -q -p air-cli pack_input_contract
-cargo test -q -p air-cli pack_auto_routing
 cargo test -q -p air-cli model_config_prompts_match_code_agent_schemas
 cargo test -q -p air-cli edit_loop_
 cargo test -q -p air-tools file_read
@@ -143,29 +141,6 @@ cargo test -q -p air-tools git_status
 cargo test -q -p air-tools command_run
 cargo test -q -p air-tools diagnostic_context
 cargo test -q -p air-tools rust_lsp_tools
-
-echo "[code-agent] deterministic explore run"
-cargo run -q -p air-cli -- code "check whether build is a public code-agent primitive" \
-  --recipe explore \
-  --query "build code agent recipe primitive" \
-  --trace-out target/generated/code_agent_explore.trace.jsonl \
-  > target/generated/code_agent_explore.output.json
-
-"${PYTHON:-python3}" - <<'PY'
-import json
-
-with open("target/generated/code_agent_explore.output.json", encoding="utf-8") as handle:
-    output = json.load(handle)
-exploration = output["exploration"]
-assert isinstance(exploration["summary"], str) and exploration["summary"], exploration
-assert isinstance(exploration["relevant_files"], list), exploration
-assert isinstance(exploration["findings"], list), exploration
-
-with open("target/generated/code_agent_explore.trace.jsonl", encoding="utf-8") as handle:
-    events = [json.loads(line) for line in handle if line.strip()]
-assert any(event.get("rule") == "choose" for event in events), events
-assert any(event.get("action") == "tool_batch_dispatch" for event in events), events
-PY
 
 echo "[code-agent] deterministic edit loop run"
 backup="$(mktemp)"
@@ -277,9 +252,6 @@ PY
 
 echo "[code-agent] explain command"
 cargo run -q -p air-cli -- code "edit the failing add function and retest" \
-  --recipe edit \
-  --target examples/code-agent/edit-fixture/math.js \
-  --related examples/code-agent/edit-fixture/test.js \
   --explain \
   > target/generated/code_agent_edit_explain.output.json
 
@@ -288,8 +260,8 @@ import json
 
 with open("target/generated/code_agent_edit_explain.output.json", encoding="utf-8") as handle:
     output = json.load(handle)
-assert output["resolved_recipe"] == "edit", output
-assert output["pack"]["recipe"] == "edit", output
+assert "resolved_recipe" not in output, output
+assert "recipe" not in output["pack"], output
 assert output["pack"]["default_profile"] == "examples/code-agent/edit.air-profile.yaml", output
 assert "test_command" not in output["input"], output
 PY

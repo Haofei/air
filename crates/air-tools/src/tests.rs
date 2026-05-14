@@ -20,6 +20,35 @@ fn write_config(dir: &Path, content: &str) -> PathBuf {
 }
 
 #[test]
+fn tool_config_workspace_dir_rebases_file_tool_roots() {
+    let workspace = temp_dir("air-tools-workspace-dir");
+    fs::write(workspace.join("note.txt"), "hello from workspace").unwrap();
+    let config_dir = workspace.join("configs");
+    fs::create_dir_all(&config_dir).unwrap();
+    let config_path = write_config(
+        &config_dir,
+        &json!({
+            "workspace_dir": workspace,
+            "tools": {
+                "read": {
+                    "kind": "file_read",
+                    "capability": "file.read",
+                    "base_dir": "."
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("read", &json!({ "path": "note.txt" }))
+        .unwrap();
+
+    assert_eq!(output["content"], json!("hello from workspace"));
+}
+
+#[test]
 fn todo_write_returns_a_structured_artifact() {
     let dir = temp_dir("air-tools-todo-write");
     let config_path = write_config(
@@ -804,6 +833,77 @@ fn file_read_accepts_opencode_file_path_offset_limit() {
 }
 
 #[test]
+fn file_read_accepts_start_line_limit() {
+    let dir = temp_dir("air-tools-file-read-start-line-limit");
+    fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "read",
+            &json!({"filePath": "note.txt", "start_line": 2, "limit": 2}),
+        )
+        .unwrap();
+
+    assert_eq!(output["start_line"], json!(2));
+    assert_eq!(output["end_line"], json!(3));
+    assert_eq!(output["content"], json!("00002| one\n00003| two"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_accepts_redundant_opencode_and_line_range_inputs() {
+    let dir = temp_dir("air-tools-file-read-redundant-range-inputs");
+    fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\nfour\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "read",
+            &json!({
+                "filePath": "note.txt",
+                "offset": 1,
+                "start_line": 2,
+                "end_line": 4,
+                "limit": 2
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["start_line"], json!(2));
+    assert_eq!(output["end_line"], json!(4));
+    assert_eq!(
+        output["content"],
+        json!("00002| one\n00003| two\n00004| three")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_returns_regex_matches_with_context() {
     let dir = temp_dir("air-tools-file-search");
     fs::write(
@@ -928,6 +1028,39 @@ fn file_search_treats_exact_include_as_scope() {
         output["matches"][0]["line"],
         json!("use serde_json::Value;")
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_search_treats_include_glob_as_file_filter() {
+    let dir = temp_dir("air-tools-file-search-include-glob");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src").join("lib.rs"), "fn target() {}\n").unwrap();
+    fs::write(dir.join("src").join("note.txt"), "fn target() {}\n").unwrap();
+    fs::write(dir.join("README.md"), "fn target() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("grep", &json!({"pattern": "fn target", "include": "*.rs"}))
+        .unwrap();
+
+    assert_eq!(output["directory"], json!(true));
+    assert_eq!(output["include_glob"], json!("*.rs"));
+    assert_eq!(output["match_count"], json!(1));
+    assert_eq!(output["matches"][0]["path"], json!("src/lib.rs"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1710,6 +1843,62 @@ fn file_edit_applies_multiple_edits_after_read() {
 }
 
 #[test]
+fn file_edit_accepts_opencode_style_multi_edit_fields() {
+    let dir = temp_dir("air-tools-file-edit-opencode-multiple-ops");
+    fs::write(dir.join("note.txt"), "AIR AIR\nstatus: todo\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("read", &json!({"filePath": "note.txt"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "edit",
+            &json!({
+                "filePath": "note.txt",
+                "edits": [
+                    {
+                        "oldString": "AIR",
+                        "newString": "Agent",
+                        "replaceAll": true
+                    },
+                    {
+                        "oldString": "status: todo",
+                        "newString": "status: done"
+                    }
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["edit_count"], json!(2));
+    assert_eq!(output["replacements"], json!(3));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.txt")).unwrap(),
+        "Agent Agent\nstatus: done\n"
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_edit_multi_edit_is_atomic_when_later_edit_fails() {
     let dir = temp_dir("air-tools-file-edit-multiple-atomic");
     fs::write(dir.join("note.txt"), "alpha\nbeta\ngamma\n").unwrap();
@@ -2044,7 +2233,7 @@ fn file_edit_requires_replace_all_for_multiple_matches() {
                 "path": "note.txt",
                 "old_string": "AIR",
                 "new_string": "Agent",
-                "replace_all": true
+                "replaceAll": true
             }),
         )
         .unwrap();
@@ -3649,6 +3838,80 @@ fn repo_symbols_returns_lightweight_symbol_map() {
 }
 
 #[test]
+fn repo_symbols_treats_space_separated_fixed_query_as_any_term() {
+    let dir = temp_dir("air-tools-repo-symbols-fixed-terms");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn call_file_write_tool() {}\nfn call_file_edit_tool() {}\nfn unrelated() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.symbols", &json!({"query": "file_write file_edit"}))
+        .unwrap();
+
+    let symbols = output["symbols"].as_array().unwrap();
+    assert_eq!(output["effective_query"], json!("file_edit|file_write"));
+    assert_eq!(symbols.len(), 2);
+    assert_eq!(symbols[0]["name"], json!("call_file_write_tool"));
+    assert_eq!(symbols[1]["name"], json!("call_file_edit_tool"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_symbols_omits_local_variables_from_structure_map() {
+    let dir = temp_dir("air-tools-repo-symbols-no-local-vars");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "pub fn alpha() {\n    let local_value = 1;\n}\nstruct Beta;\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools.call_tool("repo.symbols", &json!({})).unwrap();
+
+    let names = output["symbols"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|symbol| symbol["name"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(names, vec!["alpha", "Beta"]);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 #[ignore = "requires rust-analyzer installed on PATH"]
 fn lsp_references_reuses_session_within_config_tools() {
     let dir = temp_dir("air-tools-lsp-session-cache");
@@ -3781,6 +4044,46 @@ fn repo_symbols_reports_multiline_rust_function_body_end_line() {
     assert_eq!(symbols[0]["name"], json!("alpha"));
     assert_eq!(symbols[0]["line"], json!(1));
     assert_eq!(symbols[0]["end_line"], json!(6));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_symbols_reports_pub_super_multiline_rust_function_body_end_line() {
+    let dir = temp_dir("air-tools-repo-symbols-pub-super-multiline-fn-end-lines");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "pub(super) fn alpha(\n  name: &str,\n) -> Result<(), String> {\n  if name.is_empty() {\n    return Err(format!(\"missing {name}\"));\n  }\n  Ok(())\n}\n\nfn beta() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.symbols": {
+                  "kind": "repo_symbols",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_symbols": 10,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "repo.symbols",
+            &json!({"path": "src/lib.rs", "names": ["alpha"]}),
+        )
+        .unwrap();
+
+    let symbols = output["symbols"].as_array().unwrap();
+    assert_eq!(symbols.len(), 1);
+    assert_eq!(symbols[0]["name"], json!("alpha"));
+    assert_eq!(symbols[0]["line"], json!(1));
+    assert_eq!(symbols[0]["end_line"], json!(8));
     let _ = fs::remove_dir_all(dir);
 }
 

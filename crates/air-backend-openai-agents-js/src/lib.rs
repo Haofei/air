@@ -495,28 +495,6 @@ function validateToolCapability(module, action, toolConfigRoot) {
   }
 }
 
-function applyWriteScope(toolName, inputValue, writeScope) {
-  if (!['file.write', 'file.edit', 'edit'].includes(toolName) || writeScope == null) {
-    return inputValue;
-  }
-  let allowedPaths;
-  if (typeof writeScope === 'string') {
-    allowedPaths = writeScope.trim() ? [writeScope.trim()] : [];
-  } else if (Array.isArray(writeScope)) {
-    allowedPaths = writeScope.map((path) => {
-      if (typeof path !== 'string') throw new Error('tool_batch_dispatch write_scope entries must be strings');
-      return path.trim();
-    }).filter(Boolean);
-  } else {
-    throw new Error('tool_batch_dispatch write_scope must be a string or array of strings');
-  }
-  if (allowedPaths.length === 0) return inputValue;
-  if (!inputValue || typeof inputValue !== 'object' || Array.isArray(inputValue)) {
-    throw new Error(`tool ${toolName} input must be an object`);
-  }
-  return { ...inputValue, allowed_paths: allowedPaths };
-}
-
 function enforceRepeatedToolPolicy(module, toolHistory, toolName, inputValue) {
   const limit = module.policy?.max_repeated_tool_calls;
   if (limit == null) {
@@ -1050,7 +1028,6 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
         }
       } else if (action.kind === 'tool_batch_dispatch') {
         const batchValue = evalInput(localState, outputs, action.input);
-        const writeScope = action.write_scope == null ? null : evalInput(localState, outputs, action.write_scope);
         if (!Array.isArray(batchValue)) {
           throw new Error('tool_batch_dispatch input must be an array');
         }
@@ -1076,7 +1053,7 @@ async function runModule(modelConfig, toolConfig, moduleId, moduleInputs) {
           const normalized = normalizeModelSelectedToolName(module, dispatchValue.tool);
           const dispatchedAction = { ...action, tool: normalized.toolName };
           if (normalized.requestedTool != null) dispatchedAction.requested_tool = normalized.requestedTool;
-          const inputValue = applyWriteScope(normalized.toolName, dispatchValue.input ?? {}, writeScope);
+          const inputValue = dispatchValue.input ?? {};
           try {
             validateToolCapability(module, dispatchedAction, toolConfig);
           } catch (error) {
