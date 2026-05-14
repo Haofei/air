@@ -408,15 +408,16 @@ fn build_chat_completion_body(
     if let Some(temperature) = model_config.temperature {
         body["temperature"] = json!(temperature);
     }
-    if let Some(response_format) = resolved_response_format(model_config) {
-        body["response_format"] = response_format;
-    }
-
     let tool_name_map = if model_config.native_tool_calls == Some(true) {
         attach_native_tool_calls(&mut body, input)?
     } else {
         BTreeMap::new()
     };
+    if tool_name_map.is_empty() {
+        if let Some(response_format) = resolved_response_format(model_config) {
+            body["response_format"] = response_format;
+        }
+    }
 
     Ok(ChatCompletionBody {
         body,
@@ -707,54 +708,29 @@ fn input_to_native_tool_content(input: &Value) -> Result<String, RuntimeError> {
         return input_to_content(input);
     };
 
-    let mut projected = Map::new();
-    let mut context = Map::new();
-    let mut transcript = Vec::new();
-    for (key, value) in object {
-        match key.as_str() {
-            "allowed_tools" | "tool_schemas" => {}
-            "observations" => {
-                let compacted = compact_observation_history(value);
-                if let Some(section) = render_tool_transcript(key, &compacted) {
-                    transcript.push(section);
-                }
-                projected.insert("recent_tool_results".to_string(), compacted);
-            }
-            "tool_policy" => {
-                projected.insert("guidance".to_string(), compact_prompt_value(value));
-            }
-            "task" | "query" => {
-                projected.insert(key.clone(), compact_prompt_value(value));
-            }
-            "runtime"
-            | "verification_status"
-            | "target_path"
-            | "target_search_pattern"
-            | "target_symbol_query"
-            | "related_files"
-            | "write_paths" => {
-                context.insert(key.clone(), compact_prompt_value(value));
-            }
-            _ => {
-                context.insert(key.clone(), compact_prompt_value(value));
-            }
+    let mut sections = Vec::new();
+    if let Some(task) = object
+        .get("task")
+        .or_else(|| object.get("query"))
+        .and_then(Value::as_str)
+    {
+        sections.push(format!("<task>\n{}\n</task>", truncate_text(task, 8_000)));
+    }
+    if let Some(status) = object.get("verification_status").and_then(Value::as_str) {
+        sections.push(format!(
+            "<verification_status>{status}</verification_status>"
+        ));
+    }
+    if let Some(observations) = object.get("observations") {
+        let compacted = compact_observation_history(observations);
+        if let Some(section) = render_tool_transcript("tool_results", &compacted) {
+            sections.push(section);
         }
     }
-    if !context.is_empty() {
-        projected.insert("context".to_string(), Value::Object(context));
+    if sections.is_empty() {
+        return input_to_content(input);
     }
-    if !transcript.is_empty() {
-        projected.insert(
-            "tool_transcript".to_string(),
-            Value::String(truncate_text(&transcript.join("\n\n"), 60_000)),
-        );
-    }
-    projected.insert(
-        "response_contract".to_string(),
-        json!("Use provider-native tool calls for actions. Return complete=true with no tool calls only when the task is verified complete or no edit is needed."),
-    );
-
-    serde_json::to_string(&Value::Object(projected)).map_err(provider_error)
+    Ok(truncate_text(&sections.join("\n\n"), 64_000))
 }
 
 fn render_tool_transcript(label: &str, value: &Value) -> Option<String> {
@@ -773,9 +749,6 @@ fn render_observation_transcript(value: &Value, lines: &mut Vec<String>) {
     };
     if let Some(action) = object.get("action").and_then(Value::as_str) {
         lines.push(format!("action: {action}"));
-    }
-    if let Some(rationale) = object.get("rationale").and_then(Value::as_str) {
-        lines.push(format!("rationale: {}", truncate_text(rationale, 800)));
     }
     if let Some(results) = object.get("result").and_then(Value::as_array) {
         for result in results {
@@ -944,7 +917,6 @@ fn compact_observation(value: &Value) -> Value {
     };
     let mut compact = Map::new();
     copy_compact_field(&mut compact, object, "action");
-    copy_compact_field(&mut compact, object, "rationale");
     if let Some(requested) = object.get("requested") {
         compact.insert("requested".to_string(), compact_tool_requests(requested));
     }
@@ -1355,16 +1327,9 @@ fn parse_native_tool_calls(
         ));
     }
 
-    let rationale = response
-        .pointer("/choices/0/message/content")
-        .and_then(Value::as_str)
-        .filter(|content| !content.trim().is_empty())
-        .unwrap_or("model requested native tool calls");
-
     Ok(Some(json!({
         "complete": false,
-        "tool_calls": normalized_calls,
-        "rationale": rationale
+        "tool_calls": normalized_calls
     })))
 }
 
@@ -1887,7 +1852,7 @@ mod tests {
             temperature: None,
             request_timeout_seconds: None,
             system_prompt: None,
-            json_mode: None,
+            json_mode: Some(true),
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
@@ -1924,6 +1889,10 @@ mod tests {
             json!(["filePath"])
         );
         assert!(
+            request.body.get("response_format").is_none(),
+            "native tool calls should not force JSON response_format; provider tools carry the action schema"
+        );
+        assert!(
             request.body["tools"][0]["function"]["parameters"]["properties"]
                 .get("edits")
                 .is_some()
@@ -1934,10 +1903,11 @@ mod tests {
             !content.contains("tool_schemas") && !content.contains("allowed_tools"),
             "native tool mode must pass tool definitions through provider tools, not duplicate them in user content"
         );
-        let projected: Value = serde_json::from_str(content).unwrap();
-        assert_eq!(projected["task"], json!("choose tools"));
-        assert!(projected.get("response_contract").is_some());
-        assert!(projected.get("context").is_none());
+        assert!(content.contains("<task>\nchoose tools\n</task>"));
+        assert!(
+            serde_json::from_str::<Value>(content).is_err(),
+            "native tool content should be an OpenCode-style text transcript, not an AIR JSON envelope"
+        );
     }
 
     #[test]
@@ -1991,14 +1961,14 @@ mod tests {
         let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
         let content = request.body["messages"][0]["content"].as_str().unwrap();
 
-        assert!(content.contains("content_preview"));
-        assert!(content.contains("artifact_refs"));
+        assert!(content.contains("<file path=\"src/lib.rs\">"), "{content}");
         assert!(content.contains("[AIR_COMPACTED]"));
+        assert!(!content.contains("artifact_refs"));
         assert!(!content.contains("\"artifacts\""));
         assert!(!content.contains("\"tool_schemas\""));
-        let projected: Value = serde_json::from_str(content).unwrap();
-        assert!(projected.get("recent_tool_results").is_some());
-        assert!(projected.get("observations").is_none());
+        assert!(!content.contains("\"recent_tool_results\""));
+        assert!(!content.contains("\"observations\""));
+        assert!(!content.contains("rationale: read file"));
         assert!(content.len() < 15_000, "{content}");
     }
 
@@ -2030,14 +2000,15 @@ mod tests {
         });
 
         let content = input_to_native_tool_content(&input).unwrap();
-        let projected: Value = serde_json::from_str(&content).unwrap();
-        let output = &projected["recent_tool_results"][0]["result"][0]["output"];
-
-        assert_eq!(output["error_code"], json!("doom_loop"));
-        assert_eq!(output["permission"], json!("doom_loop"));
-        assert!(output["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("different next action")));
+        assert!(content.contains("<tool_results>"), "{content}");
+        assert!(content.contains("error_code"), "{content}");
+        assert!(content.contains("doom_loop"), "{content}");
+        assert!(content.contains("permission"), "{content}");
+        assert!(content.contains("different next action"), "{content}");
+        assert!(
+            serde_json::from_str::<Value>(&content).is_err(),
+            "native tool content should be transcript text"
+        );
     }
 
     #[test]
@@ -2080,16 +2051,14 @@ mod tests {
         });
 
         let content = input_to_native_tool_content(&input).unwrap();
-        let projected: Value = serde_json::from_str(&content).unwrap();
-        let output = &projected["recent_tool_results"][0]["result"][0]["output"];
-
-        assert_eq!(output["effective_query"], json!("maybe_save_full_output"));
-        assert_eq!(
-            output["symbols"][0]["name"],
-            json!("maybe_save_full_output")
+        assert!(content.contains("symbols:"), "{content}");
+        assert!(
+            content.contains(
+                "crates/air-tools/src/file_tools.rs:473-487 function maybe_save_full_output"
+            ),
+            "{content}"
         );
-        assert_eq!(output["symbols"][0]["line"], json!(473));
-        assert_eq!(output["symbols"][0]["end_line"], json!(487));
+        assert!(!content.contains("\"recent_tool_results\""));
     }
 
     #[test]
@@ -2135,23 +2104,14 @@ mod tests {
         });
 
         let content = input_to_native_tool_content(&input).unwrap();
-        let projected: Value = serde_json::from_str(&content).unwrap();
-        let compacted = &projected["recent_tool_results"][0]["result"][0]["output"];
-        let transcript = projected["tool_transcript"].as_str().unwrap();
 
-        assert_eq!(compacted["files"][0]["path"], json!("src/lib.rs"));
-        assert!(compacted["files"][0]["content_preview"]
-            .as_str()
-            .is_some_and(|content| content.contains("fn old_helper")));
+        assert!(content.contains("<file path=\"src/lib.rs\">"), "{content}");
+        assert!(content.contains("fn old_helper"), "{content}");
         assert!(
-            transcript.contains("<file path=\"src/lib.rs\">"),
-            "{transcript}"
+            content.contains("<file path=\"src/git_tools.rs\">"),
+            "{content}"
         );
-        assert!(transcript.contains("fn old_helper"), "{transcript}");
-        assert!(
-            transcript.contains("<file path=\"src/git_tools.rs\">"),
-            "{transcript}"
-        );
+        assert!(!content.contains("\"tool_transcript\""));
     }
 
     #[test]
@@ -2260,8 +2220,7 @@ mod tests {
                         "oldString": "old",
                         "newString": "new"
                     }
-                }],
-                "rationale": "Need an edit."
+                }]
             })
         );
     }

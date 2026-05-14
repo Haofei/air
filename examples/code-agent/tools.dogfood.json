@@ -163,7 +163,7 @@
         "default": [
           "bash",
           "-lc",
-          "cargo test -q --workspace && cargo clippy -q --workspace --all-targets -- -D warnings"
+          "export CARGO_TARGET_DIR=\"${AIR_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/air-code-agent-cargo-target-${PWD//\\//_}}\"; cargo test -q --workspace && cargo clippy -q --workspace --all-targets -- -D warnings"
         ]
       },
       "timeout_seconds": 120,

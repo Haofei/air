@@ -409,11 +409,7 @@ mod tests {
                 .get("code_edit_decider")
                 .cloned()
                 .unwrap_or_default(),
-            BTreeSet::from([
-                "complete".to_string(),
-                "rationale".to_string(),
-                "tool_calls".to_string()
-            ])
+            BTreeSet::from(["complete".to_string(), "tool_calls".to_string()])
         );
         assert!(
             requirements

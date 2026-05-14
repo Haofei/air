@@ -48,7 +48,7 @@ state:
     enum: [unknown, passed, failed]
   decision:
     type: object
-    required: [complete, tool_calls, rationale]
+    required: [complete, tool_calls]
     properties:
       complete: boolean
       tool_calls:
@@ -59,7 +59,6 @@ state:
           properties:
             tool: string
             input: object
-      rationale: string
   observation:
     type: array
     items: object
@@ -212,7 +211,6 @@ workflow:
               final_decision:
                 literal:
                   complete: false
-                  rationale: Step budget reached before verified completion.
               runtime:
                 ref: _air
           output: edit_summary
@@ -269,8 +267,8 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 6
-                max_bytes: 36000
+                max_items: 4
+                max_bytes: 24000
               runtime:
                 ref: _air
               allowed_tools:
@@ -395,8 +393,8 @@ workflow:
               tool_policy:
                 literal:
                   loop: "Work as a direct coding tool loop: choose the next read/search/edit/test action yourself from current observations. Do not wait for a separate planner."
-                  context: "Keep context narrow. Prefer grep, repo.symbols, read contains+context_lines, read start_line+limit, or exact line ranges over whole-file reads. If repo.symbols returns the target function line/end_line, read that range once and edit from that context instead of rereading overlapping ranges. Do not repeat the same read/search unless the previous result was missing a specific fact."
-                  edits: "After you have enough local context for a concrete change, edit. Keep editing while the patch is incomplete; do not validate after every tiny edit. Use multiple edits only through edit.edits when they target the same file and are grounded by prior context."
+                  context: "Keep context narrow. When the task names an exact file path, start with read or grep inside that file; do not call repo.symbols merely to restate file structure. Use repo.symbols or lsp only when symbol boundaries or references determine safety. Prefer read contains+context_lines, read start_line+limit, or exact line ranges over whole-file reads. Do not repeat the same read/search unless the previous result was missing a specific fact."
+                  edits: "After observations contain a unique oldString and the intended replacement is clear, edit instead of doing another exploratory read. Keep editing while the patch is incomplete; do not validate after every tiny edit. Use multiple edits only through edit.edits when they target the same file and are grounded by prior context."
                   paths: "Copy repository paths exactly byte-for-byte from tool output metadata. If verification points to another workspace file, edit it when needed."
                   diagnostics: "If validation fails, use returned diagnostics and diagnostic.context to make the smallest correction. Do not restart broad exploration."
                   finish: "When the patch is coherent, call format.run and test.run yourself, or return complete=true with tool_calls=[] to let AIR run the final format/test gate. Finish only after verification_status is passed or the task truly needs no code change."
@@ -424,8 +422,6 @@ workflow:
             object:
               action:
                 literal: tool_result
-              rationale:
-                path: decision.rationale
               result:
                 ref: observation
         - kind: set
@@ -447,6 +443,75 @@ workflow:
           values:
             verification_status: failed
             phase: choose
+
+    - id: manual-format-test-failed
+      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true && observation[1].tool == "test.run" && observation[1].status == "ok" && observation[1].output.success == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: diagnostic.context
+                  input:
+                    object:
+                      diagnostics:
+                        ref: observation[1].output.diagnostics
+                      context_lines:
+                        literal: 6
+          output: diagnostic_context
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_context
+              result:
+                ref: diagnostic_context
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: manual-format-test-passed-with-assertions
+      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true && observation[1].tool == "test.run" && observation[1].status == "ok" && observation[1].output.success == true && acceptance_assertions != []
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: code.assert
+                  input:
+                    object:
+                      assertions:
+                        ref: acceptance_assertions
+          output: acceptance_assert_result
+          max_calls: 1
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: acceptance_assertions
+              result:
+                ref: acceptance_assert_result
+        - kind: set
+          values:
+            phase: post_accept
+
+    - id: manual-format-test-passed
+      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true && observation[1].tool == "test.run" && observation[1].status == "ok" && observation[1].output.success == true && acceptance_assertions == []
+      actions:
+        - kind: set
+          values:
+            verification_status: passed
+            phase: summarize
 
     - id: manual-format-passed
       when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true

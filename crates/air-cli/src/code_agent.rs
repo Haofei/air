@@ -1169,6 +1169,9 @@ mod tests {
                 "act",
                 "edit-applied",
                 "manual-format-failed",
+                "manual-format-test-failed",
+                "manual-format-test-passed-with-assertions",
+                "manual-format-test-passed",
                 "manual-format-passed",
                 "final-format-before-complete",
                 "final-format-tool-error",
@@ -1298,8 +1301,15 @@ mod tests {
             .as_u64()
             .unwrap();
         assert!(
-            max_items >= 6,
-            "recent observations need room for search, read, edit, and validation feedback"
+            max_items <= 4,
+            "recent observations should stay compact enough to avoid read-only loops"
+        );
+        let max_bytes = choose_rule["actions"][0]["input"]["object"]["observations"]["max_bytes"]
+            .as_u64()
+            .unwrap();
+        assert!(
+            max_bytes <= 24_000,
+            "recent observations should not keep growing with repeated exploration"
         );
         let policy = choose_rule["actions"][0]["input"]["object"]["tool_policy"]["literal"]
             ["context"]
@@ -1308,6 +1318,40 @@ mod tests {
         assert!(
             policy.contains("Do not repeat the same read/search"),
             "model context policy should prevent read-only loops: {policy}"
+        );
+        assert!(
+            policy.contains("When the task names an exact file path"),
+            "model should start from explicit file paths instead of broad symbol maps: {policy}"
+        );
+    }
+
+    #[test]
+    fn edit_loop_does_not_replay_model_rationale_as_context() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("examples/code-agent/code-edit-loop.air.yaml");
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+        let decision_schema = &yaml["state"]["decision"];
+        let required = decision_schema["required"].as_sequence().unwrap();
+        assert!(
+            !required
+                .iter()
+                .any(|field| field.as_str() == Some("rationale")),
+            "OpenCode-style tool loops should not require a separate rationale wrapper"
+        );
+
+        let act_rule = yaml["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("act"))
+            .unwrap();
+        assert!(
+            act_rule["actions"][1]["value"]["object"]
+                .get("rationale")
+                .is_none(),
+            "provider reasoning/answer belongs in trace, not replayed observations"
         );
     }
 

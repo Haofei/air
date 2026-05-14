@@ -25,6 +25,9 @@ assert rule_ids == [
     "act",
     "edit-applied",
     "manual-format-failed",
+    "manual-format-test-failed",
+    "manual-format-test-passed-with-assertions",
+    "manual-format-test-passed",
     "manual-format-passed",
     "final-format-before-complete",
     "final-format-tool-error",
@@ -61,15 +64,32 @@ observations_window = re.search(
     choose.group("body"),
 )
 assert observations_window, "choose rule must pass bounded recent observations"
-assert int(observations_window.group(1)) == 6, observations_window.group(0)
-assert int(observations_window.group(2)) == 36000, observations_window.group(0)
+assert int(observations_window.group(1)) <= 4, observations_window.group(0)
+assert int(observations_window.group(2)) <= 24000, observations_window.group(0)
 
 for phrase in (
     "Work as a direct coding tool loop",
     "Do not repeat the same read/search",
+    "When the task names an exact file path",
     "do not validate after every tiny edit",
 ):
     assert phrase in choose.group("body"), phrase
+
+decision_schema = re.search(
+    r"\n\s+decision:\s*\n(?P<body>.*?)(?:\n\s+observation:)",
+    module,
+    re.S,
+)
+assert decision_schema, "missing decision state schema"
+assert "required: [complete, tool_calls]" in decision_schema.group("body"), decision_schema.group("body")
+assert "rationale:" not in decision_schema.group("body"), "code edit decider should not require AIR rationale wrapper"
+
+act_body = re.search(
+    r"- id:\s*act\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)",
+    module,
+    re.S,
+).group("body")
+assert "path: decision.rationale" not in act_body, "act observations should not replay model rationale"
 
 edit_contract = re.search(
     r"\n\s+edit:\s*\n(?P<body>.*?)(?:\n\s+diagnostic\.context:)",
