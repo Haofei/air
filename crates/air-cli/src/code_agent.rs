@@ -900,7 +900,20 @@ mod tests {
 
         assert_eq!(
             tools,
-            vec!["glob", "read", "grep", "lsp", "edit", "bash", "todowrite"]
+            vec![
+                "question",
+                "bash",
+                "read",
+                "glob",
+                "grep",
+                "edit",
+                "write",
+                "task",
+                "webfetch",
+                "todowrite",
+                "todoread",
+                "skill"
+            ]
         );
     }
 

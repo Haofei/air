@@ -3621,14 +3621,15 @@ fn call_bash_tool(
     let mut output = run_command_argv(name, "bash", &cwd, &argv, options)?;
     if let Some(object) = output.as_object_mut() {
         let description = input.get("description").and_then(Value::as_str);
+        let verification = is_verification_bash_command(command, description);
         object.insert(
             "input_command".to_string(),
             Value::String(command.to_string()),
         );
-        object.insert(
-            "verification".to_string(),
-            Value::Bool(is_verification_bash_command(command, description)),
-        );
+        object.insert("verification".to_string(), Value::Bool(verification));
+        if verification {
+            normalize_bash_verification_result(object);
+        }
         if let Some(description) = description {
             object.insert(
                 "description".to_string(),
@@ -3637,6 +3638,48 @@ fn call_bash_tool(
         }
     }
     Ok(output)
+}
+
+fn normalize_bash_verification_result(object: &mut Map<String, Value>) {
+    let Some(log) = object.get("log").and_then(Value::as_str) else {
+        return;
+    };
+    let Some(status) = echoed_exit_status(log) else {
+        return;
+    };
+    object.insert(
+        "reported_exit_status".to_string(),
+        Value::Number(status.into()),
+    );
+    if status != 0 {
+        object.insert("success".to_string(), Value::Bool(false));
+        object.insert("status".to_string(), Value::Number(status.into()));
+        if let Some(Value::Array(artifacts)) = object.get_mut("artifacts") {
+            for artifact in artifacts {
+                if let Some(metadata) = artifact.get_mut("metadata").and_then(Value::as_object_mut)
+                {
+                    metadata.insert("success".to_string(), Value::Bool(false));
+                    metadata.insert("status".to_string(), Value::Number(status.into()));
+                    metadata.insert(
+                        "reported_exit_status".to_string(),
+                        Value::Number(status.into()),
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn echoed_exit_status(log: &str) -> Option<i64> {
+    log.lines().rev().find_map(|line| {
+        let trimmed = line.trim();
+        let value = trimmed
+            .strip_prefix("EXIT:")
+            .or_else(|| trimmed.strip_prefix("exit:"))
+            .or_else(|| trimmed.strip_prefix("exit code:"))?
+            .trim();
+        value.parse::<i64>().ok()
+    })
 }
 
 fn is_verification_bash_command(command: &str, description: Option<&str>) -> bool {

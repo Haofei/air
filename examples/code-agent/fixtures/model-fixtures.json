@@ -6,23 +6,13 @@
           "complete": false,
           "tool_calls": [
             {
-              "input": {}
-            }
-          ],
-          "rationale": "Intentionally malformed fixture item that omits the tool name so the edit loop exercises observed tool-call errors."
-        },
-        {
-          "complete": false,
-          "tool_calls": [
-            {
               "tool": "bash",
               "input": {
                 "command": "node examples/code-agent/edit-fixture/test.js",
                 "description": "Run the fixture test"
               }
             }
-          ],
-          "rationale": "Run the configured validation first to capture the current failure."
+          ]
         },
         {
           "complete": false,
@@ -35,8 +25,7 @@
                 "max_bytes": 20000
               }
             }
-          ],
-          "rationale": "Read the small target before selecting a file operation."
+          ]
         },
         {
           "complete": false,
@@ -49,21 +38,7 @@
                 "newString": "  return a + b;"
               }
             }
-          ],
-          "rationale": "The failing implementation subtracts on line 2; replace only that line."
-        },
-        {
-          "complete": false,
-          "tool_calls": [
-            {
-              "tool": "bash",
-              "input": {
-                "command": "git diff --",
-                "description": "Show workspace diff"
-              }
-            }
-          ],
-          "rationale": "Inspect the workspace diff before finishing."
+          ]
         },
         {
           "complete": false,
@@ -75,18 +50,9 @@
                 "description": "Run the fixture test after the edit"
               }
             }
-          ],
-          "rationale": "Run the configured fixture validation after applying the edit."
-        },
-        {
-          "complete": true,
-          "tool_calls": [],
-          "rationale": "The edit was applied, validation passed, and the diff was inspected."
+          ]
         }
       ]
-    },
-    "code_edit_summarizer": {
-      "rationale": "The bounded tool loop read the target and test, applied a one-line edit call, and the configured fixture validation passed."
     }
   }
 }

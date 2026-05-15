@@ -809,10 +809,18 @@ fn file_search_accepts_opencode_grep_aliases() {
         .as_str()
         .is_some_and(|path| path.ends_with("air-tools-file-search-opencode")
             || path.contains("air-tools-file-search-opencode-")));
+    assert!(output["base_path"]
+        .as_str()
+        .is_some_and(|path| path.ends_with("air-tools-file-search-opencode")
+            || path.contains("air-tools-file-search-opencode-")));
     assert_eq!(output["match_count"], json!(1));
     assert_eq!(output["matches"][0]["path"], json!("note.txt"));
     assert_eq!(output["matches"][0]["line_number"], json!(2));
     assert_eq!(output["matches"][0]["before"][0]["line"], json!("alpha"));
+    let content = output["artifacts"][0]["content"].as_str().unwrap();
+    assert!(content.contains("note.txt:\n"));
+    assert!(content.contains("  Line 1: alpha"));
+    assert!(content.contains("  Line 2: needle"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1504,7 +1512,7 @@ fn file_edit_accepts_absolute_path_inside_base_dir() {
 }
 
 #[test]
-fn file_edit_rejects_partial_single_line_code_anchor() {
+fn file_edit_accepts_partial_single_line_code_anchor() {
     let dir = temp_dir("air-tools-file-edit-partial-code-line");
     fs::create_dir_all(dir.join("src")).unwrap();
     fs::write(
@@ -1540,29 +1548,7 @@ fn file_edit_rejects_partial_single_line_code_anchor() {
             &json!({
                 "path": "src/lib.rs",
                 "oldString": "    fn tool_capability",
-                "newString": ""
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["success"], json!(false));
-    assert_eq!(output["applied"], json!(false));
-    assert!(output["diagnostics"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("complete source line"));
-    assert_eq!(
-        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
-        "impl Tools {\n    fn tool_capability(&self, name: &str) -> Option<&str> {\n        None\n    }\n}\n"
-    );
-
-    let output = tools
-        .call_tool(
-            "file.edit",
-            &json!({
-                "path": "src/lib.rs",
-                "oldString": "    fn tool_capability(&self, name: &str) -> Option<&str> {",
-                "newString": "    fn capability_for_tool(&self, name: &str) -> Option<&str> {"
+                "newString": "    fn capability_for_tool"
             }),
         )
         .unwrap();
@@ -1572,6 +1558,51 @@ fn file_edit_rejects_partial_single_line_code_anchor() {
     assert!(fs::read_to_string(dir.join("src/lib.rs"))
         .unwrap()
         .contains("fn capability_for_tool"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_edit_allows_replace_all_for_single_identifier_anchor() {
+    let dir = temp_dir("air-tools-file-edit-replace-all-identifier");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn demo(chars: usize) -> usize {\n    let total = chars + 1;\n    total\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.edit",
+            &json!({
+                "path": "src/lib.rs",
+                "oldString": "chars",
+                "newString": "payload_chars",
+                "replaceAll": true
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["applied"], json!(true));
+    assert_eq!(output["replacements"], json!(2));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "fn demo(payload_chars: usize) -> usize {\n    let total = payload_chars + 1;\n    total\n}\n"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -2850,12 +2881,18 @@ fn code_agent_self_tools_validate_project_paths() {
     let config_path = root.join("examples/code-agent/tools.dogfood.json");
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
+    assert_eq!(tools.tool_capability("question"), Some("code.read"));
+    assert_eq!(tools.tool_capability("bash"), Some("code.test"));
     assert_eq!(tools.tool_capability("read"), Some("file.read"));
+    assert_eq!(tools.tool_capability("glob"), Some("code.read"));
     assert_eq!(tools.tool_capability("grep"), Some("file.read"));
     assert_eq!(tools.tool_capability("edit"), Some("file.write"));
-    assert_eq!(tools.tool_capability("bash"), Some("code.test"));
+    assert_eq!(tools.tool_capability("write"), Some("file.write"));
+    assert_eq!(tools.tool_capability("task"), Some("code.read"));
+    assert_eq!(tools.tool_capability("webfetch"), Some("code.read"));
     assert_eq!(tools.tool_capability("todowrite"), Some("code.read"));
-    assert_eq!(tools.tool_capability("lsp"), Some("code.read"));
+    assert_eq!(tools.tool_capability("todoread"), Some("code.read"));
+    assert_eq!(tools.tool_capability("skill"), Some("code.read"));
 
     let error = tools
         .call_tool("bash", &json!({"description": "missing command"}))
@@ -4061,6 +4098,45 @@ fn bash_uses_pipefail_for_pipelines() {
     assert_eq!(output["success"], json!(false));
     assert_eq!(output["status"], json!(1));
     assert_eq!(output["verification"], json!(true));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_verification_honors_reported_exit_status() {
+    let dir = temp_dir("air-tools-bash-reported-exit-status");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "false; echo \"EXIT: $?\"",
+                "description": "Run verification"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["verification"], json!(true));
+    assert_eq!(output["reported_exit_status"], json!(1));
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["status"], json!(1));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["reported_exit_status"],
+        json!(1)
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

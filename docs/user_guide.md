@@ -249,11 +249,11 @@ For deterministic offline smoke tests, the native CLI also accepts fixture model
 ```json
 {
   "fixtures": {
-    "code_edit_summarizer": {
-      "initial_success": false,
-      "final_success": true,
-      "patch_applied": true,
-      "rationale": "fixture edit summary"
+    "planner": {
+      "steps": [
+        "inspect inputs",
+        "return deterministic fixture output"
+      ]
     }
   }
 }
@@ -326,9 +326,10 @@ AIR checks:
 
 Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
 Tool kinds are lower-level capabilities; the names exposed to a model are application aliases.
-For the code-agent edit loop, prefer the OpenCode-style aliases `glob`, `lsp`, `read`,
-`grep`, `edit`, `bash`, and `todowrite`. Git operations should use `bash`, the same
-terminal path a human developer would use.
+For the code-agent edit loop, prefer the OpenCode-style aliases `question`, `bash`,
+`read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`, `todowrite`,
+`todoread`, and `skill`. Git operations should use `bash`, the same terminal path
+a human developer would use.
 
 | Tool kind | Typical AIR tool name | Input | Output | Notes |
 | --- | --- | --- | --- | --- |
@@ -387,7 +388,8 @@ passed through semantic compaction or adapter layers and wants to validate again
 enforcement.
 
 The `examples/code-agent` workflow exposes one OpenCode-style loop over declared tools such as
-`glob`, `lsp`, `read`, `grep`, `edit`, `bash`, and `todowrite`.
+`question`, `bash`, `read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`,
+`todowrite`, `todoread`, and `skill`.
 The same loop handles exploration, review, editing,
 formatting, and verification from a single task prompt; the model discovers relevant files through
 tools instead of receiving target-file hints from the CLI. The model-facing write contract stays

@@ -1,7 +1,7 @@
 agent:
   name: code-edit-loop-agent
   version: 0.2.0
-  description: "Minimal OpenCode-style code edit loop with line-numbered reads and optional LSP facts."
+  description: "Minimal OpenCode-style code edit loop with line-numbered reads, search, edit, bash, and todo tracking."
 
 inputs:
   task: string
@@ -67,12 +67,6 @@ state:
   final_diff_result:
     type: array
     items: object
-  edit_summary:
-    type: object
-    additional_properties: false
-    required: [rationale]
-    properties:
-      rationale: string
   edit:
     type: object
     required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
@@ -97,25 +91,40 @@ state:
       rationale: string
 
 tools:
-  - name: glob
+  - name: question
     capability: code.read
-    timeout_ms: 10000
-  - name: read
-    capability: file.read
-    timeout_ms: 10000
-  - name: grep
-    capability: file.read
-    timeout_ms: 10000
-  - name: lsp
-    capability: code.read
-    timeout_ms: 120000
-  - name: edit
-    capability: file.write
     timeout_ms: 10000
   - name: bash
     capability: code.test
     timeout_ms: 120000
+  - name: read
+    capability: file.read
+    timeout_ms: 10000
+  - name: glob
+    capability: code.read
+    timeout_ms: 10000
+  - name: grep
+    capability: file.read
+    timeout_ms: 10000
+  - name: edit
+    capability: file.write
+    timeout_ms: 10000
+  - name: write
+    capability: file.write
+    timeout_ms: 10000
+  - name: task
+    capability: code.read
+    timeout_ms: 10000
+  - name: webfetch
+    capability: code.read
+    timeout_ms: 120000
   - name: todowrite
+    capability: code.read
+    timeout_ms: 10000
+  - name: todoread
+    capability: code.read
+    timeout_ms: 10000
+  - name: skill
     capability: code.read
     timeout_ms: 10000
 
@@ -168,10 +177,10 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 8
-                max_bytes: 90000
+                max_items: 12
+                max_bytes: 180000
               allowed_tools:
-                literal: [glob, read, grep, lsp, edit, bash, todowrite]
+                literal: [question, bash, read, glob, grep, edit, write, task, webfetch, todowrite, todoread, skill]
           output: decision
           timeout_seconds: 180
           retry:
@@ -291,23 +300,6 @@ workflow:
           max_calls: 2
           timeout_seconds: 120
           on_error: observe
-        - kind: model_call
-          model: code_edit_summarizer
-          input:
-            object:
-              task:
-                ref: task
-              observations:
-                take_last_within_bytes:
-                  ref: observations
-                max_items: 6
-                max_bytes: 20000
-              final_diff_result:
-                ref: final_diff_result
-          output: edit_summary
-          timeout_seconds: 180
-          retry:
-            max_attempts: 2
         - kind: set
           values:
             edit:
@@ -343,7 +335,7 @@ workflow:
                     truncated:
                       ref: final_diff_result[0].output.truncated
                 rationale:
-                  ref: edit_summary.rationale
+                  literal: Completed by AIR code agent; see workspace_diff and changed_files for the audited change.
             phase: done
 
     - id: done

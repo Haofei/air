@@ -411,26 +411,7 @@ pub(super) fn call_file_search_tool(
             &mut result,
         )?;
     }
-    let mut rendered = String::new();
-    for item in &result.matches {
-        for context in item
-            .get("before")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            rendered.push_str(&render_search_line(context));
-        }
-        rendered.push_str(&render_search_line(item));
-        for context in item
-            .get("after")
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-        {
-            rendered.push_str(&render_search_line(context));
-        }
-    }
+    let rendered = render_search_matches(&result.matches, Some(&base));
     let (artifact_content, content_truncated, bytes, full_output_path) =
         limit_and_maybe_save(name, &base, "file-search", rendered.as_bytes(), max_bytes)?;
     let match_truncated = result.total_match_count > result.matches.len();
@@ -455,6 +436,7 @@ pub(super) fn call_file_search_tool(
         "content": artifact_content,
         "metadata": {
             "provider": "file_search",
+            "base_path": base.display().to_string(),
             "path": path.display().to_string(),
             "directory": directory,
             "pattern": pattern,
@@ -478,6 +460,7 @@ pub(super) fn call_file_search_tool(
     });
     Ok(json!({
         "path": path.display().to_string(),
+        "base_path": base.display().to_string(),
         "directory": directory,
         "pattern": pattern,
         "pattern_source": pattern_source,
@@ -823,7 +806,43 @@ fn truncate_line_text(line: &str, max_line_chars: usize) -> (String, bool) {
     (line.chars().take(max_line_chars).collect(), true)
 }
 
-fn render_search_line(value: &Value) -> String {
+fn render_search_matches(matches: &[Value], base_path: Option<&Path>) -> String {
+    let mut rendered = String::new();
+    let mut current_path = None;
+    for item in matches {
+        render_search_match(item, None, base_path, &mut current_path, &mut rendered);
+    }
+    rendered
+}
+
+fn render_search_match(
+    value: &Value,
+    fallback_path: Option<&str>,
+    base_path: Option<&Path>,
+    current_path: &mut Option<String>,
+    rendered: &mut String,
+) {
+    let path = value.get("path").and_then(Value::as_str).or(fallback_path);
+    if let Some(before) = value.get("before").and_then(Value::as_array) {
+        for context in before {
+            render_search_line(context, path, base_path, current_path, rendered);
+        }
+    }
+    render_search_line(value, path, base_path, current_path, rendered);
+    if let Some(after) = value.get("after").and_then(Value::as_array) {
+        for context in after {
+            render_search_line(context, path, base_path, current_path, rendered);
+        }
+    }
+}
+
+fn render_search_line(
+    value: &Value,
+    fallback_path: Option<&str>,
+    base_path: Option<&Path>,
+    current_path: &mut Option<String>,
+    rendered: &mut String,
+) {
     let number = value
         .get("line_number")
         .and_then(Value::as_u64)
@@ -832,10 +851,31 @@ fn render_search_line(value: &Value) -> String {
         .get("line")
         .and_then(Value::as_str)
         .unwrap_or_default();
-    if let Some(path) = value.get("path").and_then(Value::as_str) {
-        format!("{path}:{number}: {line}\n")
+    let path = value.get("path").and_then(Value::as_str).or(fallback_path);
+    if let Some(path) = path {
+        let display_path = display_search_path(path, base_path);
+        if current_path.as_deref() != Some(display_path.as_str()) {
+            if !rendered.is_empty() {
+                rendered.push('\n');
+            }
+            rendered.push_str(&display_path);
+            rendered.push_str(":\n");
+            *current_path = Some(display_path);
+        }
+        rendered.push_str(&format!("  Line {number}: {line}\n"));
     } else {
-        format!("{number}: {line}\n")
+        rendered.push_str(&format!("Line {number}: {line}\n"));
+    }
+}
+
+fn display_search_path(path: &str, base_path: Option<&Path>) -> String {
+    let path_value = Path::new(path);
+    if path_value.is_absolute() {
+        path.to_string()
+    } else if let Some(base_path) = base_path {
+        base_path.join(path_value).display().to_string()
+    } else {
+        path.to_string()
     }
 }
 
@@ -1366,58 +1406,6 @@ fn selected_edit_matches(matches: &[EditMatch], replace_all: bool) -> Vec<EditMa
     } else {
         vec![matches[0]]
     }
-}
-
-fn code_file_requires_complete_line_anchor(path: &str) -> bool {
-    let extension = Path::new(path)
-        .extension()
-        .and_then(|value| value.to_str())
-        .unwrap_or_default();
-    matches!(
-        extension,
-        "c" | "cc"
-            | "cpp"
-            | "cs"
-            | "css"
-            | "go"
-            | "h"
-            | "hpp"
-            | "java"
-            | "js"
-            | "jsx"
-            | "kt"
-            | "lua"
-            | "php"
-            | "py"
-            | "rb"
-            | "rs"
-            | "scala"
-            | "sh"
-            | "swift"
-            | "ts"
-            | "tsx"
-            | "vue"
-    )
-}
-
-fn single_line_code_anchor_is_incomplete(
-    content: &str,
-    edit_match: EditMatch,
-    old_string: &str,
-) -> bool {
-    if old_string.contains('\n') || old_string.trim().is_empty() {
-        return false;
-    }
-    let line_start = content[..edit_match.start]
-        .rfind('\n')
-        .map(|index| index + 1)
-        .unwrap_or(0);
-    let line_end = content[edit_match.end..]
-        .find('\n')
-        .map(|index| edit_match.end + index)
-        .unwrap_or(content.len());
-    let line = content[line_start..line_end].trim_end_matches('\r');
-    line.trim() != old_string.trim()
 }
 
 fn apply_selected_edit_matches(content: &str, selected: &[EditMatch], new_string: &str) -> String {
@@ -2372,32 +2360,6 @@ pub(super) fn call_file_edit_tool(
             ));
         }
         let selected_matches = selected_edit_matches(&matches, operation.replace_all);
-        if code_file_requires_complete_line_anchor(input_path)
-            && selected_matches.iter().any(|edit_match| {
-                single_line_code_anchor_is_incomplete(&updated, *edit_match, operation.old_string)
-            })
-        {
-            return Ok(file_edit_failure_output(
-                name,
-                &base,
-                &path,
-                input_path,
-                &diff,
-                EditDiagnostic {
-                    label: operation.label.clone(),
-                    path: input_path.to_string(),
-                    field: "old_string",
-                    message: format!(
-                        "{}.old_string must include a complete source line or multi-line context for code files",
-                        operation.label
-                    ),
-                    match_strategy: Some(operation.match_strategy.as_str()),
-                    effective_match_strategy: Some(effective_match_strategy.as_str()),
-                    match_count: Some(matches.len()),
-                    line: edit_anchor_line(&updated, operation.old_string),
-                },
-            ));
-        }
         diff.push_str(&edit_unified_diff(
             input_path,
             &updated,

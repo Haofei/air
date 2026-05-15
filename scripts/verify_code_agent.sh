@@ -22,7 +22,9 @@ assert rule_ids == [
     "summarize-at-step-limit",
     "choose",
     "act",
-    "bash-passed",
+    "edit-applied",
+    "bash-passed-after-patch",
+    "bash-passed-before-patch",
     "bash-failed",
     "complete-needs-verification",
     "complete-verified",
@@ -31,13 +33,14 @@ assert rule_ids == [
     "done",
 ], rule_ids
 
-for required in ("glob", "read", "grep", "lsp", "edit", "bash", "todowrite"):
+expected_tools = ["question", "bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "todoread", "skill"]
+for required in expected_tools:
     assert re.search(rf"\bname:\s*{re.escape(required)}\b", module) or f"{required}:" in module, required
 
 choose = re.search(r"- id:\s*choose\s*\n(?P<body>.*?)(?:\n\s*-\s+id:|\Z)", module, re.S)
 assert choose and "model: code_edit_decider" in choose.group("body")
-assert "max_items: 8" in choose.group("body")
-assert "max_bytes: 90000" in choose.group("body")
+assert "max_items: 12" in choose.group("body")
+assert "max_bytes: 180000" in choose.group("body")
 
 for path in (
     "examples/code-agent/tools.json",
@@ -46,7 +49,7 @@ for path in (
     "examples/code-agent/fixtures/tools.playwright.json",
 ):
     tools = json.loads(Path(path).read_text())["tools"]
-    assert list(tools) == ["glob", "read", "grep", "lsp", "edit", "bash", "todowrite"], (path, list(tools))
+    assert set(tools) == set(expected_tools), (path, list(tools))
 PY
 
 echo "[code-agent] fixture smoke"
@@ -77,7 +80,7 @@ assert "examples/code-agent/edit-fixture/math.js" in edit["workspace_diff"]["dif
 trace = [json.loads(line) for line in Path("target/generated/code-agent-minimal.trace.jsonl").read_text().splitlines()]
 first_decider = next(event for event in trace if event.get("action") == "model_call_start" and event.get("meta", {}).get("model") == "code_edit_decider")
 tool_names = first_decider["input"]["allowed_tools"]
-assert tool_names == ["glob", "read", "grep", "lsp", "edit", "bash", "todowrite"], tool_names
+assert tool_names == ["question", "bash", "read", "glob", "grep", "edit", "write", "task", "webfetch", "todowrite", "todoread", "skill"], tool_names
 PY
 
 echo "[code-agent] ok"

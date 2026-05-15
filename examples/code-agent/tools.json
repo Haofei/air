@@ -7,6 +7,10 @@
       "repo_dir": ".",
       "max_files": 100
     },
+    "question": {
+      "kind": "local_reflection",
+      "capability": "code.read"
+    },
     "read": {
       "kind": "file_read",
       "capability": "file.read",
@@ -22,20 +26,19 @@
       "max_line_chars": 2000,
       "max_bytes": 65536
     },
-    "lsp": {
-      "kind": "rust_analyzer",
-      "capability": "code.read",
-      "root_dir": ".",
-      "command": "rust-analyzer",
-      "max_results": 80,
-      "max_diagnostics": 80,
-      "max_bytes": 65536
-    },
     "edit": {
       "kind": "file_edit",
       "capability": "file.write",
       "base_dir": ".",
       "max_bytes": 262144
+    },
+    "write": {
+      "kind": "file_write",
+      "capability": "file.write",
+      "base_dir": ".",
+      "max_bytes": 262144,
+      "create_dirs": true,
+      "allow_overwrite": true
     },
     "bash": {
       "kind": "bash",
@@ -45,8 +48,26 @@
       "max_bytes": 65536,
       "truncation_direction": "tail"
     },
+    "task": {
+      "kind": "local_reflection",
+      "capability": "code.read"
+    },
+    "webfetch": {
+      "kind": "web_fetch",
+      "capability": "code.read",
+      "timeout_seconds": 120,
+      "max_bytes": 65536
+    },
     "todowrite": {
       "kind": "todo_write",
+      "capability": "code.read"
+    },
+    "todoread": {
+      "kind": "local_reflection",
+      "capability": "code.read"
+    },
+    "skill": {
+      "kind": "local_reflection",
       "capability": "code.read"
     }
   },

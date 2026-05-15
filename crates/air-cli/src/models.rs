@@ -412,10 +412,8 @@ mod tests {
             BTreeSet::from(["complete".to_string(), "tool_calls".to_string()])
         );
         assert!(
-            requirements
-                .get("code_edit_summarizer")
-                .is_some_and(|required| required == &BTreeSet::from(["rationale".to_string()])),
-            "code_edit_summarizer prompt must only produce rationale; AIR derives completion fields"
+            !requirements.contains_key("code_edit_summarizer"),
+            "code edit loop should derive final audit fields without a summarizer model call"
         );
 
         for (alias, required) in requirements {
@@ -465,18 +463,6 @@ mod tests {
                 && !edit_prompt.contains("tool_calls (array)")
                 && !edit_prompt.contains("complete=true"),
             "code_edit_decider prompt should not expose AIR's outer completion protocol in native tool mode"
-        );
-        let summarize_prompt = config
-            .models
-            .get("code_edit_summarizer")
-            .and_then(|model| model.system_prompt.as_deref())
-            .unwrap_or_default()
-            .to_lowercase();
-        assert!(
-            summarize_prompt.contains("rationale")
-                && !summarize_prompt.contains("air")
-                && !summarize_prompt.contains("verification_status"),
-            "code_edit_summarizer prompt should not expose runtime control-plane fields"
         );
     }
 

@@ -495,26 +495,38 @@ fn build_chat_completion_body(
     model_name: String,
     input: &Value,
 ) -> Result<ChatCompletionBody, RuntimeError> {
+    let opencode_style =
+        model_config.native_tool_calls == Some(true) && is_opencode_code_input(input);
+    let request_model_name = if opencode_style {
+        model_name.to_ascii_lowercase()
+    } else {
+        model_name
+    };
     let mut body = json!({
-        "model": model_name
+        "model": request_model_name
     });
 
-    if let Some(extra_body) = &model_config.extra_body {
-        merge_extra_body(&mut body, extra_body);
-    }
-    if let Some(temperature) = model_config.temperature {
-        body["temperature"] = json!(temperature);
+    if opencode_style {
+        body["max_tokens"] = json!(32_000);
+    } else {
+        if let Some(extra_body) = &model_config.extra_body {
+            merge_extra_body(&mut body, extra_body);
+        }
+        if let Some(temperature) = model_config.temperature {
+            body["temperature"] = json!(temperature);
+        }
     }
     let tool_name_map = if model_config.native_tool_calls == Some(true) {
-        attach_native_tool_calls(&mut body, input)?
+        attach_native_tool_calls(&mut body, input, opencode_style)?
     } else {
         BTreeMap::new()
     };
     body["messages"] = Value::Array(build_chat_messages(
         model_config,
-        &model_name,
+        &request_model_name,
         input,
         &tool_name_map,
+        opencode_style,
     )?);
     if tool_name_map.is_empty() {
         if let Some(response_format) = resolved_response_format(model_config) {
@@ -533,15 +545,19 @@ fn build_chat_messages(
     model_name: &str,
     input: &Value,
     tool_name_map: &BTreeMap<String, String>,
+    opencode_style: bool,
 ) -> Result<Vec<Value>, RuntimeError> {
     let mut messages = Vec::new();
-    if let Some(system_prompt) = resolved_system_prompt(model_config) {
+    if let Some(mut system_prompt) = resolved_system_prompt(model_config) {
+        if opencode_style {
+            system_prompt.push_str("\n\n");
+            system_prompt.push_str(&opencode_environment_prompt(model_name));
+        }
         messages.push(json!({
             "role": "system",
             "content": system_prompt
         }));
-    }
-    if model_config.native_tool_calls == Some(true) && is_opencode_code_input(input) {
+    } else if opencode_style {
         messages.push(json!({
             "role": "system",
             "content": opencode_environment_prompt(model_name)
@@ -551,6 +567,7 @@ fn build_chat_messages(
         messages.extend(input_to_native_tool_messages_with_names(
             input,
             tool_name_map,
+            opencode_style,
         )?);
     } else {
         messages.push(json!({
@@ -590,6 +607,10 @@ fn opencode_environment_prompt(model_name: &str) -> String {
     let directory = std::env::current_dir()
         .map(|path| path.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
+    let platform = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
     let git_repo = Command::new("git")
         .args(["rev-parse", "--is-inside-work-tree"])
         .output()
@@ -612,7 +633,7 @@ fn opencode_environment_prompt(model_name: &str) -> String {
         "<env>".to_string(),
         format!("  Working directory: {directory}"),
         format!("  Is directory a git repo: {}", if git_repo { "yes" } else { "no" }),
-        format!("  Platform: {}", std::env::consts::OS),
+        format!("  Platform: {platform}"),
         format!("  Today's date: {date}"),
         "</env>".to_string(),
         "<files>".to_string(),
@@ -657,9 +678,10 @@ fn provider_user_content_bytes(body: &Value) -> usize {
 fn attach_native_tool_calls(
     body: &mut Value,
     input: &Value,
+    opencode_style: bool,
 ) -> Result<BTreeMap<String, String>, RuntimeError> {
     let tool_schemas = input.get("tool_schemas").and_then(Value::as_object);
-    let tool_names =
+    let mut tool_names =
         if let Some(allowed_tools) = input.get("allowed_tools").and_then(Value::as_array) {
             allowed_tools
                 .iter()
@@ -674,6 +696,45 @@ fn attach_native_tool_calls(
                 .cloned()
                 .collect::<Vec<_>>()
         };
+    if opencode_style {
+        for name in [
+            "question",
+            "bash",
+            "read",
+            "glob",
+            "grep",
+            "edit",
+            "write",
+            "task",
+            "webfetch",
+            "todowrite",
+            "todoread",
+            "skill",
+        ] {
+            if !tool_names.iter().any(|existing| existing == name) {
+                tool_names.push(name.to_string());
+            }
+        }
+        tool_names.sort_by_key(|name| {
+            [
+                "question",
+                "bash",
+                "read",
+                "glob",
+                "grep",
+                "edit",
+                "write",
+                "task",
+                "webfetch",
+                "todowrite",
+                "todoread",
+                "skill",
+            ]
+            .iter()
+            .position(|candidate| candidate == name)
+            .unwrap_or(usize::MAX)
+        });
+    }
     if tool_names.is_empty() {
         return Ok(BTreeMap::new());
     }
@@ -747,13 +808,19 @@ fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize
 
 fn native_tool_description(original_name: &str, schema: Option<&Value>) -> String {
     match original_name {
+        "question" => return opencode_question_description(),
         "glob" => return opencode_glob_description(),
         "read" => return opencode_read_description(),
         "grep" => return opencode_grep_description(),
         "edit" => return opencode_edit_description(),
+        "write" => return opencode_write_description(),
+        "task" => return opencode_task_description(),
+        "webfetch" => return opencode_webfetch_description(),
         "lsp" => return opencode_lsp_description(),
         "bash" => return opencode_bash_description(),
         "todowrite" => return opencode_todowrite_description(),
+        "todoread" => return "Use this tool to read your todo list".to_string(),
+        "skill" => return opencode_skill_description(),
         _ => {}
     }
     let Some(schema) = schema else {
@@ -864,6 +931,24 @@ Important notes:
 # Creating pull requests
 Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
 
+IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
+
+1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:
+   - Run a git status command to see all untracked files
+   - Run a git diff command to see both staged and unstaged changes that will be committed
+   - Check if the current branch tracks a remote branch and is up to date with the remote, so you know if you need to push to the remote
+   - Run a git log command and `git diff [base-branch]...HEAD` to understand the full commit history for the current branch (from the time it diverged from the base branch)
+2. Analyze all changes that will be included in the pull request, making sure to look at all relevant commits (NOT just the latest commit, but ALL commits that will be included in the pull request!!!), and draft a pull request summary
+3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run the following commands in parallel:
+   - Create new branch if needed
+   - Push to remote with -u flag if needed
+   - Create PR using gh pr create with the format below. Use a HEREDOC to pass the body to ensure correct formatting.
+<example>
+gh pr create --title "the pr title" --body "$(cat <<'EOF'
+## Summary
+<1-3 bullet points>
+</example>
+
 Important:
 - DO NOT use the TodoWrite or Task tools
 - Return the PR URL when you're done, so the user can see it
@@ -872,7 +957,22 @@ Important:
 - View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments"##
         .replace("${directory}", &directory)
         .replace("${maxLines}", "2000")
-        .replace("${maxBytes}", "65536")
+        .replace("${maxBytes}", "51200")
+}
+
+fn opencode_question_description() -> String {
+    r##"Use this tool when you need to ask the user questions during execution. This allows you to:
+1. Gather user preferences or requirements
+2. Clarify ambiguous instructions
+3. Get decisions on implementation choices as you work
+4. Offer choices to the user about what direction to take.
+
+Usage notes:
+- When `custom` is enabled (default), a "Type your own answer" option is added automatically; don't include "Other" or catch-all options
+- Answers are returned as arrays of labels; set `multiple: true` to allow selecting more than one
+- If you recommend a specific option, make that the first option in the list and add "(Recommended)" at the end of the label
+"##
+        .to_string()
 }
 
 fn opencode_read_description() -> String {
@@ -887,7 +987,8 @@ Usage:
 - Results are returned using cat -n format, with line numbers starting at 1
 - You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
-- You can read image files using this tool."##
+- You can read image files using this tool.
+"##
         .to_string()
 }
 
@@ -899,7 +1000,8 @@ fn opencode_grep_description() -> String {
 - Returns file paths and line numbers with at least one match sorted by modification time
 - Use this tool when you need to find files containing specific patterns
 - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
-- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead"##
+- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
+"##
         .to_string()
 }
 
@@ -909,7 +1011,8 @@ fn opencode_glob_description() -> String {
 - Returns matching file paths sorted by modification time
 - Use this tool when you need to find files by name patterns
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
-- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful."##
+- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.
+"##
         .to_string()
 }
 
@@ -923,7 +1026,105 @@ Usage:
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
 - The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
 - The edit will FAIL if `oldString` is found multiple times in the file with an error "oldString found multiple times and requires more code context to uniquely identify the intended match". Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.
-- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."##
+- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance.
+"##
+        .to_string()
+}
+
+fn opencode_write_description() -> String {
+    r##"Writes a file to the local filesystem.
+
+Usage:
+- This tool will overwrite the existing file if there is one at the provided path.
+- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
+- Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
+"##
+        .to_string()
+}
+
+fn opencode_task_description() -> String {
+    r##"Launch a new agent to handle complex, multistep tasks autonomously.
+
+Available agent types and the tools they have access to:
+- general: General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.
+- explore: Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
+
+When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
+
+When to use the Task tool:
+- When you are instructed to execute custom slash commands. Use the Task tool with the slash command invocation as the entire prompt. The slash command can take arguments. For example: Task(description="Check the file", prompt="/check-file path/to/file.py")
+
+When NOT to use the Task tool:
+- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
+- If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
+- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
+- Other tasks that are not related to the agent descriptions above
+
+
+Usage notes:
+1. Launch multiple agents concurrently whenever possible, to maximize performance; to do that, use a single message with multiple tool uses
+2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
+3. Each agent invocation is stateless unless you provide a session_id. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
+4. The agent's outputs should generally be trusted
+5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
+6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
+
+Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
+
+<example_agent_descriptions>
+"code-reviewer": use this agent after you are done writing a significant piece of code
+"greeting-responder": use this agent when to respond to user greetings with a friendly joke
+</example_agent_description>
+
+<example>
+user: "Please write a function that checks if a number is prime"
+assistant: Sure let me write a function that checks if a number is prime
+assistant: First let me use the Write tool to write a function that checks if a number is prime
+assistant: I'm going to use the Write tool to write the following code:
+<code>
+function isPrime(n) {
+  if (n <= 1) return false
+  for (let i = 2; i * i <= n; i++) {
+    if (n % i === 0) return false
+  }
+  return true
+}
+</code>
+<commentary>
+Since a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+</commentary>
+assistant: Now let me use the code-reviewer agent to review the code
+assistant: Uses the Task tool to launch the code-reviewer agent
+</example>
+
+<example>
+user: "Hello"
+<commentary>
+Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
+</commentary>
+assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+</example>
+"##
+        .to_string()
+}
+
+fn opencode_webfetch_description() -> String {
+    r##"- Fetches content from a specified URL
+- Takes a URL and optional format as input
+- Fetches the URL content, converts to requested format (markdown by default)
+- Returns the content in the specified format
+- Use this tool when you need to retrieve and analyze web content
+
+Usage notes:
+  - IMPORTANT: if another tool is present that offers better web fetching capabilities, is more targeted to the task, or has fewer restrictions, prefer using that tool instead of this one.
+  - The URL must be a fully-formed valid URL
+  - HTTP URLs will be automatically upgraded to HTTPS
+  - Format options: "markdown" (default), "text", or "html"
+  - This tool is read-only and does not modify any files
+  - Results may be summarized if the content is very large
+"##
         .to_string()
 }
 
@@ -947,6 +1148,11 @@ All operations require:
 - character: The character offset (1-based, as shown in editors)
 
 Note: LSP servers must be configured for the file type. If no server is available, an error will be returned."##
+        .to_string()
+}
+
+fn opencode_skill_description() -> String {
+    r##"Load a skill to get detailed instructions for a specific task. Skills provide specialized knowledge and step-by-step guidance. Use this when a task matches an available skill's description. Only the listed skills are available."##
         .to_string()
 }
 
@@ -1012,6 +1218,38 @@ The assistant used the todo list because:
 </reasoning>
 </example>
 
+<example>
+User: I need to implement these features for my e-commerce site: user registration, product catalog, shopping cart, and checkout flow.
+Assistant: I'll help implement these features. First, let's add all the features to the todo list.
+*Creates a todo list breaking down each feature into specific tasks based on the project architecture*
+Assistant: Let's start with user registration. This will involve creating database models, API endpoints, and frontend forms that integrate with your existing authentication system.
+
+<reasoning>
+The assistant used the todo list because:
+1. The user provided multiple complex features to implement in a comma separated list
+2. The todo list helps organize these large features into manageable tasks
+3. This approach allows for tracking progress across the entire implementation
+</reasoning>
+</example>
+
+<example>
+User: Can you help optimize my React application? It's rendering slowly and has performance issues.</user>
+Assistant: I'll help optimize your React application. First, let me examine your codebase to identify potential performance bottlenecks.
+*Reviews component structure, render patterns, state management, and data fetching*
+Assistant: After analyzing your codebase, I've identified several performance issues. Let me create a todo list to track our optimization efforts.
+*Creates todo list with items like: 1) Implement memoization for expensive calculations in ProductList, 2) Add virtualization for long lists in Dashboard, 3) Optimize image loading in Gallery component, 4) Fix state update loops in ShoppingCart, 5) Review bundle size and implement code splitting*
+Let's start by implementing memoization for the expensive calculations in your ProductList component.</assistant>
+
+<reasoning>
+The assistant used the todo list because:
+1. First, the assistant examined the codebase to identify specific performance issues
+2. Based on this analysis, it identified multiple optimization opportunities
+3. Performance optimization is a non-trivial task requiring multiple steps
+4. The todo list helps methodically track improvements across different components
+5. This systematic approach ensures all performance bottlenecks are addressed
+</reasoning>
+</example>
+
 ## Examples of When NOT to Use the Todo List
 
 <example>
@@ -1038,6 +1276,31 @@ The assistant did not use the todo list because this is a single, straightforwar
 </reasoning>
 </example>
 
+<example>
+User: What does the git status command do?
+Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.
+
+<reasoning>
+The assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.
+</reasoning>
+</example>
+
+<example>
+User: Run npm install for me and tell me what happens.
+Assistant: I'll run the npm install command for you.
+
+*Executes: npm install*
+
+The command completed successfully. Here's the output:
+[Output of npm install command]
+
+All dependencies have been installed according to your package.json file.
+
+<reasoning>
+The assistant did not use the todo list because this is a single command execution with immediate results. There are no multiple steps to track or organize, making the todo list unnecessary for this straightforward task.
+</reasoning>
+</example>
+
 ## Task States and Management
 
 1. **Task States**: Use these states to track progress:
@@ -1058,40 +1321,92 @@ The assistant did not use the todo list because this is a single, straightforwar
    - Break complex tasks into smaller, manageable steps
    - Use clear, descriptive task names
 
-When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully."##
+When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
+"##
         .to_string()
 }
 
 fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value {
     match original_name {
+        "question" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "questions": {
+                        "description": "Questions to ask",
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "question": {"description": "Complete question", "type": "string"},
+                                "header": {"description": "Very short label (max 30 chars)", "type": "string"},
+                                "options": {
+                                    "description": "Available choices",
+                                    "type": "array",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "label": {"description": "Display text (1-5 words, concise)", "type": "string"},
+                                            "description": {"description": "Explanation of choice", "type": "string"}
+                                        },
+                                        "ref": "QuestionOption",
+                                        "required": ["label", "description"],
+                                        "additionalProperties": false
+                                    }
+                                },
+                                "multiple": {"description": "Allow selecting multiple choices", "type": "boolean"}
+                            },
+                            "required": ["question", "header", "options"],
+                            "additionalProperties": false
+                        }
+                    }
+                },
+                "required": ["questions"],
+                "additionalProperties": false
+            });
+        }
         "read" => {
             return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
                     "filePath": {"type": "string", "description": "The path to the file to read"},
-                    "offset": {"type": "integer", "description": "The line number to start reading from (0-based)"},
-                    "limit": {"type": "integer", "description": "The number of lines to read (defaults to 2000)"}
+                    "offset": {"type": "number", "description": "The line number to start reading from (0-based)"},
+                    "limit": {"type": "number", "description": "The number of lines to read (defaults to 2000)"}
                 },
                 "required": ["filePath"],
                 "additionalProperties": false
             });
         }
-        "grep" => {
+        "glob" => {
             return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "The regular expression pattern to search for in file contents"},
-                    "path": {"type": "string", "description": "The file or directory path to search in. Defaults to the current working directory."},
-                    "include": {"type": "string", "description": "File pattern to include in the search, such as *.js or *.{ts,tsx}"},
-                    "maxMatches": {"type": "integer", "description": "Optional maximum matches to return."},
-                    "contextLines": {"type": "integer", "description": "Optional surrounding context lines."}
+                    "pattern": {"type": "string", "description": "The glob pattern to match files against"},
+                    "path": {"type": "string", "description": "The directory to search in. If not specified, the current working directory will be used. IMPORTANT: Omit this field to use the default directory. DO NOT enter \"undefined\" or \"null\" - simply omit it for the default behavior. Must be a valid directory path if provided."}
                 },
                 "required": ["pattern"],
-                "additionalProperties": true
+                "additionalProperties": false
+            });
+        }
+        "grep" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "pattern": {"type": "string", "description": "The regex pattern to search for in file contents"},
+                    "path": {"type": "string", "description": "The directory to search in. Defaults to the current working directory."},
+                    "include": {"type": "string", "description": "File pattern to include in the search (e.g. \"*.js\", \"*.{ts,tsx}\")"}
+                },
+                "required": ["pattern"],
+                "additionalProperties": false
             });
         }
         "edit" => {
             return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
                     "filePath": {"type": "string", "description": "The absolute path to the file to modify"},
@@ -1100,6 +1415,51 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                     "replaceAll": {"type": "boolean", "description": "Replace all occurrences of oldString (default false)"}
                 },
                 "required": ["filePath", "oldString", "newString"],
+                "additionalProperties": false
+            });
+        }
+        "write" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "content": {"description": "The content to write to the file", "type": "string"},
+                    "filePath": {"description": "The absolute path to the file to write (must be absolute, not relative)", "type": "string"}
+                },
+                "required": ["content", "filePath"],
+                "additionalProperties": false
+            });
+        }
+        "task" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "description": {"description": "A short (3-5 words) description of the task", "type": "string"},
+                    "prompt": {"description": "The task for the agent to perform", "type": "string"},
+                    "subagent_type": {"description": "The type of specialized agent to use for this task", "type": "string"},
+                    "session_id": {"description": "Existing Task session to continue", "type": "string"},
+                    "command": {"description": "The command that triggered this task", "type": "string"}
+                },
+                "required": ["description", "prompt", "subagent_type"],
+                "additionalProperties": false
+            });
+        }
+        "webfetch" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "url": {"description": "The URL to fetch content from", "type": "string"},
+                    "format": {
+                        "description": "The format to return the content in (text, markdown, or html). Defaults to markdown.",
+                        "default": "markdown",
+                        "type": "string",
+                        "enum": ["text", "markdown", "html"]
+                    },
+                    "timeout": {"description": "Optional timeout in seconds (max 120)", "type": "number"}
+                },
+                "required": ["url", "format"],
                 "additionalProperties": false
             });
         }
@@ -1122,13 +1482,17 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
             });
         }
         "bash" => {
+            let directory = std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| ".".to_string());
             return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
                     "command": {"type": "string", "description": "The command to execute"},
-                    "timeout": {"type": "integer", "description": "Optional timeout in milliseconds"},
-                    "workdir": {"type": "string", "description": "The working directory to run the command in. Defaults to the current workspace. Use this instead of cd commands."},
-                    "description": {"type": "string", "description": "Clear, concise description of what this command does in 5-10 words."}
+                    "timeout": {"type": "number", "description": "Optional timeout in milliseconds"},
+                    "workdir": {"type": "string", "description": format!("The working directory to run the command in. Defaults to {directory}. Use this instead of 'cd' commands.")},
+                    "description": {"type": "string", "description": "Clear, concise description of what this command does in 5-10 words. Examples:\nInput: ls\nOutput: Lists files in current directory\n\nInput: git status\nOutput: Shows working tree status\n\nInput: npm install\nOutput: Installs package dependencies\n\nInput: mkdir foo\nOutput: Creates directory 'foo'"}
                 },
                 "required": ["command", "description"],
                 "additionalProperties": false
@@ -1136,23 +1500,45 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
         }
         "todowrite" => {
             return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
                     "todos": {
+                        "description": "The updated todo list",
                         "type": "array",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "content": {"type": "string"},
-                                "status": {"type": "string"},
-                                "priority": {"type": "string"}
+                                "content": {"description": "Brief description of the task", "type": "string"},
+                                "status": {"description": "Current status of the task: pending, in_progress, completed, cancelled", "type": "string"},
+                                "priority": {"description": "Priority level of the task: high, medium, low", "type": "string"},
+                                "id": {"description": "Unique identifier for the todo item", "type": "string"}
                             },
-                            "required": ["content", "status"],
-                            "additionalProperties": true
+                            "required": ["content", "status", "priority", "id"],
+                            "additionalProperties": false
                         }
                     }
                 },
                 "required": ["todos"],
+                "additionalProperties": false
+            });
+        }
+        "todoread" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            });
+        }
+        "skill" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "name": {"description": "The skill identifier from available_skills (e.g., 'spade-verify', 'spade-tech-design', 'zippy-fix', ...)", "type": "string"}
+                },
+                "required": ["name"],
                 "additionalProperties": false
             });
         }
@@ -1237,9 +1623,18 @@ fn input_to_native_user_content(input: &Value) -> Result<String, RuntimeError> {
     input_to_content(input)
 }
 
+fn input_to_opencode_user_content(input: &Value) -> Result<String, RuntimeError> {
+    let content = input_to_native_user_content(input)?;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string(&content).map_err(provider_error)?
+    ))
+}
+
 fn input_to_native_tool_messages_with_names(
     input: &Value,
     tool_name_map: &BTreeMap<String, String>,
+    opencode_style: bool,
 ) -> Result<Vec<Value>, RuntimeError> {
     let Some(object) = input.as_object() else {
         return Ok(vec![json!({
@@ -1250,7 +1645,11 @@ fn input_to_native_tool_messages_with_names(
 
     let mut messages = vec![json!({
         "role": "user",
-        "content": input_to_native_user_content(input)?
+        "content": if opencode_style {
+            input_to_opencode_user_content(input)?
+        } else {
+            input_to_native_user_content(input)?
+        }
     })];
     let Some(observations) = object.get("observations") else {
         return Ok(messages);
@@ -1309,9 +1708,13 @@ fn input_to_native_tool_messages_with_names(
         if tool_calls.is_empty() {
             continue;
         }
-        let assistant_content = observation_assistant_content(observation)
-            .map(Value::String)
-            .unwrap_or(Value::Null);
+        let assistant_content = if opencode_style {
+            Value::String(String::new())
+        } else {
+            observation_assistant_content(observation)
+                .map(Value::String)
+                .unwrap_or(Value::Null)
+        };
         messages.push(json!({
             "role": "assistant",
             "content": assistant_content,
@@ -1568,8 +1971,10 @@ fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
     let Some(matches) = output.get("matches").and_then(Value::as_array) else {
         return;
     };
+    let base_path = output.get("base_path").and_then(Value::as_str);
+    let mut current_path = None;
     for item in matches.iter().take(40) {
-        render_file_search_match(item, None, lines);
+        render_file_search_match(item, None, base_path, &mut current_path, lines);
     }
 }
 
@@ -1657,7 +2062,13 @@ fn render_todowrite_transcript(output: &Value, lines: &mut Vec<String>) {
     }
 }
 
-fn render_file_search_match(value: &Value, fallback_path: Option<&str>, lines: &mut Vec<String>) {
+fn render_file_search_match(
+    value: &Value,
+    fallback_path: Option<&str>,
+    base_path: Option<&str>,
+    current_path: &mut Option<String>,
+    lines: &mut Vec<String>,
+) {
     let Some(object) = value.as_object() else {
         return;
     };
@@ -1668,13 +2079,13 @@ fn render_file_search_match(value: &Value, fallback_path: Option<&str>, lines: &
         .unwrap_or("");
     if let Some(before) = object.get("before").and_then(Value::as_array) {
         for item in before {
-            render_file_search_match_line(item, Some(path), lines);
+            render_file_search_match_line(item, Some(path), base_path, current_path, lines);
         }
     }
-    render_file_search_match_line(value, Some(path), lines);
+    render_file_search_match_line(value, Some(path), base_path, current_path, lines);
     if let Some(after) = object.get("after").and_then(Value::as_array) {
         for item in after {
-            render_file_search_match_line(item, Some(path), lines);
+            render_file_search_match_line(item, Some(path), base_path, current_path, lines);
         }
     }
 }
@@ -1682,6 +2093,8 @@ fn render_file_search_match(value: &Value, fallback_path: Option<&str>, lines: &
 fn render_file_search_match_line(
     value: &Value,
     fallback_path: Option<&str>,
+    base_path: Option<&str>,
+    current_path: &mut Option<String>,
     lines: &mut Vec<String>,
 ) {
     let Some(object) = value.as_object() else {
@@ -1703,7 +2116,27 @@ fn render_file_search_match_line(
         .or_else(|| object.get("line"))
         .and_then(Value::as_str)
         .unwrap_or("");
-    lines.push(format!("{path}:{line}: {}", truncate_text(text, 500)));
+    if path.is_empty() {
+        lines.push(format!("Line {line}: {}", truncate_text(text, 500)));
+        return;
+    }
+    let display_path = display_file_search_path(path, base_path);
+    if current_path.as_deref() != Some(display_path.as_str()) {
+        lines.push(format!("{display_path}:"));
+        *current_path = Some(display_path);
+    }
+    lines.push(format!("  Line {line}: {}", truncate_text(text, 500)));
+}
+
+fn display_file_search_path(path: &str, base_path: Option<&str>) -> String {
+    let path_value = Path::new(path);
+    if path_value.is_absolute() {
+        path.to_string()
+    } else if let Some(base_path) = base_path {
+        Path::new(base_path).join(path_value).display().to_string()
+    } else {
+        path.to_string()
+    }
 }
 
 fn render_symbols_transcript(output: &Value, lines: &mut Vec<String>) {
@@ -2807,7 +3240,8 @@ mod tests {
             }]
         });
 
-        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
         let content = messages[2]["content"].as_str().unwrap();
         assert_eq!(messages[1]["role"], json!("assistant"));
         assert_eq!(messages[2]["role"], json!("tool"));
@@ -2933,7 +3367,8 @@ mod tests {
             }]
         });
 
-        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
         let content = messages[2]["content"].as_str().unwrap();
         assert!(content.contains("symbols:"), "{content}");
         assert!(
@@ -2961,6 +3396,7 @@ mod tests {
                     },
                     "output": {
                         "match_count": 1,
+                        "base_path": "/repo",
                         "matches": [{
                             "path": "src/lib.rs",
                             "line_number": 42,
@@ -2981,20 +3417,22 @@ mod tests {
             }]
         });
 
-        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
         let content = messages[2]["content"].as_str().unwrap();
 
         assert!(content.contains("Found 1 matches"), "{content}");
+        assert!(content.contains("/repo/src/lib.rs:\n"), "{content}");
         assert!(
-            content.contains("src/lib.rs:41: fn required_input_string() {}"),
+            content.contains("  Line 41: fn required_input_string() {}"),
             "{content}"
         );
         assert!(
-            content.contains("src/lib.rs:42: fn repo_search_query_input() {}"),
+            content.contains("  Line 42: fn repo_search_query_input() {}"),
             "{content}"
         );
         assert!(
-            content.contains("src/lib.rs:43: fn repo_glob_input() {}"),
+            content.contains("  Line 43: fn repo_glob_input() {}"),
             "{content}"
         );
         assert!(!content.contains(":0:"), "{content}");
@@ -3042,7 +3480,8 @@ mod tests {
             }]
         });
 
-        let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
         let content = messages[2]["content"].as_str().unwrap();
 
         assert!(content.contains("<content>"), "{content}");
