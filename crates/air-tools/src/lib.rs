@@ -6,27 +6,20 @@ use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-mod candidate_tools;
-mod code_assert_tools;
-mod file_tools;
-mod git_tools;
-use candidate_tools::call_candidate_validate_tool;
-use code_assert_tools::call_code_assert_tool;
 mod command_diagnostics;
+mod file_tools;
 use command_diagnostics::extract_command_diagnostics;
 mod context_tools;
 use context_tools::call_context_measure_tool;
 use file_tools::{
     call_file_edit_tool, call_file_read_many_tool, call_file_read_tool, call_file_search_tool,
-    call_file_write_tool, file_modified_time, is_likely_binary, FileEditOptions, FileWriteOptions,
-};
-use git_tools::{
-    git_diff_changed_files, git_diff_paths, git_diff_preexisting_changed_files, git_status_label,
+    call_file_write_tool, read_snapshot, FileEditOptions, FileWriteOptions, ReadSnapshot,
 };
 mod helpdesk;
 use helpdesk::helpdesk_docs;
@@ -36,31 +29,13 @@ mod repo_symbols;
 use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
 mod rust_lsp_tools;
 use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
-mod todo_tools;
-use todo_tools::{call_todo_read_tool, call_todo_write_tool};
 mod artifact_tools;
 use artifact_tools::call_artifact_validate_tool;
 mod repo_reference_tools;
 use repo_reference_tools::call_repo_references_tool;
-mod diagnostic_context_tools;
-use diagnostic_context_tools::call_diagnostic_context_tool;
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
-static GIT_BASELINE_DIFF_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-type GitDiffBaseline = BTreeMap<String, Option<Vec<u8>>>;
-type GitDiffBaselines = BTreeMap<PathBuf, GitDiffBaseline>;
-
-struct GitDiffOutput {
-    paths: Vec<String>,
-    untracked_files: Vec<String>,
-    changed_files: Vec<String>,
-    preexisting_changed_files: Vec<Value>,
-    diff: String,
-    truncated: bool,
-    bytes: usize,
-}
 
 #[derive(Debug, Deserialize)]
 struct ToolConfigFile {
@@ -279,9 +254,6 @@ enum ToolConfig {
 
         #[serde(default)]
         allow_overwrite: Option<bool>,
-
-        #[serde(default)]
-        require_read: Option<bool>,
     },
     FileEdit {
         #[serde(default)]
@@ -294,27 +266,6 @@ enum ToolConfig {
 
         #[serde(default)]
         max_changed_lines: Option<usize>,
-
-        #[serde(default)]
-        require_read: Option<bool>,
-    },
-    GitDiff {
-        #[serde(default)]
-        capability: Option<String>,
-
-        repo_dir: PathBuf,
-
-        #[serde(default)]
-        max_bytes: Option<usize>,
-    },
-    GitStatus {
-        #[serde(default)]
-        capability: Option<String>,
-
-        repo_dir: PathBuf,
-
-        #[serde(default)]
-        max_files: Option<usize>,
     },
     RepoFiles {
         #[serde(default)]
@@ -415,46 +366,23 @@ enum ToolConfig {
         #[serde(default)]
         max_bytes: Option<usize>,
     },
-    DiagnosticContext {
+    RustAnalyzer {
         #[serde(default)]
         capability: Option<String>,
 
-        repo_dir: PathBuf,
+        root_dir: PathBuf,
+
+        #[serde(default)]
+        command: Option<String>,
+
+        #[serde(default)]
+        max_results: Option<usize>,
 
         #[serde(default)]
         max_diagnostics: Option<usize>,
 
         #[serde(default)]
-        context_lines: Option<usize>,
-
-        #[serde(default)]
         max_bytes: Option<usize>,
-    },
-    CodeAssert {
-        #[serde(default)]
-        capability: Option<String>,
-
-        base_dir: PathBuf,
-
-        #[serde(default)]
-        max_assertions: Option<usize>,
-
-        #[serde(default)]
-        max_bytes: Option<usize>,
-    },
-    TodoWrite {
-        #[serde(default)]
-        capability: Option<String>,
-
-        #[serde(default)]
-        max_items: Option<usize>,
-
-        #[serde(default)]
-        max_content_chars: Option<usize>,
-    },
-    TodoRead {
-        #[serde(default)]
-        capability: Option<String>,
     },
     ContextMeasure {
         #[serde(default)]
@@ -476,11 +404,24 @@ enum ToolConfig {
         #[serde(default)]
         max_ids: Option<usize>,
     },
-    CandidateValidate {
+    TodoWrite {
+        #[serde(default)]
+        capability: Option<String>,
+    },
+    Bash {
         #[serde(default)]
         capability: Option<String>,
 
-        base_dir: PathBuf,
+        cwd: PathBuf,
+
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+
+        #[serde(default)]
+        truncation_direction: Option<TruncationDirection>,
     },
     CommandRun {
         #[serde(default)]
@@ -553,8 +494,6 @@ impl ToolConfig {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
-            | ToolConfig::GitDiff { capability, .. }
-            | ToolConfig::GitStatus { capability, .. }
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
@@ -562,13 +501,11 @@ impl ToolConfig {
             | ToolConfig::RepoReferences { capability, .. }
             | ToolConfig::RustAnalyzerReferences { capability, .. }
             | ToolConfig::RustAnalyzerDiagnostics { capability, .. }
-            | ToolConfig::DiagnosticContext { capability, .. }
-            | ToolConfig::CodeAssert { capability, .. }
-            | ToolConfig::TodoWrite { capability, .. }
-            | ToolConfig::TodoRead { capability }
+            | ToolConfig::RustAnalyzer { capability, .. }
             | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::ArtifactValidate { capability, .. }
-            | ToolConfig::CandidateValidate { capability, .. }
+            | ToolConfig::TodoWrite { capability }
+            | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -605,10 +542,28 @@ pub struct ConfigTools {
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
     workspace_dir: PathBuf,
-    read_snapshots: BTreeMap<PathBuf, SystemTime>,
-    git_diff_baselines: GitDiffBaselines,
-    current_todos: Vec<Value>,
+    read_snapshots: BTreeMap<PathBuf, ReadSnapshot>,
+    read_observations: BTreeMap<PathBuf, Vec<ReadObservation>>,
+    search_observations: BTreeMap<String, SearchObservation>,
+    search_no_match_streak: u32,
+    workspace_generation: u64,
     rust_analyzer_sessions: BTreeMap<String, RustAnalyzerSession>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ReadObservation {
+    start_line: usize,
+    end_line: usize,
+    complete: bool,
+    snapshot: ReadSnapshot,
+}
+
+#[derive(Debug, Clone)]
+struct SearchObservation {
+    path: String,
+    pattern: String,
+    match_count: u64,
+    returned_match_count: u64,
 }
 
 impl Clone for ConfigTools {
@@ -619,8 +574,10 @@ impl Clone for ConfigTools {
             config_dir: self.config_dir.clone(),
             workspace_dir: self.workspace_dir.clone(),
             read_snapshots: self.read_snapshots.clone(),
-            git_diff_baselines: self.git_diff_baselines.clone(),
-            current_todos: self.current_todos.clone(),
+            read_observations: self.read_observations.clone(),
+            search_observations: self.search_observations.clone(),
+            search_no_match_streak: self.search_no_match_streak,
+            workspace_generation: self.workspace_generation,
             rust_analyzer_sessions: BTreeMap::new(),
         }
     }
@@ -642,15 +599,16 @@ impl ConfigTools {
         } else {
             config_dir.clone()
         };
-        let git_diff_baselines = capture_git_diff_baselines(&config, &workspace_dir)?;
         Ok(Self {
             tools: config.tools,
             approvals: config.approvals,
             config_dir,
             workspace_dir,
             read_snapshots: BTreeMap::new(),
-            git_diff_baselines,
-            current_todos: Vec::new(),
+            read_observations: BTreeMap::new(),
+            search_observations: BTreeMap::new(),
+            search_no_match_streak: 0,
+            workspace_generation: 0,
             rust_analyzer_sessions: BTreeMap::new(),
         })
     }
@@ -677,8 +635,10 @@ impl ConfigTools {
             config_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
             read_snapshots: BTreeMap::new(),
-            git_diff_baselines: BTreeMap::new(),
-            current_todos: Vec::new(),
+            read_observations: BTreeMap::new(),
+            search_observations: BTreeMap::new(),
+            search_no_match_streak: 0,
+            workspace_generation: 0,
             rust_analyzer_sessions: BTreeMap::new(),
         }
     }
@@ -687,31 +647,58 @@ impl ConfigTools {
         let path = fs::canonicalize(path).map_err(|error| {
             RuntimeError::Provider(format!("tool file snapshot canonicalize path: {error}"))
         })?;
-        let modified = file_modified_time("tool", "path", &path)?;
-        self.read_snapshots.insert(path, modified);
+        let snapshot = read_snapshot("tool", "path", &path)?;
+        self.read_snapshots.insert(path, snapshot);
         Ok(())
     }
 
-    fn remember_repo_output_paths(
+    fn note_workspace_may_have_changed(&mut self) {
+        self.workspace_generation = self.workspace_generation.saturating_add(1);
+        self.search_observations.clear();
+        self.search_no_match_streak = 0;
+    }
+
+    fn remember_read_observation(
         &mut self,
-        repo_dir: &Path,
-        output: &Value,
+        path: &Path,
+        snapshot: ReadSnapshot,
+        start_line: usize,
+        end_line: usize,
+        complete: bool,
     ) -> Result<(), RuntimeError> {
-        for field in ["matches", "snippets", "references", "definitions"] {
-            for path in output
-                .get(field)
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(|item| item.get("path").and_then(Value::as_str))
-            {
-                if path.is_empty() {
-                    continue;
-                }
-                self.remember_read_snapshot(&repo_dir.join(path))?;
-            }
-        }
+        let path = fs::canonicalize(path).map_err(|error| {
+            RuntimeError::Provider(format!("tool file snapshot canonicalize path: {error}"))
+        })?;
+        self.read_snapshots.insert(path.clone(), snapshot);
+        self.read_observations
+            .entry(path)
+            .or_default()
+            .push(ReadObservation {
+                start_line,
+                end_line,
+                complete,
+                snapshot,
+            });
         Ok(())
+    }
+
+    fn covered_read_observation(
+        &self,
+        path: &Path,
+        snapshot: ReadSnapshot,
+        start_line: usize,
+        end_line: usize,
+    ) -> Option<ReadObservation> {
+        self.read_observations
+            .get(path)?
+            .iter()
+            .copied()
+            .find(|seen| {
+                seen.complete
+                    && seen.snapshot == snapshot
+                    && seen.start_line == start_line
+                    && seen.end_line == end_line
+            })
     }
 
     fn rust_analyzer_session(
@@ -732,77 +719,80 @@ impl ConfigTools {
             ))
         })
     }
-}
 
-fn capture_git_diff_baselines(
-    config: &ToolConfigFile,
-    config_dir: &Path,
-) -> Result<GitDiffBaselines> {
-    let mut baselines = BTreeMap::new();
-    for tool in config.tools.values() {
-        let ToolConfig::GitDiff { repo_dir, .. } = tool else {
-            continue;
-        };
-        let repo =
-            fs::canonicalize(resolve_config_path(config_dir, repo_dir)).with_context(|| {
-                format!(
-                    "failed to canonicalize git_diff repo_dir {}",
-                    repo_dir.display()
-                )
-            })?;
-        if baselines.contains_key(&repo) {
-            continue;
-        }
-        let paths = current_git_diff_paths(&repo).with_context(|| {
-            format!("failed to capture git_diff baseline for {}", repo.display())
-        })?;
-        let mut snapshots = BTreeMap::new();
-        for path in paths {
-            let absolute = repo.join(&path);
-            let content = if absolute.is_file() {
-                Some(fs::read(&absolute).with_context(|| {
-                    format!(
-                        "failed to read git_diff baseline file {}",
-                        absolute.display()
-                    )
-                })?)
-            } else {
-                None
-            };
-            snapshots.insert(path, content);
-        }
-        baselines.insert(repo, snapshots);
-    }
-    Ok(baselines)
-}
-
-fn current_git_diff_paths(repo: &Path) -> Result<Vec<String>> {
-    let mut paths = BTreeSet::new();
-    for args in [
-        &["diff", "--name-only"][..],
-        &["ls-files", "--others", "--exclude-standard"][..],
-    ] {
-        let output = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(args)
-            .output()
-            .with_context(|| format!("failed to run git {}", args.join(" ")))?;
-        if !output.status.success() {
-            anyhow::bail!(
-                "git {} failed: {}",
-                args.join(" "),
-                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+    fn annotate_search_progress(&mut self, mut output: Value) -> Value {
+        if search_output_no_matches(&output) {
+            self.search_no_match_streak = self.search_no_match_streak.saturating_add(1);
+            insert_output_field(
+                &mut output,
+                "no_match_streak",
+                Value::from(self.search_no_match_streak),
             );
-        }
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let path = line.trim();
-            if !path.is_empty() {
-                paths.insert(path.replace('\\', "/"));
+            if self.search_no_match_streak >= 2 {
+                append_output_search_hint(
+                    &mut output,
+                    "Several recent searches returned no matches; broaden the search strategy, inspect the project file list, or switch to a more likely source/test extension instead of repeating this direction.",
+                );
             }
+        } else if search_output_has_positive_results(&output) {
+            self.search_no_match_streak = 0;
         }
+        output
     }
-    Ok(paths.into_iter().collect())
+}
+
+const SEARCH_COUNT_FIELDS: &[&str] = &["match_count", "file_count", "returned_match_count"];
+const SEARCH_ARRAY_FIELDS: &[&str] = &["matches", "files", "symbols", "references", "locations"];
+
+fn search_output_no_matches(output: &Value) -> bool {
+    output
+        .get("no_matches")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn any_search_count_positive(output: &Value) -> bool {
+    SEARCH_COUNT_FIELDS
+        .iter()
+        .any(|&field| output.get(field).and_then(Value::as_u64).unwrap_or(0) > 0)
+}
+
+fn any_search_array_nonempty(output: &Value) -> bool {
+    SEARCH_ARRAY_FIELDS.iter().any(|&field| {
+        output
+            .get(field)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
+}
+
+fn search_output_has_positive_results(output: &Value) -> bool {
+    !search_output_no_matches(output)
+        && (any_search_count_positive(output) || any_search_array_nonempty(output))
+}
+
+fn insert_output_field(output: &mut Value, key: &str, value: Value) {
+    if let Some(object) = output.as_object_mut() {
+        object.insert(key.to_string(), value);
+    }
+}
+
+fn append_output_search_hint(output: &mut Value, hint: &str) {
+    let Some(object) = output.as_object_mut() else {
+        return;
+    };
+    let existing = object
+        .get("search_hint")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let next = if existing.trim().is_empty() {
+        hint.to_string()
+    } else if existing.contains(hint) {
+        existing.to_string()
+    } else {
+        format!("{existing} {hint}")
+    };
+    object.insert("search_hint".to_string(), Value::String(next));
 }
 
 fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
@@ -1223,32 +1213,6 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     *max_changed_lines,
                 )?;
             }
-            ToolConfig::GitDiff {
-                repo_dir,
-                max_bytes,
-                ..
-            } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
-            }
-            ToolConfig::GitStatus {
-                repo_dir,
-                max_files,
-                ..
-            } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
-            }
             ToolConfig::RepoFiles {
                 repo_dir,
                 max_files,
@@ -1372,63 +1336,27 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
-            ToolConfig::DiagnosticContext {
-                repo_dir,
+            ToolConfig::RustAnalyzer {
+                root_dir,
+                max_results,
                 max_diagnostics,
-                context_lines,
                 max_bytes,
                 ..
             } => {
-                if repo_dir.as_os_str().is_empty() {
+                if root_dir.as_os_str().is_empty() {
                     anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
+                        "tool config {} tools.{name}.root_dir must not be empty",
                         path.display()
                     );
                 }
+                validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.max_diagnostics"),
                     *max_diagnostics,
                 )?;
-                validate_positive_usize(
-                    path,
-                    &format!("tools.{name}.context_lines"),
-                    *context_lines,
-                )?;
                 validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
-            ToolConfig::CodeAssert {
-                base_dir,
-                max_assertions,
-                max_bytes,
-                ..
-            } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(
-                    path,
-                    &format!("tools.{name}.max_assertions"),
-                    *max_assertions,
-                )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
-            }
-            ToolConfig::TodoWrite {
-                max_items,
-                max_content_chars,
-                ..
-            } => {
-                validate_positive_usize(path, &format!("tools.{name}.max_items"), *max_items)?;
-                validate_positive_usize(
-                    path,
-                    &format!("tools.{name}.max_content_chars"),
-                    *max_content_chars,
-                )?;
-            }
-            ToolConfig::TodoRead { .. } => {}
             ToolConfig::ContextMeasure {
                 max_context_chars,
                 threshold_percent,
@@ -1448,13 +1376,26 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
             ToolConfig::ArtifactValidate { max_ids, .. } => {
                 validate_positive_usize(path, &format!("tools.{name}.max_ids"), *max_ids)?;
             }
-            ToolConfig::CandidateValidate { base_dir, .. } => {
-                if base_dir.as_os_str().is_empty() {
+            ToolConfig::TodoWrite { .. } => {}
+            ToolConfig::Bash {
+                cwd,
+                timeout_seconds,
+                max_bytes,
+                truncation_direction: _,
+                ..
+            } => {
+                if cwd.as_os_str().is_empty() {
                     anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
+                        "tool config {} tools.{name}.cwd must not be empty",
                         path.display()
                     );
                 }
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.timeout_seconds"),
+                    *timeout_seconds,
+                )?;
+                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
             }
             ToolConfig::CommandRun {
                 cwd,
@@ -1644,6 +1585,68 @@ fn validate_capability(path: &Path, field: &str, capability: Option<&str>) -> Re
     Ok(())
 }
 
+fn observed_tool_key(generation: u64, name: &str, input: &Value) -> String {
+    let input = serde_json::to_string(input).unwrap_or_else(|_| "<unserializable>".to_string());
+    format!("{generation}\n{name}\n{input}")
+}
+
+fn repeated_read_output(
+    previous_output: &Value,
+    start_line: usize,
+    end_line: usize,
+    covered_by: ReadObservation,
+) -> Value {
+    json!({
+        "path": previous_output.get("path").cloned().unwrap_or(Value::Null),
+        "start_line": start_line,
+        "end_line": end_line,
+        "total_lines": previous_output.get("total_lines").cloned().unwrap_or(Value::Null),
+        "no_new_information": true,
+        "already_read": true,
+        "covered_by": {
+            "start_line": covered_by.start_line,
+            "end_line": covered_by.end_line
+        },
+        "message": "This line range is already covered by a previous read and the file has not changed. Use the prior context, request a different line range, or edit based on the existing evidence.",
+        "artifacts": [{
+            "kind": "tool_notice",
+            "title": "read skipped: already covered",
+            "content": "No new file content returned because this unchanged line range was already read.",
+            "metadata": {
+                "provider": "file_read",
+                "no_new_information": true,
+                "already_read": true,
+                "covered_start_line": covered_by.start_line,
+                "covered_end_line": covered_by.end_line
+            }
+        }]
+    })
+}
+
+fn repeated_search_output(previous: &SearchObservation) -> Value {
+    json!({
+        "path": previous.path.clone(),
+        "pattern": previous.pattern.clone(),
+        "match_count": previous.match_count,
+        "returned_match_count": previous.returned_match_count,
+        "no_new_information": true,
+        "already_seen": true,
+        "message": "This exact search was already run for the current workspace state. Use the previous matches, narrow the query, or edit based on the existing evidence.",
+        "artifacts": [{
+            "kind": "tool_notice",
+            "title": "search skipped: already seen",
+            "content": "No match list returned because this exact search was already run.",
+            "metadata": {
+                "provider": "file_search",
+                "no_new_information": true,
+                "already_seen": true,
+                "match_count": previous.match_count,
+                "returned_match_count": previous.returned_match_count
+            }
+        }]
+    })
+}
+
 impl ToolProvider for ConfigTools {
     fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
         self.call_tool_with_timeout(name, input, Duration::from_secs(30))
@@ -1803,7 +1806,35 @@ impl ToolProvider for ConfigTools {
                 let output =
                     call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
-                    self.remember_read_snapshot(Path::new(path))?;
+                    let path = Path::new(path);
+                    let snapshot = read_snapshot(name, "input.path", path)?;
+                    let total_lines = output
+                        .get("total_lines")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    let start_line = output
+                        .get("start_line")
+                        .and_then(Value::as_u64)
+                        .map(|line| line as usize)
+                        .unwrap_or(1);
+                    let end_line = output
+                        .get("end_line")
+                        .and_then(Value::as_u64)
+                        .map(|line| line as usize)
+                        .unwrap_or(total_lines);
+                    if let Some(covered_by) =
+                        self.covered_read_observation(path, snapshot, start_line, end_line)
+                    {
+                        self.read_snapshots.insert(path.to_path_buf(), snapshot);
+                        return Ok(repeated_read_output(
+                            &output, start_line, end_line, covered_by,
+                        ));
+                    }
+                    let complete = !output
+                        .get("truncated")
+                        .and_then(Value::as_bool)
+                        .unwrap_or(false);
+                    self.remember_read_observation(path, snapshot, start_line, end_line, complete)?;
                 }
                 Ok(output)
             }
@@ -1841,6 +1872,10 @@ impl ToolProvider for ConfigTools {
                 max_line_chars,
             } => {
                 let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
+                let observation_key = observed_tool_key(self.workspace_generation, name, input);
+                if let Some(previous) = self.search_observations.get(&observation_key) {
+                    return Ok(repeated_search_output(previous));
+                }
                 let output = call_file_search_tool(
                     name,
                     input,
@@ -1850,10 +1885,30 @@ impl ToolProvider for ConfigTools {
                     max_context_lines.unwrap_or(8),
                     max_line_chars.unwrap_or(2000),
                 )?;
-                if let Some(path) = output.get("path").and_then(Value::as_str) {
-                    self.remember_read_snapshot(Path::new(path))?;
-                }
-                Ok(output)
+                self.search_observations.insert(
+                    observation_key,
+                    SearchObservation {
+                        path: output
+                            .get("path")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        pattern: output
+                            .get("pattern")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string(),
+                        match_count: output
+                            .get("match_count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                        returned_match_count: output
+                            .get("returned_match_count")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0),
+                    },
+                );
+                Ok(self.annotate_search_progress(output))
             }
             ToolConfig::FileWrite {
                 capability: _,
@@ -1861,7 +1916,6 @@ impl ToolProvider for ConfigTools {
                 max_bytes,
                 create_dirs,
                 allow_overwrite,
-                require_read,
             } => {
                 let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output = call_file_write_tool(
@@ -1872,13 +1926,12 @@ impl ToolProvider for ConfigTools {
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         create_dirs: create_dirs.unwrap_or(false),
                         allow_overwrite: allow_overwrite.unwrap_or(false),
-                        require_read: require_read.unwrap_or(false),
-                        read_snapshots: &self.read_snapshots,
                     },
                 )?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
                     self.remember_read_snapshot(Path::new(path))?;
                 }
+                self.note_workspace_may_have_changed();
                 Ok(output)
             }
             ToolConfig::FileEdit {
@@ -1886,7 +1939,6 @@ impl ToolProvider for ConfigTools {
                 base_dir,
                 max_bytes,
                 max_changed_lines,
-                require_read,
             } => {
                 let output = call_file_edit_tool(
                     name,
@@ -1895,50 +1947,27 @@ impl ToolProvider for ConfigTools {
                         base_dir: &resolve_config_path(&self.workspace_dir, &base_dir),
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         max_changed_lines,
-                        require_read: require_read.unwrap_or(true),
-                        read_snapshots: &self.read_snapshots,
                     },
                 )?;
                 if let Some(path) = output.get("path").and_then(Value::as_str) {
                     self.remember_read_snapshot(Path::new(path))?;
                 }
+                self.note_workspace_may_have_changed();
                 Ok(output)
             }
-            ToolConfig::GitDiff {
-                capability: _,
-                repo_dir,
-                max_bytes,
-            } => {
-                let repo = resolve_config_path(&self.workspace_dir, &repo_dir);
-                let canonical_repo = canonicalize_tool_path(name, "repo_dir", &repo)?;
-                let baseline = self.git_diff_baselines.get(&canonical_repo);
-                call_git_diff_tool(
-                    name,
-                    input,
-                    &canonical_repo,
-                    max_bytes.unwrap_or(256 * 1024),
-                    baseline,
-                )
-            }
-            ToolConfig::GitStatus {
-                capability: _,
-                repo_dir,
-                max_files,
-            } => call_git_status_tool(
-                name,
-                &resolve_config_path(&self.workspace_dir, &repo_dir),
-                max_files.unwrap_or(200),
-            ),
             ToolConfig::RepoFiles {
                 capability: _,
                 repo_dir,
                 max_files,
-            } => call_repo_files_tool(
-                name,
-                input,
-                &resolve_config_path(&self.workspace_dir, &repo_dir),
-                max_files.unwrap_or(200),
-            ),
+            } => {
+                let output = call_repo_files_tool(
+                    name,
+                    input,
+                    &resolve_config_path(&self.workspace_dir, &repo_dir),
+                    max_files.unwrap_or(200),
+                )?;
+                Ok(self.annotate_search_progress(output))
+            }
             ToolConfig::RepoSearch {
                 capability: _,
                 repo_dir,
@@ -1953,8 +1982,7 @@ impl ToolProvider for ConfigTools {
                     max_matches.unwrap_or(80),
                     max_bytes.unwrap_or(256 * 1024),
                 )?;
-                self.remember_repo_output_paths(&repo_dir, &output)?;
-                Ok(output)
+                Ok(self.annotate_search_progress(output))
             }
             ToolConfig::RepoContext {
                 capability: _,
@@ -1974,8 +2002,7 @@ impl ToolProvider for ConfigTools {
                     context_lines.unwrap_or(6),
                     max_bytes.unwrap_or(256 * 1024),
                 )?;
-                self.remember_repo_output_paths(&repo_dir, &output)?;
-                Ok(output)
+                Ok(self.annotate_search_progress(output))
             }
             ToolConfig::RepoSymbols {
                 capability: _,
@@ -1998,7 +2025,7 @@ impl ToolProvider for ConfigTools {
                 max_bytes,
             } => {
                 let repo_dir = resolve_config_path(&self.workspace_dir, &repo_dir);
-                let output = call_repo_references_tool(
+                call_repo_references_tool(
                     name,
                     input,
                     &repo_dir,
@@ -2006,9 +2033,7 @@ impl ToolProvider for ConfigTools {
                     max_files.unwrap_or(12),
                     context_lines.unwrap_or(4),
                     max_bytes.unwrap_or(256 * 1024),
-                )?;
-                self.remember_repo_output_paths(&repo_dir, &output)?;
-                Ok(output)
+                )
             }
             ToolConfig::RustAnalyzerReferences {
                 capability: _,
@@ -2038,57 +2063,37 @@ impl ToolProvider for ConfigTools {
                 max_diagnostics.unwrap_or(80),
                 max_bytes.unwrap_or(256 * 1024),
             ),
-            ToolConfig::DiagnosticContext {
+            ToolConfig::RustAnalyzer {
                 capability: _,
-                repo_dir,
+                root_dir,
+                command,
+                max_results,
                 max_diagnostics,
-                context_lines,
                 max_bytes,
             } => {
-                let repo_dir = resolve_config_path(&self.workspace_dir, &repo_dir);
-                let output = call_diagnostic_context_tool(
-                    name,
-                    input,
-                    &repo_dir,
-                    max_diagnostics.unwrap_or(20),
-                    context_lines.unwrap_or(4),
-                    max_bytes.unwrap_or(256 * 1024),
-                )?;
-                self.remember_repo_output_paths(&repo_dir, &output)?;
-                Ok(output)
-            }
-            ToolConfig::CodeAssert {
-                capability: _,
-                base_dir,
-                max_assertions,
-                max_bytes,
-            } => call_code_assert_tool(
-                name,
-                input,
-                &resolve_config_path(&self.workspace_dir, &base_dir),
-                max_assertions.unwrap_or(20),
-                max_bytes.unwrap_or(64 * 1024),
-            ),
-            ToolConfig::TodoWrite {
-                capability: _,
-                max_items,
-                max_content_chars,
-            } => {
-                let output = call_todo_write_tool(
-                    name,
-                    input,
-                    max_items.unwrap_or(20),
-                    max_content_chars.unwrap_or(200),
-                )?;
-                self.current_todos = output
-                    .get("todos")
-                    .and_then(Value::as_array)
-                    .cloned()
-                    .unwrap_or_default();
-                Ok(output)
-            }
-            ToolConfig::TodoRead { capability: _ } => {
-                Ok(call_todo_read_tool(name, &self.current_todos))
+                let root_dir = resolve_config_path(&self.workspace_dir, &root_dir);
+                let command = command.as_deref().unwrap_or("rust-analyzer");
+                let max_bytes = max_bytes.unwrap_or(256 * 1024);
+                match lsp_command(name, input)? {
+                    LspCommand::References => {
+                        let session = self.rust_analyzer_session(name, &root_dir, command)?;
+                        call_lsp_references_tool(
+                            name,
+                            session,
+                            input,
+                            max_results.unwrap_or(120),
+                            max_bytes,
+                        )
+                    }
+                    LspCommand::Diagnostics => call_lsp_diagnostics_tool(
+                        name,
+                        input,
+                        &root_dir,
+                        command,
+                        max_diagnostics.unwrap_or(80),
+                        max_bytes,
+                    ),
+                }
             }
             ToolConfig::ContextMeasure {
                 capability: _,
@@ -2110,14 +2115,28 @@ impl ToolProvider for ConfigTools {
                 fail_on_missing.unwrap_or(false),
                 max_ids.unwrap_or(512),
             ),
-            ToolConfig::CandidateValidate {
+            ToolConfig::TodoWrite { capability: _ } => call_todowrite_tool(name, input),
+            ToolConfig::Bash {
                 capability: _,
-                base_dir,
-            } => call_candidate_validate_tool(
-                name,
-                input,
-                &resolve_config_path(&self.workspace_dir, &base_dir),
-            ),
+                cwd,
+                timeout_seconds,
+                max_bytes,
+                truncation_direction,
+            } => {
+                let output = call_bash_tool(
+                    name,
+                    input,
+                    &resolve_config_path(&self.workspace_dir, &cwd),
+                    CommandRunOptions {
+                        timeout_seconds: timeout_seconds.unwrap_or(120),
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                        truncation_direction: truncation_direction
+                            .unwrap_or(TruncationDirection::Tail),
+                    },
+                )?;
+                self.note_workspace_may_have_changed();
+                Ok(output)
+            }
             ToolConfig::CommandRun {
                 capability: _,
                 cwd,
@@ -2126,18 +2145,23 @@ impl ToolProvider for ConfigTools {
                 timeout_seconds,
                 max_bytes,
                 truncation_direction,
-            } => call_command_run_tool(
-                name,
-                input,
-                &resolve_config_path(&self.workspace_dir, &cwd),
-                &commands,
-                &parameters,
-                CommandRunOptions {
-                    timeout_seconds: timeout_seconds.unwrap_or(120),
-                    max_bytes: max_bytes.unwrap_or(256 * 1024),
-                    truncation_direction: truncation_direction.unwrap_or(TruncationDirection::Head),
-                },
-            ),
+            } => {
+                let output = call_command_run_tool(
+                    name,
+                    input,
+                    &resolve_config_path(&self.workspace_dir, &cwd),
+                    &commands,
+                    &parameters,
+                    CommandRunOptions {
+                        timeout_seconds: timeout_seconds.unwrap_or(120),
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                        truncation_direction: truncation_direction
+                            .unwrap_or(TruncationDirection::Head),
+                    },
+                )?;
+                self.note_workspace_may_have_changed();
+                Ok(output)
+            }
         }
     }
 
@@ -2154,8 +2178,6 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
-            | ToolConfig::GitDiff { capability, .. }
-            | ToolConfig::GitStatus { capability, .. }
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
@@ -2163,13 +2185,11 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::RepoReferences { capability, .. }
             | ToolConfig::RustAnalyzerReferences { capability, .. }
             | ToolConfig::RustAnalyzerDiagnostics { capability, .. }
-            | ToolConfig::DiagnosticContext { capability, .. }
-            | ToolConfig::CodeAssert { capability, .. }
-            | ToolConfig::TodoWrite { capability, .. }
-            | ToolConfig::TodoRead { capability }
+            | ToolConfig::RustAnalyzer { capability, .. }
             | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::ArtifactValidate { capability, .. }
-            | ToolConfig::CandidateValidate { capability, .. }
+            | ToolConfig::TodoWrite { capability }
+            | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
     }
@@ -2739,418 +2759,31 @@ fn insert_input_or_config_array(
     }
 }
 
-fn call_git_diff_tool(
-    name: &str,
-    input: &Value,
-    repo_dir: &Path,
-    max_bytes: usize,
-    baseline: Option<&BTreeMap<String, Option<Vec<u8>>>>,
-) -> Result<Value, RuntimeError> {
-    let repo = repo_dir.to_path_buf();
-    let (paths, has_filter) = git_diff_paths(name, input)?;
-    if has_filter && paths.is_empty() {
-        return Ok(git_diff_output(
-            &repo,
-            input,
-            GitDiffOutput {
-                paths,
-                untracked_files: Vec::new(),
-                changed_files: Vec::new(),
-                preexisting_changed_files: Vec::new(),
-                diff: String::new(),
-                truncated: false,
-                bytes: 0,
-            },
-        ));
-    }
-    let staged = input
-        .get("staged")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    let raw_diff = if !staged {
-        git_diff_against_baseline(name, &repo, input, &paths, has_filter, baseline)?
-    } else {
-        let mut command = Command::new("git");
-        command.arg("-C").arg(&repo).arg("diff");
-        command.arg("--staged");
-        if !paths.is_empty() {
-            command.arg("--");
-            command.args(&paths);
+enum LspCommand {
+    References,
+    Diagnostics,
+}
+
+fn lsp_command(name: &str, input: &Value) -> Result<LspCommand, RuntimeError> {
+    let command = input
+        .get("command")
+        .or_else(|| input.get("method"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    match command {
+        Some("references") | Some("reference") | Some("refs") | Some("findReferences") => {
+            Ok(LspCommand::References)
         }
-        let output = command
-            .output()
-            .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?;
-        if !output.status.success() {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} git diff failed: {}",
-                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-            )));
+        Some("diagnostics") | Some("diagnostic") | Some("check") => Ok(LspCommand::Diagnostics),
+        Some(other) => Err(RuntimeError::Provider(format!(
+            "tool {name} input.command must be references or diagnostics, got {other}"
+        ))),
+        None if input.get("symbol").is_some() || input.get("line").is_some() => {
+            Ok(LspCommand::References)
         }
-        String::from_utf8_lossy(&output.stdout).to_string()
-    };
-    let mut raw_diff = raw_diff;
-    let untracked_files = if !staged && has_filter && !paths.is_empty() {
-        append_requested_untracked_diffs(name, &repo, &paths, &mut raw_diff)?
-    } else {
-        Vec::new()
-    };
-    let changed_files = git_diff_changed_files(&raw_diff);
-    let preexisting_changed_files =
-        git_diff_preexisting_changed_files(baseline, &paths, has_filter, &changed_files);
-    let (diff, truncated, bytes) = bytes_to_limited_text(raw_diff.as_bytes(), max_bytes);
-    Ok(git_diff_output(
-        &repo,
-        input,
-        GitDiffOutput {
-            paths,
-            untracked_files,
-            changed_files,
-            preexisting_changed_files,
-            diff,
-            truncated,
-            bytes,
-        },
-    ))
-}
-
-fn git_diff_output(repo: &Path, input: &Value, output: GitDiffOutput) -> Value {
-    let paths = output.paths;
-    let untracked_files = output.untracked_files;
-    let changed_files = output.changed_files;
-    let preexisting_changed_files = output.preexisting_changed_files;
-    let diff = output.diff;
-    let bytes = output.bytes;
-    let truncated = output.truncated;
-    let artifact_id = format!(
-        "git-diff:{}:{}:{}",
-        repo.display(),
-        input
-            .get("staged")
-            .and_then(Value::as_bool)
-            .unwrap_or(false),
-        paths.join(",")
-    );
-    json!({
-        "repo": repo.display().to_string(),
-        "diff": diff.clone(),
-        "bytes": bytes,
-        "truncated": truncated,
-        "changed_files": changed_files,
-        "workspace_changed_files": changed_files,
-        "preexisting_changed_files": preexisting_changed_files,
-        "artifacts": [{
-            "id": artifact_id.clone(),
-            "kind": "git_diff",
-            "title": "git diff",
-            "uri": repo.display().to_string(),
-            "content": diff,
-            "metadata": {
-                "provider": "git_diff",
-                "repo": repo.display().to_string(),
-                "paths": paths,
-                "untracked_files": untracked_files,
-                "changed_files": changed_files,
-                "workspace_changed_files": changed_files,
-                "preexisting_changed_files": preexisting_changed_files,
-                "bytes": bytes,
-                "truncated": truncated
-            }
-        }],
-    })
-}
-
-fn git_diff_against_baseline(
-    name: &str,
-    repo: &Path,
-    _input: &Value,
-    paths: &[String],
-    has_filter: bool,
-    baseline: Option<&BTreeMap<String, Option<Vec<u8>>>>,
-) -> Result<String, RuntimeError> {
-    let Some(baseline) = baseline.filter(|baseline| !baseline.is_empty()) else {
-        return run_git_diff_raw(name, repo, paths, false);
-    };
-
-    let mut candidates = if has_filter {
-        paths.iter().cloned().collect::<BTreeSet<_>>()
-    } else {
-        current_git_diff_paths(repo)
-            .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?
-            .into_iter()
-            .collect::<BTreeSet<_>>()
-    };
-    if !has_filter {
-        candidates.extend(baseline.keys().cloned());
+        None => Ok(LspCommand::Diagnostics),
     }
-
-    let mut baseline_paths = Vec::new();
-    let mut normal_paths = Vec::new();
-    for path in candidates {
-        if baseline.contains_key(&path) {
-            baseline_paths.push(path);
-        } else {
-            normal_paths.push(path);
-        }
-    }
-
-    let mut diff = if normal_paths.is_empty() {
-        String::new()
-    } else {
-        run_git_diff_raw(name, repo, &normal_paths, false)?
-    };
-    for path in baseline_paths {
-        let before = baseline.get(&path).cloned().unwrap_or(None);
-        let current_path = repo.join(&path);
-        let after = if current_path.is_file() {
-            Some(fs::read(&current_path).map_err(|error| {
-                RuntimeError::Provider(format!("tool {name} read current file {path}: {error}"))
-            })?)
-        } else {
-            None
-        };
-        if before == after {
-            continue;
-        }
-        diff.push_str(&git_diff_file_contents(name, &path, before, after)?);
-    }
-    Ok(diff)
-}
-
-fn run_git_diff_raw(
-    name: &str,
-    repo: &Path,
-    paths: &[String],
-    staged: bool,
-) -> Result<String, RuntimeError> {
-    let mut command = Command::new("git");
-    command.arg("-C").arg(repo).arg("diff");
-    if staged {
-        command.arg("--staged");
-    }
-    if !paths.is_empty() {
-        command.arg("--");
-        command.args(paths);
-    }
-    let output = command
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} git diff: {error}")))?;
-    if !output.status.success() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} git diff failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).to_string())
-}
-
-fn git_diff_file_contents(
-    name: &str,
-    path: &str,
-    before: Option<Vec<u8>>,
-    after: Option<Vec<u8>>,
-) -> Result<String, RuntimeError> {
-    let id = GIT_BASELINE_DIFF_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let root =
-        std::env::temp_dir().join(format!("air-git-baseline-diff-{}-{id}", std::process::id()));
-    let before_path = root.join("before").join(path);
-    let after_path = root.join("after").join(path);
-    write_optional_temp_file(&before_path, before.as_deref())?;
-    write_optional_temp_file(&after_path, after.as_deref())?;
-
-    let output = Command::new("git")
-        .args([
-            "diff",
-            "--no-index",
-            "--src-prefix=a/",
-            "--dst-prefix=b/",
-            "--",
-        ])
-        .arg(&before_path)
-        .arg(&after_path)
-        .output()
-        .map_err(|error| {
-            RuntimeError::Provider(format!("tool {name} git diff --no-index: {error}"))
-        })?;
-    let _ = fs::remove_dir_all(&root);
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} git diff --no-index failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    let diff = String::from_utf8_lossy(&output.stdout).to_string();
-    Ok(normalize_no_index_diff_paths(
-        &diff,
-        path,
-        &before_path,
-        &after_path,
-    ))
-}
-
-fn write_optional_temp_file(path: &Path, content: Option<&[u8]>) -> Result<(), RuntimeError> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
-            RuntimeError::Provider(format!("tool git.diff create temp dir: {error}"))
-        })?;
-    }
-    fs::write(path, content.unwrap_or(&[]))
-        .map_err(|error| RuntimeError::Provider(format!("tool git.diff write temp file: {error}")))
-}
-
-fn normalize_no_index_diff_paths(
-    diff: &str,
-    repo_path: &str,
-    before_path: &Path,
-    after_path: &Path,
-) -> String {
-    let before = before_path.to_string_lossy();
-    let after = after_path.to_string_lossy();
-    diff.replace(&format!("a{before}"), &format!("a/{repo_path}"))
-        .replace(&format!("b{after}"), &format!("b/{repo_path}"))
-        .replace(before.as_ref(), repo_path)
-        .replace(after.as_ref(), repo_path)
-}
-
-fn append_requested_untracked_diffs(
-    name: &str,
-    repo: &Path,
-    paths: &[String],
-    diff: &mut String,
-) -> Result<Vec<String>, RuntimeError> {
-    let mut included = Vec::new();
-    for path in paths {
-        let candidate = repo.join(path);
-        let Ok(absolute_path) = canonicalize_tool_path(name, "git diff path", &candidate) else {
-            continue;
-        };
-        if !absolute_path.starts_with(repo) || !absolute_path.is_file() {
-            continue;
-        }
-        if git_path_is_tracked(name, repo, path)? {
-            continue;
-        }
-        let body = fs::read(&absolute_path)
-            .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
-        if is_likely_binary(&body) {
-            continue;
-        }
-        let content = std::str::from_utf8(&body).map_err(|_| {
-            RuntimeError::Provider(format!(
-                "tool {name} requested untracked file {path} is not valid UTF-8"
-            ))
-        })?;
-        if !diff.is_empty() && !diff.ends_with('\n') {
-            diff.push('\n');
-        }
-        diff.push_str(&untracked_file_unified_diff(path, content));
-        included.push(path.clone());
-    }
-    Ok(included)
-}
-
-fn git_path_is_tracked(name: &str, repo: &Path, path: &str) -> Result<bool, RuntimeError> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(repo)
-        .args(["ls-files", "--error-unmatch", "--"])
-        .arg(path)
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} git ls-files: {error}")))?;
-    Ok(output.status.success())
-}
-
-fn untracked_file_unified_diff(path: &str, content: &str) -> String {
-    let lines = content.lines().collect::<Vec<_>>();
-    let mut diff = format!(
-        "diff --git a/{path} b/{path}\nnew file mode 100644\n--- /dev/null\n+++ b/{path}\n@@ -0,0 +1,{} @@\n",
-        lines.len()
-    );
-    for line in lines {
-        diff.push('+');
-        diff.push_str(line);
-        diff.push('\n');
-    }
-    diff
-}
-
-fn call_git_status_tool(
-    name: &str,
-    repo_dir: &Path,
-    max_files: usize,
-) -> Result<Value, RuntimeError> {
-    let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(&repo)
-        .args(["status", "--porcelain=v1", "--untracked-files=all"])
-        .output()
-        .map_err(|error| RuntimeError::Provider(format!("tool {name} git status: {error}")))?;
-    if !output.status.success() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} git status failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    let raw = String::from_utf8_lossy(&output.stdout).to_string();
-    let mut entries = Vec::new();
-    for line in raw.lines().take(max_files) {
-        if let Some(entry) = parse_git_status_line(line) {
-            entries.push(entry);
-        }
-    }
-    let truncated = raw.lines().count() > entries.len();
-    let rendered = entries
-        .iter()
-        .map(|entry| {
-            format!(
-                "{}{} {}",
-                entry["index"].as_str().unwrap_or_default(),
-                entry["worktree"].as_str().unwrap_or_default(),
-                entry["path"].as_str().unwrap_or_default()
-            )
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-    Ok(json!({
-        "repo": repo.display().to_string(),
-        "clean": entries.is_empty(),
-        "entries": entries,
-        "file_count": entries.len(),
-        "truncated": truncated,
-        "artifacts": [{
-            "id": format!("git-status:{}", repo.display()),
-            "kind": "git_status",
-            "title": "git status",
-            "uri": repo.display().to_string(),
-            "content": rendered,
-            "metadata": {
-                "provider": "git_status",
-                "repo": repo.display().to_string(),
-                "file_count": entries.len(),
-                "truncated": truncated
-            }
-        }]
-    }))
-}
-
-fn parse_git_status_line(line: &str) -> Option<Value> {
-    if line.len() < 4 {
-        return None;
-    }
-    let index = line.chars().next()?.to_string();
-    let worktree = line.chars().nth(1)?.to_string();
-    let rest = line.get(3..)?;
-    let (path, original_path) = rest
-        .split_once(" -> ")
-        .map(|(from, to)| (to.to_string(), Some(from.to_string())))
-        .unwrap_or_else(|| (rest.to_string(), None));
-    Some(json!({
-        "index": index,
-        "worktree": worktree,
-        "path": path,
-        "original_path": original_path,
-        "status": git_status_label(line.get(..2).unwrap_or_default())
-    }))
 }
 
 fn call_repo_files_tool(
@@ -3189,7 +2822,7 @@ fn call_repo_files_tool(
     let mut command = Command::new("rg");
     command.arg("--files");
     if let Some(glob) = glob_input.glob {
-        validate_git_pathspec(name, glob)?;
+        validate_relative_path_filter(name, glob)?;
         command.arg("-g").arg(glob);
     }
     if !paths.is_empty() {
@@ -3199,7 +2832,9 @@ fn call_repo_files_tool(
         .current_dir(&repo)
         .output()
         .map_err(|error| RuntimeError::Provider(format!("tool {name} repo files: {error}")))?;
-    if !output.status.success() {
+    let no_matches =
+        output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty();
+    if !output.status.success() && !no_matches {
         return Err(RuntimeError::Provider(format!(
             "tool {name} repo files failed: {}",
             provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
@@ -3235,6 +2870,17 @@ fn call_repo_files_tool(
         .map(|(_, path)| path)
         .collect::<Vec<_>>();
     let content = files.join("\n");
+    let file_count = files.len();
+    let no_matches = file_count == 0;
+    let search_hint = no_matches.then(|| {
+        repo_files_no_matches_hint(
+            query_input.raw_query,
+            glob_input.glob,
+            mode,
+            include_all,
+            !paths.is_empty(),
+        )
+    });
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query_input.raw_query,
@@ -3244,6 +2890,9 @@ fn call_repo_files_tool(
         "glob_source": glob_input.glob_source,
         "mode": mode,
         "files": files,
+        "file_count": file_count,
+        "no_matches": no_matches,
+        "search_hint": search_hint,
         "include_all": include_all,
         "truncated": truncated,
         "artifacts": [{
@@ -3262,10 +2911,42 @@ fn call_repo_files_tool(
                 "glob_source": glob_input.glob_source,
                 "mode": mode,
                 "max_files": effective_max_files,
-                "include_all": include_all
+                "include_all": include_all,
+                "file_count": file_count,
+                "no_matches": no_matches,
+                "search_hint": search_hint
             }
         }]
     }))
+}
+
+fn repo_files_no_matches_hint(
+    query: &str,
+    glob: Option<&str>,
+    mode: &str,
+    include_all: bool,
+    path_scoped: bool,
+) -> String {
+    let mut hints = Vec::new();
+    if glob.is_some() {
+        hints.push("try a different glob or remove the glob scope");
+    }
+    if !query.trim().is_empty() {
+        hints.push("broaden the query or use include_all=true to inspect nearby paths");
+    }
+    if mode != "smart" && !query.trim().is_empty() {
+        hints.push("try mode=smart for natural-language file discovery");
+    }
+    if path_scoped {
+        hints.push("check whether the path scope is too narrow");
+    }
+    if include_all {
+        hints.push("inspect the project layout with an empty query or broader glob");
+    }
+    if hints.is_empty() {
+        hints.push("broaden the file pattern or inspect the project layout");
+    }
+    format!("No files matched; {}.", hints.join(", "))
 }
 
 struct RepoFilesQueryInput<'a> {
@@ -3279,12 +2960,29 @@ fn repo_files_query_input<'a>(
     input: &'a Value,
 ) -> Result<RepoFilesQueryInput<'a>, RuntimeError> {
     if let Some(query) = input.get("query") {
+        let pattern_glob = if input.get("glob").is_none() && input.get("file_glob").is_none() {
+            input
+                .get("pattern")
+                .map(|pattern| {
+                    let pattern = pattern.as_str().ok_or_else(|| {
+                        RuntimeError::Provider(format!(
+                            "tool {tool_name} input.pattern must be a string"
+                        ))
+                    })?;
+                    let pattern = pattern.trim();
+                    Ok(repo_files_pattern_looks_like_glob(pattern).then_some(pattern))
+                })
+                .transpose()?
+                .flatten()
+        } else {
+            None
+        };
         return query
             .as_str()
             .map(|q| RepoFilesQueryInput {
                 raw_query: q.trim(),
                 query_source: "query",
-                pattern_glob: None,
+                pattern_glob,
             })
             .ok_or_else(|| {
                 RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
@@ -3394,7 +3092,7 @@ fn call_repo_search_tool(
     let paths = repo_tool_paths(name, input)?;
     let glob = repo_glob_input(name, input)?;
     if let Some(glob) = glob {
-        validate_git_pathspec(name, glob)?;
+        validate_relative_path_filter(name, glob)?;
     }
     let mut output = run_repo_rg(
         name,
@@ -3449,7 +3147,10 @@ fn call_repo_search_tool(
         .collect::<Vec<_>>()
         .join("\n");
     let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
-    let truncated = raw.lines().count() > matches.len() || truncated_bytes;
+    let match_count = raw.lines().count();
+    let truncated = match_count > matches.len() || truncated_bytes;
+    let no_matches = match_count == 0;
+    let search_hint = no_matches.then(|| repo_search_no_matches_hint(query, glob, &paths, &mode));
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
@@ -3459,6 +3160,9 @@ fn call_repo_search_tool(
         "mode": mode,
         "requested_mode": requested_mode,
         "matches": matches,
+        "match_count": match_count,
+        "no_matches": no_matches,
+        "search_hint": search_hint,
         "bytes": bytes,
         "truncated": truncated,
         "artifacts": [{
@@ -3477,6 +3181,9 @@ fn call_repo_search_tool(
                 "mode": mode,
                 "requested_mode": requested_mode,
                 "paths": paths,
+                "match_count": match_count,
+                "no_matches": no_matches,
+                "search_hint": search_hint,
                 "max_matches": effective_max_matches,
                 "bytes": bytes,
                 "truncated": truncated
@@ -3516,7 +3223,7 @@ fn call_repo_context_tool(
 
     let glob = repo_glob_input(name, input)?;
     if let Some(glob) = glob {
-        validate_git_pathspec(name, glob)?;
+        validate_relative_path_filter(name, glob)?;
     }
     let mut output = run_repo_rg(
         name,
@@ -3620,6 +3327,8 @@ fn call_repo_context_tool(
 
     let (content, truncated_bytes, bytes) = bytes_to_limited_text(rendered.as_bytes(), max_bytes);
     let truncated = raw_line_count > matches.len() || truncated_bytes;
+    let no_matches = raw_line_count == 0;
+    let search_hint = no_matches.then(|| repo_search_no_matches_hint(query, glob, &paths, &mode));
     Ok(json!({
         "repo": repo.display().to_string(),
         "query": query,
@@ -3627,6 +3336,9 @@ fn call_repo_context_tool(
         "mode": mode,
         "requested_mode": requested_mode,
         "matches": matches,
+        "match_count": raw_line_count,
+        "no_matches": no_matches,
+        "search_hint": search_hint,
         "snippets": snippets,
         "bytes": bytes,
         "truncated": truncated,
@@ -3644,6 +3356,9 @@ fn call_repo_context_tool(
                 "mode": mode,
                 "requested_mode": requested_mode,
                 "paths": paths,
+                "match_count": raw_line_count,
+                "no_matches": no_matches,
+                "search_hint": search_hint,
                 "max_matches": effective_max_matches,
                 "max_files": effective_max_files,
                 "context_lines": effective_context_lines,
@@ -3652,6 +3367,26 @@ fn call_repo_context_tool(
             }
         }]
     }))
+}
+
+fn repo_search_no_matches_hint(
+    query: &str,
+    glob: Option<&str>,
+    paths: &[String],
+    mode: &str,
+) -> String {
+    let mut hints = Vec::new();
+    if glob.is_some() {
+        hints.push("remove or broaden the glob scope");
+    }
+    if !paths.is_empty() {
+        hints.push("check whether the path scope is too narrow");
+    }
+    if mode != "smart" && repo_smart_search_terms(query).len() >= 2 {
+        hints.push("try mode=smart for the same query");
+    }
+    hints.push("broaden the query or search for a concrete symbol/path fragment");
+    format!("No content matches found; {}.", hints.join(", "))
 }
 
 fn repo_effective_search_query(mode: &str, query: &str) -> String {
@@ -3828,13 +3563,183 @@ fn call_command_run_tool(
     let mut argv = Vec::with_capacity(command.len());
     argv.push(program.clone());
     argv.extend(rendered_args.iter().cloned());
+    run_command_argv(name, command_name, &cwd, &argv, options)
+}
+
+fn call_bash_tool(
+    name: &str,
+    input: &Value,
+    cwd: &Path,
+    mut options: CommandRunOptions,
+) -> Result<Value, RuntimeError> {
+    let command = input
+        .get("command")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.command must be a string"))
+        })?;
+    if command.trim().is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.command must not be empty"
+        )));
+    }
+    if let Some(timeout_ms) = input.get("timeout").and_then(Value::as_u64) {
+        if timeout_ms == 0 {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.timeout must be greater than 0"
+            )));
+        }
+        options.timeout_seconds = timeout_ms.saturating_add(999) / 1000;
+    }
+    let base_cwd = canonicalize_tool_path(name, "cwd", cwd)?;
+    let requested_cwd = input
+        .get("workdir")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let cwd = if let Some(workdir) = requested_cwd {
+        let candidate = if Path::new(workdir).is_absolute() {
+            PathBuf::from(workdir)
+        } else {
+            base_cwd.join(workdir)
+        };
+        let workdir = canonicalize_tool_path(name, "input.workdir", &candidate)?;
+        if !workdir.starts_with(&base_cwd) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.workdir is outside configured cwd"
+            )));
+        }
+        workdir
+    } else {
+        base_cwd
+    };
+    let argv = vec![
+        "bash".to_string(),
+        "-lc".to_string(),
+        format!("set -o pipefail; {command}"),
+    ];
+    let mut output = run_command_argv(name, "bash", &cwd, &argv, options)?;
+    if let Some(object) = output.as_object_mut() {
+        let description = input.get("description").and_then(Value::as_str);
+        object.insert(
+            "input_command".to_string(),
+            Value::String(command.to_string()),
+        );
+        object.insert(
+            "verification".to_string(),
+            Value::Bool(is_verification_bash_command(command, description)),
+        );
+        if let Some(description) = description {
+            object.insert(
+                "description".to_string(),
+                Value::String(description.to_string()),
+            );
+        }
+    }
+    Ok(output)
+}
+
+fn is_verification_bash_command(command: &str, description: Option<&str>) -> bool {
+    let text = match description {
+        Some(description) => format!("{command}\n{description}").to_ascii_lowercase(),
+        None => command.to_ascii_lowercase(),
+    };
+    [
+        " test",
+        " test:",
+        "test ",
+        "cargo check",
+        "cargo clippy",
+        "cargo fmt",
+        "cargo test",
+        "clippy",
+        "fmt ",
+        "format",
+        "go test",
+        "lint",
+        "npm test",
+        "npm run test",
+        "pnpm test",
+        "pytest",
+        "run verification",
+        "verify",
+        "yarn test",
+    ]
+    .iter()
+    .any(|needle| text.contains(needle))
+}
+
+fn call_todowrite_tool(name: &str, input: &Value) -> Result<Value, RuntimeError> {
+    let todos = input
+        .get("todos")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.todos must be an array"))
+        })?;
+    for (index, todo) in todos.iter().enumerate() {
+        let Some(object) = todo.as_object() else {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}] must be an object"
+            )));
+        };
+        for field in ["content", "status"] {
+            if !object.get(field).is_some_and(Value::is_string) {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.todos[{index}].{field} must be a string"
+                )));
+            }
+        }
+        if let Some(priority) = object.get("priority") {
+            if !priority.is_string() {
+                return Err(RuntimeError::Provider(format!(
+                    "tool {name} input.todos[{index}].priority must be a string"
+                )));
+            }
+        }
+    }
+    Ok(json!({
+        "todos": todos,
+        "todo_count": todos.len(),
+        "artifacts": [{
+            "id": "todos:current",
+            "kind": "todo_list",
+            "title": "todos",
+            "uri": "memory://todos/current",
+            "content": serde_json::to_string_pretty(todos).unwrap_or_else(|_| "[]".to_string()),
+            "metadata": {
+                "provider": "todowrite",
+                "todo_count": todos.len()
+            }
+        }]
+    }))
+}
+
+fn run_command_argv(
+    name: &str,
+    command_name: &str,
+    cwd: &Path,
+    argv: &[String],
+    options: CommandRunOptions,
+) -> Result<Value, RuntimeError> {
+    let cwd = canonicalize_tool_path(name, "cwd", cwd)?;
+    let (program, args) = argv.split_first().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} command {command_name} is empty"))
+    })?;
     let mut child = Command::new(program)
-        .args(&rendered_args)
+        .args(args)
         .current_dir(&cwd)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .map_err(|error| RuntimeError::Provider(format!("tool {name} command run: {error}")))?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} command stdout pipe was unavailable"))
+    })?;
+    let stderr = child.stderr.take().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {name} command stderr pipe was unavailable"))
+    })?;
+    let stdout_reader = read_command_stream(stdout);
+    let stderr_reader = read_command_stream(stderr);
     let timeout = Duration::from_secs(options.timeout_seconds);
     let started_at = std::time::Instant::now();
     loop {
@@ -3843,14 +3748,13 @@ fn call_command_run_tool(
             .map_err(|error| RuntimeError::Provider(format!("tool {name} command wait: {error}")))?
         {
             Some(status) => {
-                let output = child.wait_with_output().map_err(|error| {
-                    RuntimeError::Provider(format!("tool {name} command output: {error}"))
-                })?;
+                let stdout = join_command_stream(name, command_name, "stdout", stdout_reader)?;
+                let stderr = join_command_stream(name, command_name, "stderr", stderr_reader)?;
                 let mut combined = Vec::new();
-                combined.extend_from_slice(&output.stdout);
-                if !output.stderr.is_empty() {
+                combined.extend_from_slice(&stdout);
+                if !stderr.is_empty() {
                     combined.extend_from_slice(b"\n[stderr]\n");
-                    combined.extend_from_slice(&output.stderr);
+                    combined.extend_from_slice(&stderr);
                 }
                 let combined_text = String::from_utf8_lossy(&combined).to_string();
                 let diagnostics = extract_command_diagnostics(&combined_text, 50);
@@ -3907,6 +3811,8 @@ fn call_command_run_tool(
             None if started_at.elapsed() >= timeout => {
                 let _ = child.kill();
                 let _ = child.wait();
+                let _ = join_command_stream(name, command_name, "stdout", stdout_reader);
+                let _ = join_command_stream(name, command_name, "stderr", stderr_reader);
                 return Err(RuntimeError::Provider(format!(
                     "tool {name} command {command_name} exceeded timeout_seconds={}",
                     options.timeout_seconds
@@ -3915,6 +3821,36 @@ fn call_command_run_tool(
             None => std::thread::sleep(Duration::from_millis(100)),
         }
     }
+}
+
+fn read_command_stream<R: Read + Send + 'static>(
+    mut stream: R,
+) -> JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_command_stream(
+    name: &str,
+    command_name: &str,
+    stream_name: &str,
+    reader: JoinHandle<std::io::Result<Vec<u8>>>,
+) -> Result<Vec<u8>, RuntimeError> {
+    reader
+        .join()
+        .map_err(|_| {
+            RuntimeError::Provider(format!(
+                "tool {name} command {command_name} {stream_name} reader panicked"
+            ))
+        })?
+        .map_err(|error| {
+            RuntimeError::Provider(format!(
+                "tool {name} command {command_name} read {stream_name}: {error}"
+            ))
+        })
 }
 
 fn save_command_full_log(
@@ -4093,7 +4029,7 @@ fn validate_command_parameter_value(
             .chars()
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':')),
         CommandParameterAllow::Path => {
-            validate_git_pathspec(tool_name, value).is_ok()
+            validate_relative_path_filter(tool_name, value).is_ok()
                 && value.chars().all(|ch| {
                     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':')
                 })
@@ -4147,17 +4083,20 @@ fn first_string_alias<'a>(
     Ok(None)
 }
 
+const GLOB_ALIASES: &[&str] = &["glob", "file_glob"];
+const QUERY_ALIASES: &[&str] = &["query", "pattern"];
+
 fn repo_search_query_input<'a>(
     tool_name: &str,
     input: &'a Value,
 ) -> Result<(&'a str, &'static str), RuntimeError> {
-    first_string_alias(tool_name, input, &["query", "pattern"])?.ok_or_else(|| {
+    first_string_alias(tool_name, input, QUERY_ALIASES)?.ok_or_else(|| {
         RuntimeError::Provider(format!("tool {tool_name} input.query must be a string"))
     })
 }
 
 fn repo_glob_input<'a>(tool_name: &str, input: &'a Value) -> Result<Option<&'a str>, RuntimeError> {
-    Ok(first_string_alias(tool_name, input, &["glob", "file_glob"])?.map(|(v, _)| v))
+    Ok(first_string_alias(tool_name, input, GLOB_ALIASES)?.map(|(v, _)| v))
 }
 
 fn optional_string_input<'a>(
@@ -4399,7 +4338,7 @@ fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, Runtim
             RuntimeError::Provider(format!("tool {tool_name} input.path must be a string"))
         })?;
         if !path.trim().is_empty() {
-            validate_git_pathspec(tool_name, path)?;
+            validate_relative_path_filter(tool_name, path)?;
             paths.push(path.to_string());
         }
     }
@@ -4414,7 +4353,7 @@ fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, Runtim
                 ))
             })?;
             if !path.trim().is_empty() {
-                validate_git_pathspec(tool_name, path)?;
+                validate_relative_path_filter(tool_name, path)?;
                 paths.push(path.to_string());
             }
         }
@@ -4442,7 +4381,7 @@ fn parse_rg_vimgrep_line(line: &str) -> Value {
     })
 }
 
-fn validate_git_pathspec(tool_name: &str, path: &str) -> Result<(), RuntimeError> {
+fn validate_relative_path_filter(tool_name: &str, path: &str) -> Result<(), RuntimeError> {
     let path = Path::new(path);
     if path.is_absolute()
         || path
@@ -4450,7 +4389,7 @@ fn validate_git_pathspec(tool_name: &str, path: &str) -> Result<(), RuntimeError
             .any(|component| matches!(component, std::path::Component::ParentDir))
     {
         return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} git path filters must be relative paths inside repo_dir"
+            "tool {tool_name} path filters must be relative paths inside repo_dir"
         )));
     }
     Ok(())

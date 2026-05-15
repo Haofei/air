@@ -13,6 +13,9 @@ pub enum LangGraphBackendError {
     #[error("unsupported state_machine condition {0}")]
     UnsupportedCondition(String),
 
+    #[error("unsupported expression {0}")]
+    UnsupportedExpr(String),
+
     #[error("failed to serialize literal JSON: {0}")]
     Json(#[from] serde_json::Error),
 
@@ -873,6 +876,16 @@ def _air_take_last_within_bytes(value: Any, max_items: int, max_bytes: int) -> l
     return selected
 
 
+def _air_tool_results_from_observation(observation: Any) -> list[dict[str, Any]]:
+    results = []
+    if isinstance(observation, dict) and isinstance(observation.get("result"), list):
+        results.extend(item for item in observation["result"] if isinstance(item, dict) and item.get("tool"))
+    if isinstance(observation, dict) and observation.get("tool"):
+        results.append(observation)
+    return results
+
+
+
 def call_model(name: str, input_value: Any) -> Any:
     raise NotImplementedError(f"model provider is not wired: {name}")
 
@@ -907,6 +920,10 @@ def _air_eval_input(local_state: dict[str, Any], outputs: dict[str, Any], spec: 
     return _air_eval_expr(local_state, outputs, spec)
 
 
+def _air_value_is_empty(value: Any) -> bool:
+    return value is None or value == "" or value == [] or value == {}
+
+
 def _air_eval_expr(local_state: dict[str, Any], outputs: dict[str, Any], expr: Any) -> Any:
     if isinstance(expr, dict):
         if "ref" in expr:
@@ -933,6 +950,18 @@ def _air_eval_expr(local_state: dict[str, Any], outputs: dict[str, Any], expr: A
         if "take_last_within_bytes" in expr:
             value = _air_eval_expr(local_state, outputs, expr["take_last_within_bytes"])
             return _air_take_last_within_bytes(value, expr["max_items"], expr["max_bytes"])
+        if "equals" in expr:
+            values = expr["equals"]
+            if not isinstance(values, list) or len(values) != 2:
+                raise RuntimeError("equals expression expects exactly two operands")
+            return _air_eval_expr(local_state, outputs, values[0]) == _air_eval_expr(local_state, outputs, values[1])
+        if "is_empty" in expr:
+            return _air_value_is_empty(_air_eval_expr(local_state, outputs, expr["is_empty"]))
+        if "not" in expr:
+            value = _air_eval_expr(local_state, outputs, expr["not"])
+            if not isinstance(value, bool):
+                raise RuntimeError("not expression expects a boolean operand")
+            return not value
     return expr
 
 
@@ -941,7 +970,7 @@ def _air_looks_like_expr(value: Any) -> bool:
         isinstance(value, dict)
         and len(value) == 1
         and next(iter(value))
-        in {"ref", "path", "literal", "object", "array", "template", "truncate", "take_last", "take_last_within_bytes"}
+        in {"ref", "path", "literal", "object", "array", "template", "truncate", "take_last", "take_last_within_bytes", "equals", "is_empty", "not"}
     )
 
 
@@ -2120,6 +2149,23 @@ fn expr_code(expr: &Expr) -> Result<String, LangGraphBackendError> {
             max_items = max_items,
             max_bytes = max_bytes
         )),
+        Expr::SplitLines { split_lines } => Ok(format!(
+            "[line.strip() for line in str({value}).splitlines() if line.strip()]",
+            value = expr_code(split_lines)?
+        )),
+        Expr::Equals { equals } => {
+            let [left, right] = equals.as_slice() else {
+                return Err(LangGraphBackendError::UnsupportedExpr(
+                    "equals expects exactly two operands".to_string(),
+                ));
+            };
+            Ok(format!("({} == {})", expr_code(left)?, expr_code(right)?))
+        }
+        Expr::IsEmpty { is_empty } => Ok(format!(
+            "({value} is None or {value} == \"\" or {value} == [] or {value} == {{}})",
+            value = expr_code(is_empty)?
+        )),
+        Expr::Not { not } => Ok(format!("(not bool({}))", expr_code(not)?)),
     }
 }
 

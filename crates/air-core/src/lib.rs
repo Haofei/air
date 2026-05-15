@@ -212,6 +212,18 @@ pub enum Expr {
         max_items: usize,
         max_bytes: usize,
     },
+    SplitLines {
+        split_lines: Box<Expr>,
+    },
+    Equals {
+        equals: Vec<Expr>,
+    },
+    IsEmpty {
+        is_empty: Box<Expr>,
+    },
+    Not {
+        not: Box<Expr>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

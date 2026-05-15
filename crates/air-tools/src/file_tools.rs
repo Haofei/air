@@ -1,5 +1,7 @@
 use super::*;
 
+const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 2000;
+
 pub(super) fn call_file_read_tool(
     name: &str,
     input: &Value,
@@ -49,6 +51,11 @@ pub(super) fn call_file_read_tool(
     }
     let explicit_start_line = optional_positive_usize_input(name, input, "start_line")?;
     let explicit_end_line = optional_positive_usize_input(name, input, "end_line")?;
+    if offset.is_some() && (explicit_start_line.is_some() || explicit_end_line.is_some()) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.offset cannot be combined with input.start_line or input.end_line"
+        )));
+    }
     let (start_line, end_line) = if explicit_start_line.is_some() || explicit_end_line.is_some() {
         let start = explicit_start_line;
         let end = explicit_end_line.or_else(|| {
@@ -70,8 +77,7 @@ pub(super) fn call_file_read_tool(
     let context_lines = optional_positive_usize_input(name, input, "context_lines")?.unwrap_or(0);
     let occurrence = optional_positive_usize_input(name, input, "occurrence")?.unwrap_or(1);
     let explicit_line_numbers = input.get("line_numbers").is_some();
-    let line_numbers = optional_bool_input(name, input, "line_numbers")?
-        .unwrap_or_else(|| start_line.is_some() || end_line.is_some());
+    let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(true);
     let effective_max_bytes =
         optional_bounded_usize_input(name, input, "max_bytes", max_bytes)?.unwrap_or(max_bytes);
     if let (Some(start), Some(end)) = (start_line, end_line) {
@@ -81,6 +87,10 @@ pub(super) fn call_file_read_tool(
             )));
         }
     }
+    let range_limited_unscoped_read = contains.is_none()
+        && start_line.is_none()
+        && end_line.is_none()
+        && total_lines > DEFAULT_UNSCOPED_READ_LINE_LIMIT;
     let (effective_start_line, effective_end_line, match_line) = if let Some(needle) = contains {
         if start_line.is_some() || end_line.is_some() {
             return Err(RuntimeError::Provider(format!(
@@ -117,7 +127,11 @@ pub(super) fn call_file_read_tool(
                 "tool {name} input.context_lines requires input.contains"
             )));
         }
-        (start_line, end_line, None)
+        if range_limited_unscoped_read {
+            (Some(1), Some(DEFAULT_UNSCOPED_READ_LINE_LIMIT), None)
+        } else {
+            (start_line, end_line, None)
+        }
     };
     let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
     let (selected_content, truncated, bytes, full_output_path) = limit_and_maybe_save(
@@ -139,7 +153,9 @@ pub(super) fn call_file_read_tool(
     let truncation_hint = file_read_truncation_hint(
         truncated,
         unscoped_read,
+        range_limited_unscoped_read,
         body.len(),
+        total_lines,
         full_output_path.as_deref(),
     );
     let artifact = json!({
@@ -165,6 +181,7 @@ pub(super) fn call_file_read_tool(
             "truncated": truncated,
             "full_output_path": full_output_path,
             "unscoped_read": unscoped_read,
+            "range_limited_unscoped_read": range_limited_unscoped_read,
             "line_numbers": line_numbers,
             "line_numbers_defaulted": !explicit_line_numbers && line_numbers
         }
@@ -187,6 +204,7 @@ pub(super) fn call_file_read_tool(
         "full_output_path": full_output_path,
         "truncation_hint": truncation_hint,
         "unscoped_read": unscoped_read,
+        "range_limited_unscoped_read": range_limited_unscoped_read,
         "line_numbers": line_numbers,
         "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
         "artifacts": [artifact],
@@ -196,9 +214,16 @@ pub(super) fn call_file_read_tool(
 fn file_read_truncation_hint(
     truncated: bool,
     unscoped_read: bool,
+    range_limited_unscoped_read: bool,
     source_bytes: usize,
+    total_lines: usize,
     full_output_path: Option<&str>,
 ) -> Option<String> {
+    if range_limited_unscoped_read {
+        return Some(format!(
+            "Unscoped read was limited to the first {DEFAULT_UNSCOPED_READ_LINE_LIMIT} of {total_lines} lines. Use offset+limit, start_line/end_line, or contains+context_lines to inspect the relevant range."
+        ));
+    }
     truncated.then(|| {
         let saved = full_output_path
             .map(|path| format!(" Full selected output saved to: {path}."))
@@ -415,6 +440,9 @@ pub(super) fn call_file_search_tool(
         match_truncated,
         full_output_path.as_deref(),
     );
+    let no_matches = result.total_match_count == 0;
+    let search_hint =
+        no_matches.then(|| file_search_no_matches_hint(directory, include_glob.as_deref()));
     let artifact = json!({
         "id": format!("file-search:{}:{}", path.display(), stable_pattern_id(pattern)),
         "kind": "file_search",
@@ -434,6 +462,7 @@ pub(super) fn call_file_search_tool(
             "include_glob": include_glob,
             "match_count": result.total_match_count,
             "returned_match_count": result.matches.len(),
+            "no_matches": no_matches,
             "total_lines": result.total_lines,
             "searched_file_count": result.searched_file_count,
             "skipped_file_count": result.skipped_file_count,
@@ -443,7 +472,8 @@ pub(super) fn call_file_search_tool(
             "line_truncated": result.any_line_truncated,
             "truncated": truncated,
             "full_output_path": full_output_path,
-            "truncation_hint": truncation_hint
+            "truncation_hint": truncation_hint,
+            "search_hint": search_hint
         }
     });
     Ok(json!({
@@ -455,6 +485,7 @@ pub(super) fn call_file_search_tool(
         "matches": result.matches,
         "match_count": result.total_match_count,
         "returned_match_count": result.matches.len(),
+        "no_matches": no_matches,
         "total_lines": result.total_lines,
         "searched_file_count": result.searched_file_count,
         "skipped_file_count": result.skipped_file_count,
@@ -465,9 +496,23 @@ pub(super) fn call_file_search_tool(
         "truncated": truncated,
         "full_output_path": full_output_path,
         "truncation_hint": truncation_hint,
+        "search_hint": search_hint,
         "bytes": bytes,
         "artifacts": [artifact]
     }))
+}
+
+fn file_search_no_matches_hint(directory: bool, include_glob: Option<&str>) -> String {
+    let scope = if directory {
+        if include_glob.is_some() {
+            "No matches in the current directory/glob scope."
+        } else {
+            "No matches in the current directory scope."
+        }
+    } else {
+        "No matches in this file."
+    };
+    format!("{scope} broaden the pattern/path, inspect the repo file list, or switch to a likely source/test extension instead of repeating the same search.")
 }
 
 fn file_search_truncation_hint(
@@ -587,7 +632,7 @@ fn file_search_path_input(
     if candidate.exists() {
         return Ok((Some(include.to_string()), None));
     }
-    super::validate_git_pathspec(tool_name, include)?;
+    super::validate_relative_path_filter(tool_name, include)?;
     Ok((Some(".".to_string()), Some(include.to_string())))
 }
 
@@ -1135,25 +1180,45 @@ pub(super) fn file_modified_time(
         })
 }
 
-fn require_fresh_read(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct ReadSnapshot {
+    pub(super) modified: SystemTime,
+    fingerprint: FileFingerprint,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileFingerprint {
+    len: u64,
+    hash: u64,
+}
+
+pub(super) fn read_snapshot(
     name: &str,
     label: &str,
-    action: &str,
     path: &Path,
-    read_snapshots: &BTreeMap<PathBuf, SystemTime>,
-) -> Result<(), RuntimeError> {
-    let Some(read_modified) = read_snapshots.get(path) else {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} {label} must be read before {action} when require_read is true"
-        )));
-    };
-    let current_modified = file_modified_time(name, label, path)?;
-    if current_modified > *read_modified {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} {label} was modified after it was last read; read it again before {action}"
-        )));
+) -> Result<ReadSnapshot, RuntimeError> {
+    let modified = file_modified_time(name, label, path)?;
+    let bytes = fs::read(path).map_err(|error| {
+        RuntimeError::Provider(format!(
+            "tool {name} read content fingerprint for {label}: {error}"
+        ))
+    })?;
+    Ok(ReadSnapshot {
+        modified,
+        fingerprint: file_fingerprint(&bytes),
+    })
+}
+
+fn file_fingerprint(bytes: &[u8]) -> FileFingerprint {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
     }
-    Ok(())
+    FileFingerprint {
+        len: bytes.len() as u64,
+        hash,
+    }
 }
 
 macro_rules! define_edit_match_strategies {
@@ -1301,6 +1366,58 @@ fn selected_edit_matches(matches: &[EditMatch], replace_all: bool) -> Vec<EditMa
     } else {
         vec![matches[0]]
     }
+}
+
+fn code_file_requires_complete_line_anchor(path: &str) -> bool {
+    let extension = Path::new(path)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or_default();
+    matches!(
+        extension,
+        "c" | "cc"
+            | "cpp"
+            | "cs"
+            | "css"
+            | "go"
+            | "h"
+            | "hpp"
+            | "java"
+            | "js"
+            | "jsx"
+            | "kt"
+            | "lua"
+            | "php"
+            | "py"
+            | "rb"
+            | "rs"
+            | "scala"
+            | "sh"
+            | "swift"
+            | "ts"
+            | "tsx"
+            | "vue"
+    )
+}
+
+fn single_line_code_anchor_is_incomplete(
+    content: &str,
+    edit_match: EditMatch,
+    old_string: &str,
+) -> bool {
+    if old_string.contains('\n') || old_string.trim().is_empty() {
+        return false;
+    }
+    let line_start = content[..edit_match.start]
+        .rfind('\n')
+        .map(|index| index + 1)
+        .unwrap_or(0);
+    let line_end = content[edit_match.end..]
+        .find('\n')
+        .map(|index| edit_match.end + index)
+        .unwrap_or(content.len());
+    let line = content[line_start..line_end].trim_end_matches('\r');
+    line.trim() != old_string.trim()
 }
 
 fn apply_selected_edit_matches(content: &str, selected: &[EditMatch], new_string: &str) -> String {
@@ -1496,25 +1613,21 @@ fn find_whitespace_normalized_edit_matches(content: &str, old_string: &str) -> V
     dedup_edit_matches(matches)
 }
 
-fn find_escape_normalized_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
-    let unescaped_search = unescape_edit_string(old_string);
-    let mut matches = content
-        .match_indices(&unescaped_search)
-        .map(|(start, value)| EditMatch {
-            start,
-            end: start + value.len(),
-        })
-        .collect::<Vec<_>>();
-
+fn find_line_block_edit_matches(
+    content: &str,
+    search: &str,
+    mut matches: Vec<EditMatch>,
+    block_eq: impl Fn(&str, &str) -> bool,
+) -> Vec<EditMatch> {
     let content_lines = split_lines_with_offsets(content);
-    let search_lines = normalized_search_lines(&unescaped_search);
+    let search_lines = normalized_search_lines(search);
     if search_lines.is_empty() || search_lines.len() > content_lines.len() {
         return dedup_edit_matches(matches);
     }
     for start_line in 0..=content_lines.len() - search_lines.len() {
         let end_line = start_line + search_lines.len() - 1;
         let block = &content[content_lines[start_line].start..content_lines[end_line].end];
-        if unescape_edit_string(block) == unescaped_search {
+        if block_eq(block, search) {
             matches.push(EditMatch {
                 start: content_lines[start_line].start,
                 end: content_lines[end_line].end,
@@ -1524,36 +1637,36 @@ fn find_escape_normalized_edit_matches(content: &str, old_string: &str) -> Vec<E
     dedup_edit_matches(matches)
 }
 
+fn find_escape_normalized_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
+    let unescaped_search = unescape_edit_string(old_string);
+    let matches = content
+        .match_indices(&unescaped_search)
+        .map(|(start, value)| EditMatch {
+            start,
+            end: start + value.len(),
+        })
+        .collect::<Vec<_>>();
+    find_line_block_edit_matches(content, &unescaped_search, matches, |block, search| {
+        unescape_edit_string(block) == search
+    })
+}
+
 fn find_trimmed_boundary_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
     let trimmed_search = old_string.trim();
     if trimmed_search == old_string || trimmed_search.is_empty() {
         return Vec::new();
     }
 
-    let mut matches = content
+    let matches = content
         .match_indices(trimmed_search)
         .map(|(start, value)| EditMatch {
             start,
             end: start + value.len(),
         })
         .collect::<Vec<_>>();
-
-    let content_lines = split_lines_with_offsets(content);
-    let search_lines = normalized_search_lines(trimmed_search);
-    if search_lines.is_empty() || search_lines.len() > content_lines.len() {
-        return dedup_edit_matches(matches);
-    }
-    for start_line in 0..=content_lines.len() - search_lines.len() {
-        let end_line = start_line + search_lines.len() - 1;
-        let block = &content[content_lines[start_line].start..content_lines[end_line].end];
-        if block.trim() == trimmed_search {
-            matches.push(EditMatch {
-                start: content_lines[start_line].start,
-                end: content_lines[end_line].end,
-            });
-        }
-    }
-    dedup_edit_matches(matches)
+    find_line_block_edit_matches(content, trimmed_search, matches, |block, search| {
+        block.trim() == search
+    })
 }
 
 fn find_context_aware_edit_matches(content: &str, old_string: &str) -> Vec<EditMatch> {
@@ -1790,16 +1903,12 @@ pub(super) struct FileWriteOptions<'a> {
     pub(super) max_bytes: usize,
     pub(super) create_dirs: bool,
     pub(super) allow_overwrite: bool,
-    pub(super) require_read: bool,
-    pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
 }
 
 pub(super) struct FileEditOptions<'a> {
     pub(super) base_dir: &'a Path,
     pub(super) max_bytes: usize,
     pub(super) max_changed_lines: Option<usize>,
-    pub(super) require_read: bool,
-    pub(super) read_snapshots: &'a BTreeMap<PathBuf, SystemTime>,
 }
 
 pub(super) fn call_file_write_tool(
@@ -1808,7 +1917,6 @@ pub(super) fn call_file_write_tool(
     options: FileWriteOptions<'_>,
 ) -> Result<Value, RuntimeError> {
     let input_path = required_input_string(name, input, "path")?;
-    validate_git_pathspec(name, input_path)?;
     let content = required_input_string(name, input, "content")?;
     let content_bytes = content.as_bytes();
     if content_bytes.len() > options.max_bytes {
@@ -1818,7 +1926,11 @@ pub(super) fn call_file_write_tool(
         )));
     }
     let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
-    let candidate = base.join(input_path);
+    let candidate = if Path::new(input_path).is_absolute() {
+        PathBuf::from(input_path)
+    } else {
+        base.join(input_path)
+    };
     let parent = candidate.parent().ok_or_else(|| {
         RuntimeError::Provider(format!(
             "tool {name} input.path must have a parent directory"
@@ -1845,15 +1957,6 @@ pub(super) fn call_file_write_tool(
             return Err(RuntimeError::Provider(format!(
                 "tool {name} input.path is outside configured base_dir"
             )));
-        }
-        if options.require_read {
-            require_fresh_read(
-                name,
-                "input.path",
-                "overwrite",
-                &existing,
-                options.read_snapshots,
-            )?;
         }
         if !options.allow_overwrite {
             return Err(RuntimeError::Provider(format!(
@@ -1928,6 +2031,25 @@ fn count_changed_diff_lines(diff: &str) -> usize {
                 || (line.starts_with('-') && !line.starts_with("---"))
         })
         .count()
+}
+
+fn build_post_edit_snippets(path: &str, content: &str, changed_lines: &[usize]) -> Value {
+    let total_lines = content.lines().count().max(1);
+    let snippets = merge_line_ranges(changed_lines, total_lines, 3)
+        .into_iter()
+        .take(8)
+        .map(|(start_line, end_line)| {
+            let selected = select_line_range(content, Some(start_line), Some(end_line));
+            json!({
+                "path": path,
+                "start_line": start_line,
+                "end_line": end_line,
+                "content_format": "line_numbered",
+                "content": numbered_content(&selected, start_line)
+            })
+        })
+        .collect::<Vec<_>>();
+    Value::Array(snippets)
 }
 
 fn parse_file_edit_operations<'a>(
@@ -2075,6 +2197,30 @@ impl EditDiagnostic {
     }
 }
 
+fn provider_error_message(error: &RuntimeError) -> String {
+    match error {
+        RuntimeError::Provider(message) => message.clone(),
+        other => other.to_string(),
+    }
+}
+
+fn edit_input_error_field(message: &str) -> &'static str {
+    if message.contains("old_string") || message.contains("oldString") {
+        "old_string"
+    } else if message.contains("new_string") || message.contains("newString") {
+        "new_string"
+    } else {
+        "input"
+    }
+}
+
+fn is_structured_edit_input_field_error(message: &str) -> bool {
+    message.contains("old_string must be a string")
+        || message.contains("oldString must be a string")
+        || message.contains("new_string must be a string")
+        || message.contains("newString must be a string")
+}
+
 fn file_edit_failure_output(
     name: &str,
     base: &Path,
@@ -2126,22 +2272,47 @@ pub(super) fn call_file_edit_tool(
     options: FileEditOptions<'_>,
 ) -> Result<Value, RuntimeError> {
     let input_path = required_path_input(name, input)?;
-    validate_git_pathspec(name, input_path)?;
-    let operations = parse_file_edit_operations(name, input)?;
     let dry_run = optional_bool_input(name, input, "dry_run")?.unwrap_or(false);
     let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
 
     let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
-    let candidate = base.join(input_path);
+    let candidate = if Path::new(input_path).is_absolute() {
+        PathBuf::from(input_path)
+    } else {
+        base.join(input_path)
+    };
     let path = canonicalize_tool_path(name, "input.path", &candidate)?;
     if !path.starts_with(&base) {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.path is outside configured base_dir"
         )));
     }
-    if options.require_read {
-        require_fresh_read(name, "input.path", "edit", &path, options.read_snapshots)?;
-    }
+    let operations = match parse_file_edit_operations(name, input) {
+        Ok(operations) => operations,
+        Err(error) => {
+            let message = provider_error_message(&error);
+            if !is_structured_edit_input_field_error(&message) {
+                return Err(error);
+            }
+            return Ok(file_edit_failure_output(
+                name,
+                &base,
+                &path,
+                input_path,
+                "",
+                EditDiagnostic {
+                    label: "input".to_string(),
+                    path: input_path.to_string(),
+                    field: edit_input_error_field(&message),
+                    message,
+                    match_strategy: None,
+                    effective_match_strategy: None,
+                    match_count: None,
+                    line: None,
+                },
+            ));
+        }
+    };
 
     let content = fs::read_to_string(&path)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
@@ -2149,6 +2320,7 @@ pub(super) fn call_file_edit_tool(
     let mut total_replacements = 0usize;
     let mut diff = String::new();
     let mut strategies = Vec::new();
+    let mut changed_start_lines = Vec::new();
     for operation in &operations {
         let (effective_match_strategy, matches) =
             find_edit_matches(&updated, operation.old_string, operation.match_strategy);
@@ -2200,12 +2372,43 @@ pub(super) fn call_file_edit_tool(
             ));
         }
         let selected_matches = selected_edit_matches(&matches, operation.replace_all);
+        if code_file_requires_complete_line_anchor(input_path)
+            && selected_matches.iter().any(|edit_match| {
+                single_line_code_anchor_is_incomplete(&updated, *edit_match, operation.old_string)
+            })
+        {
+            return Ok(file_edit_failure_output(
+                name,
+                &base,
+                &path,
+                input_path,
+                &diff,
+                EditDiagnostic {
+                    label: operation.label.clone(),
+                    path: input_path.to_string(),
+                    field: "old_string",
+                    message: format!(
+                        "{}.old_string must include a complete source line or multi-line context for code files",
+                        operation.label
+                    ),
+                    match_strategy: Some(operation.match_strategy.as_str()),
+                    effective_match_strategy: Some(effective_match_strategy.as_str()),
+                    match_count: Some(matches.len()),
+                    line: edit_anchor_line(&updated, operation.old_string),
+                },
+            ));
+        }
         diff.push_str(&edit_unified_diff(
             input_path,
             &updated,
             &selected_matches,
             operation.new_string,
         ));
+        changed_start_lines.extend(
+            selected_matches
+                .iter()
+                .map(|edit_match| line_number_at(&updated, edit_match.start)),
+        );
         total_replacements += selected_matches.len();
         strategies.push(effective_match_strategy.as_str());
         updated = apply_selected_edit_matches(&updated, &selected_matches, operation.new_string);
@@ -2258,6 +2461,7 @@ pub(super) fn call_file_edit_tool(
         "match_strategies": strategies,
         "diff": diff_content,
         "diff_truncated": diff_truncated,
+        "post_edit_snippets": build_post_edit_snippets(input_path, &updated, &changed_start_lines),
         "artifacts": [{
             "id": format!("file-edit:{}", path.display()),
             "kind": "file_edit",

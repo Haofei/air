@@ -1,216 +1,53 @@
 {
   "workspace_dir": ".",
   "tools": {
-    "web.search": {
-      "kind": "local_docs_search",
-      "capability": "network.search",
-      "max_results": 4,
-      "documents": [
-        {
-          "id": "docs-command-run-safety",
-          "title": "Command runner safety for coding agents",
-          "content": "Coding agents should use configured commands, bounded timeouts, structured diagnostics, and parameter policies instead of raw shell access."
-        },
-        {
-          "id": "docs-code-agent-loop",
-          "title": "Core coding-agent loop",
-          "content": "A capable coding agent should first explore repository context, then choose a narrow edit context, apply constrained file changes, and verify with configured validations."
-        },
-        {
-          "id": "docs-edit-safety",
-          "title": "Edit safety",
-          "content": "Edit loops should avoid raw shell access, require a prior read before writes, apply constrained edits, and preserve structured diagnostics plus diffs for audit."
-        },
-        {
-          "id": "docs-playwright-timeouts",
-          "title": "Playwright timeout and navigation guidance",
-          "content": "Playwright pages support default navigation and action timeouts. Browser automation code should set bounded timeouts for page.goto, selectors, and page evaluation. Tools that run inside larger agents should expose diagnostics when a page fails, times out, or returns empty content."
-        },
-        {
-          "id": "docs-search-relevance",
-          "title": "Search relevance for coding agents",
-          "content": "Coding agents need query diversification, required technical terms, domain deduplication, and source diagnostics. Broad queries can return unrelated products or tutorials; agents should preserve search queries and result metadata so poor retrieval can be audited."
-        },
-        {
-          "id": "docs-provenance",
-          "title": "Evidence provenance for code analysis",
-          "content": "A coding agent should cite stable artifact ids for web pages, file reads, and diffs. Findings should identify whether they are grounded in external documentation, local code, a diff, or missing evidence."
-        },
-        {
-          "id": "docs-browser-cost",
-          "title": "Browser-backed tool cost control",
-          "content": "Browser-backed search can be slower than API search. Practical controls include max results, max pages per query, max content characters, page concurrency limits, blocked resource types, and a hard process timeout from the host runtime."
-        }
-      ]
-    },
-    "read": {
-      "kind": "file_read",
-      "capability": "file.read",
-      "base_dir": ".",
-      "max_bytes": 32768
-    },
-    "read_many": {
-      "kind": "file_read_many",
-      "capability": "file.read",
-      "base_dir": ".",
-      "max_files": 8,
-      "max_bytes": 65536
-    },
-    "grep": {
-      "kind": "file_search",
-      "capability": "file.read",
-      "base_dir": ".",
-      "max_matches": 40,
-      "max_context_lines": 2,
-      "max_line_chars": 2000,
-      "max_bytes": 32768
-    },
     "glob": {
       "kind": "repo_files",
       "capability": "code.read",
       "repo_dir": ".",
       "max_files": 100
     },
+    "read": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": ".",
+      "max_bytes": 65536
+    },
+    "grep": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": ".",
+      "max_matches": 100,
+      "max_context_lines": 2,
+      "max_line_chars": 2000,
+      "max_bytes": 65536
+    },
+    "lsp": {
+      "kind": "rust_analyzer",
+      "capability": "code.read",
+      "root_dir": ".",
+      "command": "rust-analyzer",
+      "max_results": 80,
+      "max_diagnostics": 80,
+      "max_bytes": 65536
+    },
     "edit": {
       "kind": "file_edit",
       "capability": "file.write",
       "base_dir": ".",
-      "require_read": true,
+      "max_bytes": 262144
+    },
+    "bash": {
+      "kind": "bash",
+      "capability": "code.test",
+      "cwd": ".",
+      "timeout_seconds": 120,
       "max_bytes": 65536,
-      "max_changed_lines": 80
+      "truncation_direction": "tail"
     },
-    "repo.files": {
-      "kind": "repo_files",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_files": 100
-    },
-    "repo.search": {
-      "kind": "repo_search",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_matches": 80,
-      "max_bytes": 65536
-    },
-    "repo.symbols": {
-      "kind": "repo_symbols",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_symbols": 120,
-      "max_bytes": 65536
-    },
-    "repo.references": {
-      "kind": "repo_references",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_matches": 120,
-      "max_files": 8,
-      "context_lines": 4,
-      "max_bytes": 65536
-    },
-    "lsp.references": {
-      "kind": "rust_analyzer_references",
-      "capability": "code.read",
-      "root_dir": ".",
-      "command": "rust-analyzer",
-      "max_results": 120,
-      "max_bytes": 65536
-    },
-    "lsp.diagnostics": {
-      "kind": "rust_analyzer_diagnostics",
-      "capability": "code.read",
-      "root_dir": ".",
-      "command": "rust-analyzer",
-      "max_diagnostics": 80,
-      "max_bytes": 65536
-    },
-    "repo.context": {
-      "kind": "repo_context",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_matches": 80,
-      "max_files": 8,
-      "context_lines": 8,
-      "max_bytes": 65536
-    },
-    "diagnostic.context": {
-      "kind": "diagnostic_context",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_diagnostics": 10,
-      "context_lines": 4,
-      "max_bytes": 65536
-    },
-    "code.assert": {
-      "kind": "code_assert",
-      "capability": "code.read",
-      "base_dir": ".",
-      "max_assertions": 12,
-      "max_bytes": 65536
-    },
-    "git.diff": {
-      "kind": "git_diff",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_bytes": 65536
-    },
-    "git.status": {
-      "kind": "git_status",
-      "capability": "code.read",
-      "repo_dir": ".",
-      "max_files": 200
-    },
-    "todo.write": {
+    "todowrite": {
       "kind": "todo_write",
-      "capability": "task.progress",
-      "max_items": 8,
-      "max_content_chars": 240
-    },
-    "todo.read": {
-      "kind": "todo_read",
-      "capability": "task.progress"
-    },
-    "context.measure": {
-      "kind": "context_measure",
-      "capability": "context.manage",
-      "max_context_chars": 200000,
-      "threshold_percent": 80
-    },
-    "artifact.validate": {
-      "kind": "artifact_validate",
-      "capability": "provenance.validate",
-      "fail_on_missing": true,
-      "max_ids": 512
-    },
-    "test.run": {
-      "kind": "command_run",
-      "capability": "code.test",
-      "cwd": ".",
-      "commands": {
-        "default": [
-          "bash",
-          "-lc",
-          "export CARGO_TARGET_DIR=\"${AIR_CARGO_TARGET_DIR:-${TMPDIR:-/tmp}/air-code-agent-cargo-target-${PWD//\\//_}}\"; cargo test -q --workspace && cargo clippy -q --workspace --all-targets -- -D warnings"
-        ]
-      },
-      "timeout_seconds": 120,
-      "max_bytes": 65536,
-      "truncation_direction": "tail"
-    },
-    "format.run": {
-      "kind": "command_run",
-      "capability": "code.test",
-      "cwd": ".",
-      "commands": {
-        "default": [
-          "cargo",
-          "fmt",
-          "--all"
-        ]
-      },
-      "timeout_seconds": 120,
-      "max_bytes": 65536,
-      "truncation_direction": "tail"
+      "capability": "code.read"
     }
   },
   "approvals": {

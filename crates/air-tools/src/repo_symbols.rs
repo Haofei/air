@@ -56,7 +56,7 @@ pub(crate) fn call_repo_symbols_tool(
     let paths = super::repo_tool_paths(name, input)?;
     let glob = input.get("glob").and_then(Value::as_str);
     if let Some(glob) = glob {
-        super::validate_git_pathspec(name, glob)?;
+        super::validate_relative_path_filter(name, glob)?;
     }
 
     let symbols = repo_symbols_rg(

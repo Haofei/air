@@ -37,7 +37,7 @@ pub(crate) fn call_repo_references_tool(
         symbol,
     ]);
     if let Some(glob) = input.get("glob").and_then(Value::as_str) {
-        validate_git_pathspec(name, glob)?;
+        validate_relative_path_filter(name, glob)?;
         command.arg("-g").arg(glob);
     }
     if !paths.is_empty() {

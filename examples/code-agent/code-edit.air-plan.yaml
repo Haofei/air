@@ -1,10 +1,10 @@
 plan:
   name: code-edit
   version: 0.1.0
-  description: "Unified coding-agent edit loop for a bounded task with configured validation."
+description: "Minimal coding-agent edit loop."
 
 requires:
-  capabilities: [task.progress, file.read, file.write, code.read, code.test]
+  capabilities: [file.read, file.write, code.read, code.test]
 
 nodes:
   - id: edit
@@ -20,5 +20,5 @@ outputs:
 
 decisions:
   - id: choose-code-edit-loop
-    rationale: "Run the unified AIR edit loop with configured validation. The loop must discover and read the relevant files before writing."
+    rationale: "Run the minimal AIR edit loop."
     selected: [edit]

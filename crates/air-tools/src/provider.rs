@@ -20,15 +20,15 @@ impl ToolProvider for EchoTools {
 #[derive(Clone)]
 pub enum ToolProviderChoice {
     Echo(EchoTools),
-    Config(ConfigTools),
+    Config(Box<ConfigTools>),
 }
 
 impl ToolProviderChoice {
     pub fn from_config(tool_config: Option<PathBuf>, example_tools: bool) -> Result<Self> {
         if let Some(tool_config) = tool_config {
-            Ok(Self::Config(ConfigTools::from_file(tool_config)?))
+            Ok(Self::Config(Box::new(ConfigTools::from_file(tool_config)?)))
         } else if example_tools {
-            Ok(Self::Config(ConfigTools::example()))
+            Ok(Self::Config(Box::new(ConfigTools::example())))
         } else {
             Ok(Self::Echo(EchoTools))
         }

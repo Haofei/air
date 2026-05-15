@@ -937,6 +937,28 @@ impl Verifier {
                 }
                 self.verify_expr(rule_id, label, take_last_within_bytes, module);
             }
+            air_core::Expr::SplitLines { split_lines } => {
+                self.verify_expr(rule_id, label, split_lines, module);
+            }
+            air_core::Expr::Equals { equals } => {
+                if equals.len() != 2 {
+                    self.error(
+                        "AIR099",
+                        format!(
+                            "{label} in rule {rule_id} equals expression must have exactly two operands"
+                        ),
+                    );
+                }
+                for nested in equals {
+                    self.verify_expr(rule_id, label, nested, module);
+                }
+            }
+            air_core::Expr::IsEmpty { is_empty } => {
+                self.verify_expr(rule_id, label, is_empty, module);
+            }
+            air_core::Expr::Not { not } => {
+                self.verify_expr(rule_id, label, not, module);
+            }
         }
     }
 

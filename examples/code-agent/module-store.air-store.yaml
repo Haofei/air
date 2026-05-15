@@ -10,34 +10,7 @@ modules:
     path: examples/code-agent/code-edit-loop.air.yaml
     kind: composite
     visibility: public
-    description: "Bounded opencode-style code loop using model-selected explore, review, edit, format, test, and retest tools."
-    tags: [coding, explore, review, edit, tool_loop, diagnostics, test]
-    covers: [code_exploration, code_review, code_edit, bounded_tool_loop, diagnostics_loop, bounded_edit, retest]
+    description: "Minimal opencode-style code loop using read/search/edit, format, test, and diff tools."
+    tags: [coding, edit, tool_loop, test]
+    covers: [code_exploration, code_edit, bounded_tool_loop, retest]
     priority: 80
-
-recipes:
-  - id: code.edit_loop@0.1.0
-    visibility: public
-    description: "Core coding-agent loop for exploration, review, edits, formatting, tests, and retests through one OpenCode-style tool loop."
-    tags: [coding, explore, review, edit, tool_loop, diagnostics, test]
-    covers: [code_exploration, code_review, code_edit, bounded_tool_loop, diagnostics_loop, bounded_edit, retest]
-    priority: 85
-    plan:
-      plan:
-        name: code-edit-recipe
-        version: 0.1.0
-      requires:
-        capabilities: [task.progress, file.read, file.write, code.read, code.test]
-      nodes:
-        - id: edit
-          module: code.edit@0.1.0
-      entry: edit
-      connect:
-        - from: $input.task
-          to: edit.task
-      outputs:
-        edit: edit.edit
-      decisions:
-        - id: use-code-edit-loop
-          rationale: "Run the unified opencode-style edit loop with configured validation."
-          selected: [code.edit_loop@0.1.0]

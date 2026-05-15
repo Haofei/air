@@ -45,298 +45,7 @@ fn tool_config_workspace_dir_rebases_file_tool_roots() {
         .call_tool("read", &json!({ "path": "note.txt" }))
         .unwrap();
 
-    assert_eq!(output["content"], json!("hello from workspace"));
-}
-
-#[test]
-fn todo_write_returns_a_structured_artifact() {
-    let dir = temp_dir("air-tools-todo-write");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "todo.write": {
-                  "kind": "todo_write",
-                  "capability": "task.progress",
-                  "max_items": 4,
-                  "max_content_chars": 80
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "todo.write",
-            &json!({
-                "todos": [
-                    {
-                        "id": "inspect",
-                        "content": "Inspect repository context",
-                        "status": "completed",
-                        "priority": "high"
-                    },
-                    {
-                        "id": "fix",
-                        "content": "Apply the bounded fix",
-                        "status": "in_progress",
-                        "priority": "high"
-                    },
-                    {
-                        "id": "verify",
-                        "content": "Run the configured verification",
-                        "status": "pending",
-                        "priority": "medium"
-                    }
-                ]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["total"], json!(3));
-    assert_eq!(output["open_count"], json!(2));
-    assert_eq!(output["in_progress_count"], json!(1));
-    assert_eq!(output["artifacts"][0]["kind"], json!("todo_list"));
-    assert_eq!(tools.tool_capability("todo.write"), Some("task.progress"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn todo_read_returns_current_todo_list_after_write() {
-    let dir = temp_dir("air-tools-todo-read");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "todo.write": {
-                  "kind": "todo_write",
-                  "capability": "task.progress"
-                },
-                "todo.read": {
-                  "kind": "todo_read",
-                  "capability": "task.progress"
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let empty = tools.call_tool("todo.read", &json!({})).unwrap();
-    assert_eq!(empty["total"], json!(0));
-    assert_eq!(empty["open_count"], json!(0));
-    assert_eq!(
-        empty["artifacts"][0]["metadata"]["provider"],
-        json!("todo_read")
-    );
-
-    tools
-        .call_tool(
-            "todo.write",
-            &json!({
-                "todos": [
-                    {
-                        "id": "inspect",
-                        "content": "Inspect repository context",
-                        "status": "completed",
-                        "priority": "high"
-                    },
-                    {
-                        "id": "verify",
-                        "content": "Run verification",
-                        "status": "pending",
-                        "priority": "medium"
-                    }
-                ]
-            }),
-        )
-        .unwrap();
-
-    let output = tools.call_tool("todo.read", &json!({})).unwrap();
-    assert_eq!(output["total"], json!(2));
-    assert_eq!(output["open_count"], json!(1));
-    assert_eq!(output["completed_count"], json!(1));
-    assert_eq!(output["todos"][1]["id"], json!("verify"));
-    assert_eq!(tools.tool_capability("todo.read"), Some("task.progress"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn todo_write_accepts_items_alias() {
-    let dir = temp_dir("air-tools-todo-write-items-alias");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "todo.write": {
-                  "kind": "todo_write",
-                  "capability": "task.progress",
-                  "max_items": 4,
-                  "max_content_chars": 80
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "todo.write",
-            &json!({
-                "items": [
-                    {
-                        "id": "inspect",
-                        "content": "Inspect repository context",
-                        "status": "completed",
-                        "priority": "high"
-                    },
-                    {
-                        "id": "split",
-                        "content": "Split the repo symbols helpers",
-                        "status": "in_progress",
-                        "priority": "high"
-                    }
-                ]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["total"], json!(2));
-    assert_eq!(output["in_progress_count"], json!(1));
-    assert_eq!(output["todos"][1]["id"], json!("split"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn todo_write_stringifies_numeric_ids() {
-    let dir = temp_dir("air-tools-todo-write-numeric-id");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "todo.write": {
-                  "kind": "todo_write",
-                  "capability": "task.progress",
-                  "max_items": 4,
-                  "max_content_chars": 80
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "todo.write",
-            &json!({
-                "todos": [
-                    {
-                        "id": 1,
-                        "content": "Inspect repository context",
-                        "status": "completed",
-                        "priority": "high"
-                    },
-                    {
-                        "id": 2,
-                        "content": "Split the repo symbols helpers",
-                        "status": "in_progress",
-                        "priority": "high"
-                    }
-                ]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["total"], json!(2));
-    assert_eq!(output["todos"][0]["id"], json!("1"));
-    assert_eq!(output["todos"][1]["id"], json!("2"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn code_assert_validates_symbols_and_file_patterns() {
-    let dir = temp_dir("air-tools-code-assert");
-    fs::write(
-        dir.join("source.rs"),
-        "pub fn kept_symbol() {}\npub fn moved_symbol() {}\n",
-    )
-    .unwrap();
-    fs::write(dir.join("dest.rs"), "pub(crate) fn moved_symbol() {}\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "code.assert": {
-                  "kind": "code_assert",
-                  "capability": "code.read",
-                  "base_dir": ".",
-                  "max_assertions": 8
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "code.assert",
-            &json!({
-                "assertions": [
-                    {"kind": "symbol_present", "path": "dest.rs", "name": "moved_symbol"},
-                    {"kind": "symbol_absent", "path": "source.rs", "name": "missing_symbol"},
-                    {"kind": "file_contains", "path": "source.rs", "pattern": "kept_symbol"},
-                    {"kind": "file_not_contains", "path": "dest.rs", "pattern": "kept_symbol"}
-                ]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["passed"], json!(true));
-    assert_eq!(output["failed_count"], json!(0));
-    assert_eq!(output["assertions"][0]["matches"][0]["line"], json!(1));
-    assert_eq!(output["artifacts"][0]["kind"], json!("code_assert"));
-    assert_eq!(tools.tool_capability("code.assert"), Some("code.read"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn code_assert_reports_failed_postconditions_without_provider_error() {
-    let dir = temp_dir("air-tools-code-assert-failed");
-    fs::write(dir.join("source.rs"), "pub fn still_here() {}\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "code.assert": {
-                  "kind": "code_assert",
-                  "capability": "code.read",
-                  "base_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "code.assert",
-            &json!({
-                "assertions": [
-                    {"kind": "symbol_absent", "path": "source.rs", "name": "still_here"},
-                    {"kind": "command_passes", "command": "cargo_test", "result": {"command": "cargo_test", "success": true}}
-                ]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["passed"], json!(false));
-    assert_eq!(output["failed_count"], json!(1));
-    assert_eq!(
-        output["assertions"][0]["message"],
-        json!("symbol still_here is still present in source.rs")
-    );
-    assert_eq!(output["assertions"][1]["passed"], json!(true));
-    let _ = fs::remove_dir_all(dir);
+    assert_eq!(output["content"], json!("00001| hello from workspace"));
 }
 
 #[test]
@@ -538,48 +247,6 @@ fn artifact_validate_accepts_registered_artifact_ids() {
 }
 
 #[test]
-fn todo_write_rejects_multiple_in_progress_items() {
-    let dir = temp_dir("air-tools-todo-write-invalid");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "todo.write": {
-                  "kind": "todo_write",
-                  "capability": "task.progress"
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let error = tools
-        .call_tool(
-            "todo.write",
-            &json!({
-                "todos": [
-                    {
-                        "id": "one",
-                        "content": "First task",
-                        "status": "in_progress",
-                        "priority": "high"
-                    },
-                    {
-                        "id": "two",
-                        "content": "Second task",
-                        "status": "in_progress",
-                        "priority": "medium"
-                    }
-                ]
-            }),
-        )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("at most one in_progress"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
 fn file_read_reads_inside_configured_base_dir() {
     let dir = temp_dir("air-tools-file-read");
     let docs = dir.join("docs");
@@ -604,7 +271,7 @@ fn file_read_reads_inside_configured_base_dir() {
         .call_tool("file.read", &json!({"path": "note.txt"}))
         .unwrap();
 
-    assert_eq!(output["content"], json!("hello fr"));
+    assert_eq!(output["content"], json!("00001| hello fr"));
     assert_eq!(output["truncated"], json!(true));
     assert_eq!(output["artifacts"][0]["kind"], json!("file_span"));
     assert!(output["artifacts"][0]["id"]
@@ -654,7 +321,10 @@ fn file_read_many_reads_multiple_files_with_artifacts() {
         .unwrap();
 
     assert_eq!(output["file_count"], json!(2));
-    assert_eq!(output["files"][0]["content"], json!("alpha\nbeta\n"));
+    assert_eq!(
+        output["files"][0]["content"],
+        json!("00001| alpha\n00002| beta")
+    );
     assert_eq!(output["max_bytes_per_file"], json!(1024));
     assert_eq!(output["files"][1]["match_line"], json!(2));
     assert_eq!(
@@ -694,7 +364,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
         )
         .unwrap();
     assert_eq!(output["max_bytes_per_file"], json!(5));
-    assert_eq!(output["files"][0]["content"], json!("abcde"));
+    assert_eq!(output["files"][0]["content"], json!("00001| abcde"));
     assert_eq!(output["files"][0]["truncated"], json!(true));
 
     let capped = tools
@@ -704,7 +374,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
         )
         .unwrap();
     assert_eq!(capped["max_bytes_per_file"], json!(12));
-    assert_eq!(capped["files"][0]["content"], json!("abcdefghijkl"));
+    assert_eq!(capped["files"][0]["content"], json!("00001| abcdefghijkl"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -785,14 +455,14 @@ fn file_read_supports_bounded_per_call_max_bytes() {
     let output = tools
         .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 8}))
         .unwrap();
-    assert_eq!(output["content"], json!("abcdefgh"));
+    assert_eq!(output["content"], json!("00001| abcdefgh"));
     assert_eq!(output["max_bytes"], json!(8));
     assert_eq!(output["truncated"], json!(true));
 
     let capped = tools
         .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 99}))
         .unwrap();
-    assert_eq!(capped["content"], json!("abcdefghijklmnop"));
+    assert_eq!(capped["content"], json!("00001| abcdefghijklmnop"));
     assert_eq!(capped["max_bytes"], json!(16));
     assert_eq!(capped["truncated"], json!(true));
     let _ = fs::remove_dir_all(dir);
@@ -833,6 +503,94 @@ fn file_read_accepts_opencode_file_path_offset_limit() {
 }
 
 #[test]
+fn file_read_limits_large_unscoped_reads_to_a_bounded_prefix() {
+    let dir = temp_dir("air-tools-file-read-large-unscoped");
+    let content = (1..=2200)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("note.txt"), content).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 65536
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("read", &json!({"filePath": "note.txt"}))
+        .unwrap();
+
+    assert_eq!(output["start_line"], json!(1));
+    assert_eq!(output["end_line"], json!(2000));
+    assert_eq!(output["total_lines"], json!(2200));
+    assert_eq!(output["range_limited_unscoped_read"], json!(true));
+    assert!(output["truncation_hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("offset+limit")));
+    assert!(!output["content"].as_str().unwrap().contains("line 2200"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_repeated_same_range_returns_no_new_information() {
+    let dir = temp_dir("air-tools-file-read-repeat-range");
+    fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let first = tools
+        .call_tool(
+            "read",
+            &json!({"filePath": "note.txt", "offset": 0, "limit": 3}),
+        )
+        .unwrap();
+    assert_eq!(first["no_new_information"], Value::Null);
+
+    let repeated = tools
+        .call_tool(
+            "read",
+            &json!({"filePath": "note.txt", "offset": 0, "limit": 3}),
+        )
+        .unwrap();
+
+    assert_eq!(repeated["no_new_information"], json!(true));
+    assert_eq!(repeated["already_read"], json!(true));
+    assert_eq!(repeated["content"], Value::Null);
+    assert_eq!(repeated["covered_by"]["start_line"], json!(1));
+    assert_eq!(repeated["covered_by"]["end_line"], json!(3));
+
+    let narrower = tools
+        .call_tool(
+            "read",
+            &json!({"filePath": "note.txt", "offset": 1, "limit": 1}),
+        )
+        .unwrap();
+    assert_eq!(narrower["no_new_information"], Value::Null);
+    assert_eq!(narrower["content"], json!("00002| one"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_read_accepts_start_line_limit() {
     let dir = temp_dir("air-tools-file-read-start-line-limit");
     fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\n").unwrap();
@@ -864,7 +622,7 @@ fn file_read_accepts_start_line_limit() {
 }
 
 #[test]
-fn file_read_accepts_redundant_opencode_and_line_range_inputs() {
+fn file_read_rejects_mixed_opencode_and_line_range_inputs() {
     let dir = temp_dir("air-tools-file-read-redundant-range-inputs");
     fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\nfour\n").unwrap();
     let config_path = write_config(
@@ -881,7 +639,7 @@ fn file_read_accepts_redundant_opencode_and_line_range_inputs() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
+    let error = tools
         .call_tool(
             "read",
             &json!({
@@ -892,13 +650,83 @@ fn file_read_accepts_redundant_opencode_and_line_range_inputs() {
                 "limit": 2
             }),
         )
+        .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("input.offset cannot be combined"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_search_repeated_query_returns_no_new_information() {
+    let dir = temp_dir("air-tools-file-search-repeat-query");
+    fs::write(dir.join("note.txt"), "alpha\nneedle\nomega\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let first = tools
+        .call_tool("grep", &json!({"path": "note.txt", "pattern": "needle"}))
+        .unwrap();
+    assert_eq!(first["match_count"], json!(1));
+    assert_eq!(first["no_new_information"], Value::Null);
+
+    let repeated = tools
+        .call_tool("grep", &json!({"path": "note.txt", "pattern": "needle"}))
         .unwrap();
 
-    assert_eq!(output["start_line"], json!(2));
-    assert_eq!(output["end_line"], json!(4));
+    assert_eq!(repeated["no_new_information"], json!(true));
+    assert_eq!(repeated["already_seen"], json!(true));
+    assert_eq!(repeated["matches"], Value::Null);
+    assert_eq!(repeated["match_count"], json!(1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_search_no_matches_returns_actionable_hint() {
+    let dir = temp_dir("air-tools-file-search-no-matches");
+    fs::write(dir.join("note.txt"), "alpha\nomega\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("grep", &json!({"path": "note.txt", "pattern": "needle"}))
+        .unwrap();
+
+    assert_eq!(output["match_count"], json!(0));
+    assert_eq!(output["no_matches"], json!(true));
+    assert!(output["search_hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("broaden")));
     assert_eq!(
-        output["content"],
-        json!("00002| one\n00003| two\n00004| three")
+        output["artifacts"][0]["metadata"]["no_matches"],
+        json!(true)
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -1399,8 +1227,8 @@ fn file_read_can_return_numbered_content() {
 }
 
 #[test]
-fn file_read_range_defaults_to_numbered_content() {
-    let dir = temp_dir("air-tools-file-read-range-numbered-default");
+fn file_read_defaults_to_numbered_content() {
+    let dir = temp_dir("air-tools-file-read-numbered-default");
     fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
     let config_path = write_config(
         &dir,
@@ -1417,10 +1245,13 @@ fn file_read_range_defaults_to_numbered_content() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("file.read", &json!({"path": "note.txt", "start_line": 2}))
+        .call_tool("file.read", &json!({"path": "note.txt"}))
         .unwrap();
 
-    assert_eq!(output["content"], json!("00002| two\n00003| three"));
+    assert_eq!(
+        output["content"],
+        json!("00001| one\n00002| two\n00003| three")
+    );
     assert_eq!(output["content_format"], json!("line_numbered"));
     assert_eq!(output["line_numbers"], json!(true));
     assert_eq!(output["line_numbers_defaulted"], json!(true));
@@ -1428,6 +1259,38 @@ fn file_read_range_defaults_to_numbered_content() {
         output["artifacts"][0]["metadata"]["line_numbers_defaulted"],
         json!(true)
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_can_disable_default_line_numbers() {
+    let dir = temp_dir("air-tools-file-read-plain-explicit");
+    fs::write(dir.join("note.txt"), "one\ntwo\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "line_numbers": false}),
+        )
+        .unwrap();
+
+    assert_eq!(output["content"], json!("one\ntwo\n"));
+    assert_eq!(output["content_format"], json!("plain"));
+    assert_eq!(output["line_numbers"], json!(false));
+    assert_eq!(output["line_numbers_defaulted"], json!(false));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1524,118 +1387,53 @@ fn file_write_rejects_parent_path_escape() {
         )
         .unwrap_err();
 
-    assert!(error.to_string().contains("relative paths inside repo_dir"));
+    assert!(error
+        .to_string()
+        .contains("input.path is outside configured base_dir"));
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn file_write_requires_read_before_overwrite_when_configured() {
-    let dir = temp_dir("air-tools-file-write-read-first");
-    fs::write(dir.join("note.txt"), "before").unwrap();
+fn file_write_accepts_absolute_path_inside_base_dir() {
+    let dir = temp_dir("air-tools-file-write-absolute");
     let config_path = write_config(
         &dir,
         r#"{
               "tools": {
-                "file.read": {
-                  "kind": "file_read",
-                  "capability": "file.read",
-                  "base_dir": "."
-                },
                 "file.write": {
                   "kind": "file_write",
                   "capability": "file.write",
                   "base_dir": ".",
+                  "create_dirs": true,
                   "allow_overwrite": true,
-                  "require_read": true
+                  "max_bytes": 1024
                 }
               }
             }"#,
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
+    let path = dir.join("site/index.html");
 
-    let error = tools
-        .call_tool(
-            "file.write",
-            &json!({"path": "note.txt", "content": "after"}),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("must be read before overwrite"));
-
-    tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
-        .unwrap();
     let output = tools
         .call_tool(
             "file.write",
-            &json!({"path": "note.txt", "content": "after"}),
+            &json!({"path": path, "content": "<h1>AIR</h1>"}),
         )
         .unwrap();
 
-    assert_eq!(fs::read_to_string(dir.join("note.txt")).unwrap(), "after");
-    assert_eq!(output["overwritten"], json!(true));
+    assert_eq!(fs::read_to_string(path).unwrap(), "<h1>AIR</h1>");
+    assert_eq!(output["created"], json!(true));
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn file_write_rejects_stale_read_before_overwrite() {
-    let dir = temp_dir("air-tools-file-write-stale-read");
-    fs::write(dir.join("note.txt"), "before").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "file.read": {
-                  "kind": "file_read",
-                  "capability": "file.read",
-                  "base_dir": "."
-                },
-                "file.write": {
-                  "kind": "file_write",
-                  "capability": "file.write",
-                  "base_dir": ".",
-                  "allow_overwrite": true,
-                  "require_read": true
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-    tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(20));
-    fs::write(dir.join("note.txt"), "outside change").unwrap();
-
-    let error = tools
-        .call_tool(
-            "file.write",
-            &json!({"path": "note.txt", "content": "agent change"}),
-        )
-        .unwrap_err();
-
-    assert!(error
-        .to_string()
-        .contains("modified after it was last read"));
-    assert_eq!(
-        fs::read_to_string(dir.join("note.txt")).unwrap(),
-        "outside change"
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn file_edit_replaces_unique_string_after_read() {
+fn file_edit_replaces_unique_string() {
     let dir = temp_dir("air-tools-file-edit");
     fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
     let config_path = write_config(
         &dir,
         r#"{
               "tools": {
-                "file.read": {
-                  "kind": "file_read",
-                  "capability": "file.read",
-                  "base_dir": "."
-                },
                 "file.edit": {
                   "kind": "file_edit",
                   "capability": "file.write",
@@ -1647,17 +1445,6 @@ fn file_edit_replaces_unique_string_after_read() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let error = tools
-        .call_tool(
-            "file.edit",
-            &json!({"path": "note.txt", "old_string": "AIR", "new_string": "agent IR"}),
-        )
-        .unwrap_err();
-    assert!(error.to_string().contains("must be read before edit"));
-
-    tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
-        .unwrap();
     let output = tools
         .call_tool(
             "file.edit",
@@ -1673,9 +1460,162 @@ fn file_edit_replaces_unique_string_after_read() {
     assert_eq!(output["diff_truncated"], json!(false));
     assert!(output["diff"].as_str().unwrap().contains("-AIR"));
     assert!(output["diff"].as_str().unwrap().contains("+agent IR"));
+    assert_eq!(output["post_edit_snippets"][0]["path"], json!("note.txt"));
+    assert_eq!(
+        output["post_edit_snippets"][0]["content"],
+        json!("00001| hello agent IR")
+    );
     assert_eq!(output["artifacts"][0]["content"], output["diff"]);
     assert_eq!(output["artifacts"][0]["kind"], json!("file_edit"));
     assert_eq!(tools.tool_capability("file.edit"), Some("file.write"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_edit_accepts_absolute_path_inside_base_dir() {
+    let dir = temp_dir("air-tools-file-edit-absolute");
+    let path = dir.join("note.txt");
+    fs::write(&path, "hello AIR\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.edit",
+            &json!({"path": path, "old_string": "AIR", "new_string": "agent IR"}),
+        )
+        .unwrap();
+
+    assert_eq!(fs::read_to_string(path).unwrap(), "hello agent IR\n");
+    assert_eq!(output["replacements"], json!(1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_edit_rejects_partial_single_line_code_anchor() {
+    let dir = temp_dir("air-tools-file-edit-partial-code-line");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "impl Tools {\n    fn tool_capability(&self, name: &str) -> Option<&str> {\n        None\n    }\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "src/lib.rs"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool(
+            "file.edit",
+            &json!({
+                "path": "src/lib.rs",
+                "oldString": "    fn tool_capability",
+                "newString": ""
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["applied"], json!(false));
+    assert!(output["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("complete source line"));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "impl Tools {\n    fn tool_capability(&self, name: &str) -> Option<&str> {\n        None\n    }\n}\n"
+    );
+
+    let output = tools
+        .call_tool(
+            "file.edit",
+            &json!({
+                "path": "src/lib.rs",
+                "oldString": "    fn tool_capability(&self, name: &str) -> Option<&str> {",
+                "newString": "    fn capability_for_tool(&self, name: &str) -> Option<&str> {"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["applied"], json!(true));
+    assert!(fs::read_to_string(dir.join("src/lib.rs"))
+        .unwrap()
+        .contains("fn capability_for_tool"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_edit_reports_missing_old_string_as_structured_validation_failure() {
+    let dir = temp_dir("air-tools-file-edit-missing-old-string");
+    fs::write(dir.join("note.rs"), "fn demo() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "file.edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    tools
+        .call_tool("file.read", &json!({"path": "note.rs"}))
+        .unwrap();
+
+    let output = tools
+        .call_tool("file.edit", &json!({"filePath": "note.rs"}))
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["applied"], json!(false));
+    assert_eq!(output["diagnostics"][0]["field"], json!("old_string"));
+    assert!(output["diagnostics"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("old_string"));
+    assert_eq!(
+        fs::read_to_string(dir.join("note.rs")).unwrap(),
+        "fn demo() {}\n"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1781,7 +1721,7 @@ fn file_edit_dry_run_checks_without_writing() {
 }
 
 #[test]
-fn file_edit_applies_multiple_edits_after_read() {
+fn file_edit_applies_multiple_edits() {
     let dir = temp_dir("air-tools-file-edit-multiple-ops");
     fs::write(
         dir.join("note.txt"),
@@ -1792,11 +1732,6 @@ fn file_edit_applies_multiple_edits_after_read() {
         &dir,
         r#"{
               "tools": {
-                "file.read": {
-                  "kind": "file_read",
-                  "capability": "file.read",
-                  "base_dir": "."
-                },
                 "file.edit": {
                   "kind": "file_edit",
                   "capability": "file.write",
@@ -1807,9 +1742,6 @@ fn file_edit_applies_multiple_edits_after_read() {
             }"#,
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
-    tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
-        .unwrap();
 
     let output = tools
         .call_tool(
@@ -1839,6 +1771,15 @@ fn file_edit_applies_multiple_edits_after_read() {
     assert_eq!(output["match_strategies"], json!(["exact", "exact"]));
     assert!(output["diff"].as_str().unwrap().contains("-title: draft"));
     assert!(output["diff"].as_str().unwrap().contains("+owner: agent"));
+    assert_eq!(output["post_edit_snippets"].as_array().unwrap().len(), 1);
+    assert!(output["post_edit_snippets"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("00001| title: ready"));
+    assert!(output["post_edit_snippets"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("00003| owner: agent"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1953,51 +1894,6 @@ fn file_edit_multi_edit_is_atomic_when_later_edit_fails() {
     assert_eq!(
         fs::read_to_string(dir.join("note.txt")).unwrap(),
         "alpha\nbeta\ngamma\n"
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn file_edit_rejects_stale_read() {
-    let dir = temp_dir("air-tools-file-edit-stale-read");
-    fs::write(dir.join("note.txt"), "hello AIR\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "file.read": {
-                  "kind": "file_read",
-                  "capability": "file.read",
-                  "base_dir": "."
-                },
-                "file.edit": {
-                  "kind": "file_edit",
-                  "capability": "file.write",
-                  "base_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-    tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
-        .unwrap();
-    std::thread::sleep(Duration::from_millis(20));
-    fs::write(dir.join("note.txt"), "hello outside\n").unwrap();
-
-    let error = tools
-        .call_tool(
-            "file.edit",
-            &json!({"path": "note.txt", "old_string": "outside", "new_string": "agent"}),
-        )
-        .unwrap_err();
-
-    assert!(error
-        .to_string()
-        .contains("modified after it was last read"));
-    assert_eq!(
-        fs::read_to_string(dir.join("note.txt")).unwrap(),
-        "hello outside\n"
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -2467,7 +2363,10 @@ fn file_read_can_return_context_around_later_contains_occurrence() {
         )
         .unwrap();
 
-    assert_eq!(output["content"], json!("before\ntarget second\nafter"));
+    assert_eq!(
+        output["content"],
+        json!("00003| before\n00004| target second\n00005| after")
+    );
     assert_eq!(output["match_line"], json!(4));
     assert_eq!(output["occurrence"], json!(2));
     assert_eq!(output["artifacts"][0]["metadata"]["occurrence"], json!(2));
@@ -2533,393 +2432,6 @@ fn file_read_rejects_missing_contains_occurrence() {
     assert!(error
         .to_string()
         .contains("input.contains occurrence=2 was not found"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_diff_returns_diff_for_configured_repo() {
-    let dir = temp_dir("air-tools-git-diff");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    fs::write(dir.join("note.txt"), "before\n").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["add", "note.txt"])
-        .output()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["commit", "-m", "init"])
-        .env("GIT_AUTHOR_NAME", "AIR")
-        .env("GIT_AUTHOR_EMAIL", "air@example.com")
-        .env("GIT_COMMITTER_NAME", "AIR")
-        .env("GIT_COMMITTER_EMAIL", "air@example.com")
-        .output()
-        .unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.diff": {
-                  "kind": "git_diff",
-                  "capability": "code.read",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-    fs::write(dir.join("note.txt"), "after\n").unwrap();
-
-    let output = tools
-        .call_tool("git.diff", &json!({"path": "note.txt"}))
-        .unwrap();
-
-    assert!(output["diff"].as_str().unwrap().contains("-before"));
-    assert!(output["diff"].as_str().unwrap().contains("+after"));
-    assert_eq!(output["changed_files"], json!(["note.txt"]));
-    assert_eq!(output["workspace_changed_files"], json!(["note.txt"]));
-    assert_eq!(output["preexisting_changed_files"], json!([]));
-    assert_eq!(output["artifacts"][0]["kind"], json!("git_diff"));
-    assert!(output["artifacts"][0]["id"]
-        .as_str()
-        .unwrap()
-        .contains("note.txt"));
-    assert_eq!(tools.tool_capability("git.diff"), Some("code.read"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_diff_accepts_patch_file_objects_and_empty_filters() {
-    let dir = temp_dir("air-tools-git-diff-files");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    fs::write(dir.join("agent.txt"), "before\n").unwrap();
-    fs::write(dir.join("user.txt"), "keep\n").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["add", "agent.txt", "user.txt"])
-        .output()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["commit", "-m", "init"])
-        .env("GIT_AUTHOR_NAME", "AIR")
-        .env("GIT_AUTHOR_EMAIL", "air@example.com")
-        .env("GIT_COMMITTER_NAME", "AIR")
-        .env("GIT_COMMITTER_EMAIL", "air@example.com")
-        .output()
-        .unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.diff": {
-                  "kind": "git_diff",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-    fs::write(dir.join("agent.txt"), "after\n").unwrap();
-    fs::write(dir.join("user.txt"), "dirty user change\n").unwrap();
-
-    let output = tools
-        .call_tool(
-            "git.diff",
-            &json!({"files": [{"path": "agent.txt", "kind": "modify"}]}),
-        )
-        .unwrap();
-
-    let diff = output["diff"].as_str().unwrap();
-    assert!(diff.contains("agent.txt"));
-    assert!(diff.contains("+after"));
-    assert!(!diff.contains("user.txt"));
-
-    let empty = tools.call_tool("git.diff", &json!({"files": []})).unwrap();
-    assert_eq!(empty["diff"], json!(""));
-    assert_eq!(empty["bytes"], json!(0));
-
-    let no_path_filter = tools.call_tool("git.diff", &json!({"paths": []})).unwrap();
-    let no_path_filter_diff = no_path_filter["diff"].as_str().unwrap();
-    assert!(no_path_filter_diff.contains("agent.txt"));
-    assert!(no_path_filter_diff.contains("user.txt"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_diff_reports_only_changes_since_tool_initialization() {
-    let dir = temp_dir("air-tools-git-diff-baseline");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    fs::write(dir.join("agent.txt"), "before\n").unwrap();
-    fs::write(dir.join("user.txt"), "clean\n").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["add", "agent.txt", "user.txt"])
-        .output()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["commit", "-m", "init"])
-        .env("GIT_AUTHOR_NAME", "AIR")
-        .env("GIT_AUTHOR_EMAIL", "air@example.com")
-        .env("GIT_COMMITTER_NAME", "AIR")
-        .env("GIT_COMMITTER_EMAIL", "air@example.com")
-        .output()
-        .unwrap();
-    fs::write(dir.join("user.txt"), "preexisting user change\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.diff": {
-                  "kind": "git_diff",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-    fs::write(dir.join("agent.txt"), "after\n").unwrap();
-    fs::write(
-        dir.join("user.txt"),
-        "preexisting user change\nagent addition\n",
-    )
-    .unwrap();
-
-    let output = tools
-        .call_tool("git.diff", &json!({"paths": ["agent.txt", "user.txt"]}))
-        .unwrap();
-
-    let diff = output["diff"].as_str().unwrap();
-    assert!(diff.contains("agent.txt"));
-    assert!(diff.contains("+after"));
-    assert!(diff.contains("user.txt"));
-    assert!(diff.contains("+agent addition"));
-    assert!(!diff.contains("-clean"));
-    assert_eq!(output["changed_files"], json!(["agent.txt", "user.txt"]));
-    assert_eq!(
-        output["preexisting_changed_files"],
-        json!([{"path": "user.txt"}])
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_diff_filtered_to_baseline_path_does_not_fall_back_to_full_workspace() {
-    let dir = temp_dir("air-tools-git-diff-baseline-filtered");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    fs::write(dir.join("agent.txt"), "clean agent\n").unwrap();
-    fs::write(dir.join("other.txt"), "clean other\n").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["add", "agent.txt", "other.txt"])
-        .output()
-        .unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["commit", "-m", "init"])
-        .env("GIT_AUTHOR_NAME", "AIR")
-        .env("GIT_AUTHOR_EMAIL", "air@example.com")
-        .env("GIT_COMMITTER_NAME", "AIR")
-        .env("GIT_COMMITTER_EMAIL", "air@example.com")
-        .output()
-        .unwrap();
-    fs::write(dir.join("agent.txt"), "preexisting agent change\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.diff": {
-                  "kind": "git_diff",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-    fs::write(
-        dir.join("agent.txt"),
-        "preexisting agent change\nrun addition\n",
-    )
-    .unwrap();
-    fs::write(dir.join("other.txt"), "other changed after baseline\n").unwrap();
-
-    let output = tools
-        .call_tool("git.diff", &json!({"paths": ["agent.txt"]}))
-        .unwrap();
-
-    let diff = output["diff"].as_str().unwrap();
-    assert!(diff.contains("agent.txt"));
-    assert!(diff.contains("+run addition"));
-    assert!(!diff.contains("-clean agent"));
-    assert!(!diff.contains("other.txt"));
-    assert!(!diff.contains("other changed after baseline"));
-    assert_eq!(output["changed_files"], json!(["agent.txt"]));
-    assert_eq!(output["workspace_changed_files"], json!(["agent.txt"]));
-    assert_eq!(
-        output["preexisting_changed_files"],
-        json!([{"path": "agent.txt"}])
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_diff_rejects_parent_path_filters() {
-    let dir = temp_dir("air-tools-git-diff-path");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.diff": {
-                  "kind": "git_diff",
-                  "capability": "code.read",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let error = tools
-        .call_tool("git.diff", &json!({"path": "../outside"}))
-        .unwrap_err();
-
-    assert!(error.to_string().contains("relative paths inside repo_dir"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_diff_includes_requested_untracked_text_file() {
-    let dir = temp_dir("air-tools-git-diff-untracked");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    fs::write(dir.join("tracked.txt"), "before\n").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["add", "tracked.txt"])
-        .output()
-        .unwrap();
-    fs::write(dir.join("new.txt"), "new\ncontent\n").unwrap();
-    fs::write(dir.join("ignored.txt"), "not requested\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.diff": {
-                  "kind": "git_diff",
-                  "capability": "code.read",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool("git.diff", &json!({"path": "new.txt"}))
-        .unwrap();
-
-    let diff = output["diff"].as_str().unwrap();
-    assert!(diff.contains("diff --git a/new.txt b/new.txt"));
-    assert!(diff.contains("new file mode 100644"));
-    assert!(diff.contains("+new"));
-    assert!(diff.contains("+content"));
-    assert!(!diff.contains("ignored.txt"));
-    assert_eq!(
-        output["artifacts"][0]["metadata"]["untracked_files"],
-        json!(["new.txt"])
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn git_status_returns_structured_workspace_entries() {
-    let dir = temp_dir("air-tools-git-status");
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .arg("init")
-        .output()
-        .unwrap();
-    fs::write(dir.join("tracked.txt"), "before\n").unwrap();
-    Command::new("git")
-        .arg("-C")
-        .arg(&dir)
-        .args(["add", "tracked.txt"])
-        .output()
-        .unwrap();
-    fs::write(dir.join("tracked.txt"), "after\n").unwrap();
-    fs::write(dir.join("new.txt"), "new\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "git.status": {
-                  "kind": "git_status",
-                  "capability": "code.read",
-                  "repo_dir": ".",
-                  "max_files": 10
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools.call_tool("git.status", &json!({})).unwrap();
-
-    assert_eq!(output["clean"], json!(false));
-    assert!(output["file_count"].as_u64().unwrap() >= 2);
-    assert!(output["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == json!("tracked.txt")));
-    assert!(output["entries"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|entry| entry["path"] == json!("new.txt") && entry["status"] == json!("untracked")));
-    assert_eq!(output["artifacts"][0]["kind"], json!("git_status"));
-    assert_eq!(tools.tool_capability("git.status"), Some("code.read"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -3022,6 +2534,168 @@ fn repo_files_accepts_pattern_alias_for_glob() {
         output["artifacts"][0]["metadata"]["glob_source"],
         json!("pattern")
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_files_glob_no_matches_returns_empty_listing() {
+    let dir = temp_dir("air-tools-repo-files-glob-no-matches");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "glob": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("glob", &json!({"pattern": "**/*edit*loop*test*"}))
+        .unwrap();
+
+    assert_eq!(output["files"], json!([]));
+    assert_eq!(output["file_count"], json!(0));
+    assert_eq!(output["no_matches"], json!(true));
+    assert!(output["search_hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("different glob")));
+    assert_eq!(output["truncated"], json!(false));
+    assert_eq!(output["glob"], json!("**/*edit*loop*test*"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_search_no_matches_returns_actionable_hint() {
+    let dir = temp_dir("air-tools-repo-search-no-matches");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "repo.search": {
+                  "kind": "repo_search",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_matches": 8,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("repo.search", &json!({"query": "does_not_exist"}))
+        .unwrap();
+
+    assert_eq!(output["match_count"], json!(0));
+    assert_eq!(output["no_matches"], json!(true));
+    assert!(output["search_hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("broaden")));
+    assert_eq!(
+        output["artifacts"][0]["metadata"]["no_matches"],
+        json!(true)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn search_no_match_streak_surfaces_exhausted_search_direction() {
+    let dir = temp_dir("air-tools-search-no-match-streak");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "glob": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                },
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8,
+                  "max_bytes": 4096
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let first = tools
+        .call_tool("glob", &json!({"pattern": "**/*.tsx"}))
+        .unwrap();
+    assert_eq!(first["no_match_streak"], json!(1));
+
+    let second = tools
+        .call_tool("grep", &json!({"pattern": "does_not_exist"}))
+        .unwrap();
+    assert_eq!(second["no_match_streak"], json!(2));
+    assert!(second["search_hint"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("Several recent searches returned no matches")));
+
+    let hit = tools
+        .call_tool("grep", &json!({"pattern": "alpha"}))
+        .unwrap();
+    assert_eq!(hit["no_match_streak"], Value::Null);
+
+    let after_reset = tools
+        .call_tool("glob", &json!({"pattern": "**/*.jsx"}))
+        .unwrap();
+    assert_eq!(after_reset["no_match_streak"], json!(1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn repo_files_combines_query_with_pattern_glob() {
+    let dir = temp_dir("air-tools-repo-files-query-pattern-glob");
+    fs::create_dir_all(dir.join("crates/air-cli/src")).unwrap();
+    fs::create_dir_all(dir.join("crates/air-tools/src")).unwrap();
+    fs::write(dir.join("crates/air-cli/src/code_agent.rs"), "tests\n").unwrap();
+    fs::write(dir.join("crates/air-tools/src/file_tools.rs"), "edit\n").unwrap();
+    fs::write(dir.join("crates/air-cli/src/edit_loop_tests.rs"), "edit\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "glob": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("glob", &json!({"pattern": "**/*test*", "query": "edit"}))
+        .unwrap();
+
+    assert_eq!(
+        output["files"],
+        json!(["crates/air-cli/src/edit_loop_tests.rs"])
+    );
+    assert_eq!(output["query"], json!("edit"));
+    assert_eq!(output["query_source"], json!("query"));
+    assert_eq!(output["glob"], json!("**/*test*"));
+    assert_eq!(output["glob_source"], json!("pattern"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -3171,105 +2845,22 @@ fn repo_files_rejects_unknown_mode() {
 }
 
 #[test]
-fn candidate_validate_rejects_missing_target_file() {
-    let dir = temp_dir("air-tools-candidate-missing");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "candidate.validate": {
-                  "kind": "candidate_validate",
-                  "capability": "code.read",
-                  "base_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let error = tools
-        .call_tool(
-            "candidate.validate",
-            &json!({
-                "candidate": {
-                    "target_path": "missing.js",
-                    "related_files": []
-                }
-            }),
-        )
-        .unwrap_err();
-
-    assert!(error.to_string().contains("candidate.target_path"));
-    assert!(error.to_string().contains("missing.js"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn candidate_validate_accepts_existing_target_and_related_file() {
-    let dir = temp_dir("air-tools-candidate-valid");
-    fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(dir.join("src/lib.js"), "module.exports = {}\n").unwrap();
-    fs::write(dir.join("src/test.js"), "require('./lib')\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "candidate.validate": {
-                  "kind": "candidate_validate",
-                  "capability": "code.read",
-                  "base_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "candidate.validate",
-            &json!({
-                "candidate": {
-                    "target_path": "src/lib.js",
-                    "related_files": ["src/test.js"]
-                }
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["valid"], json!(true));
-    assert_eq!(output["target_path"], json!("src/lib.js"));
-    assert_eq!(output["related_files"], json!(["src/test.js"]));
-    assert_eq!(
-        tools.tool_capability("candidate.validate"),
-        Some("code.read")
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
 fn code_agent_self_tools_validate_project_paths() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let config_path = root.join("examples/code-agent/tools.dogfood.json");
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
-        .call_tool(
-            "candidate.validate",
-            &json!({
-                "candidate": {
-                    "target_path": "crates/air-tools/src/lib.rs",
-                    "related_files": ["crates/air-tools/src/tests.rs"]
-                }
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["valid"], json!(true));
+    assert_eq!(tools.tool_capability("read"), Some("file.read"));
+    assert_eq!(tools.tool_capability("grep"), Some("file.read"));
+    assert_eq!(tools.tool_capability("edit"), Some("file.write"));
+    assert_eq!(tools.tool_capability("bash"), Some("code.test"));
+    assert_eq!(tools.tool_capability("todowrite"), Some("code.read"));
+    assert_eq!(tools.tool_capability("lsp"), Some("code.read"));
 
     let error = tools
-        .call_tool("test.run", &json!({"command": "missing"}))
+        .call_tool("bash", &json!({"description": "missing command"}))
         .unwrap_err();
-    assert!(error.to_string().contains("is not configured"));
+    assert!(error.to_string().contains("input.command must be a string"));
 }
 
 #[test]
@@ -3930,12 +3521,13 @@ fn lsp_references_reuses_session_within_config_tools() {
         &dir,
         r#"{
               "tools": {
-                "lsp.references": {
-                  "kind": "rust_analyzer_references",
+                "lsp": {
+                  "kind": "rust_analyzer",
                   "capability": "code.read",
                   "root_dir": ".",
                   "command": "rust-analyzer",
                   "max_results": 20,
+                  "max_diagnostics": 20,
                   "max_bytes": 65536
                 }
               }
@@ -3946,8 +3538,9 @@ fn lsp_references_reuses_session_within_config_tools() {
     for _ in 0..2 {
         let output = tools
             .call_tool(
-                "lsp.references",
+                "lsp",
                 &json!({
+                    "command": "references",
                     "path": "src/lib.rs",
                     "symbol": "helper",
                     "include_declaration": true
@@ -4364,191 +3957,13 @@ fn repo_references_rejects_non_identifier_symbols() {
 }
 
 #[test]
-fn diagnostic_context_returns_source_snippets_for_command_diagnostics() {
-    let dir = temp_dir("air-tools-diagnostic-context");
-    fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(
-        dir.join("src/lib.rs"),
-        "line 1\nline 2\nfn broken() {}\nline 4\nline 5\n",
-    )
-    .unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "diagnostic.context": {
-                  "kind": "diagnostic_context",
-                  "capability": "code.read",
-                  "repo_dir": ".",
-                  "max_diagnostics": 5,
-                  "context_lines": 1,
-                  "max_bytes": 4096
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "diagnostic.context",
-            &json!({
-                "diagnostics": [{
-                    "source": "command_run",
-                    "severity": "error",
-                    "path": "src/lib.rs",
-                    "line": 3,
-                    "column": 4,
-                    "message": "expected value"
-                }]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["snippets"].as_array().unwrap().len(), 1);
-    assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
-    assert_eq!(output["snippets"][0]["start_line"], json!(2));
-    assert_eq!(output["snippets"][0]["end_line"], json!(4));
-    assert!(output["snippets"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("3: fn broken() {}"));
-    assert_eq!(output["artifacts"][0]["kind"], json!("diagnostic_context"));
-    assert_eq!(
-        output["artifacts"][0]["metadata"]["provider"],
-        json!("diagnostic_context")
-    );
-    assert!(output["unreadable"].as_array().unwrap().is_empty());
-    assert_eq!(
-        tools.tool_capability("diagnostic.context"),
-        Some("code.read")
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn diagnostic_context_returns_path_snippet_without_line() {
-    let dir = temp_dir("air-tools-diagnostic-context-path-only");
-    fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(dir.join("src/lib.rs"), "first\nsecond\nthird\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "diagnostic.context": {
-                  "kind": "diagnostic_context",
-                  "capability": "code.read",
-                  "repo_dir": ".",
-                  "context_lines": 2,
-                  "max_bytes": 4096
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "diagnostic.context",
-            &json!({
-                "diagnostics": [{
-                    "source": "edit",
-                    "severity": "error",
-                    "path": "src/lib.rs",
-                    "message": "old_string was not found"
-                }]
-            }),
-        )
-        .unwrap();
-
-    assert_eq!(output["snippets"].as_array().unwrap().len(), 1);
-    assert_eq!(output["snippets"][0]["path"], json!("src/lib.rs"));
-    assert_eq!(output["snippets"][0]["start_line"], json!(1));
-    assert_eq!(output["snippets"][0]["end_line"], json!(3));
-    assert_eq!(
-        output["snippets"][0]["path_only_diagnostic_indexes"],
-        json!([0])
-    );
-    assert!(output["snippets"][0]["content"]
-        .as_str()
-        .unwrap()
-        .contains("1: first"));
-    assert!(output["unreadable"].as_array().unwrap().is_empty());
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn diagnostic_context_accepts_missing_diagnostics_as_empty_observation() {
-    let dir = temp_dir("air-tools-diagnostic-context-empty");
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "diagnostic.context": {
-                  "kind": "diagnostic_context",
-                  "capability": "code.read",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools.call_tool("diagnostic.context", &json!({})).unwrap();
-
-    assert_eq!(output["diagnostic_count"], json!(0));
-    assert!(output["snippets"].as_array().unwrap().is_empty());
-    assert!(output["unreadable"].as_array().unwrap().is_empty());
-    assert_eq!(
-        output["artifacts"][0]["metadata"]["diagnostic_count"],
-        json!(0)
-    );
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
-fn diagnostic_context_skips_paths_outside_repo() {
-    let dir = temp_dir("air-tools-diagnostic-context-boundary");
-    fs::write(dir.join("lib.rs"), "fn alpha() {}\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "diagnostic.context": {
-                  "kind": "diagnostic_context",
-                  "capability": "code.read",
-                  "repo_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let output = tools
-        .call_tool(
-            "diagnostic.context",
-            &json!({
-                "diagnostics": [{
-                    "path": "../secret.txt",
-                    "line": 1
-                }]
-            }),
-        )
-        .unwrap();
-
-    assert!(output["snippets"].as_array().unwrap().is_empty());
-    assert_eq!(output["unreadable"].as_array().unwrap().len(), 1);
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
 fn command_run_executes_configured_command() {
     let dir = temp_dir("air-tools-command-run");
     let config_path = write_config(
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4563,13 +3978,124 @@ fn command_run_executes_configured_command() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("test.run", &json!({"command": "cargo_version"}))
+        .call_tool("test", &json!({"command": "cargo_version"}))
         .unwrap();
 
     assert_eq!(output["success"], json!(true));
     assert!(output["log"].as_str().unwrap().contains("cargo"));
     assert_eq!(output["artifacts"][0]["kind"], json!("test_log"));
-    assert_eq!(tools.tool_capability("test.run"), Some("code.test"));
+    assert_eq!(tools.tool_capability("test"), Some("code.test"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_runs_shell_command() {
+    let dir = temp_dir("air-tools-bash");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "printf 'hello from bash\\n'", "description": "smoke"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(
+        output["input_command"],
+        json!("printf 'hello from bash\\n'")
+    );
+    assert_eq!(output["description"], json!("smoke"));
+    assert_eq!(output["verification"], json!(false));
+    assert!(output["log"].as_str().unwrap().contains("hello from bash"));
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "printf 'ok\\n'", "description": "Run verification"}),
+        )
+        .unwrap();
+    assert_eq!(output["verification"], json!(true));
+    assert_eq!(tools.tool_capability("bash"), Some("code.test"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_uses_pipefail_for_pipelines() {
+    let dir = temp_dir("air-tools-bash-pipefail");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "false | cat", "description": "Run verification"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["status"], json!(1));
+    assert_eq!(output["verification"], json!(true));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn todowrite_records_todos() {
+    let dir = temp_dir("air-tools-todowrite");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "todowrite": {
+                  "kind": "todo_write",
+                  "capability": "code.read"
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "todowrite",
+            &json!({
+                "todos": [
+                    {"content": "inspect target", "status": "completed", "priority": "high"},
+                    {"content": "apply edit", "status": "pending"}
+                ]
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["todo_count"], json!(2));
+    assert_eq!(output["todos"][0]["content"], json!("inspect target"));
+    assert_eq!(output["artifacts"][0]["kind"], json!("todo_list"));
+    assert_eq!(tools.tool_capability("todowrite"), Some("code.read"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -4580,7 +4106,7 @@ fn command_run_uses_single_configured_command_by_default() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4594,10 +4120,48 @@ fn command_run_uses_single_configured_command_by_default() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools.call_tool("test.run", &json!({})).unwrap();
+    let output = tools.call_tool("test", &json!({})).unwrap();
 
     assert_eq!(output["success"], json!(true));
     assert!(output["log"].as_str().unwrap().contains("cargo"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_drains_large_stdout_without_timing_out() {
+    let dir = temp_dir("air-tools-bash-large-output");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10,
+                  "max_bytes": 1024
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "python3 -c 'import sys; sys.stdout.write(\"diff-line\\\\n\" * 25000)'", "description": "Show large diff"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["truncated"], json!(true));
+    assert_eq!(output["bytes"], json!(1024));
+    assert!(
+        fs::read_to_string(output["full_log_path"].as_str().unwrap())
+            .unwrap()
+            .len()
+            >= 200000
+    );
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -4608,7 +4172,7 @@ fn command_run_saves_full_log_when_truncated() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4624,7 +4188,7 @@ fn command_run_saves_full_log_when_truncated() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("test.run", &json!({"command": "long_log"}))
+        .call_tool("test", &json!({"command": "long_log"}))
         .unwrap();
 
     assert_eq!(output["success"], json!(true));
@@ -4654,7 +4218,7 @@ fn command_run_can_tail_truncated_log_preview() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4671,7 +4235,7 @@ fn command_run_can_tail_truncated_log_preview() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("test.run", &json!({"command": "tail_log"}))
+        .call_tool("test", &json!({"command": "tail_log"}))
         .unwrap();
 
     assert_eq!(output["truncated"], json!(true));
@@ -4690,7 +4254,7 @@ fn command_run_full_log_path_can_be_searched_by_file_search() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4716,7 +4280,7 @@ fn command_run_full_log_path_can_be_searched_by_file_search() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let command = tools
-        .call_tool("test.run", &json!({"command": "long_log"}))
+        .call_tool("test", &json!({"command": "long_log"}))
         .unwrap();
     assert_eq!(command["truncated"], json!(true));
     let full_log_path = command["full_log_path"].as_str().unwrap();
@@ -4749,7 +4313,7 @@ fn command_run_allows_empty_command_map_until_called() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4762,12 +4326,12 @@ fn command_run_allows_empty_command_map_until_called() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let error = tools
-        .call_tool("test.run", &json!({"command": "unit"}))
+        .call_tool("test", &json!({"command": "unit"}))
         .unwrap_err();
 
     assert!(error
         .to_string()
-        .contains("tool test.run command unit is not configured"));
+        .contains("tool test command unit is not configured"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -4778,7 +4342,7 @@ fn command_run_extracts_structured_diagnostics() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4796,9 +4360,7 @@ fn command_run_extracts_structured_diagnostics() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
-        .call_tool("test.run", &json!({"command": "tsc"}))
-        .unwrap();
+    let output = tools.call_tool("test", &json!({"command": "tsc"})).unwrap();
 
     assert_eq!(output["success"], json!(false));
     assert_eq!(output["diagnostics"][0]["path"], json!("src/main.ts"));
@@ -4823,7 +4385,7 @@ fn command_run_renders_constrained_template_parameters() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4845,7 +4407,7 @@ fn command_run_renders_constrained_template_parameters() {
 
     let output = tools
         .call_tool(
-            "test.run",
+            "test",
             &json!({"command": "echo_test", "case_name": "module::test_name"}),
         )
         .unwrap();
@@ -4866,7 +4428,7 @@ fn command_run_accepts_nested_args_template_parameters() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "capability": "code.test",
                   "cwd": ".",
@@ -4888,7 +4450,7 @@ fn command_run_accepts_nested_args_template_parameters() {
 
     let output = tools
         .call_tool(
-            "test.run",
+            "test",
             &json!({
                 "command": "echo_test",
                 "args": {"case_name": "module::test_name"}
@@ -4912,7 +4474,7 @@ fn command_run_rejects_undeclared_or_invalid_template_parameters() {
         &dir,
         r#"{
               "tools": {
-                "test.run": {
+                "test": {
                   "kind": "command_run",
                   "cwd": ".",
                   "commands": {
@@ -4932,7 +4494,7 @@ fn command_run_rejects_undeclared_or_invalid_template_parameters() {
 
     let error = tools
         .call_tool(
-            "test.run",
+            "test",
             &json!({"command": "echo_test", "case_name": "--eval=bad"}),
         )
         .unwrap_err();

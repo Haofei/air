@@ -15,8 +15,11 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "test.run",
-              "input": {}
+              "tool": "bash",
+              "input": {
+                "command": "node examples/code-agent/edit-fixture/test.js",
+                "description": "Run the fixture test"
+              }
             }
           ],
           "rationale": "Run the configured validation first to capture the current failure."
@@ -53,11 +56,27 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "git.diff",
-              "input": {}
+              "tool": "bash",
+              "input": {
+                "command": "git diff --",
+                "description": "Show workspace diff"
+              }
             }
           ],
           "rationale": "Inspect the workspace diff before finishing."
+        },
+        {
+          "complete": false,
+          "tool_calls": [
+            {
+              "tool": "bash",
+              "input": {
+                "command": "node examples/code-agent/edit-fixture/test.js",
+                "description": "Run the fixture test after the edit"
+              }
+            }
+          ],
+          "rationale": "Run the configured fixture validation after applying the edit."
         },
         {
           "complete": true,
@@ -67,9 +86,6 @@
       ]
     },
     "code_edit_summarizer": {
-      "initial_success": false,
-      "final_success": true,
-      "patch_applied": true,
       "rationale": "The bounded tool loop read the target and test, applied a one-line edit call, and the configured fixture validation passed."
     }
   }

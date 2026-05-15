@@ -27,7 +27,7 @@ For coding agents, that means the important questions have first-class places to
 
 | Question | AIR audit surface |
 | --- | --- |
-| Which files changed? | `edit`, `git.diff`, edit-loop `workspace_diff`, and session baseline fields distinguish agent changes from pre-existing dirty files |
+| Which files changed? | `edit`, bash-run `git diff`, edit-loop `workspace_diff`, and session baseline fields distinguish agent changes from pre-existing dirty files |
 | Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |

@@ -1,16 +1,12 @@
 agent:
   name: air-code-agent
   version: 0.2.0
-  description: "Pack manifest for AIR's bounded coding-agent loop."
+  description: "Pack manifest for AIR's minimal coding-agent loop."
 
-recipes:
-  - id: edit
-    default_profile: edit.air-profile.yaml
-    intent: "Run the unified bounded code loop with model-selected discovery, review, edit, format, and verification."
-    input:
-      required: [task]
-    completion:
-      any:
-        - equals:
-            path: /edit/final_success
-            value: true
+default_profile: edit.air-profile.yaml
+intent: "Run a minimal read/search/edit loop with formatting, tests, and diff reporting."
+completion:
+  any:
+    - equals:
+        path: /edit/final_success
+        value: true

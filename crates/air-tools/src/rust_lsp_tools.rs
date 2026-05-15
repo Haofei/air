@@ -159,8 +159,12 @@ pub(crate) fn call_lsp_references_tool(
     max_results: usize,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let path = super::required_input_string(name, input, "path")?;
-    super::validate_git_pathspec(name, path)?;
+    let path = super::first_string_alias(name, input, &["path", "filePath"])?
+        .map(|(path, _)| path)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!("tool {name} input.path must be a string"))
+        })?;
+    super::validate_relative_path_filter(name, path)?;
     let symbol = super::optional_string_input(name, input, "symbol")?;
     let include_declaration =
         super::optional_bool_input(name, input, "include_declaration")?.unwrap_or(true);
@@ -238,9 +242,10 @@ pub(crate) fn call_lsp_diagnostics_tool(
     max_diagnostics: usize,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    let path_filter = super::optional_string_input(name, input, "path")?;
+    let path_filter =
+        super::first_string_alias(name, input, &["path", "filePath"])?.map(|(path, _)| path);
     if let Some(path) = path_filter {
-        super::validate_git_pathspec(name, path)?;
+        super::validate_relative_path_filter(name, path)?;
     }
     let effective_max_diagnostics =
         super::optional_bounded_usize_input(name, input, "max_diagnostics", max_diagnostics)?
@@ -260,19 +265,69 @@ pub(crate) fn call_lsp_diagnostics_tool(
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    let diagnostics = parse_rust_analyzer_diagnostics(&raw, &root, path_filter)
+    let all_diagnostics = parse_rust_analyzer_diagnostics(&raw, &root, None);
+    let workspace_diagnostic_count = all_diagnostics.len();
+    let diagnostics = filter_lsp_diagnostics(all_diagnostics, path_filter)
         .into_iter()
         .take(effective_max_diagnostics)
         .collect::<Vec<_>>();
+    Ok(lsp_diagnostics_output(LspDiagnosticsOutput {
+        name,
+        root: &root,
+        path_filter,
+        diagnostics,
+        workspace_diagnostic_count,
+        command_success: output.status.success(),
+        command_status: output.status.code(),
+        max_bytes,
+    }))
+}
+
+struct LspDiagnosticsOutput<'a> {
+    name: &'a str,
+    root: &'a Path,
+    path_filter: Option<&'a str>,
+    diagnostics: Vec<Value>,
+    workspace_diagnostic_count: usize,
+    command_success: bool,
+    command_status: Option<i32>,
+    max_bytes: usize,
+}
+
+fn lsp_diagnostics_tool_succeeded(
+    command_success: bool,
+    workspace_diagnostic_count: usize,
+) -> bool {
+    command_success || workspace_diagnostic_count > 0
+}
+
+fn lsp_diagnostics_output(output: LspDiagnosticsOutput<'_>) -> Value {
+    let LspDiagnosticsOutput {
+        name,
+        root,
+        path_filter,
+        diagnostics,
+        workspace_diagnostic_count,
+        command_success,
+        command_status,
+        max_bytes,
+    } = output;
     let rendered = serde_json::to_string_pretty(&diagnostics).unwrap_or_else(|_| "[]".to_string());
     let (content, truncated_bytes, bytes) =
         super::bytes_to_limited_text(rendered.as_bytes(), max_bytes);
-    Ok(json!({
+    let diagnostic_count = diagnostics.len();
+    let tool_success = lsp_diagnostics_tool_succeeded(command_success, workspace_diagnostic_count);
+    json!({
         "repo": root.display().to_string(),
-        "success": output.status.success(),
-        "status": output.status.code(),
+        "success": tool_success,
+        "status": if tool_success { "ok" } else { "command_failed" },
+        "command_success": command_success,
+        "command_status": command_status,
+        "diagnostic_scope": path_filter.unwrap_or("workspace"),
+        "has_diagnostics": diagnostic_count > 0,
         "diagnostics": diagnostics,
-        "diagnostic_count": diagnostics.len(),
+        "diagnostic_count": diagnostic_count,
+        "workspace_diagnostic_count": workspace_diagnostic_count,
         "raw_truncated": truncated_bytes,
         "bytes": bytes,
         "artifacts": [{
@@ -284,11 +339,14 @@ pub(crate) fn call_lsp_diagnostics_tool(
             "metadata": {
                 "provider": "rust_analyzer",
                 "tool": name,
-                "diagnostic_count": diagnostics.len(),
-                "status": output.status.code()
+                "diagnostic_scope": path_filter.unwrap_or("workspace"),
+                "diagnostic_count": diagnostic_count,
+                "workspace_diagnostic_count": workspace_diagnostic_count,
+                "command_success": command_success,
+                "command_status": command_status
             }
         }]
-    }))
+    })
 }
 
 #[derive(Debug)]
@@ -530,6 +588,16 @@ fn parse_rust_analyzer_diagnostics(
     diagnostics
 }
 
+fn filter_lsp_diagnostics(diagnostics: Vec<Value>, path_filter: Option<&str>) -> Vec<Value> {
+    match path_filter {
+        Some(filter) => diagnostics
+            .into_iter()
+            .filter(|diagnostic| diagnostic.get("path").and_then(Value::as_str) == Some(filter))
+            .collect(),
+        None => diagnostics,
+    }
+}
+
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| "<unserializable>".to_string())
 }
@@ -552,6 +620,52 @@ mod tests {
         assert_eq!(diagnostics[0]["path"], json!("src/main.rs"));
         assert_eq!(diagnostics[0]["line"], json!(5));
         assert_eq!(diagnostics[0]["message"], json!("no method named foo"));
+    }
+
+    #[test]
+    fn lsp_diagnostics_nonzero_status_with_filtered_workspace_diagnostics_is_tool_success() {
+        let raw = r#"at crate air, file /repo/src/other.rs: Error RustcHardError("E0599") from LineCol { line: 4, col: 2 } to LineCol { line: 4, col: 8 }: no method named foo"#;
+        let all_diagnostics = parse_rust_analyzer_diagnostics(raw, Path::new("/repo"), None);
+        let workspace_diagnostic_count = all_diagnostics.len();
+        let filtered = filter_lsp_diagnostics(all_diagnostics, Some("src/target.rs"));
+        let output = lsp_diagnostics_output(LspDiagnosticsOutput {
+            name: "lsp.diagnostics",
+            root: Path::new("/repo"),
+            path_filter: Some("src/target.rs"),
+            diagnostics: filtered,
+            workspace_diagnostic_count,
+            command_success: false,
+            command_status: Some(1),
+            max_bytes: 65536,
+        });
+
+        assert_eq!(output["success"], json!(true));
+        assert_eq!(output["status"], json!("ok"));
+        assert_eq!(output["command_success"], json!(false));
+        assert_eq!(output["command_status"], json!(1));
+        assert_eq!(output["diagnostic_scope"], json!("src/target.rs"));
+        assert_eq!(output["has_diagnostics"], json!(false));
+        assert_eq!(output["diagnostic_count"], json!(0));
+        assert_eq!(output["workspace_diagnostic_count"], json!(1));
+    }
+
+    #[test]
+    fn lsp_diagnostics_nonzero_status_without_parseable_diagnostics_is_command_failed() {
+        let output = lsp_diagnostics_output(LspDiagnosticsOutput {
+            name: "lsp.diagnostics",
+            root: Path::new("/repo"),
+            path_filter: None,
+            diagnostics: Vec::new(),
+            workspace_diagnostic_count: 0,
+            command_success: false,
+            command_status: Some(1),
+            max_bytes: 65536,
+        });
+
+        assert_eq!(output["success"], json!(false));
+        assert_eq!(output["status"], json!("command_failed"));
+        assert_eq!(output["command_success"], json!(false));
+        assert_eq!(output["workspace_diagnostic_count"], json!(0));
     }
 
     #[test]

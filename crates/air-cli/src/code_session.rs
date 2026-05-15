@@ -24,9 +24,6 @@ pub(crate) struct CodeSessionTurn {
     #[serde(default)]
     pub(crate) time: CodeSessionTurnTime,
     pub(crate) task: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) requested_recipe: Option<String>,
-    pub(crate) recipe: String,
     pub(crate) profile: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) pack: Option<CodeSessionTurnPack>,
@@ -48,7 +45,6 @@ pub(crate) struct CodeSessionTurn {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct CodeSessionTurnPack {
     pub(crate) path: String,
-    pub(crate) recipe: String,
     pub(crate) default_profile: String,
     pub(crate) profile_override: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -264,15 +260,7 @@ pub(crate) fn code_session_workspace_revert(
 }
 
 fn code_session_feedback_summary(turn: &CodeSessionTurn) -> String {
-    let mut fields = vec![
-        format!("recipe={}", turn.recipe),
-        format!("completed={}", turn.completed),
-    ];
-    if let Some(requested_recipe) = turn.requested_recipe.as_ref() {
-        if requested_recipe != &turn.recipe {
-            fields.push(format!("requested_recipe={requested_recipe}"));
-        }
-    }
+    let mut fields = vec![format!("completed={}", turn.completed)];
     if !turn.summary.models.is_empty() {
         fields.push(format!("models={}", turn.summary.models.join(",")));
     }

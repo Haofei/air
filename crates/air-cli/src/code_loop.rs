@@ -1,5 +1,4 @@
 use crate::code_context::{recent_context_feedback, ContextFeedbackEntry};
-use crate::code_input::{recipe_name, CodeRecipe};
 use crate::code_pack::CodeAgentPackContext;
 use crate::run_plan::{run_plan_capture, RunPlanOptions};
 use anyhow::{bail, Result};
@@ -8,7 +7,6 @@ use std::path::{Path, PathBuf};
 
 pub(crate) struct CodeLoopOptions {
     pub(crate) pack: CodeAgentPackContext,
-    pub(crate) recipe: CodeRecipe,
     pub(crate) profile: PathBuf,
     pub(crate) input: Map<String, Value>,
     pub(crate) model_config: Option<PathBuf>,
@@ -35,11 +33,7 @@ pub(crate) fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
 
     for iteration in 1..=options.max_iterations {
         if options.log {
-            eprintln!(
-                "[air-code-loop] iteration={} recipe={}",
-                iteration,
-                recipe_name(options.recipe)
-            );
+            eprintln!("[air-code-loop] iteration={}", iteration);
         }
         let iteration_input = code_loop_iteration_input(&options.input, &iterations);
         let outputs = run_plan_capture(RunPlanOptions {
@@ -69,7 +63,7 @@ pub(crate) fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
             example_tools: false,
             tool_config: options.tool_config.clone(),
         })?;
-        completed = code_outputs_complete(&options.pack, options.recipe, &outputs)?;
+        completed = code_outputs_complete(&options.pack, &outputs)?;
         final_outputs = outputs.clone();
         iterations.push(json!({
             "iteration": iteration,
@@ -88,7 +82,6 @@ pub(crate) fn run_code_loop(options: CodeLoopOptions) -> Result<Value> {
     };
     let summary = json!({
         "status": status,
-        "recipe": recipe_name(options.recipe),
         "completed": completed,
         "iterations": iterations,
         "final_outputs": final_outputs,
@@ -156,10 +149,6 @@ pub(crate) fn iteration_path(path: &Path, iteration: usize) -> PathBuf {
     parent.join(file_name)
 }
 
-pub(crate) fn code_outputs_complete(
-    pack: &CodeAgentPackContext,
-    recipe: CodeRecipe,
-    outputs: &Value,
-) -> Result<bool> {
-    pack.recipe_complete(recipe_name(recipe), outputs)
+pub(crate) fn code_outputs_complete(pack: &CodeAgentPackContext, outputs: &Value) -> Result<bool> {
+    pack.complete(outputs)
 }

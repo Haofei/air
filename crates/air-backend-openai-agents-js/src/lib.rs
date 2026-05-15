@@ -610,6 +610,50 @@ function renderTemplate(localState, outputs, template) {
   return template.replace(/\{\{([^}]+)\}\}/g, (_, path) => String(readPath(localState, outputs, path.trim())));
 }
 
+function takeLast(value, maxItems) {
+  if (!Array.isArray(value)) throw new Error('take_last expression expected an array value');
+  if (maxItems <= 0) throw new Error('take_last max_items must be at least 1');
+  return value.slice(-maxItems);
+}
+
+function takeLastWithinBytes(value, maxItems, maxBytes) {
+  if (!Array.isArray(value)) throw new Error('take_last_within_bytes expression expected an array value');
+  if (maxItems <= 0) throw new Error('take_last_within_bytes max_items must be at least 1');
+  if (maxBytes <= 0) throw new Error('take_last_within_bytes max_bytes must be at least 1');
+  const selected = [];
+  let selectedBytes = 0;
+  for (const item of value.slice(-maxItems).reverse()) {
+    let candidate = item;
+    let candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+    if (selectedBytes + candidateBytes > maxBytes) {
+      candidate = { _air_truncated: true };
+      candidateBytes = Buffer.byteLength(JSON.stringify(candidate), 'utf8');
+    }
+    if (selectedBytes + candidateBytes > maxBytes) continue;
+    selectedBytes += candidateBytes;
+    selected.push(candidate);
+  }
+  return selected.reverse();
+}
+
+function toolResultsFromObservation(observation) {
+  const results = [];
+  if (observation && Array.isArray(observation.result)) {
+    for (const item of observation.result) {
+      if (item && item.tool) results.push(item);
+    }
+  }
+  if (observation && observation.tool) results.push(observation);
+  return results;
+}
+
+function valueIsEmpty(value) {
+  return value == null
+    || value === ''
+    || (Array.isArray(value) && value.length === 0)
+    || (typeof value === 'object' && !Array.isArray(value) && Object.keys(value).length === 0);
+}
+
 function evalInput(localState, outputs, spec) {
   if (typeof spec === 'string') return readPath(localState, outputs, spec);
   if (spec && typeof spec === 'object' && spec.fields) {
@@ -631,13 +675,27 @@ function evalExpr(localState, outputs, expr) {
     const raw = typeof value === 'string' ? value : JSON.stringify(value);
     return raw.slice(0, expr.max_chars);
   }
+  if ('take_last' in expr) return takeLast(evalExpr(localState, outputs, expr.take_last), expr.max_items);
+  if ('take_last_within_bytes' in expr) return takeLastWithinBytes(evalExpr(localState, outputs, expr.take_last_within_bytes), expr.max_items, expr.max_bytes);
+  if ('equals' in expr) {
+    if (!Array.isArray(expr.equals) || expr.equals.length !== 2) {
+      throw new Error('equals expression expects exactly two operands');
+    }
+    return JSON.stringify(evalExpr(localState, outputs, expr.equals[0])) === JSON.stringify(evalExpr(localState, outputs, expr.equals[1]));
+  }
+  if ('is_empty' in expr) return valueIsEmpty(evalExpr(localState, outputs, expr.is_empty));
+  if ('not' in expr) {
+    const value = evalExpr(localState, outputs, expr.not);
+    if (typeof value !== 'boolean') throw new Error('not expression expects a boolean operand');
+    return !value;
+  }
   return expr;
 }
 
 function looksLikeExpr(value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const keys = Object.keys(value);
-  return keys.length === 1 && ['ref', 'path', 'literal', 'object', 'array', 'template', 'truncate'].includes(keys[0]);
+  return keys.length === 1 && ['ref', 'path', 'literal', 'object', 'array', 'template', 'truncate', 'take_last', 'take_last_within_bytes', 'equals', 'is_empty', 'not'].includes(keys[0]);
 }
 
 function resolveSetValue(localState, outputs, value) {

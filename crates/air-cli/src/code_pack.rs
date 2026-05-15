@@ -1,7 +1,6 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -11,265 +10,17 @@ const CODE_AGENT_PACK_YAML: &str =
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct CodeAgentPack {
-    pub(crate) recipes: Vec<CodeAgentPackRecipe>,
-}
-
-#[derive(Clone, Debug, Default)]
-pub(crate) struct CodeAgentInputFacts {
-    pub(crate) task: bool,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn pack_relative_profiles_resolve_from_pack_directory_even_when_cwd_has_match() {
-        let pack = CodeAgentPackContext {
-            path: PathBuf::from("target/generated/custom-pack/code-agent.air-pack.yaml"),
-            pack: CodeAgentPack {
-                recipes: vec![CodeAgentPackRecipe {
-                    id: "edit".to_string(),
-                    default_profile: PathBuf::from("edit.air-profile.yaml"),
-                    intent: None,
-                    input: CodeAgentRecipeInput::default(),
-                    completion: None,
-                }],
-            },
-        };
-
-        assert_eq!(
-            pack.default_profile_for_recipe("edit").unwrap(),
-            PathBuf::from("target/generated/custom-pack/edit.air-profile.yaml")
-        );
-    }
-
-    #[test]
-    fn pack_validation_rejects_empty_recipe_list() {
-        let pack = CodeAgentPack { recipes: vec![] };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("empty recipe list should be rejected");
-
-        assert!(
-            error
-                .to_string()
-                .contains("must declare at least one recipe"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn pack_validation_rejects_empty_recipe_id() {
-        let pack = CodeAgentPack {
-            recipes: vec![CodeAgentPackRecipe {
-                id: " ".to_string(),
-                default_profile: PathBuf::from("edit.air-profile.yaml"),
-                intent: None,
-                input: CodeAgentRecipeInput::default(),
-                completion: None,
-            }],
-        };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("blank recipe id should be rejected");
-
-        assert!(error.to_string().contains("empty id"), "{error}");
-    }
-
-    #[test]
-    fn pack_validation_rejects_empty_default_profile() {
-        let pack = CodeAgentPack {
-            recipes: vec![CodeAgentPackRecipe {
-                id: "edit".to_string(),
-                default_profile: PathBuf::new(),
-                intent: None,
-                input: CodeAgentRecipeInput::default(),
-                completion: None,
-            }],
-        };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("empty default_profile should be rejected");
-
-        assert!(
-            error.to_string().contains("missing default_profile"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn pack_validation_rejects_duplicate_recipe_ids() {
-        let pack = CodeAgentPack {
-            recipes: vec![
-                CodeAgentPackRecipe {
-                    id: "edit".to_string(),
-                    default_profile: PathBuf::from("edit.air-profile.yaml"),
-                    intent: None,
-                    input: CodeAgentRecipeInput::default(),
-                    completion: None,
-                },
-                CodeAgentPackRecipe {
-                    id: "edit".to_string(),
-                    default_profile: PathBuf::from("other-edit.air-profile.yaml"),
-                    intent: None,
-                    input: CodeAgentRecipeInput::default(),
-                    completion: None,
-                },
-            ],
-        };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("duplicate recipe ids should be rejected");
-
-        assert!(
-            error.to_string().contains("duplicate recipe edit"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn pack_completion_supports_all_and_any_rules() {
-        let completion: CodeAgentCompletion = serde_yaml::from_str(
-            r#"
-all:
-  - equals:
-      path: /edit/final_success
-      value: true
-  - any:
-      - equals:
-          path: /edit/patch_applied
-          value: true
-      - exists: /edit/manual_approval
-"#,
-        )
-        .unwrap();
-
-        assert!(completion.is_complete(&serde_json::json!({
-            "edit": {
-                "final_success": true,
-                "patch_applied": false,
-                "manual_approval": {"by": "reviewer"}
-            }
-        })));
-        assert!(!completion.is_complete(&serde_json::json!({
-            "edit": {
-                "final_success": false,
-                "patch_applied": true
-            }
-        })));
-    }
-
-    #[test]
-    fn pack_validation_rejects_invalid_completion_rules() {
-        let pack = CodeAgentPack {
-            recipes: vec![CodeAgentPackRecipe {
-                id: "edit".to_string(),
-                default_profile: PathBuf::from("edit.air-profile.yaml"),
-                intent: None,
-                input: CodeAgentRecipeInput::default(),
-                completion: Some(CodeAgentCompletion {
-                    all: vec![CodeAgentCompletionRule {
-                        exists: Some("edit/final_success".to_string()),
-                        ..CodeAgentCompletionRule::default()
-                    }],
-                    any: vec![],
-                }),
-            }],
-        };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("completion paths must be JSON pointers");
-
-        assert!(error.to_string().contains("JSON pointer"), "{error}");
-    }
-
-    #[test]
-    fn pack_validation_rejects_unknown_input_fields() {
-        let pack = CodeAgentPack {
-            recipes: vec![CodeAgentPackRecipe {
-                id: "edit".to_string(),
-                default_profile: PathBuf::from("edit.air-profile.yaml"),
-                intent: None,
-                input: CodeAgentRecipeInput {
-                    required: vec!["unknown_flag".to_string()],
-                },
-                completion: None,
-            }],
-        };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("recipe input should reject unknown fields");
-
-        assert!(error.to_string().contains("unknown field"), "{error}");
-    }
-
-    #[test]
-    fn pack_validation_rejects_duplicate_required_input() {
-        let pack = CodeAgentPack {
-            recipes: vec![CodeAgentPackRecipe {
-                id: "edit".to_string(),
-                default_profile: PathBuf::from("edit.air-profile.yaml"),
-                intent: None,
-                input: CodeAgentRecipeInput {
-                    required: vec!["task".to_string(), "task".to_string()],
-                },
-                completion: None,
-            }],
-        };
-
-        let error = validate_code_agent_pack(&pack, "test-pack")
-            .expect_err("duplicate required input should be rejected");
-
-        assert!(
-            error.to_string().contains("duplicate required field task"),
-            "{error}"
-        );
-    }
-
-    #[test]
-    fn pack_input_contract_accepts_required_fields() {
-        let pack = load_code_agent_pack(None).unwrap();
-
-        pack.validate_recipe_input_facts("edit", &CodeAgentInputFacts { task: true })
-            .unwrap();
-    }
-
-    #[test]
-    fn pack_input_contract_rejects_missing_required_fields() {
-        let pack = load_code_agent_pack(None).unwrap();
-
-        pack.validate_recipe_input_facts("edit", &CodeAgentInputFacts { task: true })
-            .expect("task-only edit should be accepted");
-
-        let error = pack
-            .validate_recipe_input_facts("edit", &CodeAgentInputFacts::default())
-            .expect_err("missing task should be rejected by pack input contract");
-
-        assert!(
-            error.to_string().contains("missing required input"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("task"), "{error}");
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub(crate) struct CodeAgentPackRecipe {
-    pub(crate) id: String,
     pub(crate) default_profile: PathBuf,
     #[serde(default)]
     pub(crate) intent: Option<String>,
     #[serde(default)]
-    pub(crate) input: CodeAgentRecipeInput,
-    #[serde(default)]
     pub(crate) completion: Option<CodeAgentCompletion>,
 }
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-pub(crate) struct CodeAgentRecipeInput {
-    #[serde(default)]
-    pub(crate) required: Vec<String>,
+#[derive(Clone, Debug)]
+pub(crate) struct CodeAgentPackContext {
+    pub(crate) path: PathBuf,
+    pub(crate) pack: CodeAgentPack,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -302,12 +53,6 @@ struct CodeAgentCompletionEquals {
     value: Value,
 }
 
-#[derive(Clone, Debug)]
-pub(crate) struct CodeAgentPackContext {
-    pub(crate) path: PathBuf,
-    pub(crate) pack: CodeAgentPack,
-}
-
 pub(crate) fn load_code_agent_pack(path: Option<PathBuf>) -> Result<CodeAgentPackContext> {
     match path {
         Some(path) => {
@@ -338,55 +83,14 @@ pub(crate) fn read_code_agent_pack(path: &Path) -> Result<CodeAgentPack> {
 }
 
 fn validate_code_agent_pack(pack: &CodeAgentPack, source: &str) -> Result<()> {
-    if pack.recipes.is_empty() {
-        bail!("code-agent pack {source} must declare at least one recipe");
+    if pack.default_profile.as_os_str().is_empty() {
+        bail!("code-agent pack {source} is missing default_profile");
     }
-    let mut seen = HashSet::new();
-    for recipe in &pack.recipes {
-        if recipe.id.trim().is_empty() {
-            bail!("code-agent pack {source} contains a recipe with empty id");
-        }
-        if recipe.default_profile.as_os_str().is_empty() {
-            bail!(
-                "code-agent pack {source} recipe {} is missing default_profile",
-                recipe.id
-            );
-        }
-        if !seen.insert(recipe.id.as_str()) {
-            bail!(
-                "code-agent pack {source} declares duplicate recipe {}",
-                recipe.id
-            );
-        }
-        validate_recipe_input(
-            &recipe.input,
-            &format!("code-agent pack {source} recipe {}", recipe.id),
-        )?;
-        if let Some(completion) = &recipe.completion {
-            validate_completion(
-                completion,
-                &format!("code-agent pack {source} recipe {}", recipe.id),
-            )?;
-        }
-    }
+    let Some(completion) = &pack.completion else {
+        bail!("code-agent pack {source} is missing completion rules");
+    };
+    validate_completion(completion, &format!("code-agent pack {source}"))?;
     Ok(())
-}
-
-fn validate_recipe_input(input: &CodeAgentRecipeInput, source: &str) -> Result<()> {
-    let mut required = HashSet::new();
-    for field in &input.required {
-        if !is_known_recipe_input_field(field) {
-            bail!("{source} input references unknown field {field}");
-        }
-        if !required.insert(field.as_str()) {
-            bail!("{source} input declares duplicate required field {field}");
-        }
-    }
-    Ok(())
-}
-
-fn is_known_recipe_input_field(field: &str) -> bool {
-    matches!(field, "task")
 }
 
 fn validate_completion(completion: &CodeAgentCompletion, source: &str) -> Result<()> {
@@ -446,59 +150,18 @@ fn validate_completion_pointer(path: &str, source: &str) -> Result<()> {
 }
 
 impl CodeAgentPackContext {
-    pub(crate) fn default_profile_for_recipe(&self, recipe: &str) -> Result<PathBuf> {
-        Ok(self.recipe_for_id(recipe)?.default_profile)
+    pub(crate) fn default_profile(&self) -> PathBuf {
+        self.resolve_profile_path(&self.pack.default_profile)
     }
 
-    pub(crate) fn recipe_complete(&self, recipe: &str, outputs: &Value) -> Result<bool> {
-        let pack_recipe = self.recipe_for_id(recipe)?;
-        let Some(completion) = pack_recipe.completion.as_ref() else {
+    pub(crate) fn complete(&self, outputs: &Value) -> Result<bool> {
+        let Some(completion) = self.pack.completion.as_ref() else {
             bail!(
-                "code-agent pack {} recipe {recipe} is missing completion rules",
+                "code-agent pack {} is missing completion rules",
                 self.path.display()
             );
         };
         Ok(completion.is_complete(outputs))
-    }
-
-    pub(crate) fn validate_recipe_input_facts(
-        &self,
-        recipe: &str,
-        facts: &CodeAgentInputFacts,
-    ) -> Result<()> {
-        let pack_recipe = self.recipe_for_id(recipe)?;
-        let missing = pack_recipe
-            .input
-            .required
-            .iter()
-            .filter(|field| !facts.field_present(field))
-            .cloned()
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            bail!(
-                "code-agent pack {} recipe {recipe} missing required input field(s): {}",
-                self.path.display(),
-                missing.join(", ")
-            );
-        }
-        Ok(())
-    }
-
-    pub(crate) fn recipe_for_id(&self, recipe: &str) -> Result<CodeAgentPackRecipe> {
-        let Some(mut pack_recipe) = self
-            .pack
-            .recipes
-            .iter()
-            .find(|pack_recipe| pack_recipe.id == recipe)
-            .cloned()
-        else {
-            bail!(
-                "code-agent pack {} is missing recipe {recipe}",
-                self.path.display()
-            );
-        };
-        pack_recipe.default_profile = self.resolve_profile_path(&pack_recipe.default_profile);
-        Ok(pack_recipe)
     }
 
     fn resolve_profile_path(&self, profile: &Path) -> PathBuf {
@@ -510,15 +173,6 @@ impl CodeAgentPackContext {
             .filter(|parent| !parent.as_os_str().is_empty())
             .map(|parent| parent.join(profile))
             .unwrap_or_else(|| profile.to_path_buf())
-    }
-}
-
-impl CodeAgentInputFacts {
-    fn field_present(&self, field: &str) -> bool {
-        match field {
-            "task" => self.task,
-            _ => false,
-        }
     }
 }
 
@@ -556,5 +210,129 @@ impl CodeAgentCompletionRule {
             return self.any.iter().any(|rule| rule.matches(outputs));
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pack_relative_profile_resolves_from_pack_directory_even_when_cwd_has_match() {
+        let pack = CodeAgentPackContext {
+            path: PathBuf::from("target/generated/custom-pack/code-agent.air-pack.yaml"),
+            pack: CodeAgentPack {
+                default_profile: PathBuf::from("edit.air-profile.yaml"),
+                intent: None,
+                completion: Some(CodeAgentCompletion {
+                    all: vec![],
+                    any: vec![CodeAgentCompletionRule {
+                        equals: Some(CodeAgentCompletionEquals {
+                            path: "/edit/final_success".to_string(),
+                            value: serde_json::json!(true),
+                        }),
+                        ..CodeAgentCompletionRule::default()
+                    }],
+                }),
+            },
+        };
+
+        assert_eq!(
+            pack.default_profile(),
+            PathBuf::from("target/generated/custom-pack/edit.air-profile.yaml")
+        );
+    }
+
+    #[test]
+    fn pack_validation_rejects_empty_default_profile() {
+        let pack = CodeAgentPack {
+            default_profile: PathBuf::new(),
+            intent: None,
+            completion: Some(CodeAgentCompletion {
+                all: vec![],
+                any: vec![CodeAgentCompletionRule {
+                    equals: Some(CodeAgentCompletionEquals {
+                        path: "/edit/final_success".to_string(),
+                        value: serde_json::json!(true),
+                    }),
+                    ..CodeAgentCompletionRule::default()
+                }],
+            }),
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("empty default_profile should be rejected");
+
+        assert!(
+            error.to_string().contains("missing default_profile"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn pack_completion_supports_all_and_any_rules() {
+        let completion: CodeAgentCompletion = serde_yaml::from_str(
+            r#"
+all:
+  - equals:
+      path: /edit/final_success
+      value: true
+  - any:
+      - equals:
+          path: /edit/patch_applied
+          value: true
+      - exists: /edit/manual_approval
+"#,
+        )
+        .unwrap();
+
+        assert!(completion.is_complete(&serde_json::json!({
+            "edit": {
+                "final_success": true,
+                "patch_applied": false,
+                "manual_approval": {"by": "reviewer"}
+            }
+        })));
+        assert!(!completion.is_complete(&serde_json::json!({
+            "edit": {
+                "final_success": false,
+                "patch_applied": true
+            }
+        })));
+    }
+
+    #[test]
+    fn pack_validation_rejects_invalid_completion_rules() {
+        let pack = CodeAgentPack {
+            default_profile: PathBuf::from("edit.air-profile.yaml"),
+            intent: None,
+            completion: Some(CodeAgentCompletion {
+                all: vec![CodeAgentCompletionRule {
+                    exists: Some("edit/final_success".to_string()),
+                    ..CodeAgentCompletionRule::default()
+                }],
+                any: vec![],
+            }),
+        };
+
+        let error = validate_code_agent_pack(&pack, "test-pack")
+            .expect_err("completion paths must be JSON pointers");
+
+        assert!(error.to_string().contains("JSON pointer"), "{error}");
+    }
+
+    #[test]
+    fn default_pack_loads() {
+        let pack = load_code_agent_pack(None).unwrap();
+
+        assert_eq!(
+            pack.default_profile(),
+            PathBuf::from("examples/code-agent/edit.air-profile.yaml")
+        );
+        assert!(pack
+            .complete(&serde_json::json!({
+                "edit": {"final_success": true}
+            }))
+            .unwrap());
     }
 }

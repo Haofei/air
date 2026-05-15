@@ -4,8 +4,8 @@ use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_json_object, read_run_plan_profile, resolve_profile_path};
 use crate::tools::ToolProviderChoice;
 use air_runtime::{
-    read_trace_jsonl, replay_outputs, system_return_event, write_trace_jsonl_with_options,
-    TraceEvent, TraceStatus, TraceWriteOptions,
+    read_trace_jsonl, replay_outputs, system_return_event, truncate_middle_context_string,
+    write_trace_jsonl_with_options, TraceEvent, TraceStatus, TraceWriteOptions,
 };
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -1130,11 +1130,7 @@ fn normalized_model_output_log_lines(event: &TraceEvent, model: &str) -> Vec<Str
 }
 
 fn truncate_log_text(text: &str, max_chars: usize) -> String {
-    let mut result = text.chars().take(max_chars).collect::<String>();
-    if text.chars().count() > max_chars {
-        result.push_str(" [truncated]");
-    }
-    result
+    truncate_middle_context_string(text, max_chars, "truncated")
 }
 
 fn value_shape(value: &Value) -> String {
@@ -1374,5 +1370,17 @@ mod tests {
         assert!(lines
             .iter()
             .any(|line| { line.contains("[air:chat] agent <- fixture_model tool_calls=edit(") }));
+    }
+
+    #[test]
+    fn conversation_log_truncation_preserves_tail() {
+        let text = "start-".to_string() + &"x".repeat(128) + "-end";
+
+        let truncated = truncate_log_text(&text, 48);
+
+        assert_eq!(truncated.chars().count(), 48);
+        assert!(truncated.starts_with("start"), "{truncated}");
+        assert!(truncated.ends_with("end"), "{truncated}");
+        assert!(truncated.contains("[truncated]"), "{truncated}");
     }
 }

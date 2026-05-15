@@ -1,34 +1,10 @@
 {
   "tools": {
-    "web.search": {
-      "kind": "playwright_search",
-      "capability": "network.search",
-      "script_path": "../../../scripts/playwright_search.cjs",
-      "query_variants": [
-        "{{query}} official docs",
-        "{{query}} GitHub issues",
-        "{{query}} examples"
-      ],
-      "max_results": 6,
-      "max_results_per_query": 5,
-      "max_per_domain": 1,
-      "max_content_chars": 12000,
-      "required_terms": [],
-      "exclude_domains": [
-        "pinterest.com",
-        "facebook.com",
-        "x.com",
-        "twitter.com"
-      ],
-      "page_concurrency": 3,
-      "navigation_timeout_ms": 12000,
-      "overall_timeout_ms": 110000,
-      "search_delay_ms": 500,
-      "retry_count": 1,
-      "fetch_pages": true,
-      "cache_dir": "../../../target/generated/playwright_search_cache",
-      "cache_ttl_seconds": 86400,
-      "timeout_seconds": 120
+    "glob": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../../..",
+      "max_files": 100
     },
     "read": {
       "kind": "file_read",
@@ -36,162 +12,41 @@
       "base_dir": "../../..",
       "max_bytes": 32768
     },
-    "read_many": {
-      "kind": "file_read_many",
-      "capability": "file.read",
-      "base_dir": "../../..",
-      "max_files": 8,
-      "max_bytes": 65536
-    },
     "grep": {
       "kind": "file_search",
       "capability": "file.read",
       "base_dir": "../../..",
-      "max_matches": 40,
+      "max_matches": 100,
       "max_context_lines": 2,
       "max_line_chars": 2000,
+      "max_bytes": 32768
+    },
+    "lsp": {
+      "kind": "rust_analyzer",
+      "capability": "code.read",
+      "root_dir": "../../..",
+      "command": "rust-analyzer",
+      "max_results": 80,
+      "max_diagnostics": 80,
       "max_bytes": 32768
     },
     "edit": {
       "kind": "file_edit",
       "capability": "file.write",
       "base_dir": "../../..",
-      "require_read": true,
+      "max_bytes": 262144
+    },
+    "bash": {
+      "kind": "bash",
+      "capability": "code.test",
+      "cwd": "../../..",
+      "timeout_seconds": 120,
       "max_bytes": 65536,
-      "max_changed_lines": 80
+      "truncation_direction": "tail"
     },
-    "glob": {
-      "kind": "repo_files",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_files": 100
-    },
-    "repo.files": {
-      "kind": "repo_files",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_files": 100
-    },
-    "repo.search": {
-      "kind": "repo_search",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_matches": 80,
-      "max_bytes": 65536
-    },
-    "repo.symbols": {
-      "kind": "repo_symbols",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_symbols": 120,
-      "max_bytes": 65536
-    },
-    "repo.references": {
-      "kind": "repo_references",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_matches": 120,
-      "max_files": 8,
-      "context_lines": 4,
-      "max_bytes": 65536
-    },
-    "lsp.references": {
-      "kind": "rust_analyzer_references",
-      "capability": "code.read",
-      "root_dir": "../../..",
-      "command": "rust-analyzer",
-      "max_results": 120,
-      "max_bytes": 65536
-    },
-    "lsp.diagnostics": {
-      "kind": "rust_analyzer_diagnostics",
-      "capability": "code.read",
-      "root_dir": "../../..",
-      "command": "rust-analyzer",
-      "max_diagnostics": 80,
-      "max_bytes": 65536
-    },
-    "repo.context": {
-      "kind": "repo_context",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_matches": 80,
-      "max_files": 8,
-      "context_lines": 8,
-      "max_bytes": 65536
-    },
-    "git.diff": {
-      "kind": "git_diff",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_bytes": 65536
-    },
-    "git.status": {
-      "kind": "git_status",
-      "capability": "code.read",
-      "repo_dir": "../../..",
-      "max_files": 200
-    },
-    "code.assert": {
-      "kind": "code_assert",
-      "capability": "code.read",
-      "base_dir": "../../..",
-      "max_assertions": 12,
-      "max_bytes": 65536
-    },
-    "todo.write": {
+    "todowrite": {
       "kind": "todo_write",
-      "capability": "task.progress",
-      "max_items": 8,
-      "max_content_chars": 240
-    },
-    "todo.read": {
-      "kind": "todo_read",
-      "capability": "task.progress"
-    },
-    "context.measure": {
-      "kind": "context_measure",
-      "capability": "context.manage",
-      "max_context_chars": 200000,
-      "threshold_percent": 80
-    },
-    "artifact.validate": {
-      "kind": "artifact_validate",
-      "capability": "provenance.validate",
-      "fail_on_missing": true,
-      "max_ids": 512
-    },
-    "test.run": {
-      "kind": "command_run",
-      "capability": "code.test",
-      "cwd": "../../..",
-      "commands": {
-        "default": [
-          "cargo",
-          "test",
-          "-q",
-          "-p",
-          "air-tools"
-        ]
-      },
-      "timeout_seconds": 120,
-      "max_bytes": 65536,
-      "truncation_direction": "tail"
-    },
-    "format.run": {
-      "kind": "command_run",
-      "capability": "code.test",
-      "cwd": "../../..",
-      "commands": {
-        "format": [
-          "cargo",
-          "fmt",
-          "--all"
-        ]
-      },
-      "timeout_seconds": 120,
-      "max_bytes": 65536,
-      "truncation_direction": "tail"
+      "capability": "code.read"
     }
   }
 }

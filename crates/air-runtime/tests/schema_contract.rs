@@ -574,7 +574,11 @@ fn evaluates_composable_input_expressions() {
             "message": "double charge / please fix billing",
             "short_message": "double charge",
             "recent_notes": ["second", "third"],
-            "recent_notes_budgeted": ["second", "third"]
+            "recent_notes_budgeted": ["second", "third"],
+            "changed_files": [
+                "crates/air-tools/src/lib.rs",
+                "examples/code-agent/code-edit-loop.air.yaml"
+            ]
         })
     );
 }

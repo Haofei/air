@@ -11,6 +11,12 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+mod model_context;
+pub use model_context::{
+    compact_model_context_string, compact_model_context_value, take_last_within_bytes_value,
+    truncate_middle_context_string,
+};
+
 pub type State = Map<String, Value>;
 type ResolvedToolDispatch = Result<(String, Value), RuntimeError>;
 type ResolvedToolBatchItem = (Value, ResolvedToolDispatch);
@@ -132,6 +138,9 @@ pub enum RuntimeError {
     #[error("unsupported condition {0}")]
     UnsupportedCondition(String),
 
+    #[error("unsupported expression {0}")]
+    UnsupportedExpression(String),
+
     #[error("provider error: {0}")]
     Provider(String),
 
@@ -156,6 +165,11 @@ pub enum RuntimeError {
         limit: u32,
         attempted: u32,
     },
+
+    #[error(
+        "repeated context tool call requires repeat_reason for tool {tool}: attempted={attempted}"
+    )]
+    RepeatedContextToolCallRequiresReason { tool: String, attempted: u32 },
 
     #[error("{action} action exceeded timeout_seconds={timeout_seconds} elapsed_ms={elapsed_ms}")]
     ActionTimeoutExceeded {
@@ -412,8 +426,12 @@ pub fn sanitize_trace_text(text: &str, options: &TraceWriteOptions) -> String {
     };
     if let Some(max_chars) = options.max_string_chars {
         if text.chars().count() > max_chars {
-            text = text.chars().take(max_chars).collect::<String>();
-            text.push_str("[AIR_TRUNCATED]");
+            let truncated = truncate_middle_context_string(&text, max_chars, "AIR_TRUNCATED");
+            text = if truncated.contains("[AIR_TRUNCATED]") {
+                truncated
+            } else {
+                "[AIR_TRUNCATED]".to_string()
+            };
         }
     }
     text
@@ -1297,10 +1315,10 @@ where
                     Err(error.to_string()),
                 );
                 if on_error == ToolErrorMode::Observe {
-                    results.push(tool_batch_error_observation(
+                    results.push(tool_batch_error_observation_for_runtime_error(
                         &tool,
                         &tool_input,
-                        &error.to_string(),
+                        &error,
                     ));
                     continue;
                 }
@@ -2042,9 +2060,9 @@ fn compact_json_value_with_budget(value: &Value, remaining: &mut usize) -> Value
                 *remaining -= char_count;
                 return Value::String(text.clone());
             }
-            let truncated = text.chars().take(*remaining).collect::<String>();
+            let truncated = truncate_middle_context_string(text, *remaining, "air:truncated");
             *remaining = 0;
-            Value::String(format!("{truncated}\n[air:truncated]"))
+            Value::String(truncated)
         }
         Value::Array(values) => Value::Array(
             values
@@ -2255,6 +2273,46 @@ fn tool_batch_error_observation_for_runtime_error(
                 }
             }
         }
+    } else if let RuntimeError::RepeatedContextToolCallRequiresReason { tool, attempted } = error {
+        let policy = json!({
+            "error_code": "repeat_reason_required",
+            "permission": "repeat_reason_required",
+            "message": "This read/search/diagnostic tool call repeats a previous semantic input. Reissue it only if you include repeat_reason naming the exact missing fact; otherwise use existing observations and edit, verify, complete, or abort.",
+            "tool": tool,
+            "attempted": attempted,
+        });
+        if let Some(object) = observation.as_object_mut() {
+            for (key, value) in policy.as_object().unwrap() {
+                object.insert(key.clone(), value.clone());
+            }
+            if let Some(output) = object.get_mut("output").and_then(Value::as_object_mut) {
+                for (key, value) in policy.as_object().unwrap() {
+                    output.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    } else if let RuntimeError::ToolBatchDispatchToolNotAllowed {
+        tool,
+        allowed_tools,
+    } = error
+    {
+        let policy = json!({
+            "error_code": "tool_not_allowed_in_phase",
+            "permission": "tool_not_allowed_in_phase",
+            "message": "AIR's context ledger has narrowed the productive tool set for this phase. Choose one of the allowed tools for the current recommended action.",
+            "tool": tool,
+            "allowed_tools": allowed_tools,
+        });
+        if let Some(object) = observation.as_object_mut() {
+            for (key, value) in policy.as_object().unwrap() {
+                object.insert(key.clone(), value.clone());
+            }
+            if let Some(output) = object.get_mut("output").and_then(Value::as_object_mut) {
+                for (key, value) in policy.as_object().unwrap() {
+                    output.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
     observation
 }
@@ -2331,6 +2389,24 @@ fn enforce_repeated_tool_policy(
 
     let repeated = recent_repeated_tool_call_count(context.tool_history, tool, &normalized_input);
     let attempted = repeated + 1;
+    if repeated > 0 && context_tool_requires_repeat_reason(tool) && !has_repeat_reason(input) {
+        let error = RuntimeError::RepeatedContextToolCallRequiresReason {
+            tool: tool.to_string(),
+            attempted,
+        };
+        context.push_event_with_meta(
+            action_name,
+            Some(input.clone()),
+            None,
+            Some(json!({
+                "tool": tool,
+                "attempted": attempted,
+                "error_code": "repeat_reason_required",
+            })),
+            Err(error.to_string()),
+        );
+        return Err(error);
+    }
     if attempted > limit {
         let error = RuntimeError::RepeatedToolCallLimitExceeded {
             tool: tool.to_string(),
@@ -2358,6 +2434,33 @@ fn enforce_repeated_tool_policy(
     Ok(())
 }
 
+fn context_tool_requires_repeat_reason(tool: &str) -> bool {
+    matches!(
+        tool,
+        "read"
+            | "file.read"
+            | "read_many"
+            | "file.read_many"
+            | "grep"
+            | "file.search"
+            | "glob"
+            | "repo.files"
+            | "repo.search"
+            | "repo.context"
+            | "repo.symbols"
+            | "repo.references"
+            | "lsp"
+    )
+}
+
+fn has_repeat_reason(input: &Value) -> bool {
+    input
+        .as_object()
+        .and_then(|object| object.get("repeat_reason"))
+        .and_then(Value::as_str)
+        .is_some_and(|reason| !reason.trim().is_empty())
+}
+
 fn recent_repeated_tool_call_count(
     history: &[ToolCallRecord],
     tool: &str,
@@ -2373,10 +2476,13 @@ fn recent_repeated_tool_call_count(
 
 fn repeated_tool_input_key(tool: &str, input: &Value) -> Value {
     match tool {
-        "file.read" => pick_tool_input_fields(
+        "read" | "file.read" => pick_tool_input_fields(
             input,
             &[
                 "path",
+                "filePath",
+                "offset",
+                "limit",
                 "start_line",
                 "end_line",
                 "lines",
@@ -2384,15 +2490,24 @@ fn repeated_tool_input_key(tool: &str, input: &Value) -> Value {
                 "occurrence",
             ],
         ),
-        "file.search" => pick_tool_input_fields(input, &["path", "pattern", "query"]),
+        "read_many" | "file.read_many" => pick_tool_input_fields(input, &["files"]),
+        "grep" | "file.search" => {
+            pick_tool_input_fields(input, &["path", "include", "pattern", "query"])
+        }
+        "glob" | "repo.files" => {
+            pick_tool_input_fields(input, &["pattern", "query", "path", "include_all"])
+        }
         "repo.search" | "repo.context" => pick_tool_input_fields(
             input,
             &["path", "file_glob", "glob", "query", "pattern", "mode"],
         ),
         "repo.symbols" => pick_tool_input_fields(input, &["path", "query", "names"]),
         "repo.references" => pick_tool_input_fields(input, &["path", "symbol"]),
-        "lsp.references" => pick_tool_input_fields(input, &["path", "symbol", "line", "character"]),
-        _ => input.clone(),
+        "lsp" => pick_tool_input_fields(
+            input,
+            &["command", "method", "path", "symbol", "line", "character"],
+        ),
+        _ => strip_tool_reason_fields(input),
     }
 }
 
@@ -2405,6 +2520,23 @@ fn pick_tool_input_fields(input: &Value, fields: &[&str]) -> Value {
         if let Some(value) = object.get(*field) {
             key.insert((*field).to_string(), value.clone());
         }
+    }
+    Value::Object(key)
+}
+
+fn strip_tool_reason_fields(input: &Value) -> Value {
+    let Some(object) = input.as_object() else {
+        return input.clone();
+    };
+    let mut key = object.clone();
+    for field in [
+        "reason",
+        "repeat_reason",
+        "reread_reason",
+        "search_reason",
+        "why",
+    ] {
+        key.remove(field);
     }
     Value::Object(key)
 }
@@ -2750,6 +2882,10 @@ fn looks_like_expr(value: &Value) -> bool {
                 | "truncate"
                 | "take_last"
                 | "take_last_within_bytes"
+                | "split_lines"
+                | "equals"
+                | "is_empty"
+                | "not"
         )
     })
 }
@@ -2794,6 +2930,54 @@ fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, Runti
             *max_items,
             *max_bytes,
         ),
+        Expr::SplitLines { split_lines } => {
+            let value = eval_expr(state, outputs, split_lines)?;
+            let Some(text) = value.as_str() else {
+                return Err(RuntimeError::UnsupportedExpression(
+                    "split_lines expects a string operand".to_string(),
+                ));
+            };
+            Ok(Value::Array(
+                text.lines()
+                    .map(str::trim)
+                    .filter(|line| !line.is_empty())
+                    .map(|line| Value::String(line.to_string()))
+                    .collect(),
+            ))
+        }
+        Expr::Equals { equals } => {
+            let [left, right] = equals.as_slice() else {
+                return Err(RuntimeError::UnsupportedExpression(
+                    "equals expects exactly two operands".to_string(),
+                ));
+            };
+            Ok(Value::Bool(
+                eval_expr(state, outputs, left)? == eval_expr(state, outputs, right)?,
+            ))
+        }
+        Expr::IsEmpty { is_empty } => {
+            let value = eval_expr(state, outputs, is_empty)?;
+            Ok(Value::Bool(value_is_empty(&value)))
+        }
+        Expr::Not { not } => {
+            let value = eval_expr(state, outputs, not)?;
+            let Some(value) = value.as_bool() else {
+                return Err(RuntimeError::UnsupportedExpression(
+                    "not expects a boolean operand".to_string(),
+                ));
+            };
+            Ok(Value::Bool(!value))
+        }
+    }
+}
+
+fn value_is_empty(value: &Value) -> bool {
+    match value {
+        Value::Null => true,
+        Value::String(value) => value.is_empty(),
+        Value::Array(value) => value.is_empty(),
+        Value::Object(value) => value.is_empty(),
+        Value::Bool(_) | Value::Number(_) => false,
     }
 }
 
@@ -2867,268 +3051,6 @@ fn take_last_value(value: &Value, max_items: usize) -> Result<Value, RuntimeErro
     };
     let start = values.len().saturating_sub(max_items);
     Ok(Value::Array(values[start..].to_vec()))
-}
-
-fn take_last_within_bytes_value(
-    value: &Value,
-    max_items: usize,
-    max_bytes: usize,
-) -> Result<Value, RuntimeError> {
-    if max_items == 0 {
-        return Err(RuntimeError::Provider(
-            "take_last_within_bytes max_items must be at least 1".to_string(),
-        ));
-    }
-    if max_bytes == 0 {
-        return Err(RuntimeError::Provider(
-            "take_last_within_bytes max_bytes must be at least 1".to_string(),
-        ));
-    }
-    let Some(values) = value.as_array() else {
-        return Err(RuntimeError::Provider(
-            "take_last_within_bytes expression expected an array value".to_string(),
-        ));
-    };
-    let mut selected = Vec::new();
-    let mut selected_bytes = 0usize;
-    for value in values.iter().rev().take(max_items) {
-        let mut candidate = compact_context_payload(value, max_bytes);
-        let mut candidate_bytes = json_value_size_bytes(&candidate);
-        if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
-            candidate = compact_json_value(&candidate, max_bytes);
-            candidate_bytes = json_value_size_bytes(&candidate);
-        }
-        if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
-            continue;
-        }
-        selected_bytes = selected_bytes.saturating_add(candidate_bytes);
-        selected.push(candidate);
-    }
-    selected.reverse();
-    Ok(Value::Array(selected))
-}
-
-fn compact_context_payload(value: &Value, max_bytes: usize) -> Value {
-    let compact = compact_context_value(value);
-    if json_value_size_bytes(&compact) <= max_bytes {
-        return compact;
-    }
-    compact_json_value(&compact, max_bytes)
-}
-
-fn compact_context_value(value: &Value) -> Value {
-    match value {
-        Value::Array(items) => {
-            Value::Array(items.iter().take(16).map(compact_context_value).collect())
-        }
-        Value::Object(object) if looks_like_observation(object) => {
-            compact_observation_context(object)
-        }
-        Value::Object(object) if looks_like_tool_result(object) => {
-            compact_tool_result_context(object)
-        }
-        Value::Object(object) if object.get("files").and_then(Value::as_array).is_some() => {
-            compact_file_collection_context(object)
-        }
-        Value::Object(object)
-            if object.get("content").is_some() || object.get("content_preview").is_some() =>
-        {
-            compact_file_like_context(object, 12_000)
-        }
-        Value::Object(object) => {
-            let mut compact = Map::new();
-            for (key, value) in object.iter().take(16) {
-                compact.insert(key.clone(), compact_context_value(value));
-            }
-            if object.len() > compact.len() {
-                compact.insert(
-                    "_air_compacted".to_string(),
-                    json!({"omitted_fields": object.len() - compact.len()}),
-                );
-            }
-            Value::Object(compact)
-        }
-        Value::String(text) => Value::String(compact_context_string_for_model_input(text, 2_000)),
-        other => other.clone(),
-    }
-}
-
-fn looks_like_observation(object: &Map<String, Value>) -> bool {
-    object.contains_key("action")
-        && (object.contains_key("requested") || object.contains_key("result"))
-}
-
-fn looks_like_tool_result(object: &Map<String, Value>) -> bool {
-    object.contains_key("tool") && (object.contains_key("output") || object.contains_key("error"))
-}
-
-fn compact_observation_context(object: &Map<String, Value>) -> Value {
-    let mut compact = Map::new();
-    for field in ["action", "rationale"] {
-        copy_context_field(&mut compact, object, field);
-    }
-    if let Some(assistant) = object.get("assistant") {
-        compact.insert("assistant".to_string(), compact_context_value(assistant));
-    }
-    if let Some(requested) = object.get("requested") {
-        compact.insert("requested".to_string(), compact_context_value(requested));
-    }
-    if let Some(result) = object.get("result") {
-        compact.insert("result".to_string(), compact_context_value(result));
-    }
-    Value::Object(compact)
-}
-
-fn compact_tool_result_context(object: &Map<String, Value>) -> Value {
-    let mut compact = Map::new();
-    for field in ["tool", "status", "error_code", "permission", "message"] {
-        copy_context_field(&mut compact, object, field);
-    }
-    if let Some(input) = object.get("input") {
-        compact.insert("input".to_string(), compact_json_value(input, 1_500));
-    }
-    if let Some(output) = object.get("output").and_then(Value::as_object) {
-        compact.insert("output".to_string(), compact_tool_output_context(output));
-    }
-    if let Some(error) = object.get("error") {
-        compact.insert("error".to_string(), compact_context_value(error));
-    }
-    Value::Object(compact)
-}
-
-fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
-    if object.get("files").and_then(Value::as_array).is_some() {
-        return compact_file_collection_context(object);
-    }
-    if object.get("content").is_some() || object.get("content_preview").is_some() {
-        return compact_file_like_context(object, 12_000);
-    }
-
-    let mut compact = Map::new();
-    for field in [
-        "success",
-        "status",
-        "error",
-        "error_code",
-        "permission",
-        "message",
-        "applied",
-        "passed",
-        "failed_count",
-        "bytes",
-        "path",
-        "repo",
-        "query",
-        "effective_query",
-        "mode",
-        "names",
-        "start_line",
-        "end_line",
-        "truncated",
-        "full_log_path",
-        "full_output_path",
-        "truncation_hint",
-        "content_format",
-        "unscoped_read",
-        "changed_files",
-        "diagnostics",
-        "todos",
-        "matches",
-        "symbols",
-        "references",
-        "locations",
-    ] {
-        if let Some(value) = object.get(field) {
-            compact.insert(field.to_string(), compact_context_value(value));
-        }
-    }
-    if compact.is_empty() {
-        compact_context_value(&Value::Object(object.clone()))
-    } else {
-        Value::Object(compact)
-    }
-}
-
-fn compact_file_collection_context(object: &Map<String, Value>) -> Value {
-    let mut compact = Map::new();
-    for field in [
-        "file_count",
-        "bytes",
-        "max_bytes_per_file",
-        "truncated",
-        "truncation_hint",
-    ] {
-        copy_context_field(&mut compact, object, field);
-    }
-    if let Some(files) = object.get("files").and_then(Value::as_array) {
-        compact.insert(
-            "files".to_string(),
-            Value::Array(
-                files
-                    .iter()
-                    .take(8)
-                    .filter_map(Value::as_object)
-                    .map(|file| compact_file_like_context(file, 8_000))
-                    .collect(),
-            ),
-        );
-    }
-    Value::Object(compact)
-}
-
-fn compact_file_like_context(object: &Map<String, Value>, max_content_chars: usize) -> Value {
-    let mut compact = Map::new();
-    for field in [
-        "path",
-        "bytes",
-        "source_bytes",
-        "start_line",
-        "end_line",
-        "match_line",
-        "contains",
-        "context_lines",
-        "total_lines",
-        "truncated",
-        "full_output_path",
-        "truncation_hint",
-        "content_format",
-        "unscoped_read",
-        "line_numbers",
-    ] {
-        copy_context_field(&mut compact, object, field);
-    }
-    if let Some(content) = object.get("content").and_then(Value::as_str) {
-        compact.insert(
-            "content".to_string(),
-            Value::String(compact_context_string_for_model_input(
-                content,
-                max_content_chars,
-            )),
-        );
-    } else if let Some(content) = object.get("content_preview").and_then(Value::as_str) {
-        compact.insert(
-            "content_preview".to_string(),
-            Value::String(compact_context_string_for_model_input(
-                content,
-                max_content_chars,
-            )),
-        );
-    }
-    Value::Object(compact)
-}
-
-fn copy_context_field(compact: &mut Map<String, Value>, object: &Map<String, Value>, field: &str) {
-    if let Some(value) = object.get(field) {
-        compact.insert(field.to_string(), compact_context_value(value));
-    }
-}
-
-fn compact_context_string_for_model_input(text: &str, max_chars: usize) -> String {
-    let mut result = text.chars().take(max_chars).collect::<String>();
-    if result.len() < text.len() {
-        result.push_str("\n[AIR_COMPACTED]");
-    }
-    result
 }
 
 fn event(
@@ -3361,7 +3283,7 @@ mod tests {
         state.insert(
             "observation".to_string(),
             json!([{
-                "tool": "format.run",
+                "tool": "format",
                 "status": "ok",
                 "output": {"success": true}
             }]),
@@ -3371,9 +3293,48 @@ mod tests {
         assert!(!condition_matches(
             &state,
             &outputs,
-            "phase == \"post_act\" && observation[1].tool == \"test.run\"",
+            "phase == \"post_act\" && observation[1].tool == \"test\"",
         )
         .unwrap());
+    }
+
+    #[test]
+    fn eval_expr_supports_boolean_composition_helpers() {
+        let mut state = State::new();
+        state.insert("verification_status".to_string(), json!("passed"));
+        state.insert("changed_files".to_string(), json!(["src/lib.rs"]));
+        let outputs = State::new();
+
+        let final_success = eval_expr(
+            &state,
+            &outputs,
+            &Expr::Equals {
+                equals: vec![
+                    Expr::Ref {
+                        reference: "verification_status".to_string(),
+                    },
+                    Expr::Literal {
+                        literal: json!("passed"),
+                    },
+                ],
+            },
+        )
+        .unwrap();
+        assert_eq!(final_success, json!(true));
+
+        let patch_applied = eval_expr(
+            &state,
+            &outputs,
+            &Expr::Not {
+                not: Box::new(Expr::IsEmpty {
+                    is_empty: Box::new(Expr::Ref {
+                        reference: "changed_files".to_string(),
+                    }),
+                }),
+            },
+        )
+        .unwrap();
+        assert_eq!(patch_applied, json!(true));
     }
 
     #[test]
@@ -3391,43 +3352,65 @@ mod tests {
     fn repeated_tool_key_ignores_non_semantic_read_and_search_options() {
         assert_eq!(
             repeated_tool_input_key(
-                "file.search",
+                "grep",
                 &json!({
                     "path": "src/lib.rs",
                     "pattern": "truncat",
                     "context_lines": 3,
-                    "max_matches": 20
+                    "max_matches": 20,
+                    "repeat_reason": "need a wider preview"
                 })
             ),
             repeated_tool_input_key(
-                "file.search",
+                "grep",
                 &json!({
                     "path": "src/lib.rs",
                     "pattern": "truncat",
                     "context_lines": 5,
-                    "max_matches": 80
+                    "max_matches": 80,
+                    "repeat_reason": "checking whether the same match appears"
                 })
             )
         );
         assert_eq!(
             repeated_tool_input_key(
-                "file.read",
+                "read",
                 &json!({
-                    "path": "src/lib.rs",
+                    "filePath": "src/lib.rs",
                     "start_line": 10,
                     "end_line": 20,
                     "line_numbers": true,
-                    "max_bytes": 4096
+                    "max_bytes": 4096,
+                    "repeat_reason": "confirming same range"
                 })
             ),
             repeated_tool_input_key(
-                "file.read",
+                "read",
                 &json!({
-                    "path": "src/lib.rs",
+                    "filePath": "src/lib.rs",
                     "start_line": 10,
                     "end_line": 20,
                     "line_numbers": false,
-                    "max_bytes": 65536
+                    "max_bytes": 65536,
+                    "repeat_reason": "different explanation should not reset repeat policy"
+                })
+            )
+        );
+        assert_eq!(
+            repeated_tool_input_key(
+                "custom.tool",
+                &json!({
+                    "path": "src/lib.rs",
+                    "reason": "first explanation",
+                    "repeat_reason": "read again"
+                })
+            ),
+            repeated_tool_input_key(
+                "custom.tool",
+                &json!({
+                    "path": "src/lib.rs",
+                    "reason": "second explanation",
+                    "repeat_reason": "still read again"
                 })
             )
         );
@@ -3461,6 +3444,45 @@ mod tests {
             recent_repeated_tool_call_count(&history, "file.search", &file_search),
             2
         );
+    }
+
+    #[test]
+    fn repeated_context_tools_require_model_visible_reason() {
+        assert!(context_tool_requires_repeat_reason("read"));
+        assert!(context_tool_requires_repeat_reason("grep"));
+        assert!(context_tool_requires_repeat_reason("repo.symbols"));
+        assert!(context_tool_requires_repeat_reason("lsp"));
+        assert!(!context_tool_requires_repeat_reason("edit"));
+        assert!(!context_tool_requires_repeat_reason("format"));
+
+        assert!(has_repeat_reason(&json!({
+            "path": "src/lib.rs",
+            "repeat_reason": "need the import block after locating the moved function"
+        })));
+        assert!(!has_repeat_reason(&json!({
+            "path": "src/lib.rs",
+            "repeat_reason": "   "
+        })));
+        assert!(!has_repeat_reason(&json!({"path": "src/lib.rs"})));
+
+        let error = RuntimeError::RepeatedContextToolCallRequiresReason {
+            tool: "read".to_string(),
+            attempted: 2,
+        };
+        let observation = tool_batch_error_observation_for_runtime_error(
+            "read",
+            &json!({"path": "src/lib.rs"}),
+            &error,
+        );
+        assert_eq!(observation["error_code"], json!("repeat_reason_required"));
+        assert_eq!(
+            observation["output"]["error_code"],
+            json!("repeat_reason_required")
+        );
+        assert!(observation["output"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("include repeat_reason"));
     }
 
     #[test]
@@ -3524,6 +3546,81 @@ mod tests {
     }
 
     #[test]
+    fn take_last_within_bytes_preserves_glob_file_paths_when_compacting() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "glob",
+                "status": "ok",
+                "input": {"pattern": "crates/air-tools/src/**/*.rs"},
+                "output": {
+                    "glob": "crates/air-tools/src/**/*.rs",
+                    "mode": "fixed",
+                    "files": [
+                        "crates/air-tools/src/lib.rs",
+                        "crates/air-tools/src/file_tools.rs"
+                    ],
+                    "truncated": false
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(
+            rendered.contains("crates/air-tools/src/lib.rs"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("crates/air-tools/src/file_tools.rs"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("\"glob\""), "{rendered}");
+    }
+
+    #[test]
+    fn take_last_within_bytes_preserves_no_match_tool_hints_when_compacting() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "glob",
+                "status": "ok",
+                "input": {"pattern": "**/*edit*loop*test*"},
+                "output": {
+                    "glob": "**/*edit*loop*test*",
+                    "file_count": 0,
+                    "files": [],
+                    "no_matches": true,
+                    "no_match_streak": 2,
+                    "search_hint": "No files matched; try a different glob."
+                }
+            }, {
+                "tool": "grep",
+                "status": "ok",
+                "input": {"pattern": "does_not_exist"},
+                "output": {
+                    "path": ".",
+                    "pattern": "does_not_exist",
+                    "match_count": 0,
+                    "returned_match_count": 0,
+                    "matches": [],
+                    "no_matches": true,
+                    "search_hint": "No matches in the current directory scope. broaden the pattern/path."
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"no_matches\":true"), "{rendered}");
+        assert!(rendered.contains("\"no_match_streak\":2"), "{rendered}");
+        assert!(rendered.contains("try a different glob"), "{rendered}");
+        assert!(rendered.contains("broaden the pattern/path"), "{rendered}");
+    }
+
+    #[test]
     fn take_last_within_bytes_compacts_tool_observations_before_budgeting() {
         let evidence = json!([{
             "action": "tool_result",
@@ -3575,6 +3672,170 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("\"artifacts\""), "{rendered}");
+    }
+
+    #[test]
+    fn take_last_within_bytes_preserves_opencode_sized_read_context() {
+        let content = "x".repeat(60_000);
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "read",
+                "status": "ok",
+                "_air_tool_name": "read",
+                "_air_tool_call_id": "call_read",
+                "input": {
+                    "filePath": "src/lib.rs"
+                },
+                "output": {
+                    "path": "src/lib.rs",
+                    "content": content,
+                    "content_format": "line_numbered",
+                    "bytes": 51200,
+                    "artifacts": [{
+                        "id": "file:src/lib.rs",
+                        "kind": "file_span",
+                        "content": content
+                    }]
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 90_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"content\""), "{rendered}");
+        assert!(rendered.contains("[AIR_COMPACTED]"), "{rendered}");
+        assert!(
+            rendered.len() > 50_000,
+            "read observations should preserve roughly OpenCode's 50KB context budget, got {} bytes",
+            rendered.len()
+        );
+        assert!(
+            rendered.len() < 90_000,
+            "compacted evidence should respect the requested model window"
+        );
+        assert!(!rendered.contains("\"artifacts\""), "{rendered}");
+        assert!(!rendered.contains("file_span"), "{rendered}");
+    }
+
+    #[test]
+    fn model_context_compaction_preserves_native_tool_history_metadata() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "repo.search",
+                "status": "ok",
+                "_air_tool_name": "repo_search",
+                "_air_tool_call_id": "call_123",
+                "input": {"query": "target"},
+                "output": {
+                    "matches": [{
+                        "path": "src/lib.rs",
+                        "line_number": 42,
+                        "line": "fn target() {}"
+                    }]
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(
+            rendered.contains("\"_air_tool_name\":\"repo_search\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"_air_tool_call_id\":\"call_123\""),
+            "{rendered}"
+        );
+        assert!(rendered.contains("fn target"), "{rendered}");
+    }
+
+    #[test]
+    fn model_context_compaction_preserves_artifact_refs_not_bodies() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "docs.search",
+                "status": "ok",
+                "output": {
+                    "matches": [{
+                        "title": "AIR docs",
+                        "snippet": "Use source doc-1"
+                    }],
+                    "artifacts": [{
+                        "id": "doc-1",
+                        "kind": "document",
+                        "title": "AIR docs",
+                        "uri": "air://docs/doc-1",
+                        "content": "large artifact body should stay out of model context"
+                    }]
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"artifact_refs\""), "{rendered}");
+        assert!(rendered.contains("\"id\":\"doc-1\""), "{rendered}");
+        assert!(
+            rendered.contains("\"uri\":\"air://docs/doc-1\""),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("large artifact body"), "{rendered}");
+    }
+
+    #[test]
+    fn model_context_compaction_preserves_post_edit_snippets() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "edit",
+                "status": "ok",
+                "output": {
+                    "path": "src/lib.rs",
+                    "applied": true,
+                    "checked": true,
+                    "replacements": 1,
+                    "edit_count": 1,
+                    "files": [{"path": "src/lib.rs"}],
+                    "post_edit_snippets": [{
+                        "path": "src/lib.rs",
+                        "start_line": 10,
+                        "end_line": 14,
+                        "content_format": "line_numbered",
+                        "content": "00010| fn helper() {}\n00011| "
+                    }],
+                    "diff": "large diff body should not be required for next model step"
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"post_edit_snippets\""), "{rendered}");
+        assert!(rendered.contains("fn helper"), "{rendered}");
+        assert!(rendered.contains("\"applied\":true"), "{rendered}");
+        assert!(rendered.contains("\"path\":\"src/lib.rs\""), "{rendered}");
+        assert!(rendered.contains("\"replacements\":1"), "{rendered}");
+        assert!(!rendered.contains("large diff body"), "{rendered}");
+    }
+
+    #[test]
+    fn model_context_truncation_preserves_head_and_tail() {
+        let text = "prefix-".to_string() + &"x".repeat(128) + "-suffix";
+
+        let truncated = compact_model_context_string(&text, 48);
+
+        assert_eq!(truncated.chars().count(), 48);
+        assert!(truncated.starts_with("prefix"), "{truncated}");
+        assert!(truncated.ends_with("suffix"), "{truncated}");
+        assert!(truncated.contains("[AIR_COMPACTED]"), "{truncated}");
+        assert!(truncated.contains("chars omitted"), "{truncated}");
     }
 
     #[test]

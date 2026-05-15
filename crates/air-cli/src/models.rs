@@ -414,9 +414,8 @@ mod tests {
         assert!(
             requirements
                 .get("code_edit_summarizer")
-                .is_some_and(|required| required.contains("final_success")
-                    && required.contains("patch_applied")),
-            "code_edit_summarizer prompt must track edit completion fields"
+                .is_some_and(|required| required == &BTreeSet::from(["rationale".to_string()])),
+            "code_edit_summarizer prompt must only produce rationale; AIR derives completion fields"
         );
 
         for (alias, required) in requirements {
@@ -458,35 +457,14 @@ mod tests {
             "code_edit_decider prompt must not describe the old patch-only schema"
         );
         assert!(
-            edit_prompt.contains("available native tools")
-                && edit_prompt.contains("provider schemas"),
-            "code_edit_decider prompt must rely on provider-native tool schemas instead of duplicated tool_schemas JSON"
+            edit_prompt == "opencode:qwen",
+            "code_edit_decider should use the OpenCode-style provider prompt marker"
         );
         assert!(
-            edit_prompt.contains("native provider tool calls"),
-            "code_edit_decider prompt must prefer native provider tool calls"
-        );
-        assert!(
-            edit_prompt.contains("full extensions such as .json"),
-            "code_edit_decider prompt must preserve concrete path extensions"
-        );
-        assert!(
-            edit_prompt.contains("byte-for-byte"),
-            "code_edit_decider prompt must require exact path copying"
-        );
-        assert!(
-            edit_prompt.contains("targeted refactors that need a checklist"),
-            "code_edit_decider prompt must allow todo tools for targeted multi-step refactors"
-        );
-        assert!(
-            edit_prompt.contains("do not keep rereading the same ranges"),
-            "code_edit_decider prompt must discourage over-exploration without creating a special targeted mode"
-        );
-        assert!(
-            edit_prompt.contains("repository lint style")
-                && edit_prompt.contains("too_many_arguments")
-                && edit_prompt.contains("type_complexity"),
-            "code_edit_decider prompt must steer helper refactors away from common lint failures before the first edit"
+            !edit_prompt.contains("complete (boolean)")
+                && !edit_prompt.contains("tool_calls (array)")
+                && !edit_prompt.contains("complete=true"),
+            "code_edit_decider prompt should not expose AIR's outer completion protocol in native tool mode"
         );
         let summarize_prompt = config
             .models
@@ -495,10 +473,10 @@ mod tests {
             .unwrap_or_default()
             .to_lowercase();
         assert!(
-            summarize_prompt.contains("do not generate changed_files")
-                && summarize_prompt.contains("air fills those audit fields deterministically")
-                && summarize_prompt.contains("final_diff_result"),
-            "code_edit_summarizer prompt must leave diff audit fields to AIR"
+            summarize_prompt.contains("rationale")
+                && !summarize_prompt.contains("air")
+                && !summarize_prompt.contains("verification_status"),
+            "code_edit_summarizer prompt should not expose runtime control-plane fields"
         );
     }
 

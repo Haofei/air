@@ -1,13 +1,10 @@
 agent:
   name: code-edit-loop-agent
   version: 0.2.0
-  description: "Bounded OpenCode-style code edit loop: one model chooses read/search/edit/test tools, AIR enforces policy and audit."
+  description: "Minimal OpenCode-style code edit loop with line-numbered reads and optional LSP facts."
 
 inputs:
   task: string
-  acceptance_assertions:
-    type: array
-    items: object
 
 outputs:
   edit:
@@ -34,18 +31,23 @@ outputs:
       rationale: string
 
 requires:
-  capabilities: [task.progress, file.read, file.write, code.read, code.test]
+  capabilities: [file.read, file.write, code.read, code.test]
+
+policy:
+  require_approval: [file.write]
 
 state:
   phase:
     type: enum
-    enum: [init, choose, act, post_act, post_final_format, post_final_verify, post_accept, post_final_accept, summarize, done]
+    enum: [init, choose, act, post_act, summarize, done]
   observations:
     type: array
     items: object
   verification_status:
     type: enum
     enum: [unknown, passed, failed]
+  patch_applied:
+    type: boolean
   decision:
     type: object
     required: [complete, tool_calls]
@@ -62,32 +64,14 @@ state:
   observation:
     type: array
     items: object
-  format_result:
-    type: array
-    items: object
-  verify_result:
-    type: array
-    items: object
-  diagnostic_context:
-    type: array
-    items: object
-  full_log_context:
-    type: array
-    items: object
   final_diff_result:
-    type: array
-    items: object
-  acceptance_assert_result:
     type: array
     items: object
   edit_summary:
     type: object
     additional_properties: false
-    required: [initial_success, final_success, patch_applied, rationale]
+    required: [rationale]
     properties:
-      initial_success: boolean
-      final_success: boolean
-      patch_applied: boolean
       rationale: string
   edit:
     type: object
@@ -113,62 +97,32 @@ state:
       rationale: string
 
 tools:
-  - name: todo.write
-    capability: task.progress
-    timeout_ms: 10000
-  - name: todo.read
-    capability: task.progress
-    timeout_ms: 10000
   - name: glob
     capability: code.read
     timeout_ms: 10000
-  - name: repo.symbols
-    capability: code.read
-    timeout_ms: 10000
-  - name: lsp.references
-    capability: code.read
-    timeout_ms: 30000
-  - name: lsp.diagnostics
-    capability: code.read
-    timeout_ms: 30000
   - name: read
-    capability: file.read
-    timeout_ms: 10000
-  - name: read_many
     capability: file.read
     timeout_ms: 10000
   - name: grep
     capability: file.read
     timeout_ms: 10000
+  - name: lsp
+    capability: code.read
+    timeout_ms: 120000
   - name: edit
     capability: file.write
     timeout_ms: 10000
-  - name: diagnostic.context
-    capability: code.read
-    timeout_ms: 10000
-  - name: code.assert
-    capability: code.read
-    timeout_ms: 10000
-  - name: candidate.validate
-    capability: code.read
-    timeout_ms: 10000
-  - name: git.status
-    capability: code.read
-    timeout_ms: 10000
-  - name: git.diff
-    capability: code.read
-    timeout_ms: 10000
-  - name: format.run
+  - name: bash
     capability: code.test
     timeout_ms: 120000
-  - name: test.run
-    capability: code.test
-    timeout_ms: 120000
+  - name: todowrite
+    capability: code.read
+    timeout_ms: 10000
 
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 120
+  max_steps: 80
   terminal: [done]
   rules:
     - id: init
@@ -180,6 +134,7 @@ workflow:
           values:
             observations: []
             verification_status: unknown
+            patch_applied: false
             phase: choose
 
     - id: summarize-at-step-limit
@@ -197,61 +152,9 @@ workflow:
                     ref: _air
                   verification_status:
                     ref: verification_status
-        - kind: model_call
-          model: code_edit_summarizer
-          input:
-            object:
-              task:
-                ref: task
-              observations:
-                take_last_within_bytes:
-                  ref: observations
-                max_items: 6
-                max_bytes: 40000
-              final_decision:
-                literal:
-                  complete: false
-              runtime:
-                ref: _air
-          output: edit_summary
-          timeout_seconds: 180
-          retry:
-            max_attempts: 2
         - kind: set
           values:
-            edit:
-              object:
-                initial_success:
-                  ref: edit_summary.initial_success
-                final_success:
-                  ref: edit_summary.final_success
-                patch_applied:
-                  ref: edit_summary.patch_applied
-                changed_files:
-                  array: []
-                workspace_changed_files:
-                  array: []
-                preexisting_changed_files:
-                  array: []
-                workspace_diff:
-                  object:
-                    diff:
-                      literal: ""
-                    bytes:
-                      literal: 0
-                    truncated:
-                      literal: false
-                    artifacts:
-                      array: []
-                    changed_files:
-                      array: []
-                    workspace_changed_files:
-                      array: []
-                    preexisting_changed_files:
-                      array: []
-                rationale:
-                  ref: edit_summary.rationale
-            phase: done
+            phase: summarize
 
     - id: choose
       when: phase == "choose"
@@ -262,142 +165,13 @@ workflow:
             object:
               task:
                 ref: task
-              verification_status:
-                ref: verification_status
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 4
-                max_bytes: 24000
-              runtime:
-                ref: _air
+                max_items: 8
+                max_bytes: 90000
               allowed_tools:
-                array:
-                  - literal: todo.write
-                  - literal: todo.read
-                  - literal: glob
-                  - literal: repo.symbols
-                  - literal: lsp.references
-                  - literal: lsp.diagnostics
-                  - literal: read
-                  - literal: read_many
-                  - literal: grep
-                  - literal: edit
-                  - literal: diagnostic.context
-                  - literal: code.assert
-                  - literal: candidate.validate
-                  - literal: git.status
-                  - literal: git.diff
-                  - literal: format.run
-                  - literal: test.run
-              tool_schemas:
-                literal:
-                  todo.write:
-                    required: {todos: "array of todo objects shaped {id, content, status, priority}"}
-                    optional: {merge: "boolean"}
-                  todo.read:
-                    required: {}
-                    optional: {}
-                  glob:
-                    required:
-                      pattern: "glob/path pattern such as crates/air-tools/src/*.rs"
-                    optional:
-                      query: "substring filter"
-                      max_files: "bounded result limit"
-                      include_all: "boolean"
-                  repo.symbols:
-                    required: {}
-                    optional:
-                      query: "symbol/name filter"
-                      names: "array of exact symbol names; use this to fetch several function ranges in one call"
-                      path: "repo-relative scope"
-                      max_symbols: "bounded result limit"
-                  lsp.references:
-                    required:
-                      path: "repo-relative source file containing the symbol or position"
-                    optional:
-                      symbol: "exact identifier when semantic references are needed"
-                      line: "1-based line when symbol is not enough"
-                      character: "0-based UTF-8 character offset"
-                      include_declaration: "boolean; default true"
-                      max_results: "bounded result limit"
-                  lsp.diagnostics:
-                    required: {}
-                    optional:
-                      path: "optional repo-relative source file filter"
-                      max_diagnostics: "bounded diagnostic limit"
-                  read:
-                    required: {filePath: "repo-relative file path"}
-                    optional:
-                      path: "alias for filePath"
-                      offset: "zero-based line offset"
-                      limit: "maximum lines to read; may be combined with offset or start_line"
-                      start_line: "1-based start line"
-                      end_line: "1-based end line"
-                      lines: "single line or start-end range"
-                      contains: "substring anchor; returns context around a match"
-                      context_lines: "context around contains"
-                      line_numbers: "boolean"
-                      max_bytes: "bounded byte limit"
-                  read_many:
-                    required: {files: "array of paths or objects with path"}
-                    optional:
-                      max_bytes_per_file: "bounded byte limit"
-                      line_numbers: "boolean"
-                  grep:
-                    required:
-                      pattern: "regular expression; query is accepted as an alias"
-                    optional:
-                      path: "repo-relative file or directory; defaults to repo root"
-                      include: "OpenCode alias for an exact file, directory, or glob scope when path is omitted"
-                      context_lines: "bounded context lines"
-                      contextLines: "alias for context_lines"
-                      max_matches: "bounded result limit"
-                      maxMatches: "alias for max_matches"
-                  edit:
-                    required:
-                      filePath: "repo-relative file path"
-                    optional:
-                      oldString: "exact text to replace for a single edit; include enough context to be unique"
-                      newString: "replacement text for a single edit"
-                      replaceAll: "replace every occurrence only when all matches should change"
-                      edits: "array of {oldString,newString,replaceAll?} for several replacements in the same file"
-                  diagnostic.context:
-                    required: {}
-                    optional:
-                      diagnostics: "array of diagnostic objects"
-                      path: "repo-relative scope"
-                  code.assert:
-                    required:
-                      assertions: "array of assertion objects. file_contains/file_not_contains require {kind,path,pattern,mode?}; use pattern, not value or file_contains as a field. symbol_present/symbol_absent require {kind,path,name}. command_passes requires {kind,result:{success:boolean}} or {kind,success:boolean}."
-                    optional:
-                      checks: "alias for assertions"
-                  candidate.validate:
-                    required:
-                      candidate: "object with discovered file paths; checks paths before committing to an edit route"
-                    optional: {}
-                  git.status:
-                    required: {}
-                    optional: {}
-                  git.diff:
-                    required: {}
-                    optional:
-                      paths: "array of repo-relative paths"
-                      include_untracked: "boolean"
-                  format.run:
-                    required: {}
-                    optional: {}
-                  test.run:
-                    required: {}
-                    optional: {}
-              tool_policy:
-                literal:
-                  loop: "Work as a direct coding tool loop: choose the next read/search/edit/test action yourself from current observations. Do not wait for a separate planner."
-                  context: "Keep context narrow. When the task names an exact file path, start with read or grep inside that file; do not call repo.symbols merely to restate file structure. Use repo.symbols or lsp only when symbol boundaries or references determine safety. Prefer read contains+context_lines, read start_line+limit, or exact line ranges over whole-file reads. Do not repeat the same read/search unless the previous result was missing a specific fact."
-                  edits: "After observations contain a unique oldString and the intended replacement is clear, edit instead of doing another exploratory read. Keep editing while the patch is incomplete; do not validate after every tiny edit. Use multiple edits only through edit.edits when they target the same file and are grounded by prior context."
-                  paths: "Copy repository paths exactly byte-for-byte from tool output metadata. If verification points to another workspace file, edit it when needed."
-                  diagnostics: "If validation fails, use returned diagnostics and diagnostic.context to make the smallest correction. Do not restart broad exploration."
-                  finish: "When the patch is coherent, call format.run and test.run yourself, or return complete=true with tool_calls=[] to let AIR run the final format/test gate. Finish only after verification_status is passed or the task truly needs no code change."
+                literal: [glob, read, grep, lsp, edit, bash, todowrite]
           output: decision
           timeout_seconds: 180
           retry:
@@ -413,7 +187,7 @@ workflow:
           input:
             path: decision.tool_calls
           output: observation
-          max_calls: 200
+          max_calls: 16
           timeout_seconds: 120
           on_error: observe
         - kind: append
@@ -437,408 +211,54 @@ workflow:
       actions:
         - kind: set
           values:
-            verification_status: unknown
+            patch_applied: true
             phase: choose
 
-    - id: manual-format-failed
-      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == false
-      actions:
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: manual-format-test-failed
-      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true && observation[1].tool == "test.run" && observation[1].status == "ok" && observation[1].output.success == false
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: diagnostic.context
-                  input:
-                    object:
-                      diagnostics:
-                        ref: observation[1].output.diagnostics
-                      context_lines:
-                        literal: 6
-          output: diagnostic_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: verification_context
-              result:
-                ref: diagnostic_context
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: manual-format-test-passed-with-assertions
-      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true && observation[1].tool == "test.run" && observation[1].status == "ok" && observation[1].output.success == true && acceptance_assertions != []
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: code.assert
-                  input:
-                    object:
-                      assertions:
-                        ref: acceptance_assertions
-          output: acceptance_assert_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: acceptance_assertions
-              result:
-                ref: acceptance_assert_result
-        - kind: set
-          values:
-            phase: post_accept
-
-    - id: manual-format-test-passed
-      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true && observation[1].tool == "test.run" && observation[1].status == "ok" && observation[1].output.success == true && acceptance_assertions == []
+    - id: bash-passed-after-patch
+      when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true
       actions:
         - kind: set
           values:
             verification_status: passed
             phase: summarize
 
-    - id: manual-format-passed
-      when: phase == "post_act" && observation[0].tool == "format.run" && observation[0].status == "ok" && observation[0].output.success == true
+    - id: bash-passed-before-patch
+      when: phase == "post_act" && patch_applied != true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true
       actions:
         - kind: set
           values:
+            verification_status: passed
             phase: choose
 
-    - id: final-format-before-complete
+    - id: bash-failed
+      when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.verification == true
+      actions:
+        - kind: set
+          values:
+            verification_status: failed
+            phase: choose
+
+    - id: complete-needs-verification
       when: phase == "act" && decision.complete == true && verification_status != "passed"
       actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: format.run
-                  input:
-                    literal: {}
-          output: format_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
         - kind: append
           target: observations
           value:
             object:
               action:
-                literal: final_format_result
+                literal: verification_required
               result:
-                ref: format_result
+                literal: Run an appropriate bash verification command before finishing.
         - kind: set
           values:
-            phase: post_final_format
-
-    - id: final-format-tool-error
-      when: phase == "post_final_format" && format_result[0].status != "ok"
-      actions:
-        - kind: set
-          values:
-            verification_status: failed
             phase: choose
 
-    - id: final-format-failed
-      when: phase == "post_final_format" && format_result[0].status == "ok" && format_result[0].output.success == false
+    - id: complete-verified
+      when: phase == "act" && decision.complete == true && verification_status == "passed"
       actions:
         - kind: set
           values:
-            verification_status: failed
-            phase: choose
-
-    - id: final-verify-after-format
-      when: phase == "post_final_format" && format_result[0].status == "ok" && format_result[0].output.success == true
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: test.run
-                  input:
-                    literal: {}
-          output: verify_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: final_verify_result
-              result:
-                ref: verify_result
-        - kind: set
-          values:
-            phase: post_final_verify
-
-    - id: final-verify-truncated-failed
-      when: phase == "post_final_verify" && verify_result[0].output.success == false && verify_result[0].output.truncated == true
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: diagnostic.context
-                  input:
-                    object:
-                      diagnostics:
-                        ref: verify_result[0].output.diagnostics
-                      context_lines:
-                        literal: 6
-              - object:
-                  tool:
-                    literal: grep
-                  input:
-                    object:
-                      path:
-                        ref: verify_result[0].output.full_log_path
-                      pattern:
-                        literal: "(?i)(error|fail|failed|failure|panic|exception|assert|expected|actual)"
-                      context_lines:
-                        literal: 3
-                      max_matches:
-                        literal: 20
-          output: full_log_context
-          max_calls: 2
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: verification_context
-              result:
-                ref: full_log_context
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: final-verify-failed
-      when: phase == "post_final_verify" && verify_result[0].output.success == false && verify_result[0].output.truncated != true
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: diagnostic.context
-                  input:
-                    object:
-                      diagnostics:
-                        ref: verify_result[0].output.diagnostics
-                      context_lines:
-                        literal: 6
-          output: diagnostic_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: verification_context
-              result:
-                ref: diagnostic_context
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: final-verify-passed-with-assertions
-      when: phase == "post_final_verify" && verify_result[0].output.success == true && acceptance_assertions != []
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: code.assert
-                  input:
-                    object:
-                      assertions:
-                        ref: acceptance_assertions
-          output: acceptance_assert_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: acceptance_assertions
-              result:
-                ref: acceptance_assert_result
-        - kind: set
-          values:
-            phase: post_final_accept
-
-    - id: final-acceptance-assertions-failed
-      when: phase == "post_final_accept" && acceptance_assert_result[0].output.passed == false
-      actions:
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: final-acceptance-assertions-passed
-      when: phase == "post_final_accept" && acceptance_assert_result[0].output.passed == true
-      actions:
-        - kind: set
-          values:
-            verification_status: passed
             phase: summarize
-
-    - id: acceptance-assertions-failed
-      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == false
-      actions:
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: acceptance-assertions-passed
-      when: phase == "post_accept" && acceptance_assert_result[0].output.passed == true
-      actions:
-        - kind: set
-          values:
-            verification_status: passed
-            phase: summarize
-
-    - id: final-verify-passed
-      when: phase == "post_final_verify" && verify_result[0].output.success == true && acceptance_assertions == []
-      actions:
-        - kind: set
-          values:
-            verification_status: passed
-            phase: summarize
-
-    - id: manual-test-failed
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == false
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: diagnostic.context
-                  input:
-                    object:
-                      diagnostics:
-                        ref: observation[0].output.diagnostics
-                      context_lines:
-                        literal: 6
-          output: diagnostic_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: verification_context
-              result:
-                ref: diagnostic_context
-        - kind: set
-          values:
-            verification_status: failed
-            phase: choose
-
-    - id: manual-test-passed-with-assertions
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == true && acceptance_assertions != []
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: code.assert
-                  input:
-                    object:
-                      assertions:
-                        ref: acceptance_assertions
-          output: acceptance_assert_result
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: acceptance_assertions
-              result:
-                ref: acceptance_assert_result
-        - kind: set
-          values:
-            phase: post_accept
-
-    - id: manual-test-passed
-      when: phase == "post_act" && observation[0].tool == "test.run" && observation[0].status == "ok" && observation[0].output.success == true && acceptance_assertions == []
-      actions:
-        - kind: set
-          values:
-            verification_status: passed
-            phase: summarize
-
-    - id: edit-validation-failed
-      when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == false
-      actions:
-        - kind: tool_batch_dispatch
-          input:
-            array:
-              - object:
-                  tool:
-                    literal: diagnostic.context
-                  input:
-                    object:
-                      diagnostics:
-                        ref: observation[0].output.diagnostics
-                      context_lines:
-                        literal: 6
-          output: diagnostic_context
-          max_calls: 1
-          timeout_seconds: 120
-          on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: edit_validation_context
-              result:
-                ref: diagnostic_context
-        - kind: set
-          values:
-            phase: choose
 
     - id: continue-after-act
       when: phase == "post_act"
@@ -848,28 +268,29 @@ workflow:
             phase: choose
 
     - id: summarize
-      when: phase == "summarize" || phase == "act" && decision.complete == true && verification_status == "passed"
+      when: phase == "summarize"
       actions:
         - kind: tool_batch_dispatch
           input:
             array:
               - object:
                   tool:
-                    literal: git.diff
+                    literal: bash
                   input:
-                    literal: {}
+                    literal:
+                      command: git diff --
+                      description: Show workspace diff
+              - object:
+                  tool:
+                    literal: bash
+                  input:
+                    literal:
+                      command: git diff --name-only --
+                      description: List changed files
           output: final_diff_result
-          max_calls: 1
+          max_calls: 2
           timeout_seconds: 120
           on_error: observe
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: final_diff_observed
-              result:
-                ref: final_diff_result
         - kind: model_call
           model: code_edit_summarizer
           input:
@@ -879,12 +300,10 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 8
-                max_bytes: 30000
+                max_items: 6
+                max_bytes: 20000
               final_diff_result:
                 ref: final_diff_result
-              final_decision:
-                ref: decision
           output: edit_summary
           timeout_seconds: 180
           retry:
@@ -894,19 +313,35 @@ workflow:
             edit:
               object:
                 initial_success:
-                  ref: edit_summary.initial_success
+                  literal: false
                 final_success:
-                  ref: edit_summary.final_success
+                  equals:
+                    - ref: verification_status
+                    - literal: passed
                 patch_applied:
-                  ref: edit_summary.patch_applied
+                  ref: patch_applied
                 changed_files:
-                  ref: final_diff_result[0].output.changed_files
+                  split_lines:
+                    ref: final_diff_result[1].output.log
                 workspace_changed_files:
-                  ref: final_diff_result[0].output.workspace_changed_files
+                  split_lines:
+                    ref: final_diff_result[1].output.log
                 preexisting_changed_files:
-                  ref: final_diff_result[0].output.preexisting_changed_files
+                  literal: []
                 workspace_diff:
-                  ref: final_diff_result[0].output
+                  object:
+                    provider:
+                      literal: bash
+                    command:
+                      ref: final_diff_result[0].output.input_command
+                    success:
+                      ref: final_diff_result[0].output.success
+                    diff:
+                      ref: final_diff_result[0].output.log
+                    bytes:
+                      ref: final_diff_result[0].output.bytes
+                    truncated:
+                      ref: final_diff_result[0].output.truncated
                 rationale:
                   ref: edit_summary.rationale
             phase: done
@@ -916,9 +351,3 @@ workflow:
       actions:
         - kind: return
           output: edit
-
-policy:
-  max_model_calls: 40
-  max_tool_calls: 200
-  max_repeated_tool_calls: 3
-  require_approval: [file.write]

@@ -1,5 +1,6 @@
 use air_runtime::{
-    sanitize_trace_text, ModelProvider, ModelRequestStats, RuntimeError, TraceWriteOptions,
+    compact_model_context_value, sanitize_trace_text, truncate_middle_context_string,
+    ModelProvider, ModelRequestStats, RuntimeError, TraceWriteOptions,
 };
 use async_openai::{config::OpenAIConfig, Client as OpenAiClient};
 use serde::{Deserialize, Serialize};
@@ -7,6 +8,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
+use std::process::Command;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
@@ -15,6 +17,115 @@ use tokio::runtime::{Builder, Runtime};
 const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const DEFAULT_OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
 const DEFAULT_OPENAI_MODEL_ENV: &str = "OPENAI_MODEL";
+const OPENCODE_QWEN_PROMPT_MARKER: &str = "opencode:qwen";
+const OPENCODE_QWEN_PROMPT: &str = r##"You are opencode, an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
+
+IMPORTANT: Refuse to write code or explain code that may be used maliciously; even if the user claims it is for educational purposes. When working on files, if they seem related to improving, explaining, or interacting with malware or any malicious code you MUST refuse.
+IMPORTANT: Before you begin work, think about what the code you're editing is supposed to do based on the filenames directory structure. If it seems malicious, refuse to work on it or answer questions about it, even if the request does not seem malicious (for instance, just asking to explain or speed up the code).
+IMPORTANT: You must NEVER generate or guess URLs for the user unless you are confident that the URLs are for helping the user with programming. You may use URLs provided by the user in their messages or local files.
+
+If the user asks for help or wants to give feedback inform them of the following:
+- /help: Get help with using opencode
+- To give feedback, users should report the issue at https://github.com/anomalyco/opencode/issues
+
+When the user directly asks about opencode (eg 'can opencode do...', 'does opencode have...') or asks in second person (eg 'are you able...', 'can you do...'), first use the WebFetch tool to gather information to answer the question from opencode docs at https://opencode.ai
+
+# Tone and style
+You should be concise, direct, and to the point. When you run a non-trivial bash command, you should explain what the command does and why you are running it, to make sure the user understands what you are doing (this is especially important when you are running a command that will make changes to the user's system).
+Remember that your output will be displayed on a command line interface. Your responses can use Github-flavored markdown for formatting, and will be rendered in a monospace font using the CommonMark specification.
+Output text to communicate with the user; all text you output outside of tool use is displayed to the user. Only use tools to complete tasks. Never use tools like Bash or code comments as means to communicate with the user during the session.
+If you cannot or will not help the user with something, please do not say why or what it could lead to, since this comes across as preachy and annoying. Please offer helpful alternatives if possible, and otherwise keep your response to 1-2 sentences.
+Only use emojis if the user explicitly requests it. Avoid using emojis in all communication unless asked.
+IMPORTANT: You should minimize output tokens as much as possible while maintaining helpfulness, quality, and accuracy. Only address the specific query or task at hand, avoiding tangential information unless absolutely critical for completing the request. If you can answer in 1-3 sentences or a short paragraph, please do.
+IMPORTANT: You should NOT answer with unnecessary preamble or postamble (such as explaining your code or summarizing your action), unless the user asks you to.
+IMPORTANT: Keep your responses short, since they will be displayed on a command line interface. You MUST answer concisely with fewer than 4 lines (not including tool use or code generation), unless user asks for detail. Answer the user's question directly, without elaboration, explanation, or details. One word answers are best. Avoid introductions, conclusions, and explanations. You MUST avoid text before/after your response, such as "The answer is <answer>.", "Here is the content of the file..." or "Based on the information provided, the answer is..." or "Here is what I will do next...". Here are some examples to demonstrate appropriate verbosity:
+<example>
+user: 2 + 2
+assistant: 4
+</example>
+
+<example>
+user: what is 2+2?
+assistant: 4
+</example>
+
+<example>
+user: is 11 a prime number?
+assistant: Yes
+</example>
+
+<example>
+user: what command should I run to list files in the current directory?
+assistant: ls
+</example>
+
+<example>
+user: what command should I run to watch files in the current directory?
+assistant: [use the ls tool to list the files in the current directory, then read docs/commands in the relevant file to find out how to watch files]
+npm run dev
+</example>
+
+<example>
+user: How many golf balls fit inside a jetta?
+assistant: 150000
+</example>
+
+<example>
+user: what files are in the directory src/?
+assistant: [runs ls and sees foo.c, bar.c, baz.c]
+user: which file contains the implementation of foo?
+assistant: src/foo.c
+</example>
+
+<example>
+user: write tests for new feature
+assistant: [uses grep and glob search tools to find where similar tests are defined, uses concurrent read file tool use blocks in one tool call to read relevant files at the same time, uses edit file tool to write new tests]
+</example>
+
+# Proactiveness
+You are allowed to be proactive, but only when the user asks you to do something. You should strive to strike a balance between:
+1. Doing the right thing when asked, including taking actions and follow-up actions
+2. Not surprising the user with actions you take without asking
+For example, if the user asks you how to approach something, you should do your best to answer their question first, and not immediately jump into taking actions.
+3. Do not add additional code explanation summary unless requested by the user. After working on a file, just stop, rather than providing an explanation of what you did.
+
+# Following conventions
+When making changes to files, first understand the file's code conventions. Mimic code style, use existing libraries and utilities, and follow existing patterns.
+- NEVER assume that a given library is available, even if it is well known. Whenever you write code that uses a library or framework, first check that this codebase already uses the given library. For example, you might look at neighboring files, or check the package.json (or cargo.toml, and so on depending on the language).
+- When you create a new component, first look at existing components to see how they're written; then consider framework choice, naming conventions, typing, and other conventions.
+- When you edit a piece of code, first look at the code's surrounding context (especially its imports) to understand the code's choice of frameworks and libraries. Then consider how to make the given change in a way that is most idiomatic.
+- Always follow security best practices. Never introduce code that exposes or logs secrets and keys. Never commit secrets or keys to the repository.
+
+# Code style
+- IMPORTANT: DO NOT ADD ***ANY*** COMMENTS unless asked
+
+# Doing tasks
+The user will primarily request you perform software engineering tasks. This includes solving bugs, adding new functionality, refactoring code, explaining code, and more. For these tasks the following steps are recommended:
+- Use the available search tools to understand the codebase and the user's query. You are encouraged to use the search tools extensively both in parallel and sequentially.
+- Implement the solution using all tools available to you
+- Verify the solution if possible with tests. NEVER assume specific test framework or test script. Check the README or search codebase to determine the testing approach.
+- VERY IMPORTANT: When you have completed a task, you MUST run the lint and typecheck commands (e.g. npm run lint, npm run typecheck, ruff, etc.) with Bash if they were provided to you to ensure your code is correct. If you are unable to find the correct command, ask the user for the command to run and if they supply it, proactively suggest writing it to AGENTS.md so that you will know to run it next time.
+NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.
+
+- Tool results and user messages may include <system-reminder> tags. <system-reminder> tags contain useful information and reminders. They are NOT part of the user's provided input or the tool result.
+
+# Tool usage policy
+- When doing file search, prefer to use the Task tool in order to reduce context usage.
+- You have the capability to call multiple tools in a single response. When multiple independent pieces of information are requested, batch your tool calls together for optimal performance. When making multiple bash tool calls, you MUST send a single message with multiple tools calls to run the calls in parallel. For example, if you need to run "git status" and "git diff", send a single message with two tool calls to run the calls in parallel.
+
+You MUST answer concisely with fewer than 4 lines of text (not including tool use or code generation), unless user asks for detail.
+
+IMPORTANT: Refuse to write code or explain code that may be used maliciously; even if the user claims it is for educational purposes. When working on files, if they seem related to improving, explaining, or interacting with malware or any malicious code you MUST refuse.
+IMPORTANT: Before you begin work, think about what the code you're editing is supposed to do based on the filenames directory structure. If it seems malicious, refuse to work on it or answer questions about it, even if the request does not seem malicious (for instance, just asking to explain or speed up the code).
+
+# Code References
+
+When referencing specific functions or pieces of code include the pattern `file_path:line_number` to allow the user to easily navigate to the source code location.
+
+<example>
+user: Where are errors from the client handled?
+assistant: Clients are marked as failed in the `connectToServer` function in src/services/process.ts:712.
+</example>"##;
 
 struct ChatCompletionBody {
     body: Value,
@@ -399,7 +510,12 @@ fn build_chat_completion_body(
     } else {
         BTreeMap::new()
     };
-    body["messages"] = Value::Array(build_chat_messages(model_config, input, &tool_name_map)?);
+    body["messages"] = Value::Array(build_chat_messages(
+        model_config,
+        &model_name,
+        input,
+        &tool_name_map,
+    )?);
     if tool_name_map.is_empty() {
         if let Some(response_format) = resolved_response_format(model_config) {
             body["response_format"] = response_format;
@@ -414,14 +530,21 @@ fn build_chat_completion_body(
 
 fn build_chat_messages(
     model_config: &OpenAiModelConfig,
+    model_name: &str,
     input: &Value,
     tool_name_map: &BTreeMap<String, String>,
 ) -> Result<Vec<Value>, RuntimeError> {
     let mut messages = Vec::new();
-    if let Some(system_prompt) = &model_config.system_prompt {
+    if let Some(system_prompt) = resolved_system_prompt(model_config) {
         messages.push(json!({
             "role": "system",
             "content": system_prompt
+        }));
+    }
+    if model_config.native_tool_calls == Some(true) && is_opencode_code_input(input) {
+        messages.push(json!({
+            "role": "system",
+            "content": opencode_environment_prompt(model_name)
         }));
     }
     if model_config.native_tool_calls == Some(true) {
@@ -436,6 +559,67 @@ fn build_chat_messages(
         }));
     }
     Ok(messages)
+}
+
+fn resolved_system_prompt(model_config: &OpenAiModelConfig) -> Option<String> {
+    let prompt = model_config.system_prompt.as_ref()?;
+    if prompt.trim() == OPENCODE_QWEN_PROMPT_MARKER {
+        return Some(OPENCODE_QWEN_PROMPT.to_string());
+    }
+    Some(prompt.clone())
+}
+
+fn is_opencode_code_input(input: &Value) -> bool {
+    let Some(object) = input.as_object() else {
+        return false;
+    };
+    if !object.get("task").is_some_and(Value::is_string) {
+        return false;
+    }
+    let tools = object
+        .get("allowed_tools")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>();
+    tools.contains(&"read") && tools.contains(&"edit") && tools.contains(&"bash")
+}
+
+fn opencode_environment_prompt(model_name: &str) -> String {
+    let directory = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    let git_repo = Command::new("git")
+        .args(["rev-parse", "--is-inside-work-tree"])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .is_some_and(|value| value.trim() == "true");
+    let date = Command::new("date")
+        .arg("+%a %b %e %Y")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+    [
+        format!("You are powered by the model named {model_name}. The exact model ID is openai-compatible/{model_name}"),
+        "Here is some useful information about the environment you are running in:".to_string(),
+        "<env>".to_string(),
+        format!("  Working directory: {directory}"),
+        format!("  Is directory a git repo: {}", if git_repo { "yes" } else { "no" }),
+        format!("  Platform: {}", std::env::consts::OS),
+        format!("  Today's date: {date}"),
+        "</env>".to_string(),
+        "<files>".to_string(),
+        "  ".to_string(),
+        "</files>".to_string(),
+    ]
+    .join("\n")
 }
 
 fn chat_completion_request_stats(body: &Value, trace_provider_io: bool) -> ModelRequestStats {
@@ -474,31 +658,43 @@ fn attach_native_tool_calls(
     body: &mut Value,
     input: &Value,
 ) -> Result<BTreeMap<String, String>, RuntimeError> {
-    let Some(allowed_tools) = input.get("allowed_tools").and_then(Value::as_array) else {
-        return Ok(BTreeMap::new());
-    };
     let tool_schemas = input.get("tool_schemas").and_then(Value::as_object);
+    let tool_names =
+        if let Some(allowed_tools) = input.get("allowed_tools").and_then(Value::as_array) {
+            allowed_tools
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|name| !name.trim().is_empty())
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+        } else {
+            tool_schemas
+                .into_iter()
+                .flat_map(|schemas| schemas.keys())
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+    if tool_names.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
     let mut tools = Vec::new();
     let mut tool_name_map = BTreeMap::new();
     let mut used_names = BTreeMap::new();
 
-    for tool in allowed_tools {
-        let Some(original_name) = tool.as_str() else {
-            continue;
-        };
-        if original_name.trim().is_empty() {
+    for original_name in tool_names {
+        if tool_schemas.is_some_and(|schemas| !schemas.contains_key(&original_name)) {
             continue;
         }
-
-        let safe_name = safe_openai_tool_name(original_name, &mut used_names);
-        tool_name_map.insert(safe_name.clone(), original_name.to_string());
-        let schema = tool_schemas.and_then(|schemas| schemas.get(original_name));
+        let safe_name = safe_openai_tool_name(&original_name, &mut used_names);
+        tool_name_map.insert(safe_name.clone(), original_name.clone());
+        let schema = tool_schemas.and_then(|schemas| schemas.get(&original_name));
         tools.push(json!({
             "type": "function",
             "function": {
                 "name": safe_name,
-                "description": native_tool_description(original_name, schema),
-                "parameters": native_tool_parameters(original_name, schema),
+                "description": native_tool_description(&original_name, schema),
+                "parameters": native_tool_parameters(&original_name, schema),
                 "strict": false
             }
         }));
@@ -551,21 +747,19 @@ fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize
 
 fn native_tool_description(original_name: &str, schema: Option<&Value>) -> String {
     match original_name {
-        "read" => {
-            return "Read a repo file or line range. Prefer narrow offset/limit reads after search results.".to_string();
-        }
-        "grep" => {
-            return "Search file contents with a regex or literal pattern and return matching line locations.".to_string();
-        }
-        "edit" => {
-            return "Edit one file by replacing exact strings. Use edits for several replacements in the same file. Read or search the target first.".to_string();
-        }
+        "glob" => return opencode_glob_description(),
+        "read" => return opencode_read_description(),
+        "grep" => return opencode_grep_description(),
+        "edit" => return opencode_edit_description(),
+        "lsp" => return opencode_lsp_description(),
+        "bash" => return opencode_bash_description(),
+        "todowrite" => return opencode_todowrite_description(),
         _ => {}
     }
     let Some(schema) = schema else {
-        return format!("AIR tool {original_name}");
+        return format!("Tool {original_name}");
     };
-    let mut parts = vec![format!("AIR tool {original_name}")];
+    let mut parts = vec![format!("Tool {original_name}")];
     if let Some(required) = schema.get("required") {
         parts.push(format!("required: {}", compact_json(required)));
     }
@@ -575,30 +769,320 @@ fn native_tool_description(original_name: &str, schema: Option<&Value>) -> Strin
     parts.join("; ")
 }
 
+fn opencode_bash_description() -> String {
+    let directory = std::env::current_dir()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|_| ".".to_string());
+    r##"Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+
+All commands run in ${directory} by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
+
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+
+Before executing the command, please follow these steps:
+
+1. Directory Verification:
+   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location
+   - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
+
+2. Command Execution:
+   - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
+   - Examples of proper quoting:
+     - mkdir "/Users/name/My Documents" (correct)
+     - mkdir /Users/name/My Documents (incorrect - will fail)
+     - python "/path/with spaces/script.py" (correct)
+     - python /path/with spaces/script.py (incorrect - will fail)
+   - After ensuring proper quoting, execute the command.
+   - Capture the output of the command.
+
+Usage notes:
+  - The command argument is required.
+  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
+  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
+  - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Because of this, you do NOT need to use `head`, `tail`, or other truncation commands to limit output - just run the command directly.
+
+  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
+    - File search: Use Glob (NOT find or ls)
+    - Content search: Use Grep (NOT grep or rg)
+    - Read files: Use Read (NOT cat/head/tail)
+    - Edit files: Use Edit (NOT sed/awk)
+    - Write files: Use Write (NOT echo >/cat <<EOF)
+    - Communication: Output text directly (NOT echo/printf)
+  - When issuing multiple commands:
+    - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message. For example, if you need to run "git status" and "git diff", send a single message with two Bash tool calls in parallel.
+    - If the commands depend on each other and must run sequentially, use a single Bash call with '&&' to chain them together (e.g., `git add . && git commit -m "message" && git push`). For instance, if one operation must complete before another starts (like mkdir before cp, Write before Bash for git operations, or git add before git commit), run these operations sequentially instead.
+    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
+    - DO NOT use newlines to separate commands (newlines are ok in quoted strings)
+  - AVOID using `cd <directory> && <command>`. Use the `workdir` parameter to change directories instead.
+    <good-example>
+    Use workdir="/foo/bar" with command: pytest tests
+    </good-example>
+    <bad-example>
+    cd /foo/bar && pytest tests
+    </bad-example>
+
+# Committing changes with git
+
+Only create commits when requested by the user. If unclear, ask first. When the user asks you to create a new git commit, follow these steps carefully:
+
+Git Safety Protocol:
+- NEVER update the git config
+- NEVER run destructive/irreversible git commands (like push --force, hard reset, etc) unless the user explicitly requests them
+- NEVER skip hooks (--no-verify, --no-gpg-sign, etc) unless the user explicitly requests it
+- NEVER run force push to main/master, warn the user if they request it
+- Avoid git commit --amend. ONLY use --amend when ALL conditions are met:
+  (1) User explicitly requested amend, OR commit SUCCEEDED but pre-commit hook auto-modified files that need including
+  (2) HEAD commit was created by you in this conversation (verify: git log -1 --format='%an %ae')
+  (3) Commit has NOT been pushed to remote (verify: git status shows "Your branch is ahead")
+- CRITICAL: If commit FAILED or was REJECTED by hook, NEVER amend - fix the issue and create a NEW commit
+- CRITICAL: If you already pushed to remote, NEVER amend unless user explicitly requests it (requires force push)
+- NEVER commit changes unless the user explicitly asks you to. It is VERY IMPORTANT to only commit when explicitly asked, otherwise the user will feel that you are being too proactive.
+
+1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel, each using the Bash tool:
+  - Run a git status command to see all untracked files.
+  - Run a git diff command to see both staged and unstaged changes that will be committed.
+  - Run a git log command to see recent commit messages, so that you can follow this repository's commit message style.
+2. Analyze all staged changes (both previously staged and newly added) and draft a commit message:
+  - Summarize the nature of the changes (eg. new feature, enhancement to an existing feature, bug fix, refactoring, test, docs, etc.). Ensure the message accurately reflects the changes and their purpose (i.e. "add" means a wholly new feature, "update" means an enhancement to an existing feature, "fix" means a bug fix, etc.).
+  - Do not commit files that likely contain secrets (.env, credentials.json, etc.). Warn the user if they specifically request to commit those files
+  - Draft a concise (1-2 sentences) commit message that focuses on the "why" rather than the "what"
+  - Ensure it accurately reflects the changes and their purpose
+3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run the following commands:
+   - Add relevant untracked files to the staging area.
+   - Create the commit with a message
+   - Run git status after the commit completes to verify success.
+   Note: git status depends on the commit completing, so run it sequentially after the commit.
+4. If the commit fails due to pre-commit hook, fix the issue and create a NEW commit (see amend rules above)
+
+Important notes:
+- NEVER run additional commands to read or explore code, besides git bash commands
+- NEVER use the TodoWrite or Task tools
+- DO NOT push to the remote repository unless the user explicitly asks you to do so
+- IMPORTANT: Never use git commands with the -i flag (like git rebase -i or git add -i) since they require interactive input which is not supported.
+- If there are no changes to commit (i.e., no untracked files and no modifications), do not create an empty commit
+
+# Creating pull requests
+Use the gh command via the Bash tool for ALL GitHub-related tasks including working with issues, pull requests, checks, and releases. If given a Github URL use the gh command to get the information needed.
+
+Important:
+- DO NOT use the TodoWrite or Task tools
+- Return the PR URL when you're done, so the user can see it
+
+# Other common operations
+- View comments on a Github PR: gh api repos/foo/bar/pulls/123/comments"##
+        .replace("${directory}", &directory)
+        .replace("${maxLines}", "2000")
+        .replace("${maxBytes}", "65536")
+}
+
+fn opencode_read_description() -> String {
+    r##"Reads a file from the local filesystem. You can access any file directly by using this tool.
+Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+
+Usage:
+- The filePath parameter must be an absolute path, not a relative path
+- By default, it reads up to 2000 lines starting from the beginning of the file
+- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- Any lines longer than 2000 characters will be truncated
+- Results are returned using cat -n format, with line numbers starting at 1
+- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
+- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
+- You can read image files using this tool."##
+        .to_string()
+}
+
+fn opencode_grep_description() -> String {
+    r##"- Fast content search tool that works with any codebase size
+- Searches file contents using regular expressions
+- Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
+- Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
+- Returns file paths and line numbers with at least one match sorted by modification time
+- Use this tool when you need to find files containing specific patterns
+- If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
+- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead"##
+        .to_string()
+}
+
+fn opencode_glob_description() -> String {
+    r##"- Fast file pattern matching tool that works with any codebase size
+- Supports glob patterns like "**/*.js" or "src/**/*.ts"
+- Returns matching file paths sorted by modification time
+- Use this tool when you need to find files by name patterns
+- When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
+- You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful."##
+        .to_string()
+}
+
+fn opencode_edit_description() -> String {
+    r##"Performs exact string replacements in files.
+
+Usage:
+- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
+- ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
+- Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
+- The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
+- The edit will FAIL if `oldString` is found multiple times in the file with an error "oldString found multiple times and requires more code context to uniquely identify the intended match". Either provide a larger string with more surrounding context to make it unique or use `replaceAll` to change every instance of `oldString`.
+- Use `replaceAll` for replacing and renaming strings across the file. This parameter is useful if you want to rename a variable for instance."##
+        .to_string()
+}
+
+fn opencode_lsp_description() -> String {
+    r##"Interact with Language Server Protocol (LSP) servers to get code intelligence features.
+
+Supported operations:
+- goToDefinition: Find where a symbol is defined
+- findReferences: Find all references to a symbol
+- hover: Get hover information (documentation, type info) for a symbol
+- documentSymbol: Get all symbols (functions, classes, variables) in a document
+- workspaceSymbol: Search for symbols across the entire workspace
+- goToImplementation: Find implementations of an interface or abstract method
+- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)
+- incomingCalls: Find all functions/methods that call the function at a position
+- outgoingCalls: Find all functions/methods called by the function at a position
+
+All operations require:
+- filePath: The file to operate on
+- line: The line number (1-based, as shown in editors)
+- character: The character offset (1-based, as shown in editors)
+
+Note: LSP servers must be configured for the file type. If no server is available, an error will be returned."##
+        .to_string()
+}
+
+fn opencode_todowrite_description() -> String {
+    r##"Use this tool to create and manage a structured task list for your current coding session. This helps you track progress, organize complex tasks, and demonstrate thoroughness to the user.
+It also helps the user understand the progress of the task and overall progress of their requests.
+
+## When to Use This Tool
+Use this tool proactively in these scenarios:
+
+1. Complex multistep tasks - When a task requires 3 or more distinct steps or actions
+2. Non-trivial and complex tasks - Tasks that require careful planning or multiple operations
+3. User explicitly requests todo list - When the user directly asks you to use the todo list
+4. User provides multiple tasks - When users provide a list of things to be done (numbered or comma-separated)
+5. After receiving new instructions - Immediately capture user requirements as todos. Feel free to edit the todo list based on new information.
+6. After completing a task - Mark it complete and add any new follow-up tasks
+7. When you start working on a new task, mark the todo as in_progress. Ideally you should only have one todo as in_progress at a time. Complete existing tasks before starting new ones.
+
+## When NOT to Use This Tool
+
+Skip using this tool when:
+1. There is only a single, straightforward task
+2. The task is trivial and tracking it provides no organizational benefit
+3. The task can be completed in less than 3 trivial steps
+4. The task is purely conversational or informational
+
+NOTE that you should not use this tool if there is only one trivial task to do. In this case you are better off just doing the task directly.
+
+## Examples of When to Use the Todo List
+
+<example>
+User: I want to add a dark mode toggle to the application settings. Make sure you run the tests and build when you're done!
+Assistant: I'll help add a dark mode toggle to your application settings. Let me create a todo list to track this implementation.
+*Creates todo list with the following items:*
+1. Create dark mode toggle component in Settings page
+2. Add dark mode state management (context/store)
+3. Implement CSS-in-JS styles for dark theme
+4. Update existing components to support theme switching
+5. Run tests and build process, addressing any failures or errors that occur
+*Begins working on the first task*
+
+<reasoning>
+The assistant used the todo list because:
+1. Adding dark mode is a multi-step feature requiring UI, state management, and styling changes
+2. The user explicitly requested tests and build be run afterward
+3. The assistant inferred that tests and build need to pass by adding "Ensure tests and build succeed" as the final task
+</reasoning>
+</example>
+
+<example>
+User: Help me rename the function getCwd to getCurrentWorkingDirectory across my project
+Assistant: Let me first search through your codebase to find all occurrences of 'getCwd'.
+*Uses grep or search tools to locate all instances of getCwd in the codebase*
+Assistant: I've found 15 instances of 'getCwd' across 8 different files. Let me create a todo list to track these changes.
+*Creates todo list with specific items for each file that needs updating*
+
+<reasoning>
+The assistant used the todo list because:
+1. First, the assistant searched to understand the scope of the task
+2. Upon finding multiple occurrences across different files, it determined this was a complex task with multiple steps
+3. The todo list helps ensure every instance is tracked and updated systematically
+4. This approach prevents missing any occurrences and maintains code consistency
+</reasoning>
+</example>
+
+## Examples of When NOT to Use the Todo List
+
+<example>
+User: How do I print 'Hello World' in Python?
+Assistant: In Python, you can print "Hello World" with this simple code:
+
+python
+print("Hello World")
+
+This will output the text "Hello World" to the console when executed.</assistant>
+
+<reasoning>
+The assistant did not use the todo list because this is a single, trivial task that can be completed in one step. There's no need to track multiple tasks or steps for such a straightforward request.
+</reasoning>
+</example>
+
+<example>
+User: Can you add a comment to the calculateTotal function to explain what it does?
+Assistant: Sure, let me add a comment to the calculateTotal function to explain what it does.
+* Uses the Edit tool to add a comment to the calculateTotal function *
+
+<reasoning>
+The assistant did not use the todo list because this is a single, straightforward task confined to one location in the code. Adding a comment doesn't require tracking multiple steps or systematic organization.
+</reasoning>
+</example>
+
+## Task States and Management
+
+1. **Task States**: Use these states to track progress:
+   - pending: Task not yet started
+   - in_progress: Currently working on (limit to ONE task at a time)
+   - completed: Task finished successfully
+   - cancelled: Task no longer needed
+
+2. **Task Management**:
+   - Update task status in real-time as you work
+   - Mark tasks complete IMMEDIATELY after finishing (don't batch completions)
+   - Only have ONE task in_progress at any time
+   - Complete current tasks before starting new ones
+   - Cancel tasks that become irrelevant
+
+3. **Task Breakdown**:
+   - Create specific, actionable items
+   - Break complex tasks into smaller, manageable steps
+   - Use clear, descriptive task names
+
+When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully."##
+        .to_string()
+}
+
 fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value {
     match original_name {
         "read" => {
             return json!({
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Repo-relative file path to read."},
-                    "offset": {"type": "integer", "description": "Optional zero-based line offset."},
-                    "limit": {"type": "integer", "description": "Optional maximum number of lines to read."},
-                    "path": {"type": "string", "description": "Alias for filePath."},
-                    "start_line": {"type": "integer", "description": "Optional one-based start line."},
-                    "end_line": {"type": "integer", "description": "Optional one-based end line."}
+                    "filePath": {"type": "string", "description": "The path to the file to read"},
+                    "offset": {"type": "integer", "description": "The line number to start reading from (0-based)"},
+                    "limit": {"type": "integer", "description": "The number of lines to read (defaults to 2000)"}
                 },
                 "required": ["filePath"],
-                "additionalProperties": true
+                "additionalProperties": false
             });
         }
         "grep" => {
             return json!({
                 "type": "object",
                 "properties": {
-                    "pattern": {"type": "string", "description": "Regex or literal pattern to search for."},
-                    "path": {"type": "string", "description": "Repo-relative file or directory to search. Defaults to the repo root."},
-                    "include": {"type": "string", "description": "Optional glob-like hint for files to include."},
+                    "pattern": {"type": "string", "description": "The regular expression pattern to search for in file contents"},
+                    "path": {"type": "string", "description": "The file or directory path to search in. Defaults to the current working directory."},
+                    "include": {"type": "string", "description": "File pattern to include in the search, such as *.js or *.{ts,tsx}"},
                     "maxMatches": {"type": "integer", "description": "Optional maximum matches to return."},
                     "contextLines": {"type": "integer", "description": "Optional surrounding context lines."}
                 },
@@ -610,32 +1094,66 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
             return json!({
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Repo-relative file path to edit."},
-                    "oldString": {"type": "string", "description": "Exact text to replace for a single edit. Include enough surrounding context to be unique."},
-                    "newString": {"type": "string", "description": "Replacement text for a single edit."},
-                    "edits": {
+                    "filePath": {"type": "string", "description": "The absolute path to the file to modify"},
+                    "oldString": {"type": "string", "description": "The text to replace"},
+                    "newString": {"type": "string", "description": "The text to replace it with (must be different from oldString)"},
+                    "replaceAll": {"type": "boolean", "description": "Replace all occurrences of oldString (default false)"}
+                },
+                "required": ["filePath", "oldString", "newString"],
+                "additionalProperties": false
+            });
+        }
+        "lsp" => {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "enum": ["references", "diagnostics", "findReferences"], "description": "LSP operation. Use findReferences/references for references or diagnostics for diagnostics."},
+                    "filePath": {"type": "string", "description": "The file to operate on"},
+                    "path": {"type": "string", "description": "The file to operate on"},
+                    "symbol": {"type": "string", "description": "Optional Rust symbol name to locate in the file."},
+                    "line": {"type": "integer", "description": "The line number (1-based, as shown in editors)"},
+                    "character": {"type": "integer", "description": "The character offset (1-based, as shown in editors)"},
+                    "include_declaration": {"type": "boolean", "description": "Whether to include the declaration location."},
+                    "max_results": {"type": "integer", "description": "Optional maximum references to return."},
+                    "max_diagnostics": {"type": "integer", "description": "Optional maximum diagnostics to return."}
+                },
+                "required": [],
+                "additionalProperties": false
+            });
+        }
+        "bash" => {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "The command to execute"},
+                    "timeout": {"type": "integer", "description": "Optional timeout in milliseconds"},
+                    "workdir": {"type": "string", "description": "The working directory to run the command in. Defaults to the current workspace. Use this instead of cd commands."},
+                    "description": {"type": "string", "description": "Clear, concise description of what this command does in 5-10 words."}
+                },
+                "required": ["command", "description"],
+                "additionalProperties": false
+            });
+        }
+        "todowrite" => {
+            return json!({
+                "type": "object",
+                "properties": {
+                    "todos": {
                         "type": "array",
-                        "description": "Several replacements in the same file. Use this instead of oldString/newString when applying multiple localized edits.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "oldString": {"type": "string", "description": "Exact text to replace. Include enough surrounding context to be unique."},
-                                "newString": {"type": "string", "description": "Replacement text."},
-                                "replaceAll": {"type": "boolean", "description": "Replace every occurrence only when all matches should change."},
-                                "match_strategy": {"type": "string", "description": "Optional AIR edit matching strategy."}
+                                "content": {"type": "string"},
+                                "status": {"type": "string"},
+                                "priority": {"type": "string"}
                             },
-                            "required": ["oldString", "newString"],
+                            "required": ["content", "status"],
                             "additionalProperties": true
                         }
-                    },
-                    "replaceAll": {"type": "boolean", "description": "Replace every occurrence only when all matches should change."},
-                    "path": {"type": "string", "description": "Alias for filePath."},
-                    "old_string": {"type": "string", "description": "Alias for oldString."},
-                    "new_string": {"type": "string", "description": "Alias for newString."},
-                    "match_strategy": {"type": "string", "description": "Optional AIR edit matching strategy."}
+                    }
                 },
-                "required": ["filePath"],
-                "additionalProperties": true
+                "required": ["todos"],
+                "additionalProperties": false
             });
         }
         _ => {}
@@ -714,7 +1232,7 @@ fn input_to_native_user_content(input: &Value) -> Result<String, RuntimeError> {
         .or_else(|| object.get("query"))
         .and_then(Value::as_str)
     {
-        return Ok(truncate_text(task, 8_000));
+        return Ok(task.to_string());
     }
     input_to_content(input)
 }
@@ -805,6 +1323,35 @@ fn input_to_native_tool_messages_with_names(
     Ok(messages)
 }
 
+fn observation_assistant_content(observation: &Value) -> Option<String> {
+    let assistant = observation.get("assistant")?;
+    let mut parts = Vec::new();
+    for pointer in [
+        "/_air_assistant/reasoning",
+        "/_air_assistant/content",
+        "/reasoning",
+        "/content",
+        "/answer",
+    ] {
+        let Some(text) = assistant.pointer(pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        let text = text.trim();
+        if text.is_empty() || parts.contains(&text) {
+            continue;
+        }
+        parts.push(text);
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(truncate_text(
+            &parts.join("\n\n"),
+            NATIVE_ASSISTANT_HISTORY_MAX_CHARS,
+        ))
+    }
+}
+
 fn native_history_tool_name(
     result: &Map<String, Value>,
     requested: Option<&Value>,
@@ -842,16 +1389,6 @@ fn native_history_tool_call_id(
         .unwrap_or_else(|| {
             generated_native_history_tool_call_id(observation_index, result_index, safe_name)
         })
-}
-
-fn observation_assistant_content(observation: &Value) -> Option<String> {
-    observation
-        .pointer("/assistant/_air_assistant/content")
-        .or_else(|| observation.pointer("/assistant/content"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|content| !content.is_empty())
-        .map(|content| truncate_text(content, 8_000))
 }
 
 fn safe_openai_tool_name_for_history(
@@ -911,7 +1448,7 @@ fn render_native_tool_message_content(value: &Value) -> String {
     if lines.is_empty() {
         lines.push(truncate_text(&compact_json(value), 4_000));
     }
-    truncate_text(&lines.join("\n"), 12_000)
+    truncate_text(&lines.join("\n"), NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS)
 }
 
 fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<String>) {
@@ -919,11 +1456,37 @@ fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<Str
         "file.read" | "read" => render_file_read_transcript(output, lines),
         "file.read_many" | "read_many" => render_file_read_many_transcript(output, lines),
         "file.search" | "grep" => render_file_search_transcript(output, lines),
+        "file.edit" | "edit" => render_file_edit_transcript(output, lines),
+        "repo.files" | "glob" => render_glob_transcript(output, lines),
         "repo.symbols" => render_symbols_transcript(output, lines),
+        "rust_analyzer" | "lsp" => render_lsp_transcript(output, lines),
+        "bash" | "command.run" | "command_run" => render_bash_transcript(output, lines),
+        "todowrite" | "todo.write" => render_todowrite_transcript(output, lines),
         _ => {
             lines.push(format!(
                 "output: {}",
                 truncate_text(&compact_json(output), 4_000)
+            ));
+        }
+    }
+}
+
+fn render_file_edit_transcript(output: &Value, lines: &mut Vec<String>) {
+    let applied = output
+        .get("applied")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if applied {
+        lines.push("Edit applied successfully.".to_string());
+    } else {
+        lines.push("Edit was not applied.".to_string());
+    }
+
+    if let Some(diagnostics) = output.get("diagnostics").and_then(Value::as_array) {
+        for diagnostic in diagnostics.iter().take(4) {
+            lines.push(format!(
+                "diagnostic: {}",
+                truncate_text(&compact_json(diagnostic), 1_000)
             ));
         }
     }
@@ -934,7 +1497,9 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
         .get("path")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
-    lines.push(format!("<file path=\"{path}\">"));
+    lines.push(format!("<path>{path}</path>"));
+    lines.push("<type>file</type>".to_string());
+    lines.push("<content>".to_string());
     let content = output
         .get("content_preview")
         .or_else(|| output.get("content"))
@@ -943,9 +1508,28 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
     if content.is_empty() {
         lines.push(truncate_text(&compact_json(output), 4_000));
     } else {
-        lines.push(truncate_text(content, 4_000));
+        lines.push(truncate_text(
+            content,
+            NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS,
+        ));
     }
-    lines.push("</file>".to_string());
+    if output.get("truncated").and_then(Value::as_bool) == Some(true) {
+        let max_bytes = output
+            .get("max_bytes")
+            .and_then(Value::as_u64)
+            .unwrap_or(NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS as u64);
+        let end_line = output
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .or_else(|| output.get("total_lines").and_then(Value::as_u64))
+            .unwrap_or(0);
+        lines.push(format!(
+            "(Output truncated at {max_bytes} bytes. Use 'offset' or a line range to read beyond line {end_line})"
+        ));
+    } else if let Some(total_lines) = output.get("total_lines").and_then(Value::as_u64) {
+        lines.push(format!("(End of file - total {total_lines} lines)"));
+    }
+    lines.push("</content>".to_string());
 }
 
 fn render_file_read_many_transcript(output: &Value, lines: &mut Vec<String>) {
@@ -986,6 +1570,90 @@ fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
     };
     for item in matches.iter().take(40) {
         render_file_search_match(item, None, lines);
+    }
+}
+
+fn render_glob_transcript(output: &Value, lines: &mut Vec<String>) {
+    let Some(files) = output.get("files").and_then(Value::as_array) else {
+        lines.push(truncate_text(&compact_json(output), 4_000));
+        return;
+    };
+    if files.is_empty() {
+        if let Some(hint) = output.get("search_hint").and_then(Value::as_str) {
+            lines.push(hint.to_string());
+        } else {
+            lines.push("No files found".to_string());
+        }
+        return;
+    }
+    for file in files.iter().take(200).filter_map(Value::as_str) {
+        lines.push(file.to_string());
+    }
+    if output.get("truncated").and_then(Value::as_bool) == Some(true) {
+        lines.push("(Results truncated)".to_string());
+    }
+}
+
+fn render_bash_transcript(output: &Value, lines: &mut Vec<String>) {
+    if let Some(log) = output.get("log").and_then(Value::as_str) {
+        if log.trim().is_empty() {
+            lines.push("(No output)".to_string());
+        } else {
+            lines.push(truncate_text(log, NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS));
+        }
+    }
+    if output.get("truncated").and_then(Value::as_bool) == Some(true) {
+        let full_log = output
+            .get("full_log_path")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        if full_log.is_empty() {
+            lines.push("(Output truncated)".to_string());
+        } else {
+            lines.push(format!("(Output truncated. Full output: {full_log})"));
+        }
+    }
+    if let Some(status) = output.get("status").and_then(Value::as_i64) {
+        if status != 0 {
+            lines.push(format!(
+                "<bash_metadata>\nexit code: {status}\n</bash_metadata>"
+            ));
+        }
+    }
+}
+
+fn render_lsp_transcript(output: &Value, lines: &mut Vec<String>) {
+    if let Some(references) = output.get("references").and_then(Value::as_array) {
+        lines.push(format!("references: {}", references.len()));
+        for reference in references.iter().take(100) {
+            lines.push(truncate_text(&compact_json(reference), 1_000));
+        }
+        return;
+    }
+    if let Some(diagnostics) = output.get("diagnostics").and_then(Value::as_array) {
+        lines.push(format!("diagnostics: {}", diagnostics.len()));
+        for diagnostic in diagnostics.iter().take(100) {
+            lines.push(truncate_text(&compact_json(diagnostic), 1_000));
+        }
+        return;
+    }
+    lines.push(truncate_text(&compact_json(output), 4_000));
+}
+
+fn render_todowrite_transcript(output: &Value, lines: &mut Vec<String>) {
+    let Some(todos) = output.get("todos").and_then(Value::as_array) else {
+        lines.push(truncate_text(&compact_json(output), 4_000));
+        return;
+    };
+    for todo in todos {
+        let content = todo.get("content").and_then(Value::as_str).unwrap_or("");
+        let status = todo.get("status").and_then(Value::as_str).unwrap_or("");
+        let priority = todo.get("priority").and_then(Value::as_str).unwrap_or("");
+        if priority.is_empty() {
+            lines.push(format!("- [{status}] {content}"));
+        } else {
+            lines.push(format!("- [{status}] ({priority}) {content}"));
+        }
     }
 }
 
@@ -1065,17 +1733,17 @@ fn render_symbols_transcript(output: &Value, lines: &mut Vec<String>) {
 
 fn compact_observation_history(value: &Value) -> Value {
     let Some(items) = value.as_array() else {
-        return compact_prompt_value(value);
+        return compact_model_context_value(value);
     };
     let mut protected_chars = 0usize;
     let mut compacted = Vec::with_capacity(items.len());
     for item in items.iter().rev() {
         let estimated_chars = compact_json(item).chars().count();
-        let item = compact_observation(item);
         if protected_chars <= TOOL_RESULT_PRUNE_PROTECT_CHARS {
             protected_chars = protected_chars.saturating_add(estimated_chars);
-            compacted.push(item);
+            compacted.push(item.clone());
         } else {
+            let item = compact_model_context_value(item);
             compacted.push(prune_old_observation_tool_results(&item));
         }
     }
@@ -1083,89 +1751,11 @@ fn compact_observation_history(value: &Value) -> Value {
     Value::Array(compacted)
 }
 
-const TOOL_RESULT_PRUNE_PROTECT_CHARS: usize = 40_000;
 const OLD_TOOL_RESULT_CLEARED: &str = "[Old tool result content cleared]";
-
-fn compact_observation(value: &Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return compact_prompt_value(value);
-    };
-    let mut compact = Map::new();
-    copy_compact_field(&mut compact, object, "action");
-    copy_compact_field(&mut compact, object, "assistant");
-    if let Some(requested) = object.get("requested") {
-        compact.insert("requested".to_string(), compact_tool_requests(requested));
-    }
-    if let Some(result) = object.get("result") {
-        compact.insert("result".to_string(), compact_tool_results(result));
-    }
-    Value::Object(compact)
-}
-
-fn copy_compact_field(compact: &mut Map<String, Value>, object: &Map<String, Value>, field: &str) {
-    if let Some(value) = object.get(field) {
-        compact.insert(field.to_string(), compact_prompt_value(value));
-    }
-}
-
-fn compact_tool_requests(value: &Value) -> Value {
-    let Some(items) = value.as_array() else {
-        return compact_prompt_value(value);
-    };
-    Value::Array(
-        items
-            .iter()
-            .map(|item| {
-                let Some(object) = item.as_object() else {
-                    return compact_prompt_value(item);
-                };
-                let mut compact = Map::new();
-                for field in ["tool", "_air_tool_call_id", "_air_tool_name"] {
-                    copy_compact_field(&mut compact, object, field);
-                }
-                if let Some(input) = object.get("input") {
-                    compact.insert("input".to_string(), compact_tool_input(input));
-                }
-                Value::Object(compact)
-            })
-            .collect(),
-    )
-}
-
-fn compact_tool_results(value: &Value) -> Value {
-    let Some(items) = value.as_array() else {
-        return compact_prompt_value(value);
-    };
-    Value::Array(items.iter().map(compact_tool_result).collect())
-}
-
-fn compact_tool_result(value: &Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return compact_prompt_value(value);
-    };
-    let mut compact = Map::new();
-    for field in [
-        "tool",
-        "status",
-        "error_code",
-        "permission",
-        "message",
-        "_air_tool_call_id",
-        "_air_tool_name",
-    ] {
-        copy_compact_field(&mut compact, object, field);
-    }
-    if let Some(input) = object.get("input") {
-        compact.insert("input".to_string(), compact_tool_input(input));
-    }
-    if let Some(output) = object.get("output") {
-        compact.insert("output".to_string(), compact_tool_output(output));
-    }
-    if let Some(error) = object.get("error") {
-        compact.insert("error".to_string(), compact_prompt_value(error));
-    }
-    Value::Object(compact)
-}
+const TOOL_RESULT_PRUNE_PROTECT_CHARS: usize = 40_000;
+const NATIVE_ASSISTANT_HISTORY_MAX_CHARS: usize = 16 * 1024;
+const NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
+const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
 
 fn prune_old_observation_tool_results(value: &Value) -> Value {
     let Some(object) = value.as_object() else {
@@ -1210,244 +1800,8 @@ fn prune_old_tool_result_content(value: &Value) -> Value {
     Value::Object(compact)
 }
 
-fn compact_tool_input(value: &Value) -> Value {
-    compact_json_value_for_prompt(value, 3, 8, 1_000)
-}
-
-fn compact_tool_output(value: &Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return compact_json_value_for_prompt(value, 3, 8, 4_000);
-    };
-
-    let mut compact = Map::new();
-    for field in [
-        "success",
-        "status",
-        "error",
-        "error_code",
-        "permission",
-        "message",
-        "applied",
-        "passed",
-        "failed_count",
-        "bytes",
-        "path",
-        "repo",
-        "query",
-        "effective_query",
-        "mode",
-        "names",
-        "start_line",
-        "end_line",
-        "truncated",
-        "full_log_path",
-        "full_output_path",
-        "truncation_hint",
-        "content_format",
-        "unscoped_read",
-        "changed_files",
-        "diagnostics",
-        "todos",
-        "matches",
-        "symbols",
-        "references",
-        "locations",
-    ] {
-        if let Some(value) = object.get(field) {
-            let depth = if field == "matches" { 5 } else { 3 };
-            compact.insert(
-                field.to_string(),
-                compact_json_value_for_prompt(value, depth, 8, 2_000),
-            );
-        }
-    }
-    if let Some(content) = object.get("content") {
-        compact.insert(
-            "content_preview".to_string(),
-            compact_stringish_value(content, 4_000),
-        );
-    }
-    if let Some(artifacts) = object.get("artifacts") {
-        compact.insert(
-            "artifact_refs".to_string(),
-            compact_artifact_refs(artifacts),
-        );
-    }
-    if let Some(files) = object.get("files").and_then(Value::as_array) {
-        compact.insert(
-            "files".to_string(),
-            Value::Array(
-                files
-                    .iter()
-                    .take(8)
-                    .map(compact_file_read_output_for_prompt)
-                    .collect::<Vec<_>>(),
-            ),
-        );
-    }
-    if compact.is_empty() {
-        compact_json_value_for_prompt(value, 3, 8, 4_000)
-    } else {
-        Value::Object(compact)
-    }
-}
-
-fn compact_file_read_output_for_prompt(value: &Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return compact_json_value_for_prompt(value, 3, 8, 4_000);
-    };
-    let mut compact = Map::new();
-    for field in [
-        "path",
-        "bytes",
-        "source_bytes",
-        "start_line",
-        "end_line",
-        "match_line",
-        "contains",
-        "context_lines",
-        "total_lines",
-        "truncated",
-        "full_output_path",
-        "truncation_hint",
-        "content_format",
-        "unscoped_read",
-        "line_numbers",
-    ] {
-        if let Some(value) = object.get(field) {
-            compact.insert(
-                field.to_string(),
-                compact_json_value_for_prompt(value, 3, 8, 1_000),
-            );
-        }
-    }
-    if let Some(content) = object
-        .get("content_preview")
-        .or_else(|| object.get("content"))
-    {
-        compact.insert(
-            "content_preview".to_string(),
-            compact_stringish_value(content, 4_000),
-        );
-    }
-    if compact.is_empty() {
-        compact_json_value_for_prompt(value, 3, 8, 4_000)
-    } else {
-        Value::Object(compact)
-    }
-}
-
-fn compact_artifact_refs(value: &Value) -> Value {
-    let Some(items) = value.as_array() else {
-        return compact_prompt_value(value);
-    };
-    Value::Array(
-        items
-            .iter()
-            .take(8)
-            .filter_map(|item| {
-                let object = item.as_object()?;
-                let mut compact = Map::new();
-                for field in ["id", "kind", "title", "uri"] {
-                    if let Some(value) = object.get(field) {
-                        compact.insert(field.to_string(), compact_prompt_value(value));
-                    }
-                }
-                if let Some(metadata) = object.get("metadata") {
-                    compact.insert(
-                        "metadata".to_string(),
-                        compact_json_value_for_prompt(metadata, 2, 8, 500),
-                    );
-                }
-                Some(Value::Object(compact))
-            })
-            .collect(),
-    )
-}
-
-fn compact_prompt_value(value: &Value) -> Value {
-    compact_json_value_for_prompt(value, 4, 16, 4_000)
-}
-
-fn compact_json_value_for_prompt(
-    value: &Value,
-    max_depth: usize,
-    max_items: usize,
-    max_string_chars: usize,
-) -> Value {
-    if max_depth == 0 {
-        return json!({
-            "_air_compacted": true,
-            "preview": truncate_text(&compact_json(value), max_string_chars)
-        });
-    }
-    match value {
-        Value::String(text) => Value::String(truncate_text(text, max_string_chars)),
-        Value::Array(items) => {
-            let mut compact = items
-                .iter()
-                .take(max_items)
-                .map(|item| {
-                    compact_json_value_for_prompt(
-                        item,
-                        max_depth.saturating_sub(1),
-                        max_items,
-                        max_string_chars,
-                    )
-                })
-                .collect::<Vec<_>>();
-            if items.len() > compact.len() {
-                compact.push(json!({
-                    "_air_compacted": true,
-                    "omitted_items": items.len() - compact.len()
-                }));
-            }
-            Value::Array(compact)
-        }
-        Value::Object(object) => {
-            let mut compact = Map::new();
-            for (key, value) in object.iter().take(max_items) {
-                if matches!(key.as_str(), "artifacts" | "artifact_ids") {
-                    continue;
-                }
-                compact.insert(
-                    key.clone(),
-                    compact_json_value_for_prompt(
-                        value,
-                        max_depth.saturating_sub(1),
-                        max_items,
-                        max_string_chars,
-                    ),
-                );
-            }
-            if object.len() > compact.len() {
-                compact.insert(
-                    "_air_compacted".to_string(),
-                    json!({"omitted_fields": object.len() - compact.len()}),
-                );
-            }
-            Value::Object(compact)
-        }
-        other => other.clone(),
-    }
-}
-
-fn compact_stringish_value(value: &Value, max_chars: usize) -> Value {
-    match value {
-        Value::String(text) => Value::String(truncate_text(text, max_chars)),
-        other => Value::String(truncate_text(&compact_json(other), max_chars)),
-    }
-}
-
 fn truncate_text(text: &str, max_chars: usize) -> String {
-    let mut result = String::new();
-    for character in text.chars().take(max_chars) {
-        result.push(character);
-    }
-    if result.len() < text.len() {
-        result.push_str("\n[AIR_COMPACTED]");
-    }
-    result
+    truncate_middle_context_string(text, max_chars, "AIR_COMPACTED")
 }
 
 fn parse_chat_completion_content(
@@ -1469,6 +1823,15 @@ fn parse_chat_completion_content(
 
     match serde_json::from_str(normalized) {
         Ok(json) => Ok(json),
+        Err(_) if !tool_name_map.is_empty() => {
+            let mut decision = Map::new();
+            decision.insert("complete".to_string(), Value::Bool(true));
+            decision.insert("tool_calls".to_string(), Value::Array(Vec::new()));
+            if let Some(assistant) = native_assistant_metadata(response) {
+                decision.insert("_air_assistant".to_string(), assistant);
+            }
+            Ok(Value::Object(decision))
+        }
         Err(_) => Ok(json!({ "content": normalized })),
     }
 }
@@ -1495,7 +1858,12 @@ fn parse_native_tool_calls(
         let Some(safe_name) = call.pointer("/function/name").and_then(Value::as_str) else {
             continue;
         };
-        let original_name = tool_name_map.get(safe_name).cloned().ok_or_else(|| {
+        let repaired_name = if tool_name_map.contains_key(safe_name) {
+            safe_name.to_string()
+        } else {
+            safe_name.to_ascii_lowercase()
+        };
+        let original_name = tool_name_map.get(&repaired_name).cloned().ok_or_else(|| {
             RuntimeError::Provider(format!(
                 "model returned undeclared native tool call {safe_name}"
             ))
@@ -1513,10 +1881,7 @@ fn parse_native_tool_calls(
         let mut normalized_call = Map::new();
         normalized_call.insert("tool".to_string(), Value::String(original_name));
         normalized_call.insert("input".to_string(), input);
-        normalized_call.insert(
-            "_air_tool_name".to_string(),
-            Value::String(safe_name.to_string()),
-        );
+        normalized_call.insert("_air_tool_name".to_string(), Value::String(repaired_name));
         if let Some(call_id) = call.get("id").and_then(Value::as_str) {
             normalized_call.insert(
                 "_air_tool_call_id".to_string(),
@@ -2104,7 +2469,7 @@ mod tests {
             "glm-5.1".to_string(),
             &json!({
                 "task": "choose tools",
-                "allowed_tools": ["edit", "repo.search"],
+                "allowed_tools": ["edit", "repo.search", "repo.context"],
                 "tool_schemas": {
                     "edit": {
                         "required": {
@@ -2124,10 +2489,14 @@ mod tests {
 
         assert_eq!(request.tool_name_map["edit"], "edit");
         assert_eq!(request.tool_name_map["repo_search"], "repo.search");
+        assert!(!request
+            .tool_name_map
+            .values()
+            .any(|name| name == "repo.context"));
         assert_eq!(request.body["tool_choice"], json!("auto"));
         assert_eq!(
             request.body["tools"][0]["function"]["parameters"]["required"],
-            json!(["filePath"])
+            json!(["filePath", "oldString", "newString"])
         );
         assert!(
             request.body.get("response_format").is_none(),
@@ -2136,7 +2505,11 @@ mod tests {
         assert!(
             request.body["tools"][0]["function"]["parameters"]["properties"]
                 .get("edits")
-                .is_some()
+                .is_none()
+        );
+        assert_eq!(
+            request.body["tools"][0]["function"]["parameters"]["additionalProperties"],
+            json!(false)
         );
         let content = request.body["messages"][0]["content"].as_str().unwrap();
         assert_eq!(content, "choose tools");
@@ -2147,6 +2520,152 @@ mod tests {
         assert!(
             serde_json::from_str::<Value>(content).is_err(),
             "native tool content should be OpenCode-style user text, not an AIR JSON envelope"
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_default_to_all_tool_schemas_without_allowed_tools() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: Some(true),
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "edit the code",
+                "tool_schemas": {
+                    "read": {
+                        "required": {"filePath": "repo-relative file path"}
+                    },
+                    "edit": {
+                        "required": {
+                            "filePath": "repo-relative file path",
+                            "oldString": "text to replace",
+                            "newString": "replacement text"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(request.tool_name_map["edit"], "edit");
+        assert_eq!(request.tool_name_map["read"], "read");
+        assert_eq!(request.body["tool_choice"], json!("auto"));
+        assert_eq!(request.body["tools"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            request.body["messages"][0]["content"],
+            json!("edit the code")
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_include_lsp_tool_schemas() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: Some(true),
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "inspect references",
+                "tool_schemas": {
+                    "lsp": {
+                        "required": {},
+                        "optional": {
+                            "command": "references or diagnostics",
+                            "path": "repo-relative Rust file path",
+                            "symbol": "Rust symbol name"
+                        }
+                    }
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(request.tool_name_map["lsp"], "lsp");
+        let tools = request.body["tools"].as_array().unwrap();
+        let lsp = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "lsp")
+            .unwrap();
+        assert_eq!(lsp["function"]["parameters"]["required"], json!([]));
+        assert!(lsp["function"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Language Server Protocol"));
+        assert_eq!(
+            lsp["function"]["parameters"]["properties"]["line"]["description"],
+            json!("The line number (1-based, as shown in editors)")
+        );
+        assert_eq!(
+            lsp["function"]["parameters"]["properties"]["command"]["enum"],
+            json!(["references", "diagnostics", "findReferences"])
+        );
+    }
+
+    #[test]
+    fn native_read_tool_schema_matches_opencode_style_ranges() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "read file",
+                "allowed_tools": ["read"]
+            }),
+        )
+        .unwrap();
+
+        let properties = &request.body["tools"][0]["function"]["parameters"]["properties"];
+        assert!(properties.get("filePath").is_some());
+        assert!(properties.get("offset").is_some());
+        assert!(properties.get("limit").is_some());
+        assert!(properties.get("start_line").is_none());
+        assert!(properties.get("end_line").is_none());
+        assert!(properties.get("repeat_reason").is_none());
+        assert_eq!(
+            request.body["tools"][0]["function"]["parameters"]["additionalProperties"],
+            json!(false)
         );
     }
 
@@ -2167,7 +2686,7 @@ mod tests {
             native_tool_calls: Some(true),
             trace_provider_io: None,
         };
-        let long_content = "x".repeat(10_000);
+        let long_content = "x".repeat(60_000);
         let input = json!({
             "task": "inspect",
             "allowed_tools": ["file.read"],
@@ -2222,7 +2741,14 @@ mod tests {
         assert_eq!(messages[1]["role"], json!("assistant"));
         assert_eq!(
             messages[1]["content"],
-            json!("I will inspect the narrow target file first.")
+            json!("Need the current implementation before editing.\n\nI will inspect the narrow target file first."),
+            "native replay should preserve assistant reasoning/text so the next call does not rediscover prior conclusions"
+        );
+        assert!(
+            serde_json::to_string(&request.body)
+                .unwrap()
+                .contains("Need the current implementation before editing."),
+            "native replay should include prior reasoning/prose like OpenCode session history"
         );
         assert_eq!(
             messages[1]["tool_calls"][0]["function"]["name"],
@@ -2237,15 +2763,21 @@ mod tests {
         assert_eq!(messages[2]["tool_call_id"], json!("call_original_123"));
         let content = messages[2]["content"].as_str().unwrap();
 
-        assert!(content.contains("<file path=\"src/lib.rs\">"), "{content}");
+        assert!(content.contains("<content>"), "{content}");
+        assert!(content.contains("<path>src/lib.rs</path>"), "{content}");
         assert!(content.contains("[AIR_COMPACTED]"));
+        assert!(
+            content.len() > 50_000,
+            "native read transcript should preserve roughly OpenCode's 50KB read budget, got {} chars",
+            content.len()
+        );
         assert!(!content.contains("artifact_refs"));
         assert!(!content.contains("\"artifacts\""));
         assert!(!content.contains("\"tool_schemas\""));
         assert!(!content.contains("\"recent_tool_results\""));
         assert!(!content.contains("\"observations\""));
         assert!(!content.contains("rationale: read file"));
-        assert!(content.len() < 15_000, "{content}");
+        assert!(content.len() < 55_000, "{content}");
     }
 
     #[test]
@@ -2288,6 +2820,78 @@ mod tests {
             serde_json::from_str::<Value>(content).is_err(),
             "native tool result content should be plain text"
         );
+    }
+
+    #[test]
+    fn native_tool_messages_render_edit_like_opencode_without_diff_or_snippets() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let large_diff = "diff-line\n".repeat(5_000);
+        let input = json!({
+            "task": "continue after edit",
+            "observations": [{
+                "action": "tool_batch_dispatch",
+                "assistant": {
+                    "_air_assistant": {
+                        "content": "Apply the helper extraction."
+                    },
+                    "tool_calls": [{
+                        "tool": "edit",
+                        "input": {"filePath": "src/lib.rs"},
+                        "_air_tool_name": "edit",
+                        "_air_tool_call_id": "call_edit_1"
+                    }]
+                },
+                "requested": [{
+                    "tool": "edit",
+                    "input": {"filePath": "src/lib.rs"},
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_edit_1"
+                }],
+                "result": [{
+                    "tool": "edit",
+                    "status": "ok",
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_edit_1",
+                    "output": {
+                        "path": "src/lib.rs",
+                        "applied": true,
+                        "replacements": 1,
+                        "edit_count": 1,
+                        "files": [{"path": "src/lib.rs"}],
+                        "diff": large_diff,
+                        "post_edit_snippets": [{
+                            "path": "src/lib.rs",
+                            "start_line": 10,
+                            "end_line": 12,
+                            "content": "00010| fn helper() {}\n00011| fn caller() {}"
+                        }]
+                    }
+                }]
+            }]
+        });
+
+        let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert_eq!(content, "Edit applied successfully.");
+        assert!(!content.contains("<content>"), "{content}");
+        assert!(!content.contains("fn helper"), "{content}");
+        assert!(!content.contains("diff-line"), "{content}");
     }
 
     #[test]
@@ -2427,8 +3031,8 @@ mod tests {
                             "end_line": 11,
                             "content_format": "line_numbered"
                         }, {
-                            "path": "src/git_tools.rs",
-                            "content": "1 pub(super) fn git_diff_paths() {}",
+                            "path": "src/diff_tools.rs",
+                            "content": "1 pub(super) fn diff_paths() {}",
                             "start_line": 1,
                             "end_line": 1,
                             "content_format": "line_numbered"
@@ -2441,12 +3045,9 @@ mod tests {
         let messages = input_to_native_tool_messages_with_names(&input, &BTreeMap::new()).unwrap();
         let content = messages[2]["content"].as_str().unwrap();
 
-        assert!(content.contains("<file path=\"src/lib.rs\">"), "{content}");
+        assert!(content.contains("<content>"), "{content}");
         assert!(content.contains("fn old_helper"), "{content}");
-        assert!(
-            content.contains("<file path=\"src/git_tools.rs\">"),
-            "{content}"
-        );
+        assert!(content.contains("fn diff_paths"), "{content}");
         assert!(!content.contains("\"tool_transcript\""));
     }
 
@@ -2570,6 +3171,35 @@ mod tests {
                         "newString": "new"
                     }
                 }]
+            })
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_parse_no_tool_assistant_text_as_complete_decision() {
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("edit".to_string(), "edit".to_string());
+
+        let value = parse_chat_completion_content(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "content": "All checks pass; no more tool calls are needed."
+                    }
+                }]
+            }),
+            &tool_name_map,
+        )
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "complete": true,
+                "_air_assistant": {
+                    "content": "All checks pass; no more tool calls are needed."
+                },
+                "tool_calls": []
             })
         );
     }

@@ -1230,7 +1230,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_request_ranks_code_edit_loop_for_open_ended_code_questions() {
+    fn planner_request_does_not_force_code_edit_loop_for_open_ended_questions() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
             root.join("examples/code-agent/module-store.air-store.yaml"),
@@ -1249,11 +1249,11 @@ mod tests {
 
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["id"],
-            json!("code.edit_loop@0.1.0")
+            json!("context.compact@0.1.0")
         );
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["tier"],
-            json!("large_component")
+            json!("public_building_block")
         );
     }
 
@@ -1277,11 +1277,11 @@ mod tests {
 
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["id"],
-            json!("code.edit_loop@0.1.0")
+            json!("code.edit@0.1.0")
         );
         assert_eq!(
             request["module_store"]["component_selection"]["first_choice"]["source"],
-            json!("recipe")
+            json!("module")
         );
     }
 
@@ -1296,18 +1296,18 @@ mod tests {
         for (task, expected_id, expected_source) in [
             (
                 "Review the command_run implementation for safety, provenance, and diagnostics.",
-                "code.edit_loop@0.1.0",
-                "recipe",
+                "code.edit@0.1.0",
+                "module",
             ),
             (
                 "Edit a failing test using structured diagnostics, apply a bounded patch, and retest.",
-                "code.edit_loop@0.1.0",
-                "recipe",
+                "code.edit@0.1.0",
+                "module",
             ),
             (
                 "Explore how command_run is implemented and identify relevant repository files.",
-                "code.edit_loop@0.1.0",
-                "recipe",
+                "context.compact@0.1.0",
+                "module",
             ),
         ] {
             let catalog = module_catalog(&store, &root, true).unwrap();
