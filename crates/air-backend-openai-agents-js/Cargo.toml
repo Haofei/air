@@ -12,6 +12,3 @@ air-parser = { path = "../air-parser" }
 air-verify = { path = "../air-verify" }
 serde_json.workspace = true
 thiserror.workspace = true
-
-[dev-dependencies]
-air-parser = { path = "../air-parser" }

@@ -2,17 +2,14 @@ use air_runtime::{
     compact_model_context_value, sanitize_trace_text, truncate_middle_context_string,
     ModelProvider, ModelRequestStats, RuntimeError, TraceWriteOptions,
 };
-use async_openai::{config::OpenAIConfig, Client as OpenAiClient};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
-use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tokio::runtime::{Builder, Runtime};
 
 const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const DEFAULT_OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
@@ -315,20 +312,13 @@ fn invalid_config(path: &Path, message: impl Into<String>) -> OpenAiConfigError 
 #[derive(Clone)]
 pub struct OpenAiCompatibleModelProvider {
     config: OpenAiCompatibleConfig,
-    runtime: Arc<Runtime>,
     last_request_stats: Option<ModelRequestStats>,
 }
 
 impl OpenAiCompatibleModelProvider {
     pub fn new(config: OpenAiCompatibleConfig) -> Result<Self, RuntimeError> {
-        let runtime = Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(provider_error)?;
-
         Ok(Self {
             config,
-            runtime: Arc::new(runtime),
             last_request_stats: None,
         })
     }
@@ -363,14 +353,9 @@ impl OpenAiCompatibleModelProvider {
 
         let request_timeout =
             effective_request_timeout(model_config.request_timeout_seconds, action_timeout);
-        let client = openai_client(api_key, &base_url);
 
-        let response: Value = self.runtime.block_on(async {
-            tokio::time::timeout(request_timeout, client.chat().create_byot(request.body))
-                .await
-                .map_err(|_| provider_timeout_error("chat/completions", request_timeout))?
-                .map_err(provider_error)
-        })?;
+        let response =
+            send_chat_completion_request(api_key, &base_url, &request.body, request_timeout)?;
 
         if trace_provider_io {
             if let Some(stats) = self.last_request_stats.as_mut() {
@@ -483,11 +468,47 @@ fn resolve_model_name(model_config: &OpenAiModelConfig) -> Result<String, Runtim
     ))
 }
 
-fn openai_client(api_key: String, base_url: &str) -> OpenAiClient<OpenAIConfig> {
-    let config = OpenAIConfig::new()
-        .with_api_key(api_key)
-        .with_api_base(base_url.trim_end_matches('/'));
-    OpenAiClient::with_config(config)
+fn send_chat_completion_request(
+    api_key: String,
+    base_url: &str,
+    body: &Value,
+    timeout: Duration,
+) -> Result<Value, RuntimeError> {
+    let client = reqwest::blocking::Client::builder()
+        .timeout(timeout)
+        .build()
+        .map_err(provider_error)?;
+    let response = client
+        .post(chat_completions_url(base_url))
+        .bearer_auth(api_key)
+        .json(body)
+        .send()
+        .map_err(|error| {
+            if error.is_timeout() {
+                provider_timeout_error("chat/completions", timeout)
+            } else {
+                provider_error(error)
+            }
+        })?;
+
+    let status = response.status();
+    if !status.is_success() {
+        let body = response.text().unwrap_or_else(|error| error.to_string());
+        return Err(RuntimeError::Provider(sanitize_provider_error_text(
+            &format!("chat/completions returned HTTP {status}: {body}"),
+        )));
+    }
+
+    response.json::<Value>().map_err(provider_error)
+}
+
+fn chat_completions_url(base_url: &str) -> String {
+    let base_url = base_url.trim_end_matches('/');
+    if base_url.ends_with("/chat/completions") {
+        base_url.to_string()
+    } else {
+        format!("{base_url}/chat/completions")
+    }
 }
 
 fn build_chat_completion_body(
@@ -3689,6 +3710,22 @@ mod tests {
         assert_eq!(
             effective_request_timeout(None, None),
             Duration::from_secs(120)
+        );
+    }
+
+    #[test]
+    fn chat_completion_url_appends_endpoint_once() {
+        assert_eq!(
+            chat_completions_url("https://provider.example/v1"),
+            "https://provider.example/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://provider.example/v1/"),
+            "https://provider.example/v1/chat/completions"
+        );
+        assert_eq!(
+            chat_completions_url("https://provider.example/v1/chat/completions"),
+            "https://provider.example/v1/chat/completions"
         );
     }
 
