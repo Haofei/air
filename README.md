@@ -27,12 +27,12 @@ For coding agents, that means the important questions have first-class places to
 
 | Question | AIR audit surface |
 | --- | --- |
-| Which files changed? | `edit`, bash-run `git diff`, edit-loop `workspace_diff`, and session baseline fields distinguish agent changes from pre-existing dirty files |
+| Which files changed? | `edit`, bash-run `git diff`, and edit-loop `workspace_diff` record the audited workspace change |
 | Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
 | Did it exceed the budget or repeat itself? | `max_tool_calls`, `max_model_calls`, `max_repeated_tool_calls`, timeouts, and capability gates are checked by the runtime |
-| What will this recipe be allowed to do? | `air code --explain` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
+| What will this agent be allowed to do? | `air code --explain` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
 
 ## Status
 
@@ -227,7 +227,7 @@ Primary user-facing commands:
 | `run-plan` | Execute a RunPlan or packaged profile on the native VM |
 | `resume-plan` | Resume a halted/checkpointed plan with typed overrides |
 | `lower-plan` | Compile a checked RunPlan to another backend |
-| `code` | User-facing coding-agent wrapper with deterministic recipe routing, `--explain` permission preflight, and bounded `--loop` iteration |
+| `code` | Minimal coding-agent wrapper around the default read/search/edit/verify AIR loop, with `--explain` permission preflight |
 
 Lower-level module, system, and trace commands exist for development and tests, but are hidden from default help output.
 

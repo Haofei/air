@@ -1,11 +1,5 @@
 use air_runtime::{system_return_event, Vm};
 mod code_agent;
-mod code_budget;
-mod code_context;
-mod code_input;
-mod code_loop;
-mod code_pack;
-mod code_session;
 mod diagnostics;
 mod explain;
 mod models;
@@ -13,7 +7,7 @@ mod planner;
 mod profile;
 mod run_plan;
 mod tools;
-use crate::code_agent::{code, code_session, CodeOptions, CodeSessionOptions};
+use crate::code_agent::{code, CodeOptions};
 use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
@@ -53,10 +47,6 @@ enum Command {
         /// Natural-language coding task.
         task: String,
 
-        /// Code-agent pack manifest. Defaults to examples/code-agent/code-agent.air-pack.yaml.
-        #[arg(long)]
-        pack: Option<PathBuf>,
-
         /// Coding-agent run profile. Defaults to the generic edit loop profile.
         #[arg(long)]
         profile: Option<PathBuf>,
@@ -77,26 +67,6 @@ enum Command {
         #[arg(long, conflicts_with = "trace_redact")]
         trace_raw: bool,
 
-        /// Optional JSON state output path for AIR resume.
-        #[arg(long)]
-        state_out: Option<PathBuf>,
-
-        /// Optional JSON state checkpoint path updated after each completed module.
-        #[arg(long)]
-        checkpoint_out: Option<PathBuf>,
-
-        /// Optional JIT cache directory for trace-specialized hot-path RunPlans.
-        #[arg(long)]
-        jit_cache: Option<PathBuf>,
-
-        /// Persist and reuse bounded AIR code-agent turn context from this JSON session file.
-        #[arg(long)]
-        session: Option<PathBuf>,
-
-        /// Execute eligible schedule groups and dynamic fan-out modules in parallel.
-        #[arg(long)]
-        parallel: bool,
-
         /// Print human-readable execution logs to stderr.
         #[arg(long)]
         log: bool,
@@ -105,51 +75,9 @@ enum Command {
         #[arg(long)]
         explain: bool,
 
-        /// Re-run the coding loop until its completion signal passes or the loop budget is exhausted.
-        #[arg(long = "loop")]
-        loop_enabled: bool,
-
-        /// Maximum iterations for --loop.
-        #[arg(long, default_value_t = 3)]
-        max_iterations: usize,
-
-        /// Reject the coding run when the estimated model-call budget exceeds this limit.
-        #[arg(long)]
-        max_estimated_model_calls: Option<usize>,
-
-        /// Reject the coding run when the estimated tool-call budget exceeds this limit.
-        #[arg(long)]
-        max_estimated_tool_calls: Option<usize>,
-
         /// Optional tool provider config JSON.
         #[arg(long)]
         tool_config: Option<PathBuf>,
-    },
-    /// Inspect, fork, or truncate an AIR code-agent session file.
-    #[command(hide = true)]
-    CodeSession {
-        /// Path to an AIR code-agent session JSON file.
-        session: PathBuf,
-
-        /// Write the resulting session to this new file.
-        #[arg(long)]
-        fork: Option<PathBuf>,
-
-        /// Keep turns through this turn id or 1-based turn number.
-        #[arg(long)]
-        revert_to: Option<String>,
-
-        /// Validate or apply reverse patches from this turn's indexed patch_sets.
-        #[arg(long)]
-        revert_workspace_turn: Option<String>,
-
-        /// Apply --revert-workspace-turn after a successful reverse-patch check.
-        #[arg(long, requires = "revert_workspace_turn")]
-        apply_workspace: bool,
-
-        /// Allow writing the reverted session back to the source file.
-        #[arg(long, conflicts_with = "fork")]
-        in_place: bool,
     },
     /// Parse and statically verify an AIR module.
     #[command(hide = true)]
@@ -490,59 +418,24 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Code {
             task,
-            pack,
             profile,
             model_config,
             trace_out,
             trace_redact,
             trace_raw,
-            state_out,
-            checkpoint_out,
-            jit_cache,
-            session,
-            parallel,
             log,
             explain,
-            loop_enabled,
-            max_iterations,
-            max_estimated_model_calls,
-            max_estimated_tool_calls,
             tool_config,
         } => code(CodeOptions {
             task,
-            pack,
             profile,
             model_config,
             trace_out,
             trace_redact,
             trace_raw,
-            state_out,
-            checkpoint_out,
-            jit_cache,
-            session,
-            parallel,
             log,
             explain,
-            loop_enabled,
-            max_iterations,
-            max_estimated_model_calls,
-            max_estimated_tool_calls,
             tool_config,
-        }),
-        Command::CodeSession {
-            session,
-            fork,
-            revert_to,
-            revert_workspace_turn,
-            apply_workspace,
-            in_place,
-        } => code_session(CodeSessionOptions {
-            session,
-            fork,
-            revert_to,
-            revert_workspace_turn,
-            apply_workspace,
-            in_place,
         }),
         Command::Validate { file } => validate(file),
         Command::ValidateSystem { file } => validate_system(file),
@@ -1587,7 +1480,6 @@ mod tests {
             "run-system",
             "validate",
             "run",
-            "code-session",
             "lower",
             "replay",
             "deep-research",
@@ -1620,23 +1512,6 @@ mod tests {
     }
 
     #[test]
-    fn code_command_rejects_manual_recipe_and_path_hints() {
-        for flag in ["--recipe", "--target", "--related", "--query"] {
-            let mut args = vec!["air", "code", "fix the failing add function"];
-            args.push(flag);
-            args.push(if flag == "--recipe" {
-                "edit"
-            } else {
-                "examples/code-agent/edit-fixture/math.js"
-            });
-            assert!(
-                Cli::try_parse_from(args).is_err(),
-                "air code should not expose {flag}"
-            );
-        }
-    }
-
-    #[test]
     fn code_command_accepts_explain_flag() {
         let cli = Cli::try_parse_from([
             "air",
@@ -1651,121 +1526,6 @@ mod tests {
         };
 
         assert!(explain);
-    }
-
-    #[test]
-    fn code_command_accepts_bounded_loop_flags() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code",
-            "fix the failing add function until tests pass",
-            "--loop",
-            "--max-iterations",
-            "2",
-        ])
-        .unwrap();
-
-        let Command::Code {
-            loop_enabled,
-            max_iterations,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code command");
-        };
-
-        assert!(loop_enabled);
-        assert_eq!(max_iterations, 2);
-    }
-
-    #[test]
-    fn code_command_accepts_budget_flags() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code",
-            "review command_run budget usage",
-            "--max-iterations",
-            "2",
-            "--max-estimated-model-calls",
-            "8",
-            "--max-estimated-tool-calls",
-            "24",
-        ])
-        .unwrap();
-
-        let Command::Code {
-            max_iterations,
-            max_estimated_model_calls,
-            max_estimated_tool_calls,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code command");
-        };
-
-        assert_eq!(max_iterations, 2);
-        assert_eq!(max_estimated_model_calls, Some(8));
-        assert_eq!(max_estimated_tool_calls, Some(24));
-    }
-
-    #[test]
-    fn hidden_code_session_command_accepts_fork_and_revert() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code-session",
-            "target/generated/session.json",
-            "--fork",
-            "target/generated/session-fork.json",
-            "--revert-to",
-            "turn-000001",
-        ])
-        .unwrap();
-
-        let Command::CodeSession {
-            session,
-            fork,
-            revert_to,
-            revert_workspace_turn,
-            apply_workspace,
-            in_place,
-        } = cli.command
-        else {
-            panic!("expected code-session command");
-        };
-
-        assert_eq!(session, PathBuf::from("target/generated/session.json"));
-        assert_eq!(
-            fork,
-            Some(PathBuf::from("target/generated/session-fork.json"))
-        );
-        assert_eq!(revert_to, Some("turn-000001".to_string()));
-        assert_eq!(revert_workspace_turn, None);
-        assert!(!apply_workspace);
-        assert!(!in_place);
-    }
-
-    #[test]
-    fn hidden_code_session_command_accepts_workspace_revert_dry_run() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "code-session",
-            "target/generated/session.json",
-            "--revert-workspace-turn",
-            "turn-000001",
-        ])
-        .unwrap();
-
-        let Command::CodeSession {
-            revert_workspace_turn,
-            apply_workspace,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code-session command");
-        };
-
-        assert_eq!(revert_workspace_turn, Some("turn-000001".to_string()));
-        assert!(!apply_workspace);
     }
 
     #[test]

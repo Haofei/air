@@ -2878,7 +2878,7 @@ fn repo_files_rejects_unknown_mode() {
 #[test]
 fn code_agent_self_tools_validate_project_paths() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let config_path = root.join("examples/code-agent/tools.dogfood.json");
+    let config_path = root.join("examples/code-agent/tools.json");
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     assert_eq!(tools.tool_capability("question"), Some("code.read"));

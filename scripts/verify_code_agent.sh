@@ -44,9 +44,7 @@ assert "max_bytes: 180000" in choose.group("body")
 
 for path in (
     "examples/code-agent/tools.json",
-    "examples/code-agent/tools.dogfood.json",
     "examples/code-agent/fixtures/tools.core.json",
-    "examples/code-agent/fixtures/tools.playwright.json",
 ):
     tools = json.loads(Path(path).read_text())["tools"]
     assert set(tools) == set(expected_tools), (path, list(tools))

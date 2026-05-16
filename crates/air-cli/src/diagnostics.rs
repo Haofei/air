@@ -18,6 +18,13 @@ fn emit_diagnostic(diagnostic: &Diagnostic) {
     );
 }
 
+fn severity_label(diagnostic: &Diagnostic) -> &'static str {
+    match diagnostic.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -29,12 +36,5 @@ mod tests {
 
         assert_eq!(severity_label(&error), "error");
         assert_eq!(severity_label(&warning), "warning");
-    }
-}
-
-fn severity_label(diagnostic: &Diagnostic) -> &'static str {
-    match diagnostic.severity {
-        Severity::Error => "error",
-        Severity::Warning => "warning",
     }
 }

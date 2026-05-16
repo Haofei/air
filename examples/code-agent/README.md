@@ -42,14 +42,14 @@ OpenCode-style terminal workflow instead of exposing AIR-specific git wrappers.
 If verification fails, the result goes back into the next model turn as ordinary
 tool output.
 
-`tools.dogfood.json` uses the same OpenCode-style tool names against the current repository.
+`tools.json` uses the same OpenCode-style tool names against the current repository.
 
 ## Dogfood
 
 ```bash
 cargo run -p air-cli -- code "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
-  --tool-config examples/code-agent/tools.dogfood.json \
+  --tool-config examples/code-agent/tools.json \
   --trace-out target/generated/code-agent.trace.jsonl \
   --log
 ```
