@@ -3120,6 +3120,48 @@ fn apply_patch_add_update_and_delete_files() {
 }
 
 #[test]
+fn apply_patch_returns_relative_paths_for_absolute_targets() {
+    let dir = temp_dir("air-tools-apply-patch-absolute");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let source = dir.join("src/lib.rs");
+    fs::write(&source, "fn old() {}\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "apply_patch": {
+                  "kind": "apply_patch",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 10000
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    let patch = format!(
+        "*** Begin Patch\n*** Update File: {}\n@@\n-fn old() {{}}\n+fn new_name() {{}}\n*** End Patch",
+        source.display()
+    );
+
+    let output = tools
+        .call_tool("apply_patch", &json!({ "patchText": patch }))
+        .unwrap();
+
+    assert_eq!(output["files"][0]["path"], json!("src/lib.rs"));
+    assert!(output["files"][0]["absolute_path"]
+        .as_str()
+        .unwrap()
+        .ends_with("src/lib.rs"));
+    let diff = output["diff"].as_str().unwrap();
+    assert!(diff.contains("--- a/src/lib.rs"));
+    assert!(diff.contains("+++ b/src/lib.rs"));
+    assert!(!diff.contains("/Users/"));
+    assert_eq!(fs::read_to_string(source).unwrap(), "fn new_name() {}\n");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_search_returns_structured_matches() {
     let dir = temp_dir("air-tools-repo-search");
     fs::create_dir_all(dir.join("src")).unwrap();

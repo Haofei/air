@@ -357,11 +357,12 @@ fn plan_change(tool_name: &str, base: &Path, hunk: PatchHunk) -> Result<FileChan
                 )));
             }
             let new_content = ensure_trailing_newline(content);
-            let diff = simple_unified_diff(&path, "", &new_content);
+            let relative_path = display_patch_path(base, &target, &path);
+            let diff = simple_unified_diff(&relative_path, "", &new_content);
             let (additions, deletions) = count_changed_lines("", &new_content);
             Ok(FileChange {
                 path: target,
-                relative_path: path,
+                relative_path,
                 kind: "add",
                 new_content,
                 move_path: None,
@@ -374,11 +375,12 @@ fn plan_change(tool_name: &str, base: &Path, hunk: PatchHunk) -> Result<FileChan
         PatchHunk::Delete { path } => {
             let target = resolve_existing_patch_path(tool_name, base, &path)?;
             let old_content = read_text_file(tool_name, &target)?;
-            let diff = simple_unified_diff(&path, &old_content, "");
+            let relative_path = display_patch_path(base, &target, &path);
+            let diff = simple_unified_diff(&relative_path, &old_content, "");
             let (additions, deletions) = count_changed_lines(&old_content, "");
             Ok(FileChange {
                 path: target,
-                relative_path: path,
+                relative_path,
                 kind: "delete",
                 new_content: String::new(),
                 move_path: None,
@@ -396,16 +398,21 @@ fn plan_change(tool_name: &str, base: &Path, hunk: PatchHunk) -> Result<FileChan
             let target = resolve_existing_patch_path(tool_name, base, &path)?;
             let old_content = read_text_file(tool_name, &target)?;
             let new_content = derive_new_content(tool_name, &path, &old_content, &chunks)?;
-            let diff_path = move_path.as_deref().unwrap_or(&path);
-            let diff = simple_unified_diff(diff_path, &old_content, &new_content);
-            let (additions, deletions) = count_changed_lines(&old_content, &new_content);
             let resolved_move_path = move_path
                 .as_deref()
                 .map(|path| resolve_patch_path(tool_name, base, path))
                 .transpose()?;
+            let relative_path = display_patch_path(base, &target, &path);
+            let move_relative_path = resolved_move_path
+                .as_ref()
+                .zip(move_path.as_deref())
+                .map(|(path, fallback)| display_patch_path(base, path, fallback));
+            let diff_path = move_relative_path.as_deref().unwrap_or(&relative_path);
+            let diff = simple_unified_diff(diff_path, &old_content, &new_content);
+            let (additions, deletions) = count_changed_lines(&old_content, &new_content);
             Ok(FileChange {
                 path: target,
-                relative_path: path,
+                relative_path,
                 kind: if move_path.is_some() {
                     "move"
                 } else {
@@ -413,7 +420,7 @@ fn plan_change(tool_name: &str, base: &Path, hunk: PatchHunk) -> Result<FileChan
                 },
                 new_content,
                 move_path: resolved_move_path,
-                move_relative_path: move_path,
+                move_relative_path,
                 diff,
                 additions,
                 deletions,
@@ -689,6 +696,15 @@ fn ensure_trailing_newline(mut content: String) -> String {
         content.push('\n');
     }
     content
+}
+
+fn display_patch_path(base: &Path, path: &Path, fallback: &str) -> String {
+    path.strip_prefix(base)
+        .ok()
+        .and_then(|path| path.to_str())
+        .filter(|path| !path.is_empty())
+        .unwrap_or(fallback)
+        .replace('\\', "/")
 }
 
 fn simple_unified_diff(path: &str, old_content: &str, new_content: &str) -> String {

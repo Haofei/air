@@ -220,17 +220,22 @@ fn insert_non_empty_id(
     ids: &mut BTreeSet<String>,
     max_ids: usize,
 ) -> Result<(), RuntimeError> {
-    let id = id.trim();
-    if id.is_empty() {
-        return Err(RuntimeError::Provider(format!(
-            "tool {tool_name} input.{field} entries must not be empty"
-        )));
-    }
-    ids.insert(id.to_string());
+    let id = parse_artifact_id(tool_name, field, id)?;
+    ids.insert(id);
     if ids.len() > max_ids {
         return Err(RuntimeError::Provider(format!(
             "tool {tool_name} input.{field} must reference at most {max_ids} ids"
         )));
     }
     Ok(())
+}
+
+fn parse_artifact_id(tool_name: &str, field: &str, id: &str) -> Result<String, RuntimeError> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.{field} entries must not be empty"
+        )));
+    }
+    Ok(id.to_string())
 }
