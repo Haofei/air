@@ -1,4 +1,5 @@
 use super::*;
+use crate::command_diagnostics::extract_command_diagnostics;
 
 fn temp_dir(prefix: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(

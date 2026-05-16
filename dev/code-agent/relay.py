@@ -30,6 +30,7 @@ sys.dont_write_bytecode = True
 DEFAULT_SIDE = "air"
 MAX_LATE_ACTION_ROUTES = 2
 MAX_TOLERATED_LATE_TARGETED_READS = 1
+MAX_REFERENCE_EXTRA_MODEL_CALLS = 4
 
 
 def main() -> None:
@@ -161,6 +162,21 @@ class RouteMonitor:
         self.tolerated_late_targeted_reads = 0
 
     def stop_before(self, call_index: int) -> dict[str, Any] | None:
+        if (
+            not self.stop_reason
+            and self.reference
+            and call_index > len(self.reference) + MAX_REFERENCE_EXTRA_MODEL_CALLS
+        ):
+            self.stop_reason = {
+                "kind": "reference_call_budget_exceeded",
+                "call_index": call_index,
+                "reference_calls": len(self.reference),
+                "max_extra_calls": MAX_REFERENCE_EXTRA_MODEL_CALLS,
+                "message": (
+                    f"AIR reached model call {call_index}, exceeding {self.label}'s "
+                    f"{len(self.reference)} calls by more than {MAX_REFERENCE_EXTRA_MODEL_CALLS}"
+                ),
+            }
         return self.stop_reason
 
     def observe_response(
