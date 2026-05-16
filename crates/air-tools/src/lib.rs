@@ -33,6 +33,11 @@ mod rust_lsp_tools;
 use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
 mod artifact_tools;
 use artifact_tools::call_artifact_validate_tool;
+mod bash_classify;
+use bash_classify::{
+    forbidden_git_workspace_command, is_verification_bash_command,
+    normalize_bash_verification_result,
+};
 mod repo_reference_tools;
 use repo_reference_tools::call_repo_references_tool;
 
@@ -3524,6 +3529,11 @@ fn call_bash_tool(
             "tool {name} input.command must not be empty"
         )));
     }
+    if let Some(git_subcommand) = forbidden_git_workspace_command(command) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} refuses workspace-mutating git command `git {git_subcommand}`; use read-only git commands such as git diff or git status for inspection"
+        )));
+    }
     if let Some(timeout_ms) = input.get("timeout").and_then(Value::as_u64) {
         if timeout_ms == 0 {
             return Err(RuntimeError::Provider(format!(
@@ -3579,126 +3589,6 @@ fn call_bash_tool(
         }
     }
     Ok(output)
-}
-
-fn normalize_bash_verification_result(object: &mut Map<String, Value>) {
-    let Some(log) = object.get("log").and_then(Value::as_str) else {
-        return;
-    };
-    let Some(status) = echoed_exit_status(log) else {
-        return;
-    };
-    object.insert(
-        "reported_exit_status".to_string(),
-        Value::Number(status.into()),
-    );
-    if status != 0 {
-        object.insert("success".to_string(), Value::Bool(false));
-        object.insert("status".to_string(), Value::Number(status.into()));
-        if let Some(Value::Array(artifacts)) = object.get_mut("artifacts") {
-            for artifact in artifacts {
-                if let Some(metadata) = artifact.get_mut("metadata").and_then(Value::as_object_mut)
-                {
-                    metadata.insert("success".to_string(), Value::Bool(false));
-                    metadata.insert("status".to_string(), Value::Number(status.into()));
-                    metadata.insert(
-                        "reported_exit_status".to_string(),
-                        Value::Number(status.into()),
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn echoed_exit_status(log: &str) -> Option<i64> {
-    log.lines().rev().find_map(|line| {
-        let trimmed = line.trim();
-        let value = ["EXIT:", "exit:", "exit code:"]
-            .iter()
-            .find_map(|marker| {
-                trimmed
-                    .find(marker)
-                    .map(|index| &trimmed[index + marker.len()..])
-            })?
-            .trim();
-        let value = leading_i64_text(value)?;
-        value.parse::<i64>().ok()
-    })
-}
-
-fn leading_i64_text(value: &str) -> Option<&str> {
-    let value = value
-        .trim_start_matches(|character: char| !(character.is_ascii_digit() || character == '-'));
-    let mut end = 0usize;
-    for (index, character) in value.char_indices() {
-        if index == 0 && character == '-' {
-            end = character.len_utf8();
-            continue;
-        }
-        if !character.is_ascii_digit() {
-            break;
-        }
-        end = index + character.len_utf8();
-    }
-    if end == 0 || value[..end].chars().all(|character| character == '-') {
-        None
-    } else {
-        Some(&value[..end])
-    }
-}
-
-fn is_verification_bash_command(command: &str, description: Option<&str>) -> bool {
-    let command = command.to_ascii_lowercase();
-    let description = description.unwrap_or_default().to_ascii_lowercase();
-
-    if is_inspection_bash_command(&command) {
-        return false;
-    }
-    if command.contains("--no-run") {
-        return false;
-    }
-
-    [
-        "verification",
-        "verify",
-        "retest",
-        "test",
-        "tests",
-        "check",
-        "compile",
-        "typecheck",
-        "type check",
-        "lint",
-        "format",
-        "fmt",
-    ]
-    .iter()
-    .any(|needle| description.contains(needle))
-}
-
-fn is_inspection_bash_command(command: &str) -> bool {
-    let command = command.trim_start();
-    [
-        "awk ",
-        "cat ",
-        "echo ",
-        "find ",
-        "git diff",
-        "git ls-files",
-        "git show",
-        "git status",
-        "grep ",
-        "head ",
-        "ls ",
-        "printf ",
-        "rg ",
-        "sed ",
-        "tail ",
-        "wc ",
-    ]
-    .iter()
-    .any(|prefix| command.starts_with(prefix))
 }
 
 fn validate_todo_item(name: &str, index: usize, todo: &Value) -> Result<(), RuntimeError> {

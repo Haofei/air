@@ -23,11 +23,13 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+sys.dont_write_bytecode = True
 
 DEFAULT_SIDE = "air"
 MAX_LATE_ACTION_ROUTES = 2
+MAX_TOLERATED_LATE_TARGETED_READS = 1
 
 
 def main() -> None:
@@ -156,6 +158,7 @@ class RouteMonitor:
         self.first_reference_action = first_action_route_call(reference)
         self.air_action_seen = False
         self.late_action_routes = 0
+        self.tolerated_late_targeted_reads = 0
 
     def stop_before(self, call_index: int) -> dict[str, Any] | None:
         return self.stop_reason
@@ -201,6 +204,10 @@ class RouteMonitor:
             and not self.air_action_seen
             and expected_has_action
         ):
+            if is_targeted_read_only_route(body):
+                self.tolerated_late_targeted_reads += 1
+                if self.tolerated_late_targeted_reads <= MAX_TOLERATED_LATE_TARGETED_READS:
+                    return None
             self.late_action_routes += 1
             if self.late_action_routes < MAX_LATE_ACTION_ROUTES:
                 return None
@@ -302,10 +309,41 @@ def run_with_relay(args: argparse.Namespace) -> None:
             f"[code-agent-relay] running: {shlex.join(child_command)}",
             flush=True,
         )
-        completed = subprocess.run(child_command, env=env, cwd=repo_root())
-        raise SystemExit(completed.returncode)
+        raise SystemExit(
+            run_child(
+                child_command,
+                env=env,
+                cwd=repo_root(),
+                stop_when=relay.rate_limit_message,
+            )
+        )
     finally:
         relay.stop()
+
+
+def run_child(
+    command: list[str],
+    *,
+    env: dict[str, str],
+    cwd: Path,
+    stop_when: Callable[[], str | None] | None = None,
+) -> int:
+    process = subprocess.Popen(command, env=env, cwd=cwd)
+    while True:
+        returncode = process.poll()
+        if returncode is not None:
+            if stop_when:
+                stop_reason = stop_when()
+                if stop_reason:
+                    raise SystemExit(stop_reason)
+            return int(returncode)
+        if stop_when:
+            stop_reason = stop_when()
+            if stop_reason:
+                process.kill()
+                process.wait()
+                raise SystemExit(stop_reason)
+        time.sleep(1)
 
 
 def build_relay(args: argparse.Namespace, cassette: list[CapturedCall]) -> "ReplayRelay":
@@ -345,6 +383,7 @@ class ReplayRelay:
         self.base_url = ""
         self.monitor = RouteMonitor(monitor_reference) if monitor_reference else None
         self.path_rewrites = path_rewrites or []
+        self.rate_limit_stop: dict[str, Any] | None = None
 
     def start(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -394,6 +433,14 @@ class ReplayRelay:
                 request_log["cassette_shape"],
             )
         self.write_json("http-request", request_log)
+        if self.rate_limit_stop:
+            self.send_json_error(
+                handler,
+                429,
+                "relay stopped after upstream HTTP 429",
+                call_index,
+            )
+            return
 
         if call_index < self.replay_until:
             self.replay_response(handler, call_index)
@@ -487,6 +534,7 @@ class ReplayRelay:
                 self.write_forward_response(call_index, target_url, response.status, response.headers, response_body)
         except urllib.error.HTTPError as error:
             response_body = error.read()
+            self.record_rate_limit(call_index, target_url, error.code, response_body)
             self.send_response(handler, error.code, dict(error.headers.items()), response_body)
             self.write_forward_response(call_index, target_url, error.code, error.headers, response_body)
         except urllib.error.URLError as error:
@@ -558,6 +606,29 @@ class ReplayRelay:
         )
         if stop_reason:
             print(f"[code-agent-relay] route divergence detected: {stop_reason['message']}", flush=True)
+
+    def record_rate_limit(
+        self, call_index: int, target_url: str, status: int, body: bytes
+    ) -> None:
+        if status != 429 or self.rate_limit_stop:
+            return
+        self.rate_limit_stop = {
+            "kind": "upstream_rate_limited",
+            "call_index": call_index,
+            "url": target_url,
+            "status": status,
+            "body": parse_json_bytes(body),
+        }
+        print(
+            f"[code-agent-relay] upstream returned HTTP 429 at model call {call_index}; stopping",
+            flush=True,
+        )
+
+    def rate_limit_message(self) -> str | None:
+        if not self.rate_limit_stop:
+            return None
+        call_index = self.rate_limit_stop.get("call_index")
+        return f"upstream returned HTTP 429 at model call {call_index}; stopping run"
 
     def send_json_error(
         self,
@@ -943,9 +1014,51 @@ def route_body_tool_signature(body: Any) -> list[str]:
     return route_relevant_tools(body_tool_signature(body))
 
 
+def route_body_tool_calls(body: Any) -> list[dict[str, Any]]:
+    response = assistant_response(body)
+    calls = []
+    for tool_call in response.get("tool_calls") or []:
+        name = tool_call.get("name")
+        if not name or name in {"todowrite", "todoread"}:
+            continue
+        calls.append(tool_call)
+    return calls
+
+
 def route_relevant_tools(tools: list[str]) -> list[str]:
     ignored = {"todowrite", "todoread"}
     return [tool for tool in tools if tool not in ignored]
+
+
+def is_targeted_read_only_route(body: Any) -> bool:
+    calls = route_body_tool_calls(body)
+    if len(calls) != 1 or calls[0].get("name") != "read":
+        return False
+    arguments = parse_tool_arguments(calls[0].get("arguments"))
+    if not isinstance(arguments, dict):
+        return False
+    if not any(arguments.get(key) for key in ("filePath", "path")):
+        return False
+    return any(
+        key in arguments
+        for key in (
+            "offset",
+            "limit",
+            "start_line",
+            "end_line",
+            "startLine",
+            "endLine",
+        )
+    )
+
+
+def parse_tool_arguments(arguments: Any) -> Any:
+    if isinstance(arguments, str):
+        try:
+            return json.loads(arguments)
+        except json.JSONDecodeError:
+            return None
+    return arguments
 
 
 def route_has_action(tools: list[str]) -> bool:

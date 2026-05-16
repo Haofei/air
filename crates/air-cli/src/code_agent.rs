@@ -296,4 +296,23 @@ mod tests {
             .iter()
             .all(|rule| rule["id"].as_str() != Some("continue-verification-after-tool-update")));
     }
+
+    #[test]
+    fn edit_loop_recognizes_batched_todo_and_bash_verification() {
+        let module = code_edit_loop_module();
+        let rules = module["workflow"]["rules"].as_sequence().unwrap();
+        for id in [
+            "bash-passed-after-patch",
+            "bash-passed-before-patch",
+            "bash-failed",
+        ] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule["id"].as_str() == Some(id))
+                .unwrap();
+            let condition = rule["when"].as_str().unwrap();
+            assert!(condition.contains("observation[0].tool == \"bash\""));
+            assert!(condition.contains("observation[1].tool == \"bash\""));
+        }
+    }
 }

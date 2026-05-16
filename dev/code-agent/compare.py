@@ -24,8 +24,9 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
+sys.dont_write_bytecode = True
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
@@ -175,6 +176,7 @@ class HttpCaptureProxy:
             if reference_cassette
             else None
         )
+        self.rate_limit_stop: dict[str, Any] | None = None
 
     def start(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -229,6 +231,9 @@ class HttpCaptureProxy:
             json.dumps(request_log, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+        if self.rate_limit_stop:
+            self.send_rate_limit_stop(handler, call_index, target_url)
+            return
 
         if self.monitor:
             stop_reason = self.monitor.stop_before(call_index)
@@ -268,6 +273,7 @@ class HttpCaptureProxy:
                 )
         except urllib.error.HTTPError as error:
             response_body = error.read()
+            self.record_rate_limit(call_index, target_url, error.code, response_body)
             handler.send_response(error.code)
             for key, value in error.headers.items():
                 if key.lower() in {"content-length", "transfer-encoding", "connection"}:
@@ -344,6 +350,50 @@ class HttpCaptureProxy:
             json.dumps(log, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def record_rate_limit(
+        self, call_index: int, url: str, status: int, body: bytes
+    ) -> None:
+        if status != 429 or self.rate_limit_stop:
+            return
+        parsed_body = parse_json_bytes(body)
+        self.rate_limit_stop = {
+            "kind": "upstream_rate_limited",
+            "call_index": call_index,
+            "url": url,
+            "status": status,
+            "body": parsed_body,
+        }
+        log_step(f"upstream returned HTTP 429 at model call {call_index}; stopping run")
+
+    def rate_limit_message(self) -> str | None:
+        if not self.rate_limit_stop:
+            return None
+        call_index = self.rate_limit_stop.get("call_index")
+        return f"upstream returned HTTP 429 at model call {call_index}; stopping run"
+
+    def send_rate_limit_stop(
+        self,
+        handler: http.server.BaseHTTPRequestHandler,
+        call_index: int,
+        target_url: str,
+    ) -> None:
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "compare stopped after upstream HTTP 429",
+                    "type": "upstream_rate_limited",
+                    "details": self.rate_limit_stop,
+                }
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        handler.send_response(429)
+        handler.send_header("content-type", "application/json")
+        handler.send_header("content-length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        self.write_response_log(call_index, target_url, 429, {}, body)
 
     def send_monitor_stop(
         self,
@@ -559,6 +609,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             stderr=air_stderr,
             timeout=args.timeout_seconds,
             allow_failure=bool(opencode_reference),
+            stop_when=air_proxy.rate_limit_message if air_proxy else None,
         )
     finally:
         if air_proxy:
@@ -703,6 +754,7 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
             stderr=air_stderr,
             timeout=args.timeout_seconds,
             allow_failure=bool(opencode_reference),
+            stop_when=relay.rate_limit_message,
         )
     finally:
         relay.stop()
@@ -809,6 +861,7 @@ def run_opencode_agent(
             stdout=opencode_events,
             stderr=opencode_stderr,
             timeout=args.timeout_seconds,
+            stop_when=opencode_proxy.rate_limit_message if opencode_proxy else None,
         )
         has_raw_request = bool(list(opencode_raw.glob("*provider-request.json")))
         has_http_request = capture_http and bool(list(opencode_http_dir.glob("*http-request.json")))
@@ -1075,16 +1128,20 @@ def analyze_source_opencode(run_dir: Path) -> tuple[dict[str, Any], dict[str, An
 
 
 def source_air_path_rewrites(source_run: Path, air_workdir: Path) -> list[tuple[str, str]]:
+    target = str(air_workdir.resolve())
     summary_path = source_run / "summary.json"
-    if not summary_path.exists():
-        return []
-    summary = read_json(summary_path)
-    run = summary.get("run") if isinstance(summary.get("run"), dict) else {}
-    source_air_workdir = run.get("air_workdir")
+    source_air_workdir = None
+    if summary_path.exists():
+        summary = read_json(summary_path)
+        run = summary.get("run") if isinstance(summary.get("run"), dict) else {}
+        source_air_workdir = run.get("air_workdir")
+    if not isinstance(source_air_workdir, str) or not source_air_workdir:
+        fallback = source_run / "air-work"
+        if fallback.exists():
+            source_air_workdir = str(fallback)
     if not isinstance(source_air_workdir, str) or not source_air_workdir:
         return []
     source = str(Path(source_air_workdir).resolve())
-    target = str(air_workdir.resolve())
     if source == target:
         return []
     return [(source, target)]
@@ -1624,6 +1681,7 @@ def run_checked(
     stderr: Path | None,
     timeout: int,
     allow_failure: bool = False,
+    stop_when: Callable[[], str | None] | None = None,
 ) -> int:
     stdout_handle = stdout.open("w", encoding="utf-8") if stdout else None
     stderr_handle = stderr.open("w", encoding="utf-8") if stderr else None
@@ -1654,6 +1712,12 @@ def run_checked(
                 process.kill()
                 process.wait()
                 raise SystemExit(f"command timed out after {timeout}s: {command_text}")
+            if stop_when:
+                stop_reason = stop_when()
+                if stop_reason:
+                    process.kill()
+                    process.wait()
+                    raise SystemExit(stop_reason)
             if now >= next_heartbeat_at:
                 log_step(f"still running after {elapsed}s: {short_command(command)}")
                 next_heartbeat_at = now + 30
@@ -1665,6 +1729,10 @@ def run_checked(
             stderr_handle.close()
     if process is None:
         return 0
+    if stop_when:
+        stop_reason = stop_when()
+        if stop_reason:
+            raise SystemExit(stop_reason)
     if process.returncode != 0 and not allow_failure:
         raise SystemExit(
             f"command failed with exit {process.returncode}: {command_text}"

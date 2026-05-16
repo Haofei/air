@@ -255,7 +255,7 @@ workflow:
             phase: choose
 
     - id: bash-passed-after-patch
-      when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true
+      when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
       actions:
         - kind: set
           values:
@@ -263,7 +263,7 @@ workflow:
             phase: summarize
 
     - id: bash-passed-before-patch
-      when: phase == "post_act" && patch_applied != true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true
+      when: phase == "post_act" && patch_applied != true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied != true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
       actions:
         - kind: set
           values:
@@ -271,7 +271,7 @@ workflow:
             phase: choose
 
     - id: bash-failed
-      when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.verification == true
+      when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.verification == true || phase == "post_act" && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == false && observation[1].output.verification == true
       actions:
         - kind: set
           values:

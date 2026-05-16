@@ -517,7 +517,7 @@ fn file_search_no_matches_hint(directory: bool, include_glob: Option<&str>) -> S
     } else {
         "No matches in this file."
     };
-    format!("{scope} broaden the pattern/path, inspect the repo file list, or switch to a likely source/test extension instead of repeating the same search.")
+    format!("{scope} broaden the pattern/path, inspect the repo file list, or read a known likely file instead of repeating speculative searches.")
 }
 
 fn file_search_truncation_hint(
@@ -719,29 +719,21 @@ fn search_file_path(
         }
         let line_number = index + 1;
         let before_start = line_number.saturating_sub(context_lines).max(1);
-        let before = (before_start..line_number)
-            .filter_map(|number| {
-                line_json_for_path(&lines, number, effective_max_line_chars, relative_path)
-            })
-            .inspect(|line| {
-                result.any_line_truncated |= line
-                    .get("line_truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-            })
-            .collect::<Vec<_>>();
+        let before = collect_context_lines(
+            &lines,
+            before_start..line_number,
+            effective_max_line_chars,
+            relative_path,
+            result,
+        );
         let after_end = (line_number + context_lines).min(total_lines);
-        let after = ((line_number + 1)..=after_end)
-            .filter_map(|number| {
-                line_json_for_path(&lines, number, effective_max_line_chars, relative_path)
-            })
-            .inspect(|line| {
-                result.any_line_truncated |= line
-                    .get("line_truncated")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(false);
-            })
-            .collect::<Vec<_>>();
+        let after = collect_context_lines(
+            &lines,
+            (line_number + 1)..=after_end,
+            effective_max_line_chars,
+            relative_path,
+            result,
+        );
         let (line, line_truncated) = truncate_line_text(line, effective_max_line_chars);
         result.any_line_truncated |= line_truncated;
         let mut item = json!({
@@ -757,6 +749,24 @@ fn search_file_path(
         result.matches.push(item);
     }
     Ok(())
+}
+
+fn collect_context_lines(
+    lines: &[&str],
+    line_numbers: impl Iterator<Item = usize>,
+    max_line_chars: usize,
+    relative_path: Option<&str>,
+    result: &mut FileSearchResult,
+) -> Vec<Value> {
+    line_numbers
+        .filter_map(|number| line_json_for_path(lines, number, max_line_chars, relative_path))
+        .inspect(|line| {
+            result.any_line_truncated |= line
+                .get("line_truncated")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+        })
+        .collect()
 }
 
 fn file_search_directory_files(

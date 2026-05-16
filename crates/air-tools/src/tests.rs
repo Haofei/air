@@ -4421,6 +4421,52 @@ fn bash_cargo_test_no_run_is_not_completion_verification() {
 }
 
 #[test]
+fn bash_rejects_workspace_mutating_git_commands() {
+    let dir = temp_dir("air-tools-bash-mutating-git");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "git stash && cargo test -p air-tools file_search",
+                "description": "Check whether a test failure is pre-existing"
+            }),
+        )
+        .unwrap_err();
+    assert!(
+        error.to_string().contains("git stash"),
+        "unexpected error: {error}"
+    );
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "git status --short || true",
+                "description": "Inspect workspace status"
+            }),
+        )
+        .unwrap();
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["verification"], json!(false));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn todowrite_records_todos() {
     let dir = temp_dir("air-tools-todowrite");
     let config_path = write_config(

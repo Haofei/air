@@ -2247,6 +2247,11 @@ fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
         })
         .unwrap_or(0);
     lines.push(format!("Found {match_count} matches"));
+    if match_count == 0 {
+        if let Some(hint) = output.get("search_hint").and_then(Value::as_str) {
+            lines.push(hint.to_string());
+        }
+    }
     let Some(matches) = output.get("matches").and_then(Value::as_array) else {
         return;
     };
@@ -3851,6 +3856,38 @@ mod tests {
             "{content}"
         );
         assert!(!content.contains(":0:"), "{content}");
+    }
+
+    #[test]
+    fn native_tool_messages_render_file_search_no_match_hint() {
+        let input = json!({
+            "task": "find helper",
+            "observations": [{
+                "action": "tool_result",
+                "result": [{
+                    "tool": "grep",
+                    "status": "ok",
+                    "input": {
+                        "pattern": "fn test.*file_search"
+                    },
+                    "output": {
+                        "match_count": 0,
+                        "matches": [],
+                        "search_hint": "No matches in the current directory scope. Read a known likely file instead of repeating speculative searches."
+                    }
+                }]
+            }]
+        });
+
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert!(content.contains("Found 0 matches"), "{content}");
+        assert!(
+            content.contains("Read a known likely file instead of repeating speculative searches."),
+            "{content}"
+        );
     }
 
     #[test]
