@@ -1889,21 +1889,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         f"- Empty glob calls: AIR `{diff['empty_glob_calls']['air']}`, OpenCode `{diff['empty_glob_calls']['opencode']}`",
         "",
     ]
-    if "workspace_diff" in report:
-        workspace = report["workspace_diff"]
-        lines.extend(
-            [
-                "## Workspace Diff",
-                "",
-                f"- Same changed files: `{workspace['same_changed_files']}`",
-                f"- Same diff hash: `{workspace['same_diff']}`",
-                f"- AIR changed files: `{workspace['air']['changed_files']}`",
-                f"- OpenCode changed files: `{workspace['opencode']['changed_files']}`",
-                f"- AIR diff bytes: `{workspace['air']['diff_bytes']}`",
-                f"- OpenCode diff bytes: `{workspace['opencode']['diff_bytes']}`",
-                "",
-            ]
-        )
+    lines.extend(_render_workspace_diff_section(report.get("workspace_diff")))
     lines.extend(["## Schema Diffs", ""])
     if diff["schema_diff"]:
         for tool, tool_diff in diff["schema_diff"].items():
@@ -1928,6 +1914,22 @@ def render_markdown(report: dict[str, Any]) -> str:
         ]
     )
     return "\n".join(lines)
+
+
+def _render_workspace_diff_section(workspace_diff: Any) -> list[str]:
+    if not isinstance(workspace_diff, dict):
+        return []
+    return [
+        "## Workspace Diff",
+        "",
+        f"- Same changed files: `{workspace_diff['same_changed_files']}`",
+        f"- Same diff hash: `{workspace_diff['same_diff']}`",
+        f"- AIR changed files: `{workspace_diff['air']['changed_files']}`",
+        f"- OpenCode changed files: `{workspace_diff['opencode']['changed_files']}`",
+        f"- AIR diff bytes: `{workspace_diff['air']['diff_bytes']}`",
+        f"- OpenCode diff bytes: `{workspace_diff['opencode']['diff_bytes']}`",
+        "",
+    ]
 
 
 def copy_workspace(source: Path, target: Path) -> None:
