@@ -3,6 +3,10 @@ use serde_json::{json, Value};
 
 use crate::{json_char_count, optional_bounded_usize_input, optional_threshold_percent_input};
 
+fn context_threshold_chars(max_context_chars: usize, threshold_percent: u64) -> usize {
+    max_context_chars.saturating_mul(threshold_percent as usize) / 100
+}
+
 pub(crate) fn call_context_measure_tool(
     name: &str,
     input: &Value,
@@ -23,7 +27,7 @@ pub(crate) fn call_context_measure_tool(
     let payload = input.get("payload").unwrap_or(input);
     let chars = json_char_count(payload);
     let threshold_chars =
-        effective_max_context_chars.saturating_mul(effective_threshold_percent as usize) / 100;
+        context_threshold_chars(effective_max_context_chars, effective_threshold_percent);
     let should_compact = chars >= threshold_chars;
     let fields = payload
         .as_object()
