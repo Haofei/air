@@ -1918,18 +1918,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "",
     ]
     lines.extend(_render_workspace_diff_section(report.get("workspace_diff")))
-    lines.extend(["## Schema Diffs", ""])
-    if diff["schema_diff"]:
-        for tool, tool_diff in diff["schema_diff"].items():
-            lines.append(f"### `{tool}`")
-            lines.append("")
-            lines.append("```json")
-            lines.append(json.dumps(tool_diff, indent=2, ensure_ascii=False))
-            lines.append("```")
-            lines.append("")
-    else:
-        lines.append("No schema diffs for shared tools.")
-        lines.append("")
+    lines.extend(_render_schema_diffs_section(diff["schema_diff"]))
 
     lines.extend(
         [
@@ -1958,6 +1947,22 @@ def _render_workspace_diff_section(workspace_diff: Any) -> list[str]:
         f"- OpenCode diff bytes: `{workspace_diff['opencode']['diff_bytes']}`",
         "",
     ]
+
+
+def _render_schema_diffs_section(schema_diff: Any) -> list[str]:
+    lines = ["## Schema Diffs", ""]
+    if schema_diff:
+        for tool, tool_diff in schema_diff.items():
+            lines.append(f"### `{tool}`")
+            lines.append("")
+            lines.append("```json")
+            lines.append(json.dumps(tool_diff, indent=2, ensure_ascii=False))
+            lines.append("```")
+            lines.append("")
+    else:
+        lines.append("No schema diffs for shared tools.")
+        lines.append("")
+    return lines
 
 
 def copy_workspace(source: Path, target: Path) -> None:
