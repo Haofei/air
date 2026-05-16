@@ -172,8 +172,8 @@ mod tests {
                 "act",
                 "edit-applied",
                 "write-applied",
-                "apply-patch-applied",
                 "bash-passed-after-patch",
+                "apply-patch-applied",
                 "bash-passed-before-patch",
                 "bash-failed",
                 "complete-needs-verification",
@@ -316,5 +316,17 @@ mod tests {
             assert!(condition.contains("observation[0].tool == \"bash\""));
             assert!(condition.contains("observation[1].tool == \"bash\""));
         }
+
+        let after_patch = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("bash-passed-after-patch"))
+            .unwrap();
+        let condition = after_patch["when"].as_str().unwrap();
+        assert!(condition.contains("observation[0].tool == \"apply_patch\""));
+        assert!(condition.contains("observation[0].output.applied == true"));
+        assert_eq!(
+            after_patch["actions"][0]["values"]["patch_applied"],
+            serde_yaml::Value::Bool(true)
+        );
     }
 }

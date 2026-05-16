@@ -257,6 +257,15 @@ workflow:
             patch_applied: true
             phase: choose
 
+    - id: bash-passed-after-patch
+      when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true || phase == "post_act" && observation[0].tool == "apply_patch" && observation[0].status == "ok" && observation[0].output.applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
+      actions:
+        - kind: set
+          values:
+            patch_applied: true
+            verification_status: passed
+            phase: summarize
+
     - id: apply-patch-applied
       when: phase == "post_act" && observation[0].tool == "apply_patch" && observation[0].status == "ok" && observation[0].output.applied == true
       actions:
@@ -264,14 +273,6 @@ workflow:
           values:
             patch_applied: true
             phase: choose
-
-    - id: bash-passed-after-patch
-      when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
-      actions:
-        - kind: set
-          values:
-            verification_status: passed
-            phase: summarize
 
     - id: bash-passed-before-patch
       when: phase == "post_act" && patch_applied != true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied != true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true

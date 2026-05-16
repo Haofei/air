@@ -629,6 +629,29 @@ def merge_opencode_config_content(
     return json.dumps(config, separators=(",", ":"), ensure_ascii=False)
 
 
+def _build_air_code_agent_command(
+    air_bin: Path,
+    task: str,
+    workdir: Path,
+    model_config: str,
+    tool_config: str,
+    trace_path: Path,
+) -> list[str]:
+    return [
+        str(air_bin),
+        "code",
+        task,
+        "--model-config",
+        str(workdir / model_config),
+        "--tool-config",
+        str(workdir / tool_config),
+        "--trace-out",
+        str(trace_path.relative_to(workdir)),
+        "--trace-raw",
+        "--log",
+    ]
+
+
 def run_and_analyze(args: argparse.Namespace) -> None:
     source_repo = args.repo.resolve()
     run_name = args.name or time.strftime("%Y%m%d-%H%M%S")
@@ -723,19 +746,14 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         air_env["OPENAI_BASE_URL"] = air_proxy.base_url
     try:
         air_returncode = run_checked(
-            [
-                str(air_bin),
-                "code",
-                args.task,
-                "--model-config",
-                str(air_workdir / args.model_config),
-                "--tool-config",
-                str(air_workdir / args.tool_config),
-                "--trace-out",
-                str(air_trace.relative_to(air_workdir)),
-                "--trace-raw",
-                "--log",
-            ],
+            _build_air_code_agent_command(
+                air_bin=air_bin,
+                task=args.task,
+                workdir=air_workdir,
+                model_config=args.model_config,
+                tool_config=args.tool_config,
+                trace_path=air_trace,
+            ),
             cwd=air_workdir,
             env=air_env,
             stdout=air_stdout,
@@ -891,19 +909,14 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
         print(relay_module.render_relay_banner(relay, source_air), flush=True)
         log_step("running AIR code agent through replay relay")
         air_returncode = run_checked(
-            [
-                str(air_bin),
-                "code",
-                task,
-                "--model-config",
-                str(air_workdir / args.model_config),
-                "--tool-config",
-                str(air_workdir / args.tool_config),
-                "--trace-out",
-                str(air_trace.relative_to(air_workdir)),
-                "--trace-raw",
-                "--log",
-            ],
+            _build_air_code_agent_command(
+                air_bin=air_bin,
+                task=task,
+                workdir=air_workdir,
+                model_config=args.model_config,
+                tool_config=args.tool_config,
+                trace_path=air_trace,
+            ),
             cwd=air_workdir,
             env=air_env,
             stdout=air_stdout,
