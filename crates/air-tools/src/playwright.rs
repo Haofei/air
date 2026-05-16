@@ -46,6 +46,18 @@ pub(super) struct PlaywrightPageAuditConfig<'a> {
     pub(super) action_timeout: Option<Duration>,
 }
 
+fn compute_request_timeout(
+    timeout_seconds: Option<u64>,
+    action_timeout: Option<Duration>,
+    default_timeout_seconds: u64,
+) -> Duration {
+    let configured_timeout =
+        Duration::from_secs(timeout_seconds.unwrap_or(default_timeout_seconds));
+    action_timeout
+        .map(|timeout| timeout.min(configured_timeout))
+        .unwrap_or(configured_timeout)
+}
+
 pub(super) fn run_playwright_subprocess(
     name: &str,
     label: &str,
@@ -117,11 +129,8 @@ pub(super) fn call_playwright_page_audit_tool(
 ) -> Result<Value, RuntimeError> {
     let script = canonicalize_tool_path(name, "script_path", config.script_path)?;
     let base = canonicalize_tool_path(name, "base_dir", config.base_dir)?;
-    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(30));
-    let request_timeout = config
-        .action_timeout
-        .map(|timeout| timeout.min(configured_timeout))
-        .unwrap_or(configured_timeout);
+    let request_timeout =
+        compute_request_timeout(config.timeout_seconds, config.action_timeout, 30);
 
     let mut request = Map::new();
     match (
@@ -223,11 +232,8 @@ pub(super) fn call_playwright_search_tool(
 ) -> Result<Value, RuntimeError> {
     let query = required_input_string(name, input, "query")?;
     let script = canonicalize_tool_path(name, "script_path", script_path)?;
-    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(120));
-    let request_timeout = config
-        .action_timeout
-        .map(|timeout| timeout.min(configured_timeout))
-        .unwrap_or(configured_timeout);
+    let request_timeout =
+        compute_request_timeout(config.timeout_seconds, config.action_timeout, 120);
     let mut request = Map::new();
     request.insert("query".to_string(), Value::String(query.to_string()));
     insert_numeric_request_option(
