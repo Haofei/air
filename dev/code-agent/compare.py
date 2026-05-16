@@ -639,6 +639,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     )
 
     opencode_workdir = run_dir / "opencode-work"
+    source_snapshot = WorkspaceSnapshot.capture(source_repo)
     log_step(f"run directory: {run_dir}")
     log_step("preparing AIR workspace")
     if args.air_copy:
@@ -694,6 +695,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             opencode_http_dir=opencode_http_dir,
             capture_http=capture_http,
         )
+        assert_opencode_did_not_modify_source(source_repo, source_snapshot, run_dir)
     else:
         log_step(f"reusing OpenCode reference from {reuse_opencode_from}")
 
@@ -813,6 +815,27 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             shutil.rmtree(air_workdir, ignore_errors=True)
         if reuse_opencode_from is None:
             shutil.rmtree(opencode_workdir, ignore_errors=True)
+
+
+def assert_opencode_did_not_modify_source(
+    source_repo: Path,
+    before: "WorkspaceSnapshot",
+    run_dir: Path,
+) -> None:
+    delta = workspace_delta_summary(source_repo, before)
+    changed_files = delta.get("changed_files") or []
+    if not changed_files:
+        return
+    leak_path = run_dir / "opencode-source-leak.diff"
+    leak_path.write_text(str(delta.get("diff") or ""), encoding="utf-8")
+    preview = ", ".join(changed_files[:8])
+    if len(changed_files) > 8:
+        preview += f", ... ({len(changed_files)} files)"
+    raise SystemExit(
+        "OpenCode modified the source repository while it should have stayed "
+        f"inside the isolated workdir. Changed files: {preview}. "
+        f"Diff saved to {leak_path}."
+    )
 
 
 def replay_air_and_analyze(args: argparse.Namespace) -> None:
