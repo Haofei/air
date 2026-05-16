@@ -148,21 +148,7 @@ pub(super) fn call_apply_patch_tool(
             })
         })
         .collect::<Vec<_>>();
-    let summary = changes
-        .iter()
-        .map(|change| match change.kind {
-            "add" => format!("A {}", change.relative_path),
-            "delete" => format!("D {}", change.relative_path),
-            "move" => format!(
-                "M {}",
-                change
-                    .move_relative_path
-                    .as_deref()
-                    .unwrap_or(change.relative_path.as_str())
-            ),
-            _ => format!("M {}", change.relative_path),
-        })
-        .collect::<Vec<_>>();
+    let summary = build_apply_patch_summary(&changes);
 
     Ok(json!({
         "repo": base.display().to_string(),
@@ -175,7 +161,7 @@ pub(super) fn call_apply_patch_tool(
         "diff": diff,
         "diff_truncated": diff_truncated,
         "diff_bytes": diff_bytes,
-        "output": format!("Success. Updated the following files:\n{}", summary.join("\n")),
+        "output": build_apply_patch_output(&summary),
         "artifacts": [{
             "id": format!("apply-patch:{}", stable_change_id(&summary)),
             "kind": "file_edit",
@@ -261,6 +247,31 @@ fn parse_patch(tool_name: &str, patch_text: &str) -> Result<Vec<PatchHunk>, Runt
         }
     }
     Ok(hunks)
+}
+
+fn build_apply_patch_summary(changes: &[FileChange]) -> Vec<String> {
+    changes
+        .iter()
+        .map(|change| match change.kind {
+            "add" => format!("A {}", change.relative_path),
+            "delete" => format!("D {}", change.relative_path),
+            "move" => format!(
+                "M {}",
+                change
+                    .move_relative_path
+                    .as_deref()
+                    .unwrap_or(change.relative_path.as_str())
+            ),
+            _ => format!("M {}", change.relative_path),
+        })
+        .collect()
+}
+
+fn build_apply_patch_output(summary: &[String]) -> String {
+    format!(
+        "Success. Updated the following files:\n{}",
+        summary.join("\n")
+    )
 }
 
 fn strip_heredoc(text: &str) -> String {
