@@ -4062,11 +4062,71 @@ fn bash_runs_shell_command() {
     let output = tools
         .call_tool(
             "bash",
-            &json!({"command": "printf 'ok\\n'", "description": "Run verification"}),
+            &json!({"command": "true", "description": "Run verification"}),
         )
         .unwrap();
     assert_eq!(output["verification"], json!(true));
     assert_eq!(tools.tool_capability("bash"), Some("code.test"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_search_containing_format_is_not_verification() {
+    let dir = temp_dir("air-tools-bash-format-search");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "printf 'validate_positive_usize(path, &format!(...)\\n'",
+                "description": "Find all max_bytes validation lines"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["verification"], json!(false));
+    assert!(output["reported_exit_status"].is_null());
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "rg -n \"validate_max_bytes\" crates/air-tools/src/lib.rs",
+                "description": "Verify all validate_max_bytes usages"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["verification"], json!(false));
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "true",
+                "description": "Run the fixture test after the edit"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["verification"], json!(true));
     let _ = fs::remove_dir_all(dir);
 }
 

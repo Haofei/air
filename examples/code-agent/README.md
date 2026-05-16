@@ -86,8 +86,10 @@ JSON body under `air-http/` and `opencode-http/`, then forwards the request to
 the real provider. Authorization headers are redacted; request bodies are kept
 intact for shape comparison.
 
-Each copied workspace is committed to an ephemeral baseline before either agent
-runs, so the final diff report only includes files changed by that run even when
+AIR runs in the current repository by default, while OpenCode always runs in an
+isolated copy for comparison. The harness snapshots AIR before it runs and commits
+OpenCode's copy to an ephemeral baseline, so the final diff report only includes
+files changed by that run even when
 the source checkout is dirty.
 
 To analyze existing logs without another model run:

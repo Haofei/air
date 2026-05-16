@@ -924,7 +924,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.timeout_seconds"),
                     *timeout_seconds,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::PlaywrightSearch {
                 script_path,
@@ -1137,7 +1137,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::FileReadMany {
                 base_dir,
@@ -1151,7 +1151,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
             }
             ToolConfig::FileSearch {
@@ -1168,7 +1168,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
                 validate_positive_usize(
                     path,
@@ -1192,7 +1192,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::FileEdit {
                 base_dir,
@@ -1206,7 +1206,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.max_changed_lines"),
@@ -1239,7 +1239,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RepoContext {
                 repo_dir,
@@ -1262,7 +1262,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.context_lines"),
                     *context_lines,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RepoSymbols {
                 repo_dir,
@@ -1277,7 +1277,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_symbols"), *max_symbols)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RepoReferences {
                 repo_dir,
@@ -1300,7 +1300,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.context_lines"),
                     *context_lines,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RustAnalyzerReferences {
                 root_dir,
@@ -1315,7 +1315,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     );
                 }
                 validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RustAnalyzerDiagnostics {
                 root_dir,
@@ -1334,7 +1334,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.max_diagnostics"),
                     *max_diagnostics,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RustAnalyzer {
                 root_dir,
@@ -1355,7 +1355,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.max_diagnostics"),
                     *max_diagnostics,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::ContextMeasure {
                 max_context_chars,
@@ -1395,7 +1395,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.timeout_seconds"),
                     *timeout_seconds,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::CommandRun {
                 cwd,
@@ -1474,7 +1474,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                     &format!("tools.{name}.timeout_seconds"),
                     *timeout_seconds,
                 )?;
-                validate_positive_usize(path, &format!("tools.{name}.max_bytes"), *max_bytes)?;
+                validate_max_bytes(path, name, *max_bytes)?;
             }
         }
     }
@@ -1519,6 +1519,10 @@ fn validate_positive_usize(path: &Path, field: &str, value: Option<usize>) -> Re
         );
     }
     Ok(())
+}
+
+fn validate_max_bytes(path: &Path, name: &str, max_bytes: Option<usize>) -> Result<()> {
+    validate_positive_usize(path, &format!("tools.{name}.max_bytes"), max_bytes)
 }
 
 fn validate_threshold_percent(path: &Path, field: &str, value: Option<u64>) -> Result<()> {
@@ -3683,33 +3687,64 @@ fn echoed_exit_status(log: &str) -> Option<i64> {
 }
 
 fn is_verification_bash_command(command: &str, description: Option<&str>) -> bool {
-    let text = match description {
-        Some(description) => format!("{command}\n{description}").to_ascii_lowercase(),
-        None => command.to_ascii_lowercase(),
-    };
+    let command = command.to_ascii_lowercase();
+    let description = description.unwrap_or_default().to_ascii_lowercase();
+
+    if is_inspection_bash_command(&command) {
+        return false;
+    }
+
+    if description.contains("verification")
+        || description.contains("verify")
+        || description.contains("retest")
+        || (description.contains("run")
+            && ["check", "clippy", "fmt", "format", "lint", "test", "tests"]
+                .iter()
+                .any(|needle| description.contains(needle)))
+    {
+        return true;
+    }
+
     [
-        " test",
-        " test:",
-        "test ",
         "cargo check",
         "cargo clippy",
         "cargo fmt",
         "cargo test",
-        "clippy",
-        "fmt ",
-        "format",
         "go test",
-        "lint",
+        "make check",
+        "make test",
         "npm test",
         "npm run test",
         "pnpm test",
         "pytest",
-        "run verification",
-        "verify",
         "yarn test",
     ]
     .iter()
-    .any(|needle| text.contains(needle))
+    .any(|needle| command.contains(needle))
+}
+
+fn is_inspection_bash_command(command: &str) -> bool {
+    let command = command.trim_start();
+    [
+        "awk ",
+        "cat ",
+        "echo ",
+        "find ",
+        "git diff",
+        "git ls-files",
+        "git show",
+        "git status",
+        "grep ",
+        "head ",
+        "ls ",
+        "printf ",
+        "rg ",
+        "sed ",
+        "tail ",
+        "wc ",
+    ]
+    .iter()
+    .any(|prefix| command.starts_with(prefix))
 }
 
 fn call_todowrite_tool(name: &str, input: &Value) -> Result<Value, RuntimeError> {

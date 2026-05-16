@@ -9,6 +9,7 @@ shape, and writes a machine-readable JSON plus a short Markdown report.
 from __future__ import annotations
 
 import argparse
+import difflib
 import hashlib
 import http.server
 import json
@@ -53,6 +54,11 @@ def main() -> None:
     run_parser.add_argument("--tool-config", default=DEFAULT_TOOL_CONFIG)
     run_parser.add_argument("--air-bin", type=Path, default=None)
     run_parser.add_argument("--build-air", action="store_true")
+    run_parser.add_argument(
+        "--air-copy",
+        action="store_true",
+        help="run AIR in an isolated copy instead of editing --repo directly",
+    )
     run_parser.add_argument(
         "--opencode-command",
         default=default_opencode_command(),
@@ -286,11 +292,21 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     run_dir = (args.out_dir / run_name).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    air_workdir = run_dir / "air-work"
     opencode_workdir = run_dir / "opencode-work"
-    copy_workspace(source_repo, air_workdir)
+    if args.air_copy:
+        air_workdir = run_dir / "air-work"
+        copy_workspace(source_repo, air_workdir)
+        commit_workspace_baseline(air_workdir)
+        air_snapshot = None
+        air_execution = "isolated-copy"
+    else:
+        air_workdir = source_repo
+        air_snapshot = WorkspaceSnapshot.capture(air_workdir)
+        air_execution = "in-place"
+
+    # OpenCode stays isolated. The copy happens before AIR runs so OpenCode does
+    # not see or contribute to AIR's in-place refactor.
     copy_workspace(source_repo, opencode_workdir)
-    commit_workspace_baseline(air_workdir)
     commit_workspace_baseline(opencode_workdir)
 
     env = os.environ.copy()
@@ -395,11 +411,18 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         opencode_http_dir=opencode_http_dir if capture_http else None,
         opencode_events=opencode_events,
     )
-    report["workspace_diff"] = compare_workspace_diffs(air_workdir, opencode_workdir)
+    air_diff = (
+        workspace_delta_summary(air_workdir, air_snapshot)
+        if air_snapshot
+        else workspace_diff_summary(air_workdir)
+    )
+    opencode_diff = workspace_diff_summary(opencode_workdir)
+    report["workspace_diff"] = compare_workspace_diff_summaries(air_diff, opencode_diff)
     report["run"] = {
         "name": run_name,
         "task": args.task,
         "execution_order": "sequential: air then opencode",
+        "air_execution": air_execution,
         "air_workdir": str(air_workdir),
         "opencode_workdir": str(opencode_workdir),
         "air_trace": str(air_trace),
@@ -414,7 +437,8 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     write_report(run_dir, report)
 
     if not args.keep_workdirs:
-        shutil.rmtree(air_workdir, ignore_errors=True)
+        if args.air_copy:
+            shutil.rmtree(air_workdir, ignore_errors=True)
         shutil.rmtree(opencode_workdir, ignore_errors=True)
 
 
@@ -441,9 +465,9 @@ def analyze_existing(args: argparse.Namespace) -> None:
     write_report(report_dir, report)
 
 
-def compare_workspace_diffs(air_workdir: Path, opencode_workdir: Path) -> dict[str, Any]:
-    air = workspace_diff_summary(air_workdir)
-    opencode = workspace_diff_summary(opencode_workdir)
+def compare_workspace_diff_summaries(
+    air: dict[str, Any], opencode: dict[str, Any]
+) -> dict[str, Any]:
     return {
         "same_changed_files": air["changed_files"] == opencode["changed_files"],
         "same_diff": air["diff_sha256"] == opencode["diff_sha256"],
@@ -460,6 +484,131 @@ def workspace_diff_summary(workdir: Path) -> dict[str, Any]:
         "diff_bytes": len(diff.encode("utf-8")),
         "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
     }
+
+
+class WorkspaceSnapshot:
+    def __init__(self, files: dict[str, bytes]):
+        self.files = files
+        self.hashes = {
+            path: hashlib.sha256(content).hexdigest() for path, content in files.items()
+        }
+
+    @classmethod
+    def capture(cls, workdir: Path) -> "WorkspaceSnapshot":
+        files: dict[str, bytes] = {}
+        for path in workspace_file_list(workdir):
+            full_path = workdir / path
+            if not full_path.is_file():
+                continue
+            try:
+                files[path] = full_path.read_bytes()
+            except OSError:
+                continue
+        return cls(files)
+
+
+def workspace_delta_summary(workdir: Path, before: WorkspaceSnapshot) -> dict[str, Any]:
+    after = WorkspaceSnapshot.capture(workdir)
+    changed_files = sorted(
+        path
+        for path in set(before.hashes) | set(after.hashes)
+        if before.hashes.get(path) != after.hashes.get(path)
+    )
+    diff = render_snapshot_diff(before, after, changed_files)
+    return {
+        "changed_files": changed_files,
+        "diff_bytes": len(diff.encode("utf-8")),
+        "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+        "diff": diff,
+    }
+
+
+def workspace_file_list(workdir: Path) -> list[str]:
+    if (workdir / ".git").exists():
+        result = subprocess.run(
+            ["git", "ls-files", "-co", "--exclude-standard", "-z"],
+            cwd=workdir,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        if result.returncode == 0:
+            return [
+                path
+                for path in result.stdout.decode("utf-8", errors="replace").split("\0")
+                if path and not ignored_workspace_path(path)
+            ]
+    paths = []
+    for path in workdir.rglob("*"):
+        if path.is_file():
+            relative = path.relative_to(workdir).as_posix()
+            if not ignored_workspace_path(relative):
+                paths.append(relative)
+    return sorted(paths)
+
+
+def ignored_workspace_path(path: str) -> bool:
+    return path.startswith(
+        (
+            ".git/",
+            ".air/",
+            "target/",
+            "node_modules/",
+            "__pycache__/",
+        )
+    )
+
+
+def render_snapshot_diff(
+    before: WorkspaceSnapshot, after: WorkspaceSnapshot, changed_files: list[str]
+) -> str:
+    hunks: list[str] = []
+    for path in changed_files:
+        old = before.files.get(path)
+        new = after.files.get(path)
+        if old is not None and new is None:
+            old_text = decode_diff_text(old)
+            if old_text is None:
+                hunks.append(f"Binary file deleted: {path}")
+                continue
+            new_lines: list[str] = []
+            old_lines = old_text.splitlines()
+        elif old is None and new is not None:
+            new_text = decode_diff_text(new)
+            if new_text is None:
+                hunks.append(f"Binary file added: {path}")
+                continue
+            old_lines = []
+            new_lines = new_text.splitlines()
+        elif old is not None and new is not None:
+            old_text = decode_diff_text(old)
+            new_text = decode_diff_text(new)
+            if old_text is None or new_text is None:
+                hunks.append(f"Binary file changed: {path}")
+                continue
+            old_lines = old_text.splitlines()
+            new_lines = new_text.splitlines()
+        else:
+            continue
+        hunks.extend(
+            difflib.unified_diff(
+                old_lines,
+                new_lines,
+                fromfile=f"a/{path}",
+                tofile=f"b/{path}",
+                lineterm="",
+            )
+        )
+    return "\n".join(hunks)
+
+
+def decode_diff_text(content: bytes) -> str | None:
+    if b"\0" in content:
+        return None
+    try:
+        return content.decode("utf-8")
+    except UnicodeDecodeError:
+        return content.decode("utf-8", errors="replace")
 
 
 def analyze_pair(
