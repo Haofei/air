@@ -2081,21 +2081,27 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
             NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS,
         ));
     }
+    let end_line = output
+        .get("end_line")
+        .and_then(Value::as_u64)
+        .or_else(|| output.get("total_lines").and_then(Value::as_u64))
+        .unwrap_or(0);
     if output.get("truncated").and_then(Value::as_bool) == Some(true) {
         let max_bytes = output
             .get("max_bytes")
             .and_then(Value::as_u64)
             .unwrap_or(NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS as u64);
-        let end_line = output
-            .get("end_line")
-            .and_then(Value::as_u64)
-            .or_else(|| output.get("total_lines").and_then(Value::as_u64))
-            .unwrap_or(0);
         lines.push(format!(
             "(Output truncated at {max_bytes} bytes. Use 'offset' or a line range to read beyond line {end_line})"
         ));
     } else if let Some(total_lines) = output.get("total_lines").and_then(Value::as_u64) {
-        lines.push(format!("(End of file - total {total_lines} lines)"));
+        if end_line > 0 && total_lines > end_line {
+            lines.push(format!(
+                "(File has more lines. Use 'offset' parameter to read beyond line {end_line})"
+            ));
+        } else {
+            lines.push(format!("(End of file - total {total_lines} lines)"));
+        }
     }
     lines.push("</file>".to_string());
 }
@@ -3429,6 +3435,43 @@ mod tests {
         assert!(!content.contains("\"observations\""));
         assert!(!content.contains("rationale: read file"));
         assert!(content.len() < 70_000, "{content}");
+    }
+
+    #[test]
+    fn native_read_transcript_reports_more_lines_for_bounded_range() {
+        let input = json!({
+            "task": "inspect",
+            "observations": [{
+                "action": "file_read",
+                "requested": [{
+                    "tool": "read",
+                    "input": {"filePath": "src/lib.rs", "offset": 100}
+                }],
+                "result": [{
+                    "tool": "read",
+                    "status": "ok",
+                    "input": {"filePath": "src/lib.rs", "offset": 100},
+                    "output": {
+                        "path": "src/lib.rs",
+                        "content": "00101| fn helper() {}",
+                        "start_line": 101,
+                        "end_line": 300,
+                        "total_lines": 350,
+                        "truncated": false,
+                        "content_format": "line_numbered"
+                    }
+                }]
+            }]
+        });
+
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert!(content.contains("00101| fn helper() {}"), "{content}");
+        assert!(content.contains("File has more lines"), "{content}");
+        assert!(content.contains("beyond line 300"), "{content}");
+        assert!(!content.contains("End of file"), "{content}");
     }
 
     #[test]

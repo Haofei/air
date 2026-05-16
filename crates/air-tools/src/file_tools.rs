@@ -1,6 +1,7 @@
 use super::*;
 
 const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 2000;
+const DEFAULT_OPEN_ENDED_RANGE_LINE_LIMIT: usize = 200;
 
 pub(super) fn call_file_read_tool(
     name: &str,
@@ -59,12 +60,20 @@ pub(super) fn call_file_read_tool(
     let (start_line, end_line) = if explicit_start_line.is_some() || explicit_end_line.is_some() {
         let start = explicit_start_line;
         let end = explicit_end_line.or_else(|| {
-            start.and_then(|start| limit.map(|limit| start.saturating_add(limit).saturating_sub(1)))
+            start.map(|start| {
+                start
+                    .saturating_add(limit.unwrap_or(DEFAULT_OPEN_ENDED_RANGE_LINE_LIMIT))
+                    .saturating_sub(1)
+            })
         });
         (start, end)
     } else if let Some(offset) = offset {
         let start = offset.saturating_add(1);
-        let end = limit.map(|limit| start.saturating_add(limit).saturating_sub(1));
+        let end = Some(
+            start
+                .saturating_add(limit.unwrap_or(DEFAULT_OPEN_ENDED_RANGE_LINE_LIMIT))
+                .saturating_sub(1),
+        );
         (Some(start), end)
     } else if let Some(limit) = limit {
         (Some(1), Some(limit))

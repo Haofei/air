@@ -503,6 +503,76 @@ fn file_read_accepts_opencode_file_path_offset_limit() {
 }
 
 #[test]
+fn file_read_offset_without_limit_uses_bounded_window() {
+    let dir = temp_dir("air-tools-file-read-offset-default-window");
+    let content = (1..=350)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("note.txt"), content).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("read", &json!({"filePath": "note.txt", "offset": 100}))
+        .unwrap();
+
+    assert_eq!(output["start_line"], json!(101));
+    assert_eq!(output["end_line"], json!(300));
+    let content = output["content"].as_str().unwrap();
+    assert!(content.contains("00101| line 101"));
+    assert!(content.contains("00300| line 300"));
+    assert!(!content.contains("00301| line 301"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_start_line_without_limit_uses_bounded_window() {
+    let dir = temp_dir("air-tools-file-read-start-line-default-window");
+    let content = (1..=350)
+        .map(|line| format!("line {line}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("note.txt"), content).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("read", &json!({"filePath": "note.txt", "start_line": 100}))
+        .unwrap();
+
+    assert_eq!(output["start_line"], json!(100));
+    assert_eq!(output["end_line"], json!(299));
+    let content = output["content"].as_str().unwrap();
+    assert!(content.contains("00100| line 100"));
+    assert!(content.contains("00299| line 299"));
+    assert!(!content.contains("00300| line 300"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_read_limits_large_unscoped_reads_to_a_bounded_prefix() {
     let dir = temp_dir("air-tools-file-read-large-unscoped");
     let content = (1..=2200)
