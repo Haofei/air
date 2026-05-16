@@ -10,17 +10,23 @@ pub(super) struct HttpJsonToolConfig<'a> {
     pub action_timeout: Option<Duration>,
 }
 
+fn compute_request_timeout(
+    timeout_seconds: Option<u64>,
+    action_timeout: Option<Duration>,
+) -> Duration {
+    let configured_timeout = Duration::from_secs(timeout_seconds.unwrap_or(30));
+    action_timeout
+        .map(|timeout| timeout.min(configured_timeout))
+        .unwrap_or(configured_timeout)
+}
+
 pub(super) fn call_http_json_tool(
     name: &str,
     input: &Value,
     config: HttpJsonToolConfig<'_>,
 ) -> Result<Value, RuntimeError> {
     let method = config.method.to_ascii_uppercase();
-    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(30));
-    let request_timeout = config
-        .action_timeout
-        .map(|timeout| timeout.min(configured_timeout))
-        .unwrap_or(configured_timeout);
+    let request_timeout = compute_request_timeout(config.timeout_seconds, config.action_timeout);
     let client = reqwest::blocking::Client::builder()
         .timeout(request_timeout)
         .build()
@@ -90,11 +96,7 @@ pub(super) fn call_web_fetch_tool(
             "tool {name} input.url must start with http:// or https://"
         )));
     }
-    let configured_timeout = Duration::from_secs(config.timeout_seconds.unwrap_or(30));
-    let request_timeout = config
-        .action_timeout
-        .map(|timeout| timeout.min(configured_timeout))
-        .unwrap_or(configured_timeout);
+    let request_timeout = compute_request_timeout(config.timeout_seconds, config.action_timeout);
     let client = reqwest::blocking::Client::builder()
         .timeout(request_timeout)
         .build()
