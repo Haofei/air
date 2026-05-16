@@ -1913,7 +1913,7 @@ pub(super) fn call_file_write_tool(
     input: &Value,
     options: FileWriteOptions<'_>,
 ) -> Result<Value, RuntimeError> {
-    let input_path = required_input_string(name, input, "path")?;
+    let input_path = required_path_input(name, input)?;
     let content = required_input_string(name, input, "content")?;
     let content_bytes = content.as_bytes();
     if content_bytes.len() > options.max_bytes {

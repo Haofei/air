@@ -516,7 +516,22 @@ def compare_workspace_diff_summaries(
 
 def workspace_diff_summary(workdir: Path) -> dict[str, Any]:
     diff = capture_stdout(["git", "diff", "--"], workdir)
-    changed_files = capture_stdout(["git", "diff", "--name-only", "--"], workdir).splitlines()
+    tracked_changed = capture_stdout(["git", "diff", "--name-only", "--"], workdir).splitlines()
+    untracked = capture_stdout(
+        ["git", "ls-files", "--others", "--exclude-standard"], workdir
+    ).splitlines()
+    changed_files = sorted(set(tracked_changed) | set(untracked))
+    if untracked:
+        after = WorkspaceSnapshot.capture(workdir)
+        before = WorkspaceSnapshot({})
+        diff = "\n".join(
+            part
+            for part in [
+                diff,
+                render_snapshot_diff(before, after, sorted(untracked)),
+            ]
+            if part
+        )
     return {
         "changed_files": changed_files,
         "diff_bytes": len(diff.encode("utf-8")),
@@ -674,6 +689,9 @@ def load_reused_opencode_summary(run_dir: Path) -> tuple[dict[str, Any], dict[st
     opencode = summary.get("opencode")
     if not isinstance(opencode, dict):
         raise SystemExit(f"Cannot reuse OpenCode results: {summary_path} has no opencode section")
+    opencode_workdir = run_dir / "opencode-work"
+    if opencode_workdir.exists():
+        return opencode, workspace_diff_summary(opencode_workdir)
     workspace = summary.get("workspace_diff") if isinstance(summary.get("workspace_diff"), dict) else {}
     opencode_diff = workspace.get("opencode") if isinstance(workspace.get("opencode"), dict) else None
     if opencode_diff is None:

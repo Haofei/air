@@ -1441,6 +1441,40 @@ fn file_write_writes_inside_configured_base_dir() {
 }
 
 #[test]
+fn file_write_accepts_opencode_file_path_alias() {
+    let dir = temp_dir("air-tools-file-write-file-path");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "write": {
+                  "kind": "file_write",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "create_dirs": true,
+                  "allow_overwrite": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "write",
+            &json!({"filePath": "src/todo_tools.rs", "content": "pub fn todo() {}\n"}),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.join("src/todo_tools.rs")).unwrap(),
+        "pub fn todo() {}\n"
+    );
+    assert_eq!(output["created"], json!(true));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_write_rejects_parent_path_escape() {
     let dir = temp_dir("air-tools-file-write-boundary");
     let config_path = write_config(
