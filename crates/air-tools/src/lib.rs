@@ -742,20 +742,7 @@ impl ConfigTools {
         };
         let path = Path::new(path);
         let snapshot = read_snapshot(name, "input.path", path)?;
-        let total_lines = output
-            .get("total_lines")
-            .and_then(Value::as_u64)
-            .unwrap_or(0) as usize;
-        let start_line = output
-            .get("start_line")
-            .and_then(Value::as_u64)
-            .map(|line| line as usize)
-            .unwrap_or(1);
-        let end_line = output
-            .get("end_line")
-            .and_then(Value::as_u64)
-            .map(|line| line as usize)
-            .unwrap_or(total_lines);
+        let (start_line, end_line) = extract_read_line_range(output);
         if let Some(covered_by) =
             self.covered_read_observation(path, snapshot, start_line, end_line)
         {
@@ -869,6 +856,24 @@ fn append_output_search_hint(output: &mut Value, hint: &str) {
 fn observed_tool_key(generation: u64, name: &str, input: &Value) -> String {
     let input = serde_json::to_string(input).unwrap_or_else(|_| "<unserializable>".to_string());
     format!("{generation}\n{name}\n{input}")
+}
+
+fn extract_read_line_range(output: &Value) -> (usize, usize) {
+    let total_lines = output
+        .get("total_lines")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+    let start_line = output
+        .get("start_line")
+        .and_then(Value::as_u64)
+        .map(|line| line as usize)
+        .unwrap_or(1);
+    let end_line = output
+        .get("end_line")
+        .and_then(Value::as_u64)
+        .map(|line| line as usize)
+        .unwrap_or(total_lines);
+    (start_line, end_line)
 }
 
 fn repeated_read_output(
