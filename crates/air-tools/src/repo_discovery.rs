@@ -358,6 +358,42 @@ fn should_smart_fallback(mode: &str, query: &str) -> bool {
     mode == "fixed" && repo_smart_search_terms(query).len() >= 2
 }
 
+fn ensure_repo_rg_success(
+    name: &str,
+    label: &str,
+    output: &std::process::Output,
+) -> Result<(), RuntimeError> {
+    if !output.status.success() && output.status.code() != Some(1) {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} {label} failed: {}",
+            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
+        )));
+    }
+    Ok(())
+}
+
+fn run_repo_rg_with_smart_fallback(
+    name: &str,
+    repo: &Path,
+    paths: &[String],
+    glob: Option<&str>,
+    requested_mode: &str,
+    query: &str,
+    label: &str,
+) -> Result<(String, String, std::process::Output), RuntimeError> {
+    let mut mode = requested_mode.to_string();
+    let mut effective_query = repo_effective_search_query(&mode, query);
+    let mut output = run_repo_rg(name, repo, paths, glob, &mode, &effective_query, label)?;
+    ensure_repo_rg_success(name, label, &output)?;
+    if output.status.code() == Some(1) && should_smart_fallback(requested_mode, query) {
+        mode = "smart".to_string();
+        effective_query = repo_effective_search_query(&mode, query);
+        output = run_repo_rg(name, repo, paths, glob, &mode, &effective_query, label)?;
+        ensure_repo_rg_success(name, label, &output)?;
+    }
+    Ok((mode, effective_query, output))
+}
+
 fn repo_search_no_matches_hint(
     query: &str,
     glob: Option<&str>,
@@ -392,8 +428,6 @@ pub(crate) fn call_repo_search_tool(
             "tool {name} input.mode must be fixed, regex, or smart"
         )));
     }
-    let mut mode = requested_mode.to_string();
-    let mut effective_query = repo_effective_search_query(&mode, query);
     let effective_max_matches =
         optional_bounded_usize_input(name, input, "max_matches", max_matches)?
             .unwrap_or(max_matches);
@@ -403,40 +437,15 @@ pub(crate) fn call_repo_search_tool(
     if let Some(glob) = glob {
         validate_relative_path_filter(name, glob)?;
     }
-    let mut output = run_repo_rg(
+    let (mode, effective_query, output) = run_repo_rg_with_smart_fallback(
         name,
         &repo,
         &paths,
         glob,
-        &mode,
-        &effective_query,
+        requested_mode,
+        query,
         "repo search",
     )?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} repo search failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    if output.status.code() == Some(1) && should_smart_fallback(requested_mode, query) {
-        mode = "smart".to_string();
-        effective_query = repo_effective_search_query(&mode, query);
-        output = run_repo_rg(
-            name,
-            &repo,
-            &paths,
-            glob,
-            &mode,
-            &effective_query,
-            "repo search",
-        )?;
-        if !output.status.success() && output.status.code() != Some(1) {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} repo search failed: {}",
-                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-            )));
-        }
-    }
     let raw = String::from_utf8_lossy(&output.stdout);
     let mut matches = Vec::new();
     for line in raw.lines().take(effective_max_matches) {
@@ -517,8 +526,6 @@ pub(crate) fn call_repo_context_tool(
             "tool {name} input.mode must be fixed, regex, or smart"
         )));
     }
-    let mut mode = requested_mode.to_string();
-    let mut effective_query = repo_effective_search_query(&mode, query);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
     let paths = repo_tool_paths(name, input, &repo)?;
     let effective_max_matches =
@@ -534,40 +541,15 @@ pub(crate) fn call_repo_context_tool(
     if let Some(glob) = glob {
         validate_relative_path_filter(name, glob)?;
     }
-    let mut output = run_repo_rg(
+    let (mode, effective_query, output) = run_repo_rg_with_smart_fallback(
         name,
         &repo,
         &paths,
         glob,
-        &mode,
-        &effective_query,
+        requested_mode,
+        query,
         "repo context",
     )?;
-    if !output.status.success() && output.status.code() != Some(1) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} repo context failed: {}",
-            provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-        )));
-    }
-    if output.status.code() == Some(1) && should_smart_fallback(requested_mode, query) {
-        mode = "smart".to_string();
-        effective_query = repo_effective_search_query(&mode, query);
-        output = run_repo_rg(
-            name,
-            &repo,
-            &paths,
-            glob,
-            &mode,
-            &effective_query,
-            "repo context",
-        )?;
-        if !output.status.success() && output.status.code() != Some(1) {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} repo context failed: {}",
-                provider_error_snippet(&String::from_utf8_lossy(&output.stderr))
-            )));
-        }
-    }
 
     let raw = String::from_utf8_lossy(&output.stdout);
     let raw_line_count = raw.lines().count();
