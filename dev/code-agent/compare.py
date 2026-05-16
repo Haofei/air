@@ -177,6 +177,7 @@ class HttpCaptureProxy:
             else None
         )
         self.rate_limit_stop: dict[str, Any] | None = None
+        self.provider_error_stop: dict[str, Any] | None = None
 
     def start(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -273,7 +274,7 @@ class HttpCaptureProxy:
                 )
         except urllib.error.HTTPError as error:
             response_body = error.read()
-            self.record_rate_limit(call_index, target_url, error.code, response_body)
+            self.record_terminal_provider_error(call_index, target_url, error.code, response_body)
             handler.send_response(error.code)
             for key, value in error.headers.items():
                 if key.lower() in {"content-length", "transfer-encoding", "connection"}:
@@ -358,26 +359,50 @@ class HttpCaptureProxy:
             encoding="utf-8",
         )
 
-    def record_rate_limit(
+    def record_terminal_provider_error(
         self, call_index: int, url: str, status: int, body: bytes
     ) -> None:
-        if status != 429 or self.rate_limit_stop:
+        if status not in {401, 403, 429}:
             return
         parsed_body = parse_json_bytes(body)
-        self.rate_limit_stop = {
-            "kind": "upstream_rate_limited",
+        kind = "upstream_rate_limited" if status == 429 else "upstream_auth_failed"
+        details = {
+            "kind": kind,
             "call_index": call_index,
             "url": url,
             "status": status,
             "body": parsed_body,
         }
-        log_step(f"upstream returned HTTP 429 at model call {call_index}; stopping run")
+        if not self.provider_error_stop:
+            self.provider_error_stop = details
+        if status == 429 and not self.rate_limit_stop:
+            self.rate_limit_stop = details
+            log_step(f"upstream returned HTTP 429 at model call {call_index}; stopping run")
+        elif status in {401, 403}:
+            log_step(
+                f"upstream returned HTTP {status} at model call {call_index}; "
+                "check OPENAI_API_KEY and OPENAI_BASE_URL"
+            )
 
     def rate_limit_message(self) -> str | None:
         if not self.rate_limit_stop:
             return None
         call_index = self.rate_limit_stop.get("call_index")
         return f"upstream returned HTTP 429 at model call {call_index}; stopping run"
+
+    def provider_error_message(self) -> str | None:
+        if not self.provider_error_stop:
+            return None
+        call_index = self.provider_error_stop.get("call_index")
+        status = self.provider_error_stop.get("status")
+        if status in {401, 403}:
+            return (
+                f"upstream returned HTTP {status} at model call {call_index}; "
+                "check OPENAI_API_KEY and OPENAI_BASE_URL"
+            )
+        if status == 429:
+            return f"upstream returned HTTP 429 at model call {call_index}; stopping run"
+        return f"upstream returned HTTP {status} at model call {call_index}"
 
     def send_rate_limit_stop(
         self,
@@ -921,15 +946,20 @@ def run_opencode_agent(
         if args.opencode_model:
             opencode_cmd.extend(["--model", args.opencode_model])
         opencode_cmd.append(args.task)
-        run_checked(
+        returncode = run_checked(
             opencode_cmd,
             cwd=opencode_workdir,
             env=opencode_env,
             stdout=opencode_events,
             stderr=opencode_stderr,
             timeout=args.timeout_seconds,
+            allow_failure=bool(opencode_proxy),
             stop_when=opencode_proxy.rate_limit_message if opencode_proxy else None,
         )
+        if returncode != 0:
+            if opencode_proxy and opencode_proxy.provider_error_message():
+                raise SystemExit(opencode_proxy.provider_error_message())
+            raise SystemExit(f"OpenCode command failed with exit {returncode}")
         has_raw_request = bool(list(opencode_raw.glob("*provider-request.json")))
         has_http_request = capture_http and bool(list(opencode_http_dir.glob("*http-request.json")))
         if not has_raw_request and not has_http_request:
