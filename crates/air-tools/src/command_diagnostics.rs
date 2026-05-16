@@ -2,6 +2,25 @@
 
 use serde_json::{json, Value};
 
+fn command_run_diagnostic(
+    severity: impl Into<String>,
+    path: impl Into<String>,
+    line: u64,
+    column: u64,
+    message: impl Into<String>,
+    raw: impl Into<String>,
+) -> Value {
+    json!({
+        "source": "command_run",
+        "severity": severity.into(),
+        "path": path.into(),
+        "line": line,
+        "column": column,
+        "message": message.into(),
+        "raw": raw.into()
+    })
+}
+
 pub(crate) fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> Vec<Value> {
     let mut diagnostics = Vec::new();
     let mut pending_rust = None;
@@ -30,30 +49,28 @@ pub(crate) fn extract_command_diagnostics(log: &str, max_diagnostics: usize) -> 
         }
         if let Some(message) = parse_python_exception_line(trimmed) {
             if let Some((path, line_number, raw)) = pending_python_frames.last() {
-                diagnostics.push(json!({
-                    "source": "command_run",
-                    "severity": "error",
-                    "path": path,
-                    "line": line_number,
-                    "column": 1,
-                    "message": message,
-                    "raw": raw
-                }));
+                diagnostics.push(command_run_diagnostic(
+                    "error",
+                    path,
+                    *line_number,
+                    1,
+                    message,
+                    raw,
+                ));
                 pending_python_frames.clear();
                 pending_rust = None;
             }
         }
         if let Some((path, line_number, column)) = parse_rust_location_line(trimmed) {
             if let Some((severity, message, raw)) = pending_rust.take() {
-                diagnostics.push(json!({
-                    "source": "command_run",
-                    "severity": severity,
-                    "path": path,
-                    "line": line_number,
-                    "column": column,
-                    "message": message,
-                    "raw": raw
-                }));
+                diagnostics.push(command_run_diagnostic(
+                    severity,
+                    path,
+                    line_number,
+                    column,
+                    message,
+                    raw,
+                ));
             }
         } else if let Some(diagnostic) = parse_typescript_diagnostic(trimmed)
             .or_else(|| parse_colon_diagnostic(trimmed))
@@ -104,15 +121,14 @@ fn parse_typescript_diagnostic(line: &str) -> Option<Value> {
     let rest = line[close + 1..].trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
     let (severity, message) = split_severity_message(rest)?;
-    Some(json!({
-        "source": "command_run",
-        "severity": severity,
-        "path": path,
-        "line": line_number,
-        "column": column,
-        "message": message,
-        "raw": line
-    }))
+    Some(command_run_diagnostic(
+        severity,
+        path,
+        line_number,
+        column,
+        message,
+        line,
+    ))
 }
 
 fn parse_python_traceback_location(line: &str) -> Option<(String, u64)> {
@@ -167,15 +183,14 @@ fn parse_colon_diagnostic(line: &str) -> Option<Value> {
             continue;
         };
         let path = parts[..index].join(":");
-        return Some(json!({
-            "source": "command_run",
-            "severity": severity,
-            "path": path,
-            "line": line_number,
-            "column": column,
-            "message": message,
-            "raw": line
-        }));
+        return Some(command_run_diagnostic(
+            severity,
+            path,
+            line_number,
+            column,
+            message,
+            line,
+        ));
     }
     None
 }
@@ -205,15 +220,14 @@ fn parse_colon_line_diagnostic(line: &str) -> Option<Value> {
         } else {
             continue;
         };
-        return Some(json!({
-            "source": "command_run",
-            "severity": severity,
-            "path": path,
-            "line": line_number,
-            "column": 1,
-            "message": message,
-            "raw": line
-        }));
+        return Some(command_run_diagnostic(
+            severity,
+            path,
+            line_number,
+            1,
+            message,
+            line,
+        ));
     }
     None
 }
@@ -242,15 +256,14 @@ fn parse_indented_line_column_diagnostic(line: &str, path: &str) -> Option<Value
     let column = column_text.trim().parse::<u64>().ok()?;
     let rest = rest.trim_start();
     let (severity, message) = split_severity_message(rest)?;
-    Some(json!({
-        "source": "command_run",
-        "severity": severity,
-        "path": path,
-        "line": line_number,
-        "column": column,
-        "message": message,
-        "raw": line.trim()
-    }))
+    Some(command_run_diagnostic(
+        severity,
+        path,
+        line_number,
+        column,
+        message,
+        line.trim(),
+    ))
 }
 
 fn split_severity_message(text: &str) -> Option<(String, String)> {
