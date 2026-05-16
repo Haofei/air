@@ -337,6 +337,7 @@ fn compact_file_edit_output_context(object: &Map<String, Value>) -> Value {
         "match_strategy",
         "match_strategies",
         "bytes",
+        "output",
         "diagnostics",
         "post_edit_snippets",
         "files",

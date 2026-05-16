@@ -1930,7 +1930,7 @@ fn input_to_native_tool_messages_with_names(
             tool_messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "content": render_native_tool_message_content(result)
+                "content": render_native_tool_message_content(result, Some(&safe_name))
             }));
         }
         if tool_calls.is_empty() {
@@ -2095,11 +2095,14 @@ fn generated_native_history_tool_call_id(
     format!("call_air_{observation_index}_{result_index}_{name}")
 }
 
-fn render_native_tool_message_content(value: &Value) -> String {
+fn render_native_tool_message_content(value: &Value, exposed_tool_name: Option<&str>) -> String {
     let Some(object) = value.as_object() else {
         return truncate_text(&compact_json(value), 12_000);
     };
-    let tool = object.get("tool").and_then(Value::as_str).unwrap_or("tool");
+    let tool = exposed_tool_name
+        .or_else(|| object.get("_air_tool_name").and_then(Value::as_str))
+        .or_else(|| object.get("tool").and_then(Value::as_str))
+        .unwrap_or("tool");
     let status = object
         .get("status")
         .and_then(Value::as_str)
@@ -2130,7 +2133,8 @@ fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<Str
         "file.read" | "read" => render_file_read_transcript(output, lines),
         "file.read_many" | "read_many" => render_file_read_many_transcript(output, lines),
         "file.search" | "grep" => render_file_search_transcript(output, lines),
-        "file.edit" | "edit" | "apply_patch" => render_file_edit_transcript(output, lines),
+        "apply_patch" => render_apply_patch_transcript(output, lines),
+        "file.edit" | "edit" => render_file_edit_transcript(output, lines),
         "repo.files" | "glob" => render_glob_transcript(output, lines),
         "repo.symbols" => render_symbols_transcript(output, lines),
         "rust_analyzer" | "lsp" => render_lsp_transcript(output, lines),
@@ -2164,6 +2168,14 @@ fn render_file_edit_transcript(output: &Value, lines: &mut Vec<String>) {
             ));
         }
     }
+}
+
+fn render_apply_patch_transcript(output: &Value, lines: &mut Vec<String>) {
+    if let Some(summary) = output.get("output").and_then(Value::as_str) {
+        lines.push(truncate_text(summary, 2_000));
+        return;
+    }
+    render_file_edit_transcript(output, lines);
 }
 
 fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
@@ -3812,6 +3824,70 @@ mod tests {
         assert_eq!(content, "Edit applied successfully.");
         assert!(!content.contains("<content>"), "{content}");
         assert!(!content.contains("fn helper"), "{content}");
+        assert!(!content.contains("diff-line"), "{content}");
+    }
+
+    #[test]
+    fn native_tool_messages_render_apply_patch_updated_files_summary() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "gpt-5.3-codex:high".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let large_diff = "diff-line\n".repeat(5_000);
+        let input = json!({
+            "task": "continue after patch",
+            "observations": [{
+                "action": "tool_batch_dispatch",
+                "assistant": {
+                    "_air_assistant": {"content": ""},
+                    "tool_calls": [{
+                        "tool": "apply_patch",
+                        "input": {"patchText": "*** Begin Patch\n*** End Patch"},
+                        "_air_tool_name": "apply_patch",
+                        "_air_tool_call_id": "call_patch_1"
+                    }]
+                },
+                "requested": [{
+                    "tool": "apply_patch",
+                    "input": {"patchText": "*** Begin Patch\n*** End Patch"},
+                    "_air_tool_name": "apply_patch",
+                    "_air_tool_call_id": "call_patch_1"
+                }],
+                "result": [{
+                    "tool": "apply_patch",
+                    "status": "ok",
+                    "_air_tool_name": "apply_patch",
+                    "_air_tool_call_id": "call_patch_1",
+                    "output": {
+                        "applied": true,
+                        "output": "Success. Updated the following files:\nM crates/air-tools/src/http_tools.rs",
+                        "files": [{"path": "crates/air-tools/src/http_tools.rs"}],
+                        "diff": large_diff
+                    }
+                }]
+            }]
+        });
+
+        let request =
+            build_chat_completion_body(&config, "gpt-5.3-codex:high".to_string(), &input).unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert_eq!(
+            content,
+            "Success. Updated the following files:\nM crates/air-tools/src/http_tools.rs"
+        );
         assert!(!content.contains("diff-line"), "{content}");
     }
 
