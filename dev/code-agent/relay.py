@@ -31,6 +31,7 @@ DEFAULT_SIDE = "air"
 MAX_LATE_ACTION_ROUTES = 2
 MAX_TOLERATED_LATE_TARGETED_INSPECTIONS = 2
 MAX_REFERENCE_EXTRA_MODEL_CALLS = 4
+ACTION_TOOLS = {"apply_patch", "edit", "write"}
 
 
 def main() -> None:
@@ -237,7 +238,7 @@ class RouteMonitor:
                 "expected_tools": route_tool_signature(self.first_reference_action),
                 "actual_tools": actual,
                 "message": (
-                    f"{self.label} reached an edit/write route at call "
+                    f"{self.label} reached an edit route at call "
                     f"{self.first_reference_action.index}, but AIR was still using "
                     f"{actual} at call {call_index}"
                 ),
@@ -779,7 +780,7 @@ def render_inspection(cassette: list[CapturedCall]) -> str:
     ]
     shapes = [request_shape(call.request.get("body")) for call in cassette]
     tool_names = count_response_tool_calls(cassette)
-    first_write = first_tool_call(cassette, {"edit", "write"})
+    first_write = first_tool_call(cassette, ACTION_TOOLS)
     target = infer_target_base_url(cassette) or "(unknown)"
     lines = [
         f"[code-agent-relay] http_dir: {http_dir}",
@@ -914,8 +915,8 @@ def render_divergence_report(
         f"- OpenCode calls: `{len(opencode)}`",
         f"- first tool divergence: `{first_tool or 'none'}`",
         f"- first request-size divergence (>25%): `{first_size or 'none'}`",
-        f"- AIR first edit/write: `{format_action_call(air_action)}`",
-        f"- OpenCode first edit/write: `{format_action_call(opencode_action)}`",
+        f"- AIR first edit action: `{format_action_call(air_action)}`",
+        f"- OpenCode first edit action: `{format_action_call(opencode_action)}`",
         f"- suggested replay: `--from {suggested_from}`",
     ]
     if action_from is not None:
@@ -969,7 +970,7 @@ def first_request_size_divergence(
 def first_action_call(cassette: list[CapturedCall]) -> tuple[int, str] | None:
     for call in cassette:
         for name in response_tool_signature(call):
-            if name in {"edit", "write"}:
+            if name in ACTION_TOOLS:
                 return (call.index, name)
     return None
 
@@ -1050,26 +1051,18 @@ def route_relevant_tools(tools: list[str]) -> list[str]:
 
 def is_targeted_inspection_route(body: Any) -> bool:
     calls = route_body_tool_calls(body)
-    if len(calls) != 1:
+    if not calls or len(calls) > 3:
         return False
-    name = calls[0].get("name")
-    arguments = parse_tool_arguments(calls[0].get("arguments"))
+    return all(is_targeted_inspection_call(call) for call in calls)
+
+
+def is_targeted_inspection_call(call: dict[str, Any]) -> bool:
+    name = call.get("name")
+    arguments = parse_tool_arguments(call.get("arguments"))
     if not isinstance(arguments, dict):
         return False
     if name == "read":
-        if not any(arguments.get(key) for key in ("filePath", "path")):
-            return False
-        return any(
-            key in arguments
-            for key in (
-                "offset",
-                "limit",
-                "start_line",
-                "end_line",
-                "startLine",
-                "endLine",
-            )
-        )
+        return any(arguments.get(key) for key in ("filePath", "path"))
     if name in {"grep", "glob"}:
         return bool(arguments.get("pattern"))
     if name == "bash":
@@ -1088,14 +1081,14 @@ def parse_tool_arguments(arguments: Any) -> Any:
 
 
 def route_has_action(tools: list[str]) -> bool:
-    return any(tool in {"edit", "write"} for tool in tools)
+    return any(tool in ACTION_TOOLS for tool in tools)
 
 
 def tool_route_compatible(expected: list[str], actual: list[str]) -> bool:
     if expected == actual:
         return True
     if not expected:
-        return not any(tool in {"edit", "write"} for tool in actual)
+        return not any(tool in ACTION_TOOLS for tool in actual)
     cursor = 0
     for tool in actual:
         if cursor < len(expected) and tool == expected[cursor]:

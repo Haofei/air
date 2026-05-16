@@ -48,18 +48,35 @@ fn render_search_line(
         .unwrap_or_default();
     let path = value.get("path").and_then(Value::as_str).or(fallback_path);
     if let Some(path) = path {
-        let display_path = display_search_path(path, base_path);
-        if current_path.as_deref() != Some(display_path.as_str()) {
-            if !rendered.is_empty() {
-                rendered.push('\n');
-            }
-            rendered.push_str(&display_path);
-            rendered.push_str(":\n");
-            *current_path = Some(display_path);
-        }
-        rendered.push_str(&format!("  Line {number}: {line}\n"));
+        render_path_header(path, base_path, current_path, rendered);
+        rendered.push_str(&format_search_line(number, line, true));
     } else {
-        rendered.push_str(&format!("Line {number}: {line}\n"));
+        rendered.push_str(&format_search_line(number, line, false));
+    }
+}
+
+fn render_path_header(
+    path: &str,
+    base_path: Option<&Path>,
+    current_path: &mut Option<String>,
+    rendered: &mut String,
+) {
+    let display_path = display_search_path(path, base_path);
+    if current_path.as_deref() != Some(display_path.as_str()) {
+        if !rendered.is_empty() {
+            rendered.push('\n');
+        }
+        rendered.push_str(&display_path);
+        rendered.push_str(":\n");
+        *current_path = Some(display_path);
+    }
+}
+
+fn format_search_line(number: u64, line: &str, indented: bool) -> String {
+    if indented {
+        format!("  Line {number}: {line}\n")
+    } else {
+        format!("Line {number}: {line}\n")
     }
 }
 

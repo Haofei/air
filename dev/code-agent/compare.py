@@ -43,6 +43,7 @@ DEFAULT_MODEL_CONFIG = "examples/bigmodel-openai-compatible.json"
 DEFAULT_TOOL_CONFIG = "examples/code-agent/tools.json"
 DEFAULT_MODIFIED_OPENCODE = Path("/Users/hwang/work/opencode/packages/opencode/src/index.ts")
 DEFAULT_BUN = Path("/Users/hwang/.bun/bin/bun")
+ACTION_TOOLS = {"apply_patch", "edit", "write"}
 
 
 def main() -> None:
@@ -1305,7 +1306,7 @@ def analyze_air(trace_path: Path, stderr_path: Path | None, http_dir: Path | Non
         "first_request": display_requests[0] if display_requests else {},
         "tool_sequence": tool_sequence,
         "tool_counts": count_tools(tool_sequence),
-        "first_edit_tool_index": first_tool_index(tool_sequence, {"edit", "write"}),
+        "first_edit_tool_index": first_tool_index(tool_sequence, ACTION_TOOLS),
         "empty_glob_calls": [
             item for item in tool_sequence if item["tool"] == "glob" and item.get("input") == {}
         ],
@@ -1368,7 +1369,7 @@ def analyze_opencode(raw_dir: Path, events_path: Path | None, http_dir: Path | N
         "first_request": first_request,
         "tool_sequence": tool_sequence,
         "tool_counts": count_tools(tool_sequence),
-        "first_edit_tool_index": first_tool_index(tool_sequence, {"edit", "write"}),
+        "first_edit_tool_index": first_tool_index(tool_sequence, ACTION_TOOLS),
         "empty_glob_calls": [
             item for item in tool_sequence if item["tool"] == "glob" and item.get("input") == {}
         ],
