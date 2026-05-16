@@ -2817,11 +2817,9 @@ fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, Runti
         } => take_last_value(&eval_expr(state, outputs, take_last)?, *max_items),
         Expr::TakeLastWithinBytes {
             take_last_within_bytes,
-            max_items,
             max_bytes,
         } => take_last_within_bytes_value(
             &eval_expr(state, outputs, take_last_within_bytes)?,
-            *max_items,
             *max_bytes,
         ),
         Expr::SplitLines { split_lines } => {
@@ -3414,7 +3412,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 18_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 18_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(rendered.contains("\"files\""), "{rendered}");
@@ -3448,7 +3446,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(
@@ -3460,6 +3458,35 @@ mod tests {
             "{rendered}"
         );
         assert!(rendered.contains("\"glob\""), "{rendered}");
+    }
+
+    #[test]
+    fn take_last_within_bytes_has_no_item_count_cap() {
+        let evidence = Value::Array(
+            (0..20)
+                .map(|index| {
+                    json!({
+                        "action": "tool_result",
+                        "result": [{
+                            "tool": "read",
+                            "status": "ok",
+                            "output": {
+                                "path": format!("src/{index}.rs"),
+                                "content": format!("note-{index}")
+                            }
+                        }]
+                    })
+                })
+                .collect(),
+        );
+
+        let compacted = take_last_within_bytes_value(&evidence, 100_000).unwrap();
+        let items = compacted.as_array().unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert_eq!(items.len(), 20, "{rendered}");
+        assert!(rendered.contains("note-0"), "{rendered}");
+        assert!(rendered.contains("note-19"), "{rendered}");
     }
 
     #[test]
@@ -3494,7 +3521,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(rendered.contains("\"no_matches\":true"), "{rendered}");
@@ -3541,7 +3568,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(
@@ -3584,11 +3611,11 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 90_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 90_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(rendered.contains("\"content\""), "{rendered}");
-        assert!(rendered.contains("[AIR_COMPACTED]"), "{rendered}");
+        assert!(!rendered.contains("[AIR_COMPACTED]"), "{rendered}");
         assert!(
             rendered.len() > 50_000,
             "read observations should preserve roughly OpenCode's 50KB context budget, got {} bytes",
@@ -3622,7 +3649,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(
@@ -3659,7 +3686,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(rendered.contains("\"artifact_refs\""), "{rendered}");
@@ -3697,7 +3724,7 @@ mod tests {
             }]
         }]);
 
-        let compacted = take_last_within_bytes_value(&evidence, 1, 20_000).unwrap();
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
         let rendered = serde_json::to_string(&compacted).unwrap();
 
         assert!(rendered.contains("\"post_edit_snippets\""), "{rendered}");

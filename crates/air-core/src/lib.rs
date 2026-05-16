@@ -195,7 +195,6 @@ pub enum Expr {
     },
     TakeLastWithinBytes {
         take_last_within_bytes: Box<Expr>,
-        max_items: usize,
         max_bytes: usize,
     },
     SplitLines {

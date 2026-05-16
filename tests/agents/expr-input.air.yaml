@@ -64,7 +64,6 @@ workflow:
               recent_notes_budgeted:
                 take_last_within_bytes:
                   ref: notes
-                max_items: 3
                 max_bytes: 16
               changed_files:
                 split_lines:

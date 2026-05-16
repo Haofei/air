@@ -271,7 +271,7 @@ fn file_read_reads_inside_configured_base_dir() {
         .call_tool("file.read", &json!({"path": "note.txt"}))
         .unwrap();
 
-    assert_eq!(output["content"], json!("00001| hello fr"));
+    assert_eq!(output["content"], json!("00001| h"));
     assert_eq!(output["truncated"], json!(true));
     assert_eq!(output["artifacts"][0]["kind"], json!("file_span"));
     assert!(output["artifacts"][0]["id"]
@@ -364,7 +364,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
         )
         .unwrap();
     assert_eq!(output["max_bytes_per_file"], json!(5));
-    assert_eq!(output["files"][0]["content"], json!("00001| abcde"));
+    assert_eq!(output["files"][0]["content"], json!("00001"));
     assert_eq!(output["files"][0]["truncated"], json!(true));
 
     let capped = tools
@@ -374,7 +374,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
         )
         .unwrap();
     assert_eq!(capped["max_bytes_per_file"], json!(12));
-    assert_eq!(capped["files"][0]["content"], json!("00001| abcdefghijkl"));
+    assert_eq!(capped["files"][0]["content"], json!("00001| abcde"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -455,14 +455,14 @@ fn file_read_supports_bounded_per_call_max_bytes() {
     let output = tools
         .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 8}))
         .unwrap();
-    assert_eq!(output["content"], json!("00001| abcdefgh"));
+    assert_eq!(output["content"], json!("00001| a"));
     assert_eq!(output["max_bytes"], json!(8));
     assert_eq!(output["truncated"], json!(true));
 
     let capped = tools
         .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 99}))
         .unwrap();
-    assert_eq!(capped["content"], json!("00001| abcdefghijklmnop"));
+    assert_eq!(capped["content"], json!("00001| abcdefghi"));
     assert_eq!(capped["max_bytes"], json!(16));
     assert_eq!(capped["truncated"], json!(true));
     let _ = fs::remove_dir_all(dir);
@@ -2290,6 +2290,10 @@ fn file_read_truncates_unscoped_large_reads_with_range_hint() {
     assert_eq!(output["unscoped_read"], json!(true));
     assert_eq!(output["bytes"], json!(512));
     assert_eq!(output["content_format"], json!("line_numbered"));
+    assert!(
+        output["content"].as_str().unwrap().len() <= 512,
+        "displayed content should respect max_bytes after line numbers are added"
+    );
     assert!(output["content"]
         .as_str()
         .unwrap()
@@ -4197,6 +4201,74 @@ fn bash_verification_honors_reported_exit_status() {
         output["artifacts"][0]["metadata"]["reported_exit_status"],
         json!(1)
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_verification_honors_decorated_reported_exit_status() {
+    let dir = temp_dir("air-tools-bash-decorated-reported-exit-status");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "false; echo \"---EXIT:$?---\"",
+                "description": "Run verification"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["verification"], json!(true));
+    assert_eq!(output["reported_exit_status"], json!(1));
+    assert_eq!(output["success"], json!(false));
+    assert_eq!(output["status"], json!(1));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_cargo_test_no_run_is_not_completion_verification() {
+    let dir = temp_dir("air-tools-bash-no-run-not-verification");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "cargo test -p air-tools --no-run 2>&1; echo \"EXIT: $?\"",
+                "description": "Run verification"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["verification"], json!(false));
+    assert_eq!(output["reported_exit_status"], Value::Null);
     let _ = fs::remove_dir_all(dir);
 }
 

@@ -861,17 +861,8 @@ impl Verifier {
             }
             air_core::Expr::TakeLastWithinBytes {
                 take_last_within_bytes,
-                max_items,
                 max_bytes,
             } => {
-                if *max_items == 0 {
-                    self.error(
-                        "AIR096",
-                        format!(
-                            "{label} in rule {rule_id} take_last_within_bytes.max_items must be at least 1"
-                        ),
-                    );
-                }
                 if *max_bytes == 0 {
                     self.error(
                         "AIR097",

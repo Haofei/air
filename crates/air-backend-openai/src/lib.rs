@@ -516,8 +516,8 @@ fn build_chat_completion_body(
     model_name: String,
     input: &Value,
 ) -> Result<ChatCompletionBody, RuntimeError> {
-    let opencode_style =
-        model_config.native_tool_calls == Some(true) && is_opencode_code_input(input);
+    let opencode_style = model_config.native_tool_calls == Some(true)
+        && (uses_opencode_prompt(model_config) || is_opencode_code_input(input));
     let request_model_name = if opencode_style {
         model_name.to_ascii_lowercase()
     } else {
@@ -607,6 +607,13 @@ fn resolved_system_prompt(model_config: &OpenAiModelConfig) -> Option<String> {
     Some(prompt.clone())
 }
 
+fn uses_opencode_prompt(model_config: &OpenAiModelConfig) -> bool {
+    model_config
+        .system_prompt
+        .as_deref()
+        .is_some_and(|prompt| prompt.trim() == OPENCODE_QWEN_PROMPT_MARKER)
+}
+
 fn is_opencode_code_input(input: &Value) -> bool {
     let Some(object) = input.as_object() else {
         return false;
@@ -648,8 +655,10 @@ fn opencode_environment_prompt(model_name: &str) -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "unknown".to_string());
+    let exact_model_id = opencode_exact_model_id(model_name);
     [
-        format!("You are powered by the model named {model_name}. The exact model ID is openai-compatible/{model_name}"),
+        String::new(),
+        format!("You are powered by the model named {model_name}. The exact model ID is {exact_model_id}"),
         "Here is some useful information about the environment you are running in:".to_string(),
         "<env>".to_string(),
         format!("  Working directory: {directory}"),
@@ -662,6 +671,20 @@ fn opencode_environment_prompt(model_name: &str) -> String {
         "</files>".to_string(),
     ]
     .join("\n")
+}
+
+fn opencode_exact_model_id(model_name: &str) -> String {
+    if let Ok(prefix) = std::env::var("AIR_OPENCODE_MODEL_ID_PREFIX") {
+        let prefix = prefix.trim().trim_end_matches('/');
+        if !prefix.is_empty() {
+            return format!("{prefix}/{model_name}");
+        }
+    }
+    if model_name.to_ascii_lowercase().starts_with("glm") {
+        format!("zhipuai-coding-plan/{model_name}")
+    } else {
+        format!("openai-compatible/{model_name}")
+    }
 }
 
 fn chat_completion_request_stats(body: &Value, trace_provider_io: bool) -> ModelRequestStats {
@@ -771,14 +794,17 @@ fn attach_native_tool_calls(
         let safe_name = safe_openai_tool_name(&original_name, &mut used_names);
         tool_name_map.insert(safe_name.clone(), original_name.clone());
         let schema = tool_schemas.and_then(|schemas| schemas.get(&original_name));
+        let mut function = json!({
+            "name": safe_name,
+            "description": native_tool_description(&original_name, schema),
+            "parameters": native_tool_parameters(&original_name, schema)
+        });
+        if !opencode_style {
+            function["strict"] = json!(false);
+        }
         tools.push(json!({
             "type": "function",
-            "function": {
-                "name": safe_name,
-                "description": native_tool_description(&original_name, schema),
-                "parameters": native_tool_parameters(&original_name, schema),
-                "strict": false
-            }
+            "function": function
         }));
     }
 
@@ -935,7 +961,7 @@ Git Safety Protocol:
   - Do not commit files that likely contain secrets (.env, credentials.json, etc.). Warn the user if they specifically request to commit those files
   - Draft a concise (1-2 sentences) commit message that focuses on the "why" rather than the "what"
   - Ensure it accurately reflects the changes and their purpose
-3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run the following commands:
+3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following commands:
    - Add relevant untracked files to the staging area.
    - Create the commit with a message
    - Run git status after the commit completes to verify success.
@@ -954,13 +980,13 @@ Use the gh command via the Bash tool for ALL GitHub-related tasks including work
 
 IMPORTANT: When the user asks you to create a pull request, follow these steps carefully:
 
-1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:
+1. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following bash commands in parallel using the Bash tool, in order to understand the current state of the branch since it diverged from the main branch:
    - Run a git status command to see all untracked files
    - Run a git diff command to see both staged and unstaged changes that will be committed
    - Check if the current branch tracks a remote branch and is up to date with the remote, so you know if you need to push to the remote
    - Run a git log command and `git diff [base-branch]...HEAD` to understand the full commit history for the current branch (from the time it diverged from the base branch)
 2. Analyze all changes that will be included in the pull request, making sure to look at all relevant commits (NOT just the latest commit, but ALL commits that will be included in the pull request!!!), and draft a pull request summary
-3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run the following commands in parallel:
+3. You can call multiple tools in a single response. When multiple independent pieces of information are requested and all commands are likely to succeed, run multiple tool calls in parallel for optimal performance. run the following commands in parallel:
    - Create new branch if needed
    - Push to remote with -u flag if needed
    - Create PR using gh pr create with the format below. Use a HEREDOC to pass the body to ensure correct formatting.
@@ -1173,8 +1199,88 @@ Note: LSP servers must be configured for the file type. If no server is availabl
 }
 
 fn opencode_skill_description() -> String {
-    r##"Load a skill to get detailed instructions for a specific task. Skills provide specialized knowledge and step-by-step guidance. Use this when a task matches an available skill's description. Only the listed skills are available."##
-        .to_string()
+    let Some(skills) = opencode_available_skills() else {
+        return r##"Load a skill to get detailed instructions for a specific task. Skills provide specialized knowledge and step-by-step guidance. Use this when a task matches an available skill's description. Only the listed skills are available."##
+            .to_string();
+    };
+    format!(
+        "Load a skill to get detailed instructions for a specific task. Skills provide specialized knowledge and step-by-step guidance. Use this when a task matches an available skill's description. Only the skills listed here are available: {skills}"
+    )
+}
+
+fn opencode_available_skills() -> Option<String> {
+    let home = std::env::var("HOME").ok()?;
+    let skills_dir = Path::new(&home).join(".agents/skills");
+    let entries = fs::read_dir(skills_dir).ok()?;
+    let mut skills = entries
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| opencode_skill_frontmatter(&entry.path().join("SKILL.md")))
+        .collect::<Vec<_>>();
+    if skills.is_empty() {
+        return None;
+    }
+    let preferred_order = [
+        "spade-verify",
+        "spade-tech-design",
+        "zippy-fix",
+        "zippy-commit",
+        "spade",
+        "spade-tasks",
+        "zippy-create-mr",
+        "zippy",
+        "spade-ux-design",
+        "spade-prd",
+        "zeta-coding-standards",
+        "spade-implement",
+        "spade-test-plan",
+        "zippy-review",
+        "zippy-assign-reviewers",
+    ];
+    skills.retain(|(name, _)| preferred_order.contains(&name.as_str()));
+    if skills.is_empty() {
+        return None;
+    }
+    skills.sort_by_key(|(name, _)| {
+        preferred_order
+            .iter()
+            .position(|preferred| preferred == name)
+            .unwrap_or(preferred_order.len())
+    });
+    let mut rendered = String::from("<available_skills>");
+    for (name, description) in skills {
+        rendered.push_str("   <skill>     <name>");
+        rendered.push_str(&name);
+        rendered.push_str("</name>     <description>");
+        rendered.push_str(&description);
+        rendered.push_str("</description>   </skill>");
+    }
+    rendered.push_str(" </available_skills>");
+    Some(rendered)
+}
+
+fn opencode_skill_frontmatter(path: &Path) -> Option<(String, String)> {
+    let text = fs::read_to_string(path).ok()?;
+    let mut lines = text.lines();
+    if lines.next()? != "---" {
+        return None;
+    }
+    let mut name = None;
+    let mut description = None;
+    for line in lines {
+        if line == "---" {
+            break;
+        }
+        let Some((key, value)) = line.split_once(':') else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').to_string();
+        match key.trim() {
+            "name" => name = Some(value),
+            "description" => description = Some(value),
+            _ => {}
+        }
+    }
+    Some((name?, description?))
 }
 
 fn opencode_todowrite_description() -> String {
@@ -1222,6 +1328,7 @@ The assistant used the todo list because:
 3. The assistant inferred that tests and build need to pass by adding "Ensure tests and build succeed" as the final task
 </reasoning>
 </example>
+
 
 <example>
 User: Help me rename the function getCwd to getCurrentWorkingDirectory across my project
@@ -1288,21 +1395,21 @@ The assistant did not use the todo list because this is a single, trivial task t
 </example>
 
 <example>
+User: What does the git status command do?
+Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.
+
+<reasoning>
+The assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.
+</reasoning>
+</example>
+
+<example>
 User: Can you add a comment to the calculateTotal function to explain what it does?
 Assistant: Sure, let me add a comment to the calculateTotal function to explain what it does.
 * Uses the Edit tool to add a comment to the calculateTotal function *
 
 <reasoning>
 The assistant did not use the todo list because this is a single, straightforward task confined to one location in the code. Adding a comment doesn't require tracking multiple steps or systematic organization.
-</reasoning>
-</example>
-
-<example>
-User: What does the git status command do?
-Assistant: The git status command shows the current state of your working directory and staging area. It displays which changes have been staged, which haven't, and which files aren't being tracked by Git. This is a fundamental command for understanding the current state of your repository before making commits.
-
-<reasoning>
-The assistant did not use the todo list because this is an informational request with no actual coding task to complete. The user is simply asking for an explanation, not for the assistant to perform multiple steps or tasks.
 </reasoning>
 </example>
 
@@ -1343,6 +1450,7 @@ The assistant did not use the todo list because this is a single command executi
    - Use clear, descriptive task names
 
 When in doubt, use this tool. Being proactive with task management demonstrates attentiveness and ensures you complete all requirements successfully.
+
 "##
         .to_string()
 }
@@ -1722,29 +1830,39 @@ fn input_to_native_tool_messages_with_names(
             tool_messages.push(json!({
                 "role": "tool",
                 "tool_call_id": call_id,
-                "name": safe_name,
                 "content": render_native_tool_message_content(result)
             }));
         }
         if tool_calls.is_empty() {
             continue;
         }
-        let assistant_content = if opencode_style {
-            Value::String(String::new())
-        } else {
-            observation_assistant_content(observation)
-                .map(Value::String)
-                .unwrap_or(Value::Null)
-        };
-        messages.push(json!({
+        let mut assistant_message = json!({
             "role": "assistant",
-            "content": assistant_content,
+            "content": assistant_message_content(observation, opencode_style),
             "tool_calls": tool_calls
-        }));
+        });
+        if opencode_style {
+            if let Some(reasoning) = observation_assistant_reasoning(observation) {
+                assistant_message["reasoning_content"] = Value::String(reasoning);
+            }
+        }
+        messages.push(assistant_message);
         messages.extend(tool_messages);
     }
 
     Ok(messages)
+}
+
+fn assistant_message_content(observation: &Value, opencode_style: bool) -> Value {
+    if opencode_style {
+        observation_assistant_content_only(observation)
+            .map(Value::String)
+            .unwrap_or_else(|| Value::String(String::new()))
+    } else {
+        observation_assistant_content(observation)
+            .map(Value::String)
+            .unwrap_or(Value::Null)
+    }
 }
 
 fn observation_assistant_content(observation: &Value) -> Option<String> {
@@ -1774,6 +1892,33 @@ fn observation_assistant_content(observation: &Value) -> Option<String> {
             NATIVE_ASSISTANT_HISTORY_MAX_CHARS,
         ))
     }
+}
+
+fn observation_assistant_content_only(observation: &Value) -> Option<String> {
+    assistant_text_from_pointers(
+        observation.get("assistant")?,
+        &["/_air_assistant/content", "/content", "/answer"],
+    )
+}
+
+fn observation_assistant_reasoning(observation: &Value) -> Option<String> {
+    assistant_text_from_pointers(
+        observation.get("assistant")?,
+        &["/_air_assistant/reasoning", "/reasoning"],
+    )
+}
+
+fn assistant_text_from_pointers(assistant: &Value, pointers: &[&str]) -> Option<String> {
+    for pointer in pointers {
+        let Some(text) = assistant.pointer(pointer).and_then(Value::as_str) else {
+            continue;
+        };
+        let text = text.trim();
+        if !text.is_empty() {
+            return Some(truncate_text(text, NATIVE_ASSISTANT_HISTORY_MAX_CHARS));
+        }
+    }
+    None
 }
 
 fn native_history_tool_name(
@@ -1872,7 +2017,12 @@ fn render_native_tool_message_content(value: &Value) -> String {
     if lines.is_empty() {
         lines.push(truncate_text(&compact_json(value), 4_000));
     }
-    truncate_text(&lines.join("\n"), NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS)
+    let transcript = lines.join("\n");
+    if matches!(tool, "file.read" | "read" | "file.read_many" | "read_many") {
+        truncate_tail_text(&transcript, NATIVE_FILE_READ_MESSAGE_MAX_CHARS)
+    } else {
+        truncate_text(&transcript, NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS)
+    }
 }
 
 fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<String>) {
@@ -1917,13 +2067,7 @@ fn render_file_edit_transcript(output: &Value, lines: &mut Vec<String>) {
 }
 
 fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
-    let path = output
-        .get("path")
-        .and_then(Value::as_str)
-        .unwrap_or("unknown");
-    lines.push(format!("<path>{path}</path>"));
-    lines.push("<type>file</type>".to_string());
-    lines.push("<content>".to_string());
+    lines.push("<file>".to_string());
     let content = output
         .get("content_preview")
         .or_else(|| output.get("content"))
@@ -1932,7 +2076,7 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
     if content.is_empty() {
         lines.push(truncate_text(&compact_json(output), 4_000));
     } else {
-        lines.push(truncate_text(
+        lines.push(truncate_tail_text(
             content,
             NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS,
         ));
@@ -1953,7 +2097,7 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
     } else if let Some(total_lines) = output.get("total_lines").and_then(Value::as_u64) {
         lines.push(format!("(End of file - total {total_lines} lines)"));
     }
-    lines.push("</content>".to_string());
+    lines.push("</file>".to_string());
 }
 
 fn render_file_read_many_transcript(output: &Value, lines: &mut Vec<String>) {
@@ -1964,7 +2108,6 @@ fn render_file_read_many_transcript(output: &Value, lines: &mut Vec<String>) {
         ));
         return;
     };
-    lines.push(format!("files: {}", files.len()));
     for file in files.iter().take(8) {
         render_file_read_transcript(file, lines);
     }
@@ -2071,16 +2214,10 @@ fn render_todowrite_transcript(output: &Value, lines: &mut Vec<String>) {
         lines.push(truncate_text(&compact_json(output), 4_000));
         return;
     };
-    for todo in todos {
-        let content = todo.get("content").and_then(Value::as_str).unwrap_or("");
-        let status = todo.get("status").and_then(Value::as_str).unwrap_or("");
-        let priority = todo.get("priority").and_then(Value::as_str).unwrap_or("");
-        if priority.is_empty() {
-            lines.push(format!("- [{status}] {content}"));
-        } else {
-            lines.push(format!("- [{status}] ({priority}) {content}"));
-        }
-    }
+    lines.push(
+        serde_json::to_string_pretty(todos)
+            .unwrap_or_else(|_| serde_json::to_string(todos).unwrap_or_else(|_| "[]".to_string())),
+    );
 }
 
 fn render_file_search_match(
@@ -2189,73 +2326,50 @@ fn compact_observation_history(value: &Value) -> Value {
     let Some(items) = value.as_array() else {
         return compact_model_context_value(value);
     };
-    let mut protected_chars = 0usize;
-    let mut compacted = Vec::with_capacity(items.len());
-    for item in items.iter().rev() {
-        let estimated_chars = compact_json(item).chars().count();
-        if protected_chars <= TOOL_RESULT_PRUNE_PROTECT_CHARS {
-            protected_chars = protected_chars.saturating_add(estimated_chars);
-            compacted.push(item.clone());
-        } else {
-            let item = compact_model_context_value(item);
-            compacted.push(prune_old_observation_tool_results(&item));
-        }
-    }
-    compacted.reverse();
-    Value::Array(compacted)
+    Value::Array(items.iter().map(compact_model_context_value).collect())
 }
 
-const OLD_TOOL_RESULT_CLEARED: &str = "[Old tool result content cleared]";
-const TOOL_RESULT_PRUNE_PROTECT_CHARS: usize = 40_000;
 const NATIVE_ASSISTANT_HISTORY_MAX_CHARS: usize = 16 * 1024;
 const NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
-const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
-
-fn prune_old_observation_tool_results(value: &Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return value.clone();
-    };
-    let mut compact = object.clone();
-    if let Some(results) = object.get("result").and_then(Value::as_array) {
-        compact.insert(
-            "result".to_string(),
-            Value::Array(results.iter().map(prune_old_tool_result_content).collect()),
-        );
-    }
-    Value::Object(compact)
-}
-
-fn prune_old_tool_result_content(value: &Value) -> Value {
-    let Some(object) = value.as_object() else {
-        return value.clone();
-    };
-    let mut compact = Map::new();
-    for field in [
-        "tool",
-        "status",
-        "input",
-        "error",
-        "_air_tool_call_id",
-        "_air_tool_name",
-    ] {
-        if let Some(value) = object.get(field) {
-            compact.insert(field.to_string(), value.clone());
-        }
-    }
-    if object.get("output").is_some() {
-        compact.insert(
-            "output".to_string(),
-            json!({
-                "_air_compacted": true,
-                "message": OLD_TOOL_RESULT_CLEARED,
-            }),
-        );
-    }
-    Value::Object(compact)
-}
+const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 80 * 1024;
+const NATIVE_FILE_READ_MESSAGE_MAX_CHARS: usize = 88 * 1024;
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
     truncate_middle_context_string(text, max_chars, "AIR_COMPACTED")
+}
+
+fn truncate_tail_text(text: &str, max_chars: usize) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return "[AIR_COMPACTED]".to_string();
+    }
+
+    let mut marker = format!("\n[AIR_COMPACTED] {} chars omitted at end\n", total_chars);
+    for _ in 0..4 {
+        let marker_chars = marker.chars().count();
+        if marker_chars >= max_chars {
+            return "[AIR_COMPACTED]".chars().take(max_chars).collect();
+        }
+        let keep_chars = max_chars - marker_chars;
+        let omitted_chars = total_chars.saturating_sub(keep_chars);
+        let next_marker = format!("\n[AIR_COMPACTED] {omitted_chars} chars omitted at end\n");
+        if next_marker == marker {
+            let prefix = text.chars().take(keep_chars).collect::<String>();
+            return format!("{prefix}{marker}");
+        }
+        marker = next_marker;
+    }
+
+    let marker_chars = marker.chars().count();
+    if marker_chars >= max_chars {
+        return "[AIR_COMPACTED]".chars().take(max_chars).collect();
+    }
+    let keep_chars = max_chars - marker_chars;
+    let prefix = text.chars().take(keep_chars).collect::<String>();
+    format!("{prefix}{marker}")
 }
 
 fn parse_chat_completion_content(
@@ -3092,7 +3206,7 @@ mod tests {
             model_env: None,
             temperature: None,
             request_timeout_seconds: None,
-            system_prompt: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
             json_mode: None,
             response_format: None,
             extra_body: None,
@@ -3110,7 +3224,13 @@ mod tests {
         )
         .unwrap();
 
-        let properties = &request.body["tools"][0]["function"]["parameters"]["properties"];
+        let read_tool = request.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "read")
+            .unwrap();
+        let properties = &read_tool["function"]["parameters"]["properties"];
         assert!(properties.get("filePath").is_some());
         assert!(properties.get("offset").is_some());
         assert!(properties.get("limit").is_some());
@@ -3118,8 +3238,84 @@ mod tests {
         assert!(properties.get("end_line").is_none());
         assert!(properties.get("repeat_reason").is_none());
         assert_eq!(
-            request.body["tools"][0]["function"]["parameters"]["additionalProperties"],
+            read_tool["function"]["parameters"]["additionalProperties"],
             json!(false)
+        );
+        assert!(
+            read_tool["function"].get("strict").is_none(),
+            "OpenCode-style tool schemas should not include the OpenAI strict extension"
+        );
+    }
+
+    #[test]
+    fn native_opencode_history_replays_assistant_reasoning_and_content() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let input = json!({
+            "task": "edit the helper",
+            "allowed_tools": ["edit"],
+            "observations": [{
+                "action": "tool_result",
+                "assistant": {
+                    "_air_assistant": {
+                        "reasoning": "I found the exact helper and can patch it now.",
+                        "content": "I'll apply the local edit."
+                    },
+                    "tool_calls": [{
+                        "tool": "edit",
+                        "input": {
+                            "filePath": "src/lib.rs",
+                            "oldString": "old",
+                            "newString": "new"
+                        },
+                        "_air_tool_name": "edit",
+                        "_air_tool_call_id": "call_edit_1"
+                    }]
+                },
+                "requested": [{
+                    "tool": "edit",
+                    "input": {
+                        "filePath": "src/lib.rs",
+                        "oldString": "old",
+                        "newString": "new"
+                    },
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_edit_1"
+                }],
+                "result": [{
+                    "tool": "edit",
+                    "status": "ok",
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_edit_1",
+                    "output": {"applied": true}
+                }]
+            }]
+        });
+
+        let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+        let assistant = messages
+            .iter()
+            .find(|message| message.get("role").and_then(Value::as_str) == Some("assistant"))
+            .unwrap();
+
+        assert_eq!(assistant["content"], json!("I'll apply the local edit."));
+        assert_eq!(
+            assistant["reasoning_content"],
+            json!("I found the exact helper and can patch it now.")
         );
     }
 
@@ -3193,16 +3389,17 @@ mod tests {
         assert_eq!(messages[0]["role"], json!("user"));
         assert_eq!(messages[0]["content"], json!("inspect"));
         assert_eq!(messages[1]["role"], json!("assistant"));
-        assert_eq!(
-            messages[1]["content"],
-            json!("Need the current implementation before editing.\n\nI will inspect the narrow target file first."),
-            "native replay should preserve assistant reasoning/text so the next call does not rediscover prior conclusions"
+        assert!(
+            messages[1]["content"]
+                .as_str()
+                .is_some_and(|content| content.contains("I will inspect the narrow target file first.")),
+            "native replay should preserve assistant text so the next call does not rediscover prior conclusions"
         );
         assert!(
             serde_json::to_string(&request.body)
                 .unwrap()
-                .contains("Need the current implementation before editing."),
-            "native replay should include prior reasoning/prose like OpenCode session history"
+                .contains("I will inspect the narrow target file first."),
+            "native replay should include prior assistant prose like OpenCode session history"
         );
         assert_eq!(
             messages[1]["tool_calls"][0]["function"]["name"],
@@ -3213,13 +3410,13 @@ mod tests {
             json!("call_original_123")
         );
         assert_eq!(messages[2]["role"], json!("tool"));
-        assert_eq!(messages[2]["name"], json!("file_read"));
+        assert!(messages[2].get("name").is_none());
         assert_eq!(messages[2]["tool_call_id"], json!("call_original_123"));
         let content = messages[2]["content"].as_str().unwrap();
 
-        assert!(content.contains("<content>"), "{content}");
-        assert!(content.contains("<path>src/lib.rs</path>"), "{content}");
-        assert!(content.contains("[AIR_COMPACTED]"));
+        assert!(content.contains("<file>"), "{content}");
+        assert!(content.contains("</file>"), "{content}");
+        assert!(!content.contains("[AIR_COMPACTED]"), "{content}");
         assert!(
             content.len() > 50_000,
             "native read transcript should preserve roughly OpenCode's 50KB read budget, got {} chars",
@@ -3231,7 +3428,7 @@ mod tests {
         assert!(!content.contains("\"recent_tool_results\""));
         assert!(!content.contains("\"observations\""));
         assert!(!content.contains("rationale: read file"));
-        assert!(content.len() < 55_000, "{content}");
+        assert!(content.len() < 70_000, "{content}");
     }
 
     #[test]
@@ -3443,7 +3640,7 @@ mod tests {
         let content = messages[2]["content"].as_str().unwrap();
 
         assert!(content.contains("Found 1 matches"), "{content}");
-        assert!(content.contains("/repo/src/lib.rs:\n"), "{content}");
+        assert!(content.contains("src/lib.rs:\n"), "{content}");
         assert!(
             content.contains("  Line 41: fn required_input_string() {}"),
             "{content}"
@@ -3505,14 +3702,14 @@ mod tests {
             input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
         let content = messages[2]["content"].as_str().unwrap();
 
-        assert!(content.contains("<content>"), "{content}");
+        assert!(content.contains("<file>"), "{content}");
         assert!(content.contains("fn old_helper"), "{content}");
         assert!(content.contains("fn diff_paths"), "{content}");
         assert!(!content.contains("\"tool_transcript\""));
     }
 
     #[test]
-    fn native_tool_messages_prune_old_tool_results_like_opencode() {
+    fn native_tool_messages_preserve_current_run_tool_results_like_opencode() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
@@ -3528,40 +3725,55 @@ mod tests {
             native_tool_calls: Some(true),
             trace_provider_io: None,
         };
-        let old_content = "old-result-".repeat(10_000);
-        let recent_content = "recent-result-".repeat(100);
-        let observations = (0..6)
+        let target_context = "target-context-".repeat(1_000);
+        let todo_content = "todo updated";
+        let observations = (0..2)
             .map(|index| {
-                let content = if index == 5 {
-                    recent_content.clone()
+                if index == 1 {
+                    json!({
+                        "action": "tool_batch_dispatch",
+                        "requested": [{
+                            "tool": "todowrite",
+                            "input": {"todos": [{"content": todo_content, "status": "completed"}]}
+                        }],
+                        "result": [{
+                            "tool": "todowrite",
+                            "status": "ok",
+                            "input": {"todos": [{"content": todo_content, "status": "completed"}]},
+                            "output": {
+                                "todos": [{"content": todo_content, "status": "completed"}]
+                            }
+                        }]
+                    })
                 } else {
-                    old_content.clone()
-                };
-                json!({
-                    "action": "tool_batch_dispatch",
-                    "rationale": format!("turn {index}"),
-                    "requested": [{
-                        "tool": "file.read",
-                        "input": {"path": format!("src/{index}.rs")}
-                    }],
-                    "result": [{
-                        "tool": "file.read",
-                        "status": "ok",
-                        "input": {"path": format!("src/{index}.rs")},
-                        "output": {
-                            "path": format!("src/{index}.rs"),
-                            "content": content
-                        }
-                    }]
-                })
+                    json!({
+                        "action": "tool_batch_dispatch",
+                        "requested": [{
+                            "tool": "file.read",
+                            "input": {"path": "src/lib.rs"}
+                        }],
+                        "result": [{
+                            "tool": "file.read",
+                            "status": "ok",
+                            "input": {"path": "src/lib.rs"},
+                            "output": {
+                                "path": "src/lib.rs",
+                                "content": target_context
+                            }
+                        }]
+                    })
+                }
             })
             .collect::<Vec<_>>();
         let input = json!({
             "task": "inspect",
-            "allowed_tools": ["file.read"],
+            "allowed_tools": ["file.read", "todowrite"],
             "tool_schemas": {
                 "file.read": {
                     "required": {"path": "repo-relative path"}
+                },
+                "todowrite": {
+                    "required": {"todos": "todo list"}
                 }
             },
             "observations": observations
@@ -3577,16 +3789,21 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        assert!(content.contains(OLD_TOOL_RESULT_CLEARED));
         assert!(
-            content.contains("recent-result-"),
-            "recent tool output should remain available"
+            content.contains("target-context-"),
+            "current-run file context should remain available"
         );
         assert!(
-            content.len() < 80_000,
-            "old tool outputs should be pruned from prompt content, got {} chars",
-            content.len()
+            content.contains(todo_content),
+            "recent todo output should remain available"
         );
+        assert!(
+            content.contains("\"status\": \"completed\"")
+                || content.contains("\"status\":\"completed\""),
+            "todo output should be replayed as OpenCode-style JSON, not markdown checkboxes: {content}"
+        );
+        assert!(!content.contains("- [completed]"), "{content}");
+        assert!(!content.contains("Old tool result content cleared"));
     }
 
     #[test]

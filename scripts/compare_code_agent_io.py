@@ -70,6 +70,12 @@ def main() -> None:
     run_parser.add_argument("--opencode-model", default=None)
     run_parser.add_argument("--opencode-agent", default="build")
     run_parser.add_argument(
+        "--reuse-opencode-from",
+        type=Path,
+        default=None,
+        help="reuse the OpenCode section from a previous compare run instead of running OpenCode again",
+    )
+    run_parser.add_argument(
         "--allow-missing-opencode-raw",
         action="store_true",
         help="write a partial report even if OPENCODE_RAW_IO_DIR produced no provider requests",
@@ -291,6 +297,9 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     run_name = args.name or time.strftime("%Y%m%d-%H%M%S")
     run_dir = (args.out_dir / run_name).resolve()
     run_dir.mkdir(parents=True, exist_ok=True)
+    reuse_opencode_from = (
+        args.reuse_opencode_from.resolve() if args.reuse_opencode_from else None
+    )
 
     opencode_workdir = run_dir / "opencode-work"
     if args.air_copy:
@@ -306,8 +315,9 @@ def run_and_analyze(args: argparse.Namespace) -> None:
 
     # OpenCode stays isolated. The copy happens before AIR runs so OpenCode does
     # not see or contribute to AIR's in-place refactor.
-    copy_workspace(source_repo, opencode_workdir)
-    commit_workspace_baseline(opencode_workdir)
+    if reuse_opencode_from is None:
+        copy_workspace(source_repo, opencode_workdir)
+        commit_workspace_baseline(opencode_workdir)
 
     env = os.environ.copy()
     env.update(load_env_file(args.env_file))
@@ -355,91 +365,119 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         if air_proxy:
             air_proxy.stop()
 
-    opencode_raw = run_dir / "opencode-raw"
-    opencode_raw.mkdir(parents=True, exist_ok=True)
-    opencode_events = opencode_workdir / "target/generated/opencode.events.jsonl"
-    opencode_stderr = opencode_workdir / "target/generated/opencode.stderr.log"
-    opencode_events.parent.mkdir(parents=True, exist_ok=True)
-    opencode_env = env.copy()
-    opencode_proxy = None
-    if capture_http:
-        opencode_proxy = HttpCaptureProxy(real_base_url, opencode_http_dir)
-        opencode_proxy.start()
-    try:
-        if opencode_proxy:
-            opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
-                opencode_env.get("OPENCODE_CONFIG_CONTENT"),
-                opencode_proxy.base_url,
-            )
-        opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)
-        opencode_env["OPENCODE_PROJECT_DIR"] = str(opencode_workdir)
-        opencode_env["OPENCODE_PERMISSION"] = json.dumps({"*": "allow"})
-        opencode_cmd = [
-            *shlex.split(args.opencode_command),
-            "run",
-            "--format",
-            "json",
-            "--agent",
-            args.opencode_agent,
-        ]
-        if args.opencode_model:
-            opencode_cmd.extend(["--model", args.opencode_model])
-        opencode_cmd.append(args.task)
-        run_checked(
-            opencode_cmd,
-            cwd=opencode_workdir,
-            env=opencode_env,
-            stdout=opencode_events,
-            stderr=opencode_stderr,
-            timeout=args.timeout_seconds,
+    if reuse_opencode_from:
+        air = analyze_air(
+            air_trace,
+            stderr_path=air_stderr,
+            http_dir=air_http_dir if capture_http else None,
         )
-        if not list(opencode_raw.glob("*provider-request.json")) and not args.allow_missing_opencode_raw:
-            raise SystemExit(
-                "OpenCode produced no *provider-request.json files in "
-                f"{opencode_raw}. Use an OpenCode binary built with OPENCODE_RAW_IO_DIR "
-                "support, or pass --allow-missing-opencode-raw for a partial event-only report."
+        opencode, opencode_diff = load_reused_opencode_summary(reuse_opencode_from)
+        report = {
+            "air": air,
+            "opencode": opencode,
+            "diff": compare_summaries(air, opencode),
+        }
+        opencode_raw = reuse_opencode_from / "opencode-raw"
+        opencode_events = None
+        opencode_stderr = None
+    else:
+        opencode_raw = run_dir / "opencode-raw"
+        opencode_raw.mkdir(parents=True, exist_ok=True)
+        opencode_events = opencode_workdir / "target/generated/opencode.events.jsonl"
+        opencode_stderr = opencode_workdir / "target/generated/opencode.stderr.log"
+        opencode_events.parent.mkdir(parents=True, exist_ok=True)
+        opencode_env = env.copy()
+        opencode_proxy = None
+        if capture_http:
+            opencode_proxy = HttpCaptureProxy(real_base_url, opencode_http_dir)
+            opencode_proxy.start()
+        try:
+            if opencode_proxy:
+                opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
+                    opencode_env.get("OPENCODE_CONFIG_CONTENT"),
+                    opencode_proxy.base_url,
+                )
+            opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)
+            opencode_env["OPENCODE_PROJECT_DIR"] = str(opencode_workdir)
+            opencode_env["OPENCODE_PERMISSION"] = json.dumps({"*": "allow"})
+            opencode_cmd = [
+                *shlex.split(args.opencode_command),
+                "run",
+                "--format",
+                "json",
+                "--agent",
+                args.opencode_agent,
+            ]
+            if args.opencode_model:
+                opencode_cmd.extend(["--model", args.opencode_model])
+            opencode_cmd.append(args.task)
+            run_checked(
+                opencode_cmd,
+                cwd=opencode_workdir,
+                env=opencode_env,
+                stdout=opencode_events,
+                stderr=opencode_stderr,
+                timeout=args.timeout_seconds,
             )
-    finally:
-        if opencode_proxy:
-            opencode_proxy.stop()
+            if (
+                not list(opencode_raw.glob("*provider-request.json"))
+                and not args.allow_missing_opencode_raw
+            ):
+                raise SystemExit(
+                    "OpenCode produced no *provider-request.json files in "
+                    f"{opencode_raw}. Use an OpenCode binary built with OPENCODE_RAW_IO_DIR "
+                    "support, or pass --allow-missing-opencode-raw for a partial event-only report."
+                )
+        finally:
+            if opencode_proxy:
+                opencode_proxy.stop()
 
-    report = analyze_pair(
-        air_trace=air_trace,
-        air_stderr=air_stderr,
-        air_http_dir=air_http_dir if capture_http else None,
-        opencode_raw_dir=opencode_raw,
-        opencode_http_dir=opencode_http_dir if capture_http else None,
-        opencode_events=opencode_events,
-    )
+        report = analyze_pair(
+            air_trace=air_trace,
+            air_stderr=air_stderr,
+            air_http_dir=air_http_dir if capture_http else None,
+            opencode_raw_dir=opencode_raw,
+            opencode_http_dir=opencode_http_dir if capture_http else None,
+            opencode_events=opencode_events,
+        )
+        opencode_diff = workspace_diff_summary(opencode_workdir)
+
     air_diff = (
         workspace_delta_summary(air_workdir, air_snapshot)
         if air_snapshot
         else workspace_diff_summary(air_workdir)
     )
-    opencode_diff = workspace_diff_summary(opencode_workdir)
     report["workspace_diff"] = compare_workspace_diff_summaries(air_diff, opencode_diff)
     report["run"] = {
         "name": run_name,
         "task": args.task,
-        "execution_order": "sequential: air then opencode",
+        "execution_order": "sequential: air then reused opencode"
+        if reuse_opencode_from
+        else "sequential: air then opencode",
         "air_execution": air_execution,
         "air_workdir": str(air_workdir),
-        "opencode_workdir": str(opencode_workdir),
+        "opencode_workdir": None if reuse_opencode_from else str(opencode_workdir),
+        "reuse_opencode_from": str(reuse_opencode_from) if reuse_opencode_from else None,
         "air_trace": str(air_trace),
         "air_http_dir": str(air_http_dir) if capture_http else None,
         "air_stdout": str(air_stdout),
         "air_stderr": str(air_stderr),
         "opencode_raw_dir": str(opencode_raw),
-        "opencode_http_dir": str(opencode_http_dir) if capture_http else None,
-        "opencode_events": str(opencode_events),
-        "opencode_stderr": str(opencode_stderr),
+        "opencode_http_dir": None
+        if reuse_opencode_from
+        else str(opencode_http_dir)
+        if capture_http
+        else None,
+        "opencode_events": str(opencode_events) if opencode_events else None,
+        "opencode_stderr": str(opencode_stderr) if opencode_stderr else None,
     }
     write_report(run_dir, report)
 
     if not args.keep_workdirs:
         if args.air_copy:
             shutil.rmtree(air_workdir, ignore_errors=True)
-        shutil.rmtree(opencode_workdir, ignore_errors=True)
+        if reuse_opencode_from is None:
+            shutil.rmtree(opencode_workdir, ignore_errors=True)
 
 
 def analyze_existing(args: argparse.Namespace) -> None:
@@ -626,6 +664,25 @@ def analyze_pair(
         "opencode": opencode,
         "diff": compare_summaries(air, opencode),
     }
+
+
+def load_reused_opencode_summary(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    summary_path = run_dir / "summary.json"
+    if not summary_path.exists():
+        raise SystemExit(f"Cannot reuse OpenCode results: {summary_path} does not exist")
+    summary = read_json(summary_path)
+    opencode = summary.get("opencode")
+    if not isinstance(opencode, dict):
+        raise SystemExit(f"Cannot reuse OpenCode results: {summary_path} has no opencode section")
+    workspace = summary.get("workspace_diff") if isinstance(summary.get("workspace_diff"), dict) else {}
+    opencode_diff = workspace.get("opencode") if isinstance(workspace.get("opencode"), dict) else None
+    if opencode_diff is None:
+        opencode_diff = {
+            "changed_files": [],
+            "diff_bytes": 0,
+            "diff_sha256": "",
+        }
+    return opencode, opencode_diff
 
 
 def analyze_air(trace_path: Path, stderr_path: Path | None, http_dir: Path | None) -> dict[str, Any]:

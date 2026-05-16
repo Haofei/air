@@ -1,18 +1,12 @@
 use crate::RuntimeError;
 use serde_json::{json, Map, Value};
 
-const OPENCODE_READ_CONTEXT_CHARS: usize = 50 * 1024;
+const OPENCODE_READ_CONTEXT_CHARS: usize = 80 * 1024;
 
 pub fn take_last_within_bytes_value(
     value: &Value,
-    max_items: usize,
     max_bytes: usize,
 ) -> Result<Value, RuntimeError> {
-    if max_items == 0 {
-        return Err(RuntimeError::Provider(
-            "take_last_within_bytes max_items must be at least 1".to_string(),
-        ));
-    }
     if max_bytes == 0 {
         return Err(RuntimeError::Provider(
             "take_last_within_bytes max_bytes must be at least 1".to_string(),
@@ -25,7 +19,7 @@ pub fn take_last_within_bytes_value(
     };
     let mut selected = Vec::new();
     let mut selected_bytes = 0usize;
-    for value in values.iter().rev().take(max_items) {
+    for value in values.iter().rev() {
         let mut candidate = compact_model_context_payload(value, max_bytes);
         let mut candidate_bytes = json_value_size_bytes(&candidate);
         if selected_bytes.saturating_add(candidate_bytes) > max_bytes {
@@ -62,9 +56,13 @@ pub fn compact_model_context_value(value: &Value) -> Value {
         Value::Object(object) if looks_like_observation(object) => {
             compact_observation_context(object)
         }
+        Value::Object(object) if looks_like_assistant_context(object) => {
+            compact_assistant_context(object)
+        }
         Value::Object(object) if looks_like_tool_result(object) => {
             compact_tool_result_context(object)
         }
+        Value::Object(object) if looks_like_todo_item(object) => compact_todo_item_context(object),
         Value::Object(object) if object.get("files").and_then(Value::as_array).is_some() => {
             compact_file_collection_context(object)
         }
@@ -98,6 +96,41 @@ fn looks_like_observation(object: &Map<String, Value>) -> bool {
 
 fn looks_like_tool_result(object: &Map<String, Value>) -> bool {
     object.contains_key("tool") && (object.contains_key("output") || object.contains_key("error"))
+}
+
+fn looks_like_todo_item(object: &Map<String, Value>) -> bool {
+    object.contains_key("content") && object.contains_key("status")
+}
+
+fn compact_todo_item_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in ["id", "content", "status", "priority"] {
+        copy_context_field(&mut compact, object, field);
+    }
+    Value::Object(compact)
+}
+
+fn looks_like_assistant_context(object: &Map<String, Value>) -> bool {
+    object.contains_key("_air_assistant")
+        || object.contains_key("reasoning")
+        || object.contains_key("reasoning_content")
+        || object.contains_key("tool_calls")
+}
+
+fn compact_assistant_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in [
+        "_air_assistant",
+        "reasoning",
+        "reasoning_content",
+        "content",
+        "answer",
+        "complete",
+        "tool_calls",
+    ] {
+        copy_context_field(&mut compact, object, field);
+    }
+    Value::Object(compact)
 }
 
 fn compact_observation_context(object: &Map<String, Value>) -> Value {
@@ -351,12 +384,12 @@ fn compact_file_like_context(object: &Map<String, Value>, max_content_chars: usi
     if let Some(content) = object.get("content").and_then(Value::as_str) {
         compact.insert(
             "content".to_string(),
-            Value::String(compact_model_context_string(content, max_content_chars)),
+            Value::String(compact_file_content_string(content, max_content_chars)),
         );
     } else if let Some(content) = object.get("content_preview").and_then(Value::as_str) {
         compact.insert(
             "content_preview".to_string(),
-            Value::String(compact_model_context_string(content, max_content_chars)),
+            Value::String(compact_file_content_string(content, max_content_chars)),
         );
     }
     Value::Object(compact)
@@ -370,6 +403,44 @@ fn copy_context_field(compact: &mut Map<String, Value>, object: &Map<String, Val
 
 pub fn compact_model_context_string(text: &str, max_chars: usize) -> String {
     truncate_middle_context_string(text, max_chars, "AIR_COMPACTED")
+}
+
+fn compact_file_content_string(text: &str, max_chars: usize) -> String {
+    truncate_tail_context_string(text, max_chars, "AIR_COMPACTED")
+}
+
+fn truncate_tail_context_string(text: &str, max_chars: usize, marker_label: &str) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    if max_chars == 0 {
+        return format!("[{marker_label}]");
+    }
+
+    let mut marker = format!("\n[{marker_label}] {} chars omitted at end\n", total_chars);
+    for _ in 0..4 {
+        let marker_chars = marker.chars().count();
+        if marker_chars >= max_chars {
+            return marker_label_fallback(marker_label, max_chars);
+        }
+        let keep_chars = max_chars - marker_chars;
+        let omitted_chars = total_chars.saturating_sub(keep_chars);
+        let next_marker = format!("\n[{marker_label}] {omitted_chars} chars omitted at end\n");
+        if next_marker == marker {
+            let prefix = text.chars().take(keep_chars).collect::<String>();
+            return format!("{prefix}{marker}");
+        }
+        marker = next_marker;
+    }
+
+    let marker_chars = marker.chars().count();
+    if marker_chars >= max_chars {
+        return marker_label_fallback(marker_label, max_chars);
+    }
+    let keep_chars = max_chars - marker_chars;
+    let prefix = text.chars().take(keep_chars).collect::<String>();
+    format!("{prefix}{marker}")
 }
 
 pub fn truncate_middle_context_string(text: &str, max_chars: usize, marker_label: &str) -> String {

@@ -35,6 +35,8 @@ requires:
 
 policy:
   require_approval: [file.write]
+  max_model_calls: 80
+  max_tool_calls: 500
 
 state:
   phase:
@@ -131,7 +133,7 @@ tools:
 workflow:
   kind: state_machine
   initial: init
-  max_steps: 80
+  max_steps: 220
   rules:
     - id: init
       when: phase == "init"
@@ -176,8 +178,7 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_items: 12
-                max_bytes: 180000
+                max_bytes: 250000
               allowed_tools:
                 literal: [question, bash, read, glob, grep, edit, write, task, webfetch, todowrite, todoread, skill]
           output: decision
@@ -195,7 +196,7 @@ workflow:
           input:
             path: decision.tool_calls
           output: observation
-          max_calls: 16
+          max_calls: 64
           timeout_seconds: 120
           on_error: observe
         - kind: append

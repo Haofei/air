@@ -324,21 +324,12 @@ fn rejects_zero_budget_take_last_within_bytes_expression() {
             take_last_within_bytes: Box::new(air_core::Expr::Ref {
                 reference: "notes".to_string(),
             }),
-            max_items: 0,
             max_bytes: 0,
         },
     );
 
     let report = verify(&module);
 
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "AIR096"),
-        "expected AIR096, got {:?}",
-        report.diagnostics
-    );
     assert!(
         report
             .diagnostics

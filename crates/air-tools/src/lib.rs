@@ -1077,12 +1077,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                         path.display()
                     );
                 }
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
                 if screenshot_dir
                     .as_ref()
                     .is_some_and(|value| value.as_os_str().is_empty())
@@ -1131,12 +1126,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
                 validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::FileReadMany {
@@ -1145,14 +1135,9 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_files,
                 ..
             } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
                 validate_max_bytes(path, name, *max_bytes)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_max_files(path, name, *max_files)?;
             }
             ToolConfig::FileSearch {
                 base_dir,
@@ -1162,14 +1147,9 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_line_chars,
                 ..
             } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
                 validate_max_bytes(path, name, *max_bytes)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
+                validate_max_matches(path, name, *max_matches)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.max_context_lines"),
@@ -1186,12 +1166,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
                 validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::FileEdit {
@@ -1200,12 +1175,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_changed_lines,
                 ..
             } => {
-                if base_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.base_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
                 validate_max_bytes(path, name, *max_bytes)?;
                 validate_positive_usize(
                     path,
@@ -1218,13 +1188,8 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_files,
                 ..
             } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_non_empty_path(path, &format!("tools.{name}.repo_dir"), repo_dir)?;
+                validate_max_files(path, name, *max_files)?;
             }
             ToolConfig::RepoSearch {
                 repo_dir,
@@ -1232,13 +1197,8 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
+                validate_non_empty_path(path, &format!("tools.{name}.repo_dir"), repo_dir)?;
+                validate_max_matches(path, name, *max_matches)?;
                 validate_max_bytes(path, name, *max_bytes)?;
             }
             ToolConfig::RepoContext {
@@ -1249,14 +1209,9 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_non_empty_path(path, &format!("tools.{name}.repo_dir"), repo_dir)?;
+                validate_max_matches(path, name, *max_matches)?;
+                validate_max_files(path, name, *max_files)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.context_lines"),
@@ -1270,12 +1225,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.repo_dir"), repo_dir)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_symbols"), *max_symbols)?;
                 validate_max_bytes(path, name, *max_bytes)?;
             }
@@ -1287,14 +1237,9 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if repo_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.repo_dir must not be empty",
-                        path.display()
-                    );
-                }
-                validate_positive_usize(path, &format!("tools.{name}.max_matches"), *max_matches)?;
-                validate_positive_usize(path, &format!("tools.{name}.max_files"), *max_files)?;
+                validate_non_empty_path(path, &format!("tools.{name}.repo_dir"), repo_dir)?;
+                validate_max_matches(path, name, *max_matches)?;
+                validate_max_files(path, name, *max_files)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.context_lines"),
@@ -1308,12 +1253,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if root_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.root_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.root_dir"), root_dir)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
                 validate_max_bytes(path, name, *max_bytes)?;
             }
@@ -1323,12 +1263,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if root_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.root_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.root_dir"), root_dir)?;
                 validate_positive_usize(
                     path,
                     &format!("tools.{name}.max_diagnostics"),
@@ -1343,12 +1278,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 max_bytes,
                 ..
             } => {
-                if root_dir.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.root_dir must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.root_dir"), root_dir)?;
                 validate_positive_usize(path, &format!("tools.{name}.max_results"), *max_results)?;
                 validate_positive_usize(
                     path,
@@ -1384,12 +1314,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 truncation_direction: _,
                 ..
             } => {
-                if cwd.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.cwd must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.cwd"), cwd)?;
                 validate_positive_u64(
                     path,
                     &format!("tools.{name}.timeout_seconds"),
@@ -1406,12 +1331,7 @@ fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Result<()> {
                 truncation_direction: _,
                 ..
             } => {
-                if cwd.as_os_str().is_empty() {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.cwd must not be empty",
-                        path.display()
-                    );
-                }
+                validate_non_empty_path(path, &format!("tools.{name}.cwd"), cwd)?;
                 for (alias, command) in commands {
                     if alias.trim().is_empty() {
                         anyhow::bail!(
@@ -1525,6 +1445,14 @@ fn validate_max_bytes(path: &Path, name: &str, max_bytes: Option<usize>) -> Resu
     validate_positive_usize(path, &format!("tools.{name}.max_bytes"), max_bytes)
 }
 
+fn validate_max_matches(path: &Path, name: &str, max_matches: Option<usize>) -> Result<()> {
+    validate_positive_usize(path, &format!("tools.{name}.max_matches"), max_matches)
+}
+
+fn validate_max_files(path: &Path, name: &str, max_files: Option<usize>) -> Result<()> {
+    validate_positive_usize(path, &format!("tools.{name}.max_files"), max_files)
+}
+
 fn validate_threshold_percent(path: &Path, field: &str, value: Option<u64>) -> Result<()> {
     if value.is_some_and(|value| value == 0 || value > 100) {
         anyhow::bail!(
@@ -1575,6 +1503,13 @@ fn validate_domain_filters(path: &Path, field: &str, values: Option<&[String]>) 
                 path.display()
             );
         }
+    }
+    Ok(())
+}
+
+fn validate_non_empty_path(path: &Path, field: &str, dir: &Path) -> Result<()> {
+    if dir.as_os_str().is_empty() {
+        anyhow::bail!("tool config {} {field} must not be empty", path.display());
     }
     Ok(())
 }
@@ -3677,13 +3612,38 @@ fn normalize_bash_verification_result(object: &mut Map<String, Value>) {
 fn echoed_exit_status(log: &str) -> Option<i64> {
     log.lines().rev().find_map(|line| {
         let trimmed = line.trim();
-        let value = trimmed
-            .strip_prefix("EXIT:")
-            .or_else(|| trimmed.strip_prefix("exit:"))
-            .or_else(|| trimmed.strip_prefix("exit code:"))?
+        let value = ["EXIT:", "exit:", "exit code:"]
+            .iter()
+            .find_map(|marker| {
+                trimmed
+                    .find(marker)
+                    .map(|index| &trimmed[index + marker.len()..])
+            })?
             .trim();
+        let value = leading_i64_text(value)?;
         value.parse::<i64>().ok()
     })
+}
+
+fn leading_i64_text(value: &str) -> Option<&str> {
+    let value = value
+        .trim_start_matches(|character: char| !(character.is_ascii_digit() || character == '-'));
+    let mut end = 0usize;
+    for (index, character) in value.char_indices() {
+        if index == 0 && character == '-' {
+            end = character.len_utf8();
+            continue;
+        }
+        if !character.is_ascii_digit() {
+            break;
+        }
+        end = index + character.len_utf8();
+    }
+    if end == 0 || value[..end].chars().all(|character| character == '-') {
+        None
+    } else {
+        Some(&value[..end])
+    }
 }
 
 fn is_verification_bash_command(command: &str, description: Option<&str>) -> bool {
@@ -3691,6 +3651,9 @@ fn is_verification_bash_command(command: &str, description: Option<&str>) -> boo
     let description = description.unwrap_or_default().to_ascii_lowercase();
 
     if is_inspection_bash_command(&command) {
+        return false;
+    }
+    if command.contains("--no-run") {
         return false;
     }
 
