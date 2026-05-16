@@ -645,6 +645,12 @@ fn build_chat_completion_body(
 }
 
 fn opencode_reasoning_effort(model_name: &str) -> Option<&str> {
+    if model_name.contains("gpt-5")
+        && !model_name.contains("gpt-5-chat")
+        && !model_name.contains("gpt-5-pro")
+    {
+        return Some("medium");
+    }
     let (_, suffix) = model_name.rsplit_once(':')?;
     match suffix {
         "low" | "medium" | "high" | "xhigh" => Some(suffix),
@@ -3320,7 +3326,7 @@ mod tests {
         assert!(exposed.contains(&"apply_patch".to_string()));
         assert!(!exposed.contains(&"edit".to_string()));
         assert!(!exposed.contains(&"write".to_string()));
-        assert_eq!(request.body["reasoning_effort"], json!("high"));
+        assert_eq!(request.body["reasoning_effort"], json!("medium"));
         let apply_patch = request.body["tools"]
             .as_array()
             .unwrap()
