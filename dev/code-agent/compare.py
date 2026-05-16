@@ -1211,29 +1211,11 @@ def render_snapshot_diff(
     for path in changed_files:
         old = before.files.get(path)
         new = after.files.get(path)
-        if old is not None and new is None:
-            old_text = decode_diff_text(old)
-            if old_text is None:
-                hunks.append(f"Binary file deleted: {path}")
-                continue
-            new_lines: list[str] = []
-            old_lines = old_text.splitlines()
-        elif old is None and new is not None:
-            new_text = decode_diff_text(new)
-            if new_text is None:
-                hunks.append(f"Binary file added: {path}")
-                continue
-            old_lines = []
-            new_lines = new_text.splitlines()
-        elif old is not None and new is not None:
-            old_text = decode_diff_text(old)
-            new_text = decode_diff_text(new)
-            if old_text is None or new_text is None:
-                hunks.append(f"Binary file changed: {path}")
-                continue
-            old_lines = old_text.splitlines()
-            new_lines = new_text.splitlines()
-        else:
+        old_lines, new_lines, binary_kind = _prepare_snapshot_diff_lines(old, new)
+        if binary_kind:
+            hunks.append(f"Binary file {binary_kind}: {path}")
+            continue
+        if old_lines is None or new_lines is None:
             continue
         hunks.extend(
             difflib.unified_diff(
@@ -1245,6 +1227,29 @@ def render_snapshot_diff(
             )
         )
     return "\n".join(hunks)
+
+
+def _prepare_snapshot_diff_lines(
+    old: bytes | None,
+    new: bytes | None,
+) -> tuple[list[str] | None, list[str] | None, str | None]:
+    if old is not None and new is None:
+        old_text = decode_diff_text(old)
+        if old_text is None:
+            return None, None, "deleted"
+        return old_text.splitlines(), [], None
+    if old is None and new is not None:
+        new_text = decode_diff_text(new)
+        if new_text is None:
+            return None, None, "added"
+        return [], new_text.splitlines(), None
+    if old is not None and new is not None:
+        old_text = decode_diff_text(old)
+        new_text = decode_diff_text(new)
+        if old_text is None or new_text is None:
+            return None, None, "changed"
+        return old_text.splitlines(), new_text.splitlines(), None
+    return None, None, None
 
 
 def decode_diff_text(content: bytes) -> str | None:
