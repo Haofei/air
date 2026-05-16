@@ -44,6 +44,7 @@ DEFAULT_TOOL_CONFIG = "examples/code-agent/tools.json"
 DEFAULT_MODIFIED_OPENCODE = Path("/Users/hwang/work/opencode/packages/opencode/src/index.ts")
 DEFAULT_BUN = Path("/Users/hwang/.bun/bin/bun")
 ACTION_TOOLS = {"apply_patch", "edit", "write"}
+MAX_REPEATED_IDENTICAL_TOOL_ROUTES = 5
 
 
 def main() -> None:
@@ -179,6 +180,9 @@ class HttpCaptureProxy:
         )
         self.rate_limit_stop: dict[str, Any] | None = None
         self.provider_error_stop: dict[str, Any] | None = None
+        self.repeated_tool_stop: dict[str, Any] | None = None
+        self._last_tool_route_signature: str | None = None
+        self._same_tool_route_count = 0
 
     def start(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -355,10 +359,52 @@ class HttpCaptureProxy:
             if stop_reason:
                 log["route_monitor"] = stop_reason
                 log_step(f"route divergence detected: {stop_reason['message']}")
+        if status < 400:
+            repeated_stop = self.observe_repeated_tool_route(call_index, parsed_body)
+            if repeated_stop:
+                log["repeated_tool_route_stop"] = repeated_stop
+                log_step(repeated_stop["message"])
         self.next_path("http-response").write_text(
             json.dumps(log, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def observe_repeated_tool_route(
+        self, call_index: int, parsed_body: Any
+    ) -> dict[str, Any] | None:
+        if self.repeated_tool_stop:
+            return self.repeated_tool_stop
+        calls = relay_module.route_body_tool_calls(parsed_body)
+        if len(calls) != 1:
+            self._last_tool_route_signature = None
+            self._same_tool_route_count = 0
+            return None
+        call = calls[0]
+        name = call.get("name")
+        arguments = relay_module.parse_tool_arguments(call.get("arguments"))
+        signature = json.dumps(
+            {"name": name, "arguments": arguments},
+            sort_keys=True,
+            ensure_ascii=False,
+        )
+        if signature == self._last_tool_route_signature:
+            self._same_tool_route_count += 1
+        else:
+            self._last_tool_route_signature = signature
+            self._same_tool_route_count = 1
+        if self._same_tool_route_count < MAX_REPEATED_IDENTICAL_TOOL_ROUTES:
+            return None
+        self.repeated_tool_stop = {
+            "kind": "repeated_identical_tool_route",
+            "call_index": call_index,
+            "tool": name,
+            "repeat_count": self._same_tool_route_count,
+            "message": (
+                f"stopping after {self._same_tool_route_count} consecutive "
+                f"identical {name} tool routes; likely no-progress verification loop"
+            ),
+        }
+        return self.repeated_tool_stop
 
     def record_terminal_provider_error(
         self, call_index: int, url: str, status: int, body: bytes
@@ -404,6 +450,17 @@ class HttpCaptureProxy:
         if status == 429:
             return f"upstream returned HTTP 429 at model call {call_index}; stopping run"
         return f"upstream returned HTTP {status} at model call {call_index}"
+
+    def stop_message(self) -> str | None:
+        return (
+            self.rate_limit_message()
+            or self.provider_error_message()
+            or (
+                str(self.repeated_tool_stop.get("message"))
+                if self.repeated_tool_stop
+                else None
+            )
+        )
 
     def send_rate_limit_stop(
         self,
@@ -683,7 +740,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             stderr=air_stderr,
             timeout=args.timeout_seconds,
             allow_failure=bool(opencode_reference),
-            stop_when=air_proxy.rate_limit_message if air_proxy else None,
+            stop_when=air_proxy.stop_message if air_proxy else None,
         )
     finally:
         if air_proxy:
@@ -955,7 +1012,7 @@ def run_opencode_agent(
             stderr=opencode_stderr,
             timeout=args.timeout_seconds,
             allow_failure=bool(opencode_proxy),
-            stop_when=opencode_proxy.rate_limit_message if opencode_proxy else None,
+            stop_when=opencode_proxy.stop_message if opencode_proxy else None,
         )
         if returncode != 0:
             if opencode_proxy and opencode_proxy.provider_error_message():
