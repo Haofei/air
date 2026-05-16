@@ -933,6 +933,29 @@ fn repeated_search_output(previous: &SearchObservation) -> Value {
     })
 }
 
+fn search_observation_from_output(output: &Value) -> SearchObservation {
+    SearchObservation {
+        path: output
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        pattern: output
+            .get("pattern")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        match_count: output
+            .get("match_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+        returned_match_count: output
+            .get("returned_match_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0),
+    }
+}
+
 impl ToolProvider for ConfigTools {
     fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
         self.call_tool_with_timeout(name, input, Duration::from_secs(30))
@@ -1143,29 +1166,8 @@ impl ToolProvider for ConfigTools {
                     max_context_lines.unwrap_or(8),
                     max_line_chars.unwrap_or(2000),
                 )?;
-                self.search_observations.insert(
-                    observation_key,
-                    SearchObservation {
-                        path: output
-                            .get("path")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        pattern: output
-                            .get("pattern")
-                            .and_then(Value::as_str)
-                            .unwrap_or_default()
-                            .to_string(),
-                        match_count: output
-                            .get("match_count")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                        returned_match_count: output
-                            .get("returned_match_count")
-                            .and_then(Value::as_u64)
-                            .unwrap_or(0),
-                    },
-                );
+                self.search_observations
+                    .insert(observation_key, search_observation_from_output(&output));
                 Ok(self.annotate_search_progress(output))
             }
             ToolConfig::FileWrite {
