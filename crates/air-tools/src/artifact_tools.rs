@@ -54,11 +54,11 @@ pub(crate) fn call_artifact_validate_tool(
     let registered_ids = registered_ids.into_iter().collect::<Vec<_>>();
     let cited_ids = cited_ids.into_iter().collect::<Vec<_>>();
     let valid = missing_ids.is_empty();
-    let content = format!(
-        "valid: {valid}\nregistered_ids: {}\ncited_ids: {}\nmissing_ids: {}",
+    let content = artifact_validation_summary_content(
+        valid,
         registered_ids.len(),
         cited_ids.len(),
-        missing_ids.len()
+        missing_ids.len(),
     );
 
     Ok(json!({
@@ -238,4 +238,15 @@ fn parse_artifact_id(tool_name: &str, field: &str, id: &str) -> Result<String, R
         )));
     }
     Ok(id.to_string())
+}
+
+fn artifact_validation_summary_content(
+    valid: bool,
+    registered_count: usize,
+    cited_count: usize,
+    missing_count: usize,
+) -> String {
+    format!(
+        "valid: {valid}\nregistered_ids: {registered_count}\ncited_ids: {cited_count}\nmissing_ids: {missing_count}"
+    )
 }

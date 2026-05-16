@@ -85,21 +85,12 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                         path.display()
                     )
                 })?;
-                if headers.keys().any(|header| header.trim().is_empty()) {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.headers contains an empty header name",
-                        path.display()
-                    );
-                }
-                if bearer_token_env
-                    .as_deref()
-                    .is_some_and(|env_name| env_name.trim().is_empty())
-                {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.bearer_token_env must not be empty",
-                        path.display()
-                    );
-                }
+                validate_headers_and_bearer_token_env(
+                    path,
+                    name,
+                    headers,
+                    bearer_token_env.as_deref(),
+                )?;
                 if timeout_seconds.is_some_and(|value| value == 0) {
                     anyhow::bail!(
                         "tool config {} tools.{name}.timeout_seconds must be greater than 0",
@@ -114,21 +105,12 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                 max_bytes,
                 ..
             } => {
-                if headers.keys().any(|header| header.trim().is_empty()) {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.headers contains an empty header name",
-                        path.display()
-                    );
-                }
-                if bearer_token_env
-                    .as_deref()
-                    .is_some_and(|env_name| env_name.trim().is_empty())
-                {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.bearer_token_env must not be empty",
-                        path.display()
-                    );
-                }
+                validate_headers_and_bearer_token_env(
+                    path,
+                    name,
+                    headers,
+                    bearer_token_env.as_deref(),
+                )?;
                 validate_positive_u64(
                     path,
                     &format!("tools.{name}.timeout_seconds"),
@@ -633,6 +615,27 @@ fn validate_positive_u64(path: &Path, field: &str, value: Option<u64>) -> Result
     if value.is_some_and(|value| value == 0) {
         anyhow::bail!(
             "tool config {} {field} must be greater than 0",
+            path.display()
+        );
+    }
+    Ok(())
+}
+
+fn validate_headers_and_bearer_token_env(
+    path: &Path,
+    name: &str,
+    headers: &std::collections::BTreeMap<String, String>,
+    bearer_token_env: Option<&str>,
+) -> Result<()> {
+    if headers.keys().any(|header| header.trim().is_empty()) {
+        anyhow::bail!(
+            "tool config {} tools.{name}.headers contains an empty header name",
+            path.display()
+        );
+    }
+    if bearer_token_env.is_some_and(|env_name| env_name.trim().is_empty()) {
+        anyhow::bail!(
+            "tool config {} tools.{name}.bearer_token_env must not be empty",
             path.display()
         );
     }
