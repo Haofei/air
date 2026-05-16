@@ -14,7 +14,7 @@
       "kind": "file_read",
       "capability": "file.read",
       "base_dir": "../..",
-      "max_bytes": 65536
+      "max_bytes": 51200
     },
     "grep": {
       "kind": "file_search",
@@ -23,7 +23,7 @@
       "max_matches": 100,
       "max_context_lines": 2,
       "max_line_chars": 2000,
-      "max_bytes": 65536
+      "max_bytes": 51200
     },
     "edit": {
       "kind": "file_edit",
@@ -44,7 +44,7 @@
       "capability": "code.test",
       "cwd": "../..",
       "timeout_seconds": 120,
-      "max_bytes": 65536,
+      "max_bytes": 51200,
       "truncation_direction": "tail"
     },
     "task": {
@@ -55,7 +55,7 @@
       "kind": "web_fetch",
       "capability": "code.read",
       "timeout_seconds": 120,
-      "max_bytes": 65536
+      "max_bytes": 51200
     },
     "todowrite": {
       "kind": "todo_write",

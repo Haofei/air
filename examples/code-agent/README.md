@@ -104,3 +104,65 @@ python3 scripts/compare_code_agent_io.py analyze \
 ```
 
 Reports are written under `target/generated/code-agent-io-compare/`.
+
+When HTTP capture is enabled, the harness runs OpenCode first and uses its
+model-call route as a reference while AIR runs. If AIR's next tool choice clearly
+diverges from the same OpenCode call, the harness records the divergence and
+stops the next AIR model request locally instead of spending the rest of the
+budget on a known-bad path.
+
+## Relay Debugging
+
+When a run diverges late, use the relay to replay the known-good prefix and
+continue from a specific model call instead of spending the whole budget again.
+
+Inspect a previous run:
+
+```bash
+python3 scripts/code_agent_relay.py inspect \
+  target/generated/code-agent-io-compare/todo-refactor \
+  --side air
+```
+
+Compare AIR and OpenCode at a specific model call:
+
+```bash
+python3 scripts/code_agent_relay.py diff \
+  target/generated/code-agent-io-compare/todo-refactor \
+  --call 9
+```
+
+Find the first likely divergence and suggested replay points:
+
+```bash
+python3 scripts/code_agent_relay.py divergence \
+  target/generated/code-agent-io-compare/todo-refactor
+```
+
+Resume from call 23:
+
+```bash
+python3 scripts/code_agent_relay.py run \
+  target/generated/code-agent-io-compare/todo-refactor \
+  --side air \
+  --from 23 \
+  -- cargo run -p air-cli -- code "refactor a small helper and run tests" \
+    --model-config examples/bigmodel-openai-compatible.json \
+    --tool-config examples/code-agent/tools.json \
+    --trace-out target/generated/code-agent.trace.jsonl \
+    --log
+```
+
+Calls before `--from` are served from the captured HTTP responses. Calls at and
+after `--from` are forwarded to the original provider URL inferred from the
+capture. The relay writes a new `relay-air-http/` directory so request shape and
+response behavior can be compared at the fork point.
+
+To keep the normal comparison report flow and reuse a saved OpenCode run:
+
+```bash
+python3 scripts/compare_code_agent_io.py replay-air \
+  target/generated/code-agent-io-compare/todo-refactor \
+  --from 23 \
+  --name todo-refactor-replay
+```

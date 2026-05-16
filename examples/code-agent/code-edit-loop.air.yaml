@@ -178,7 +178,7 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_bytes: 250000
+                max_bytes: 600000
               allowed_tools:
                 literal: [question, bash, read, glob, grep, edit, write, task, webfetch, todowrite, todoread, skill]
           output: decision
@@ -201,7 +201,7 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_bytes: 250000
+                max_bytes: 600000
               allowed_tools:
                 literal: [bash, todowrite]
           output: decision
@@ -244,7 +244,15 @@ workflow:
         - kind: set
           values:
             patch_applied: true
-            phase: verify
+            phase: choose
+
+    - id: write-applied
+      when: phase == "post_act" && observation[0].tool == "write" && observation[0].status == "ok"
+      actions:
+        - kind: set
+          values:
+            patch_applied: true
+            phase: choose
 
     - id: bash-passed-after-patch
       when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true
@@ -292,13 +300,6 @@ workflow:
           values:
             phase: summarize
 
-    - id: continue-verification-after-tool-update
-      when: phase == "post_act" && patch_applied == true && verification_status != "passed"
-      actions:
-        - kind: set
-          values:
-            phase: verify
-
     - id: continue-after-act
       when: phase == "post_act"
       actions:
@@ -317,15 +318,15 @@ workflow:
                     literal: bash
                   input:
                     literal:
-                      command: git diff --
-                      description: Show workspace diff
+                      command: git diff -- && git ls-files --others --exclude-standard | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
+                      description: Show workspace diff including untracked files
               - object:
                   tool:
                     literal: bash
                   input:
                     literal:
-                      command: git diff --name-only --
-                      description: List changed files
+                      command: '{ git diff --name-only --; git ls-files --others --exclude-standard; } | sort -u'
+                      description: List changed files including untracked files
           output: final_diff_result
           max_calls: 2
           timeout_seconds: 120

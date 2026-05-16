@@ -1,7 +1,8 @@
 use crate::RuntimeError;
 use serde_json::{json, Map, Value};
 
-const OPENCODE_READ_CONTEXT_CHARS: usize = 80 * 1024;
+const OPENCODE_READ_CONTEXT_CHARS: usize = 50 * 1024;
+const OPENCODE_ASSISTANT_CONTEXT_CHARS: usize = 32 * 1024;
 
 pub fn take_last_within_bytes_value(
     value: &Value,
@@ -128,9 +129,47 @@ fn compact_assistant_context(object: &Map<String, Value>) -> Value {
         "complete",
         "tool_calls",
     ] {
-        copy_context_field(&mut compact, object, field);
+        if let Some(value) = object.get(field) {
+            compact.insert(field.to_string(), compact_assistant_context_value(value));
+        }
     }
     Value::Object(compact)
+}
+
+fn compact_assistant_context_value(value: &Value) -> Value {
+    match value {
+        Value::String(text) => Value::String(compact_model_context_string(
+            text,
+            OPENCODE_ASSISTANT_CONTEXT_CHARS,
+        )),
+        Value::Array(items) => Value::Array(
+            items
+                .iter()
+                .take(16)
+                .map(compact_model_context_value)
+                .collect(),
+        ),
+        Value::Object(object) => {
+            let mut compact = Map::new();
+            for (key, value) in object.iter().take(16) {
+                let compacted = match key.as_str() {
+                    "reasoning" | "reasoning_content" | "content" | "answer" => {
+                        compact_assistant_context_value(value)
+                    }
+                    _ => compact_model_context_value(value),
+                };
+                compact.insert(key.clone(), compacted);
+            }
+            if object.len() > compact.len() {
+                compact.insert(
+                    "_air_compacted".to_string(),
+                    json!({"omitted_fields": object.len() - compact.len()}),
+                );
+            }
+            Value::Object(compact)
+        }
+        other => other.clone(),
+    }
 }
 
 fn compact_observation_context(object: &Map<String, Value>) -> Value {
@@ -190,6 +229,9 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
     }
     if object.get("content").is_some() || object.get("content_preview").is_some() {
         return compact_file_like_context(object, OPENCODE_READ_CONTEXT_CHARS);
+    }
+    if object.get("log").and_then(Value::as_str).is_some() {
+        return compact_command_output_context(object);
     }
 
     let mut compact = Map::new();
@@ -251,6 +293,30 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
     } else {
         Value::Object(compact)
     }
+}
+
+fn compact_command_output_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in [
+        "success",
+        "status",
+        "error",
+        "error_code",
+        "bytes",
+        "truncated",
+        "full_log_path",
+        "truncation_hint",
+        "diagnostics",
+    ] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(log) = object.get("log").and_then(Value::as_str) {
+        compact.insert(
+            "log".to_string(),
+            Value::String(compact_model_context_string(log, 16_000)),
+        );
+    }
+    Value::Object(compact)
 }
 
 fn looks_like_edit_output(object: &Map<String, Value>) -> bool {
@@ -366,6 +432,7 @@ fn compact_file_like_context(object: &Map<String, Value>, max_content_chars: usi
         "path",
         "bytes",
         "source_bytes",
+        "max_bytes",
         "start_line",
         "end_line",
         "match_line",
@@ -382,17 +449,80 @@ fn compact_file_like_context(object: &Map<String, Value>, max_content_chars: usi
         copy_context_field(&mut compact, object, field);
     }
     if let Some(content) = object.get("content").and_then(Value::as_str) {
-        compact.insert(
-            "content".to_string(),
-            Value::String(compact_file_content_string(content, max_content_chars)),
-        );
+        let compacted = compact_file_content_string(content, max_content_chars);
+        update_visible_line_window(&mut compact, object, &compacted, content, max_content_chars);
+        compact.insert("content".to_string(), Value::String(compacted));
     } else if let Some(content) = object.get("content_preview").and_then(Value::as_str) {
-        compact.insert(
-            "content_preview".to_string(),
-            Value::String(compact_file_content_string(content, max_content_chars)),
-        );
+        let compacted = compact_file_content_string(content, max_content_chars);
+        update_visible_line_window(&mut compact, object, &compacted, content, max_content_chars);
+        compact.insert("content_preview".to_string(), Value::String(compacted));
     }
     Value::Object(compact)
+}
+
+fn update_visible_line_window(
+    compact: &mut Map<String, Value>,
+    object: &Map<String, Value>,
+    compacted: &str,
+    original: &str,
+    max_content_chars: usize,
+) {
+    let content_was_truncated = compacted != original;
+    let output_was_truncated = object
+        .get("truncated")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if content_was_truncated {
+        compact.insert("truncated".to_string(), Value::Bool(true));
+        compact.insert("max_bytes".to_string(), json!(max_content_chars));
+    }
+    if !content_was_truncated && !output_was_truncated && object.get("end_line").is_some() {
+        return;
+    }
+    let Some(visible_end_line) = visible_end_line(compacted, object) else {
+        return;
+    };
+    if object.get("start_line").is_none() {
+        compact.insert("start_line".to_string(), json!(1));
+    }
+    compact.insert("end_line".to_string(), json!(visible_end_line));
+    if let Some(total_lines) = object.get("total_lines").and_then(Value::as_u64) {
+        if total_lines > visible_end_line {
+            compact.insert("next_offset".to_string(), json!(visible_end_line));
+        }
+    }
+}
+
+fn visible_end_line(content: &str, object: &Map<String, Value>) -> Option<u64> {
+    if content.is_empty() {
+        return None;
+    }
+    let line_numbered = object
+        .get("content_format")
+        .and_then(Value::as_str)
+        .is_some_and(|format| format == "line_numbered");
+    if line_numbered {
+        return content.lines().rev().find_map(numbered_line_prefix);
+    }
+    if let Some(end_line) = object.get("end_line").and_then(Value::as_u64) {
+        return Some(end_line);
+    }
+    let start = object
+        .get("start_line")
+        .and_then(Value::as_u64)
+        .unwrap_or(1);
+    let visible_lines = content
+        .lines()
+        .filter(|line| !line.starts_with("[AIR_COMPACTED]"))
+        .count() as u64;
+    visible_lines
+        .checked_sub(1)
+        .map(|offset| start.saturating_add(offset))
+}
+
+fn numbered_line_prefix(line: &str) -> Option<u64> {
+    let (prefix, _) = line.split_once('|')?;
+    prefix.trim().parse::<u64>().ok()
 }
 
 fn copy_context_field(compact: &mut Map<String, Value>, object: &Map<String, Value>, field: &str) {
@@ -406,41 +536,11 @@ pub fn compact_model_context_string(text: &str, max_chars: usize) -> String {
 }
 
 fn compact_file_content_string(text: &str, max_chars: usize) -> String {
-    truncate_tail_context_string(text, max_chars, "AIR_COMPACTED")
-}
-
-fn truncate_tail_context_string(text: &str, max_chars: usize, marker_label: &str) -> String {
-    let total_chars = text.chars().count();
-    if total_chars <= max_chars {
-        return text.to_string();
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        text.chars().take(max_chars).collect()
     }
-    if max_chars == 0 {
-        return format!("[{marker_label}]");
-    }
-
-    let mut marker = format!("\n[{marker_label}] {} chars omitted at end\n", total_chars);
-    for _ in 0..4 {
-        let marker_chars = marker.chars().count();
-        if marker_chars >= max_chars {
-            return marker_label_fallback(marker_label, max_chars);
-        }
-        let keep_chars = max_chars - marker_chars;
-        let omitted_chars = total_chars.saturating_sub(keep_chars);
-        let next_marker = format!("\n[{marker_label}] {omitted_chars} chars omitted at end\n");
-        if next_marker == marker {
-            let prefix = text.chars().take(keep_chars).collect::<String>();
-            return format!("{prefix}{marker}");
-        }
-        marker = next_marker;
-    }
-
-    let marker_chars = marker.chars().count();
-    if marker_chars >= max_chars {
-        return marker_label_fallback(marker_label, max_chars);
-    }
-    let keep_chars = max_chars - marker_chars;
-    let prefix = text.chars().take(keep_chars).collect::<String>();
-    format!("{prefix}{marker}")
 }
 
 pub fn truncate_middle_context_string(text: &str, max_chars: usize, marker_label: &str) -> String {

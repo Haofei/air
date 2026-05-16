@@ -499,7 +499,112 @@ fn send_chat_completion_request(
         )));
     }
 
+    if body.get("stream").and_then(Value::as_bool) == Some(true) {
+        let text = response.text().map_err(provider_error)?;
+        return parse_chat_completion_stream(&text);
+    }
+
     response.json::<Value>().map_err(provider_error)
+}
+
+fn parse_chat_completion_stream(text: &str) -> Result<Value, RuntimeError> {
+    let mut content = String::new();
+    let mut reasoning = String::new();
+    let mut tool_calls: BTreeMap<usize, StreamToolCall> = BTreeMap::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if !line.starts_with("data:") {
+            continue;
+        }
+        let payload = line[5..].trim();
+        if payload.is_empty() || payload == "[DONE]" {
+            continue;
+        }
+        let event: Value = serde_json::from_str(payload).map_err(|error| {
+            RuntimeError::Provider(format!("invalid chat/completions stream event: {error}"))
+        })?;
+        let choices = event
+            .get("choices")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten();
+        for choice in choices {
+            let Some(delta) = choice.get("delta").and_then(Value::as_object) else {
+                continue;
+            };
+            if let Some(part) = delta.get("content").and_then(Value::as_str) {
+                content.push_str(part);
+            }
+            if let Some(part) = delta.get("reasoning_content").and_then(Value::as_str) {
+                reasoning.push_str(part);
+            }
+            for call in delta
+                .get("tool_calls")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+            {
+                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let entry = tool_calls.entry(index).or_default();
+                if let Some(id) = call.get("id").and_then(Value::as_str) {
+                    entry.id.push_str(id);
+                }
+                if let Some(kind) = call.get("type").and_then(Value::as_str) {
+                    entry.kind.push_str(kind);
+                }
+                if let Some(function) = call.get("function").and_then(Value::as_object) {
+                    if let Some(name) = function.get("name").and_then(Value::as_str) {
+                        entry.name.push_str(name);
+                    }
+                    if let Some(arguments) = function.get("arguments").and_then(Value::as_str) {
+                        entry.arguments.push_str(arguments);
+                    }
+                }
+            }
+        }
+    }
+
+    let mut message = Map::new();
+    message.insert("role".to_string(), json!("assistant"));
+    message.insert("content".to_string(), Value::String(content));
+    if !reasoning.is_empty() {
+        message.insert("reasoning_content".to_string(), Value::String(reasoning));
+    }
+    if !tool_calls.is_empty() {
+        message.insert(
+            "tool_calls".to_string(),
+            Value::Array(
+                tool_calls
+                    .into_iter()
+                    .map(|(index, call)| {
+                        json!({
+                            "index": index,
+                            "id": if call.id.is_empty() { format!("call_{index}") } else { call.id },
+                            "type": if call.kind.is_empty() { "function".to_string() } else { call.kind },
+                            "function": {
+                                "name": call.name,
+                                "arguments": call.arguments
+                            }
+                        })
+                    })
+                    .collect(),
+            ),
+        );
+    }
+    Ok(json!({
+        "choices": [{
+            "message": Value::Object(message)
+        }]
+    }))
+}
+
+#[derive(Default)]
+struct StreamToolCall {
+    id: String,
+    kind: String,
+    name: String,
+    arguments: String,
 }
 
 fn chat_completions_url(base_url: &str) -> String {
@@ -529,6 +634,10 @@ fn build_chat_completion_body(
 
     if opencode_style {
         body["max_tokens"] = json!(32_000);
+        body["stream"] = json!(true);
+        body["stream_options"] = json!({
+            "include_usage": true
+        });
     } else {
         if let Some(extra_body) = &model_config.extra_body {
             merge_extra_body(&mut body, extra_body);
@@ -2335,10 +2444,10 @@ fn compact_observation_history(value: &Value) -> Value {
     Value::Array(items.iter().map(compact_model_context_value).collect())
 }
 
-const NATIVE_ASSISTANT_HISTORY_MAX_CHARS: usize = 16 * 1024;
+const NATIVE_ASSISTANT_HISTORY_MAX_CHARS: usize = 32 * 1024;
 const NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
-const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 80 * 1024;
-const NATIVE_FILE_READ_MESSAGE_MAX_CHARS: usize = 88 * 1024;
+const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
+const NATIVE_FILE_READ_MESSAGE_MAX_CHARS: usize = 60 * 1024;
 
 fn truncate_text(text: &str, max_chars: usize) -> String {
     truncate_middle_context_string(text, max_chars, "AIR_COMPACTED")
@@ -2501,13 +2610,13 @@ fn native_assistant_metadata(response: &Value) -> Option<Value> {
     if let Some(content) = content {
         assistant.insert(
             "content".to_string(),
-            Value::String(truncate_text(content, 8_000)),
+            Value::String(truncate_text(content, NATIVE_ASSISTANT_HISTORY_MAX_CHARS)),
         );
     }
     if let Some(reasoning) = reasoning {
         assistant.insert(
             "reasoning".to_string(),
-            Value::String(truncate_text(reasoning, 8_000)),
+            Value::String(truncate_text(reasoning, NATIVE_ASSISTANT_HISTORY_MAX_CHARS)),
         );
     }
     Some(Value::Object(assistant))
@@ -3142,6 +3251,51 @@ mod tests {
         assert_eq!(
             request.body["messages"][0]["content"],
             json!("edit the code")
+        );
+    }
+
+    #[test]
+    fn opencode_style_native_tool_calls_use_streaming_like_opencode() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "edit the code",
+                "allowed_tools": ["read", "edit", "bash"],
+                "tool_schemas": {
+                    "read": {"required": {"filePath": "repo-relative file path"}},
+                    "edit": {
+                        "required": {
+                            "filePath": "repo-relative file path",
+                            "oldString": "text to replace",
+                            "newString": "replacement text"
+                        }
+                    },
+                    "bash": {"required": {"command": "command to run"}}
+                }
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(request.body["stream"], json!(true));
+        assert_eq!(
+            request.body["stream_options"],
+            json!({"include_usage": true})
         );
     }
 
@@ -3893,6 +4047,67 @@ mod tests {
                 }]
             })
         );
+    }
+
+    #[test]
+    fn streaming_chat_completion_parses_native_tool_call_chunks() {
+        let response = parse_chat_completion_stream(
+            r#"data: {"choices":[{"delta":{"reasoning_content":"thinking ","tool_calls":[{"index":0,"id":"call_edit","type":"function","function":{"name":"edit","arguments":"{\"filePath\":\"src/lib.rs\","}}]}}]}
+
+data: {"choices":[{"delta":{"content":"Applying edit.","tool_calls":[{"index":0,"function":{"arguments":"\"oldString\":\"old\",\"newString\":\"new\"}"}}]}}]}
+
+data: [DONE]
+"#,
+        )
+        .unwrap();
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("edit".to_string(), "edit".to_string());
+        let value = parse_chat_completion_content(&response, &tool_name_map).unwrap();
+
+        assert_eq!(value["complete"], json!(false));
+        assert_eq!(value["_air_assistant"]["content"], json!("Applying edit."));
+        assert_eq!(value["_air_assistant"]["reasoning"], json!("thinking"));
+        assert_eq!(value["tool_calls"][0]["tool"], json!("edit"));
+        assert_eq!(
+            value["tool_calls"][0]["input"],
+            json!({
+                "filePath": "src/lib.rs",
+                "oldString": "old",
+                "newString": "new"
+            })
+        );
+    }
+
+    #[test]
+    fn native_tool_call_response_keeps_long_reasoning_for_history() {
+        let long_reasoning = format!(
+            "I know the target edit now. {}",
+            "preserve the implementation plan. ".repeat(500)
+        );
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "role": "assistant",
+                    "content": "Now I can write the file.",
+                    "reasoning_content": long_reasoning,
+                    "tool_calls": [{
+                        "id": "call_write",
+                        "type": "function",
+                        "function": {
+                            "name": "write",
+                            "arguments": "{\"filePath\":\"src/lib.rs\",\"content\":\"fn main() {}\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("write".to_string(), "write".to_string());
+        let value = parse_chat_completion_content(&response, &tool_name_map).unwrap();
+        let reasoning = value["_air_assistant"]["reasoning"].as_str().unwrap();
+
+        assert!(reasoning.contains("I know the target edit now."));
+        assert!(reasoning.len() > 10_000);
     }
 
     #[test]

@@ -13,13 +13,15 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod command_diagnostics;
+mod context_tools;
+mod edit_tools;
 mod file_tools;
 use command_diagnostics::extract_command_diagnostics;
-mod context_tools;
 use context_tools::call_context_measure_tool;
+use edit_tools::{call_file_edit_tool, FileEditOptions};
 use file_tools::{
-    call_file_edit_tool, call_file_read_many_tool, call_file_read_tool, call_file_search_tool,
-    call_file_write_tool, read_snapshot, FileEditOptions, FileWriteOptions, ReadSnapshot,
+    call_file_read_many_tool, call_file_read_tool, call_file_search_tool, call_file_write_tool,
+    read_snapshot, FileWriteOptions, ReadSnapshot,
 };
 mod helpdesk;
 use helpdesk::helpdesk_docs;

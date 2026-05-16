@@ -26,6 +26,11 @@ import urllib.request
 from pathlib import Path
 from typing import Any
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+import code_agent_relay
+
 
 DEFAULT_TASK = (
     "Refactor the todo tool implementation in crates/air-tools/src/lib.rs by "
@@ -75,11 +80,6 @@ def main() -> None:
         default=None,
         help="reuse the OpenCode section from a previous compare run instead of running OpenCode again",
     )
-    run_parser.add_argument(
-        "--allow-missing-opencode-raw",
-        action="store_true",
-        help="write a partial report even if OPENCODE_RAW_IO_DIR produced no provider requests",
-    )
     run_parser.add_argument("--timeout-seconds", type=int, default=900)
     run_parser.add_argument(
         "--keep-workdirs",
@@ -87,6 +87,34 @@ def main() -> None:
         help="keep copied AIR/OpenCode workdirs in the run output directory",
     )
     run_parser.set_defaults(func=run_and_analyze)
+
+    replay_parser = subcommands.add_parser(
+        "replay-air",
+        help="replay a captured AIR prefix, then continue AIR and compare to the saved OpenCode run",
+    )
+    add_common_output_args(replay_parser)
+    replay_parser.add_argument("source_run", type=Path)
+    replay_parser.add_argument("--from", dest="from_call", type=int, default=None)
+    replay_parser.add_argument("--task", default=None)
+    replay_parser.add_argument("--repo", type=Path, default=repo_root())
+    replay_parser.add_argument("--env-file", type=Path, default=repo_root() / ".env")
+    replay_parser.add_argument("--model-config", default=DEFAULT_MODEL_CONFIG)
+    replay_parser.add_argument("--tool-config", default=DEFAULT_TOOL_CONFIG)
+    replay_parser.add_argument("--air-bin", type=Path, default=None)
+    replay_parser.add_argument("--build-air", action="store_true")
+    replay_parser.add_argument(
+        "--air-copy",
+        action="store_true",
+        help="run AIR in an isolated copy instead of editing --repo directly",
+    )
+    replay_parser.add_argument("--target-base-url", default=None)
+    replay_parser.add_argument("--timeout-seconds", type=int, default=900)
+    replay_parser.add_argument(
+        "--keep-workdirs",
+        action="store_true",
+        help="keep copied AIR workdir in the run output directory",
+    )
+    replay_parser.set_defaults(func=replay_air_and_analyze)
 
     analyze_parser = subcommands.add_parser("analyze", help="analyze existing logs")
     add_common_output_args(analyze_parser)
@@ -127,14 +155,26 @@ def default_opencode_command() -> str:
 
 
 class HttpCaptureProxy:
-    def __init__(self, target_base_url: str, out_dir: Path):
+    def __init__(
+        self,
+        target_base_url: str,
+        out_dir: Path,
+        *,
+        reference_cassette: list[code_agent_relay.CapturedCall] | None = None,
+    ):
         self.target_base_url = target_base_url.rstrip("/")
         self.out_dir = out_dir
         self._server: http.server.ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._counter = 0
+        self._call_index = 0
         self._lock = threading.Lock()
         self.base_url = ""
+        self.monitor = (
+            code_agent_relay.RouteMonitor(reference_cassette)
+            if reference_cassette
+            else None
+        )
 
     def start(self) -> None:
         self.out_dir.mkdir(parents=True, exist_ok=True)
@@ -166,11 +206,18 @@ class HttpCaptureProxy:
             counter = self._counter
         return self.out_dir / f"{int(time.time() * 1000)}-{counter:04d}-{kind}.json"
 
+    def next_call_index(self) -> int:
+        with self._lock:
+            self._call_index += 1
+            return self._call_index
+
     def handle(self, handler: http.server.BaseHTTPRequestHandler) -> None:
         body_bytes = handler.rfile.read(int(handler.headers.get("content-length", "0") or "0"))
         body = parse_json_bytes(body_bytes)
+        call_index = self.next_call_index()
         target_url = self.target_base_url + handler.path
         request_log = {
+            "call_index": call_index,
             "method": handler.command,
             "path": handler.path,
             "url": target_url,
@@ -182,6 +229,12 @@ class HttpCaptureProxy:
             json.dumps(request_log, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+        if self.monitor:
+            stop_reason = self.monitor.stop_before(call_index)
+            if stop_reason:
+                self.send_monitor_stop(handler, call_index, stop_reason)
+                return
 
         headers = {
             key: value
@@ -196,16 +249,23 @@ class HttpCaptureProxy:
         )
         try:
             with urllib.request.urlopen(request, timeout=600) as response:
-                response_body = response.read()
-                handler.send_response(response.status)
-                for key, value in response.headers.items():
-                    if key.lower() in {"content-length", "transfer-encoding", "connection"}:
-                        continue
-                    handler.send_header(key, value)
-                handler.send_header("content-length", str(len(response_body)))
-                handler.end_headers()
-                handler.wfile.write(response_body)
-                self.write_response_log(target_url, response.status, response.headers, response_body)
+                if isinstance(body, dict) and body.get("stream") is True:
+                    response_body = self.forward_stream_response(
+                        handler, response, call_index, target_url
+                    )
+                else:
+                    response_body = response.read()
+                    handler.send_response(response.status)
+                    for key, value in response.headers.items():
+                        if key.lower() in {"content-length", "transfer-encoding", "connection"}:
+                            continue
+                        handler.send_header(key, value)
+                    handler.send_header("content-length", str(len(response_body)))
+                    handler.end_headers()
+                    handler.wfile.write(response_body)
+                self.write_response_log(
+                    call_index, target_url, response.status, response.headers, response_body
+                )
         except urllib.error.HTTPError as error:
             response_body = error.read()
             handler.send_response(error.code)
@@ -216,7 +276,7 @@ class HttpCaptureProxy:
             handler.send_header("content-length", str(len(response_body)))
             handler.end_headers()
             handler.wfile.write(response_body)
-            self.write_response_log(target_url, error.code, error.headers, response_body)
+            self.write_response_log(call_index, target_url, error.code, error.headers, response_body)
         except urllib.error.URLError as error:
             response_body = json.dumps(
                 {"error": f"proxy upstream request failed: {error}"},
@@ -227,20 +287,86 @@ class HttpCaptureProxy:
             handler.send_header("content-length", str(len(response_body)))
             handler.end_headers()
             handler.wfile.write(response_body)
-            self.write_response_log(target_url, 502, {}, response_body)
+            self.write_response_log(call_index, target_url, 502, {}, response_body)
 
-    def write_response_log(self, url: str, status: int, headers: Any, body: bytes) -> None:
+    def forward_stream_response(
+        self,
+        handler: http.server.BaseHTTPRequestHandler,
+        response: Any,
+        call_index: int,
+        target_url: str,
+    ) -> bytes:
+        chunks = bytearray()
+        progress_path = self.next_path("http-stream-progress")
+        last_progress_at = time.time()
+        handler.send_response(response.status)
+        for key, value in response.headers.items():
+            if key.lower() in {"content-length", "transfer-encoding", "connection"}:
+                continue
+            handler.send_header(key, value)
+        handler.end_headers()
+        while True:
+            chunk = response.readline()
+            if not chunk:
+                break
+            chunks.extend(chunk)
+            handler.wfile.write(chunk)
+            handler.wfile.flush()
+            now = time.time()
+            if len(chunks) <= len(chunk) or now - last_progress_at >= 5:
+                write_stream_progress(progress_path, call_index, target_url, bytes(chunks))
+                log_step(
+                    f"stream call {call_index}: received {len(chunks)} bytes "
+                    f"(progress: {progress_path})"
+                )
+                last_progress_at = now
+        write_stream_progress(progress_path, call_index, target_url, bytes(chunks), done=True)
+        return bytes(chunks)
+
+    def write_response_log(
+        self, call_index: int, url: str, status: int, headers: Any, body: bytes
+    ) -> None:
+        parsed_body = parse_json_bytes(body)
         log = {
+            "call_index": call_index,
             "url": url,
             "status": status,
             "headers": redact_headers(dict(headers.items())),
             "body_bytes": len(body),
-            "body": parse_json_bytes(body),
+            "body": parsed_body,
         }
+        if self.monitor and status < 400:
+            stop_reason = self.monitor.observe_response(call_index, parsed_body)
+            if stop_reason:
+                log["route_monitor"] = stop_reason
+                log_step(f"route divergence detected: {stop_reason['message']}")
         self.next_path("http-response").write_text(
             json.dumps(log, indent=2, ensure_ascii=False),
             encoding="utf-8",
         )
+
+    def send_monitor_stop(
+        self,
+        handler: http.server.BaseHTTPRequestHandler,
+        call_index: int,
+        stop_reason: dict[str, Any],
+    ) -> None:
+        body = json.dumps(
+            {
+                "error": {
+                    "message": "AIR compare stopped after route divergence",
+                    "type": "air_compare_route_divergence",
+                    "details": stop_reason,
+                }
+            },
+            ensure_ascii=False,
+        ).encode("utf-8")
+        handler.send_response(409)
+        handler.send_header("content-type", "application/json")
+        handler.send_header("content-length", str(len(body)))
+        handler.end_headers()
+        handler.wfile.write(body)
+        self.write_response_log(call_index, self.target_base_url + handler.path, 409, {}, body)
 
 
 def free_port() -> int:
@@ -257,6 +383,31 @@ def parse_json_bytes(data: bytes) -> Any:
         return text
 
 
+def write_stream_progress(
+    path: Path, call_index: int, url: str, body: bytes, *, done: bool = False
+) -> None:
+    text = body.decode("utf-8", errors="replace")
+    assistant = code_agent_relay.assistant_response(text)
+    progress = {
+        "call_index": call_index,
+        "url": url,
+        "done": done,
+        "body_bytes": len(body),
+        "assistant": {
+            "content_chars": len(assistant.get("text") or ""),
+            "reasoning_chars": len(assistant.get("reasoning") or ""),
+            "tool_calls": [
+                {
+                    "name": tool_call.get("name"),
+                    "arguments_chars": len(str(tool_call.get("arguments") or "")),
+                }
+                for tool_call in assistant.get("tool_calls") or []
+            ],
+        },
+    }
+    path.write_text(json.dumps(progress, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
 def redact_headers(headers: dict[str, Any]) -> dict[str, Any]:
     result = {}
     for key, value in headers.items():
@@ -265,6 +416,10 @@ def redact_headers(headers: dict[str, Any]) -> dict[str, Any]:
         else:
             result[key] = value
     return result
+
+
+def log_step(message: str) -> None:
+    print(f"[compare-code-agent-io] {message}", flush=True)
 
 
 def merge_opencode_config_content(existing: str | None, base_url: str) -> str:
@@ -302,6 +457,8 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     )
 
     opencode_workdir = run_dir / "opencode-work"
+    log_step(f"run directory: {run_dir}")
+    log_step("preparing AIR workspace")
     if args.air_copy:
         air_workdir = run_dir / "air-work"
         copy_workspace(source_repo, air_workdir)
@@ -316,6 +473,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     # OpenCode stays isolated. The copy happens before AIR runs so OpenCode does
     # not see or contribute to AIR's in-place refactor.
     if reuse_opencode_from is None:
+        log_step("preparing OpenCode workspace")
         copy_workspace(source_repo, opencode_workdir)
         commit_workspace_baseline(opencode_workdir)
 
@@ -328,20 +486,60 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     if not capture_http:
         print("[compare-code-agent-io] OPENAI_BASE_URL is not set; HTTP body capture is disabled")
 
-    air_bin = resolve_air_bin(args.air_bin, source_repo, args.build_air)
     air_trace = air_workdir / "target/generated/air.trace.jsonl"
     air_stdout = air_workdir / "target/generated/air.stdout.log"
     air_stderr = air_workdir / "target/generated/air.stderr.log"
     air_trace.parent.mkdir(parents=True, exist_ok=True)
 
+    opencode_raw = run_dir / "opencode-raw"
+    opencode_events = None
+    opencode_stderr = None
+    if reuse_opencode_from is None:
+        opencode_raw.mkdir(parents=True, exist_ok=True)
+        opencode_events = opencode_workdir / "target/generated/opencode.events.jsonl"
+        opencode_stderr = opencode_workdir / "target/generated/opencode.stderr.log"
+        opencode_events.parent.mkdir(parents=True, exist_ok=True)
+
+    if reuse_opencode_from is None:
+        log_step("running OpenCode reference")
+        run_opencode_agent(
+            args=args,
+            env=env,
+            real_base_url=real_base_url,
+            opencode_workdir=opencode_workdir,
+            opencode_raw=opencode_raw,
+            opencode_events=opencode_events,
+            opencode_stderr=opencode_stderr,
+            opencode_http_dir=opencode_http_dir,
+            capture_http=capture_http,
+        )
+    else:
+        log_step(f"reusing OpenCode reference from {reuse_opencode_from}")
+
+    log_step("building AIR CLI" if args.build_air else "resolving AIR CLI")
+    air_bin = resolve_air_bin(args.air_bin, source_repo, args.build_air)
+    log_step("running AIR code agent")
     air_env = env.copy()
     air_proxy = None
+    air_returncode = 0
+    opencode_reference = None
     if capture_http:
-        air_proxy = HttpCaptureProxy(real_base_url, air_http_dir)
+        opencode_reference = load_opencode_http_reference(
+            reuse_opencode_from if reuse_opencode_from else opencode_http_dir
+        )
+        if opencode_reference:
+            log_step(
+                f"monitoring AIR route against OpenCode reference ({len(opencode_reference)} calls)"
+            )
+        air_proxy = HttpCaptureProxy(
+            real_base_url,
+            air_http_dir,
+            reference_cassette=opencode_reference,
+        )
         air_proxy.start()
         air_env["OPENAI_BASE_URL"] = air_proxy.base_url
     try:
-        run_checked(
+        air_returncode = run_checked(
             [
                 str(air_bin),
                 "code",
@@ -360,10 +558,13 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             stdout=air_stdout,
             stderr=air_stderr,
             timeout=args.timeout_seconds,
+            allow_failure=bool(opencode_reference),
         )
     finally:
         if air_proxy:
             air_proxy.stop()
+    if air_returncode != 0 and not (air_proxy and air_proxy.monitor and air_proxy.monitor.stop_reason):
+        raise SystemExit(f"AIR command failed with exit {air_returncode}")
 
     if reuse_opencode_from:
         air = analyze_air(
@@ -381,57 +582,6 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         opencode_events = None
         opencode_stderr = None
     else:
-        opencode_raw = run_dir / "opencode-raw"
-        opencode_raw.mkdir(parents=True, exist_ok=True)
-        opencode_events = opencode_workdir / "target/generated/opencode.events.jsonl"
-        opencode_stderr = opencode_workdir / "target/generated/opencode.stderr.log"
-        opencode_events.parent.mkdir(parents=True, exist_ok=True)
-        opencode_env = env.copy()
-        opencode_proxy = None
-        if capture_http:
-            opencode_proxy = HttpCaptureProxy(real_base_url, opencode_http_dir)
-            opencode_proxy.start()
-        try:
-            if opencode_proxy:
-                opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
-                    opencode_env.get("OPENCODE_CONFIG_CONTENT"),
-                    opencode_proxy.base_url,
-                )
-            opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)
-            opencode_env["OPENCODE_PROJECT_DIR"] = str(opencode_workdir)
-            opencode_env["OPENCODE_PERMISSION"] = json.dumps({"*": "allow"})
-            opencode_cmd = [
-                *shlex.split(args.opencode_command),
-                "run",
-                "--format",
-                "json",
-                "--agent",
-                args.opencode_agent,
-            ]
-            if args.opencode_model:
-                opencode_cmd.extend(["--model", args.opencode_model])
-            opencode_cmd.append(args.task)
-            run_checked(
-                opencode_cmd,
-                cwd=opencode_workdir,
-                env=opencode_env,
-                stdout=opencode_events,
-                stderr=opencode_stderr,
-                timeout=args.timeout_seconds,
-            )
-            if (
-                not list(opencode_raw.glob("*provider-request.json"))
-                and not args.allow_missing_opencode_raw
-            ):
-                raise SystemExit(
-                    "OpenCode produced no *provider-request.json files in "
-                    f"{opencode_raw}. Use an OpenCode binary built with OPENCODE_RAW_IO_DIR "
-                    "support, or pass --allow-missing-opencode-raw for a partial event-only report."
-                )
-        finally:
-            if opencode_proxy:
-                opencode_proxy.stop()
-
         report = analyze_pair(
             air_trace=air_trace,
             air_stderr=air_stderr,
@@ -451,9 +601,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     report["run"] = {
         "name": run_name,
         "task": args.task,
-        "execution_order": "sequential: air then reused opencode"
-        if reuse_opencode_from
-        else "sequential: air then opencode",
+        "execution_order": compare_execution_order(reuse_opencode_from),
         "air_execution": air_execution,
         "air_workdir": str(air_workdir),
         "opencode_workdir": None if reuse_opencode_from else str(opencode_workdir),
@@ -462,9 +610,11 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         "air_http_dir": str(air_http_dir) if capture_http else None,
         "air_stdout": str(air_stdout),
         "air_stderr": str(air_stderr),
+        "air_returncode": air_returncode,
+        "air_route_monitor": (air_proxy.monitor.stop_reason if air_proxy and air_proxy.monitor else None),
         "opencode_raw_dir": str(opencode_raw),
-        "opencode_http_dir": None
-        if reuse_opencode_from
+        "opencode_http_dir": str(reuse_opencode_from / "opencode-http")
+        if reuse_opencode_from and capture_http
         else str(opencode_http_dir)
         if capture_http
         else None,
@@ -478,6 +628,199 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             shutil.rmtree(air_workdir, ignore_errors=True)
         if reuse_opencode_from is None:
             shutil.rmtree(opencode_workdir, ignore_errors=True)
+
+
+def replay_air_and_analyze(args: argparse.Namespace) -> None:
+    source_repo = args.repo.resolve()
+    source_run = args.source_run.resolve()
+    source_air = code_agent_relay.load_cassette(source_run, "air")
+    task = args.task or code_agent_relay.infer_task_from_cassette(source_air)
+    if not task:
+        raise SystemExit("Cannot infer task from source run; pass --task explicitly")
+
+    run_name = args.name or f"replay-air-{time.strftime('%Y%m%d-%H%M%S')}"
+    run_dir = (args.out_dir / run_name).resolve()
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_step(f"run directory: {run_dir}")
+    log_step(f"replay source: {source_run}")
+
+    if args.air_copy:
+        air_workdir = run_dir / "air-work"
+        log_step("preparing AIR replay workspace")
+        copy_workspace(source_repo, air_workdir)
+        commit_workspace_baseline(air_workdir)
+        air_snapshot = None
+        air_execution = "isolated-copy"
+    else:
+        air_workdir = source_repo
+        air_snapshot = WorkspaceSnapshot.capture(air_workdir)
+        air_execution = "in-place"
+
+    env = os.environ.copy()
+    env.update(load_env_file(args.env_file))
+    air_trace = air_workdir / "target/generated/air.trace.jsonl"
+    air_stdout = air_workdir / "target/generated/air.stdout.log"
+    air_stderr = air_workdir / "target/generated/air.stderr.log"
+    air_trace.parent.mkdir(parents=True, exist_ok=True)
+    air_http_dir = run_dir / "air-http"
+
+    log_step("building AIR CLI" if args.build_air else "resolving AIR CLI")
+    air_bin = resolve_air_bin(args.air_bin, source_repo, args.build_air)
+    opencode_reference = load_opencode_http_reference(source_run)
+    relay = code_agent_relay.ReplayRelay(
+        cassette=source_air,
+        replay_until=len(source_air) + 1 if args.from_call is None else args.from_call,
+        target_base_url=args.target_base_url
+        or code_agent_relay.infer_target_base_url(source_air),
+        out_dir=air_http_dir,
+        monitor_reference=opencode_reference,
+        path_rewrites=source_air_path_rewrites(source_run, air_workdir),
+    )
+    relay.start()
+    air_env = env.copy()
+    air_env["OPENAI_BASE_URL"] = relay.base_url
+    air_returncode = 0
+    try:
+        print(code_agent_relay.render_relay_banner(relay, source_air), flush=True)
+        log_step("running AIR code agent through replay relay")
+        air_returncode = run_checked(
+            [
+                str(air_bin),
+                "code",
+                task,
+                "--model-config",
+                str(air_workdir / args.model_config),
+                "--tool-config",
+                str(air_workdir / args.tool_config),
+                "--trace-out",
+                str(air_trace.relative_to(air_workdir)),
+                "--trace-raw",
+                "--log",
+            ],
+            cwd=air_workdir,
+            env=air_env,
+            stdout=air_stdout,
+            stderr=air_stderr,
+            timeout=args.timeout_seconds,
+            allow_failure=bool(opencode_reference),
+        )
+    finally:
+        relay.stop()
+    if air_returncode != 0 and not (relay.monitor and relay.monitor.stop_reason):
+        raise SystemExit(f"AIR command failed with exit {air_returncode}")
+
+    air = analyze_air(air_trace, stderr_path=air_stderr, http_dir=air_http_dir)
+    opencode, opencode_diff = analyze_source_opencode(source_run)
+    air_diff = (
+        workspace_delta_summary(air_workdir, air_snapshot)
+        if air_snapshot
+        else workspace_diff_summary(air_workdir)
+    )
+    report = {
+        "air": air,
+        "opencode": opencode,
+        "diff": compare_summaries(air, opencode),
+        "workspace_diff": compare_workspace_diff_summaries(air_diff, opencode_diff),
+        "run": {
+            "name": run_name,
+            "task": task,
+            "execution_order": "replay-air: saved prefix then live AIR; OpenCode reused",
+            "air_execution": air_execution,
+            "air_workdir": str(air_workdir),
+            "source_run": str(source_run),
+            "replay_from": args.from_call,
+            "air_trace": str(air_trace),
+            "air_http_dir": str(air_http_dir),
+            "air_stdout": str(air_stdout),
+            "air_stderr": str(air_stderr),
+            "air_returncode": air_returncode,
+            "air_route_monitor": relay.monitor.stop_reason if relay.monitor else None,
+            "opencode_raw_dir": str(source_run / "opencode-raw"),
+            "opencode_http_dir": str(opencode_http_dir_for_run(source_run)),
+            "opencode_events": str(source_run / "opencode-work/target/generated/opencode.events.jsonl"),
+        },
+    }
+    write_report(run_dir, report)
+
+    if not args.keep_workdirs and args.air_copy:
+        shutil.rmtree(air_workdir, ignore_errors=True)
+
+
+def compare_execution_order(reuse_opencode_from: Path | None) -> str:
+    if reuse_opencode_from:
+        return "sequential: reused opencode then air"
+    return "sequential: opencode then air"
+
+
+def load_opencode_http_reference(
+    path: Path,
+) -> list[code_agent_relay.CapturedCall] | None:
+    try:
+        return code_agent_relay.load_cassette(path, "opencode")
+    except SystemExit:
+        return None
+
+
+def opencode_http_dir_for_run(run_dir: Path) -> Path:
+    return code_agent_relay.resolve_http_dir(run_dir.resolve(), "opencode")
+
+
+def run_opencode_agent(
+    *,
+    args: argparse.Namespace,
+    env: dict[str, str],
+    real_base_url: str,
+    opencode_workdir: Path,
+    opencode_raw: Path,
+    opencode_events: Path | None,
+    opencode_stderr: Path | None,
+    opencode_http_dir: Path,
+    capture_http: bool,
+) -> None:
+    opencode_env = env.copy()
+    opencode_proxy = None
+    if capture_http:
+        opencode_proxy = HttpCaptureProxy(real_base_url, opencode_http_dir)
+        opencode_proxy.start()
+    try:
+        if opencode_proxy:
+            opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
+                opencode_env.get("OPENCODE_CONFIG_CONTENT"),
+                opencode_proxy.base_url,
+            )
+        opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)
+        opencode_env["OPENCODE_PROJECT_DIR"] = str(opencode_workdir)
+        opencode_env["OPENCODE_PERMISSION"] = json.dumps({"*": "allow"})
+        opencode_cmd = [
+            *shlex.split(args.opencode_command),
+            "run",
+            "--format",
+            "json",
+            "--agent",
+            args.opencode_agent,
+        ]
+        if args.opencode_model:
+            opencode_cmd.extend(["--model", args.opencode_model])
+        opencode_cmd.append(args.task)
+        run_checked(
+            opencode_cmd,
+            cwd=opencode_workdir,
+            env=opencode_env,
+            stdout=opencode_events,
+            stderr=opencode_stderr,
+            timeout=args.timeout_seconds,
+        )
+        has_raw_request = bool(list(opencode_raw.glob("*provider-request.json")))
+        has_http_request = capture_http and bool(list(opencode_http_dir.glob("*http-request.json")))
+        if not has_raw_request and not has_http_request:
+            raise SystemExit(
+                "OpenCode produced no captured provider requests. Expected either "
+                f"*provider-request.json in {opencode_raw} or *http-request.json in "
+                f"{opencode_http_dir}."
+            )
+    finally:
+        if opencode_proxy:
+            opencode_proxy.stop()
 
 
 def analyze_existing(args: argparse.Namespace) -> None:
@@ -701,6 +1044,45 @@ def load_reused_opencode_summary(run_dir: Path) -> tuple[dict[str, Any], dict[st
             "diff_sha256": "",
         }
     return opencode, opencode_diff
+
+
+def analyze_source_opencode(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    summary_path = run_dir / "summary.json"
+    if summary_path.exists():
+        return load_reused_opencode_summary(run_dir)
+
+    raw_dir = run_dir / "opencode-raw"
+    http_dir = run_dir / "opencode-http"
+    events = run_dir / "opencode-work/target/generated/opencode.events.jsonl"
+    opencode = analyze_opencode(
+        raw_dir,
+        events if events.exists() else None,
+        http_dir if http_dir.exists() else None,
+    )
+    opencode_workdir = run_dir / "opencode-work"
+    if opencode_workdir.exists():
+        return opencode, workspace_diff_summary(opencode_workdir)
+    return opencode, {
+        "changed_files": [],
+        "diff_bytes": 0,
+        "diff_sha256": "",
+    }
+
+
+def source_air_path_rewrites(source_run: Path, air_workdir: Path) -> list[tuple[str, str]]:
+    summary_path = source_run / "summary.json"
+    if not summary_path.exists():
+        return []
+    summary = read_json(summary_path)
+    run = summary.get("run") if isinstance(summary.get("run"), dict) else {}
+    source_air_workdir = run.get("air_workdir")
+    if not isinstance(source_air_workdir, str) or not source_air_workdir:
+        return []
+    source = str(Path(source_air_workdir).resolve())
+    target = str(air_workdir.resolve())
+    if source == target:
+        return []
+    return [(source, target)]
 
 
 def analyze_air(trace_path: Path, stderr_path: Path | None, http_dir: Path | None) -> dict[str, Any]:
@@ -1073,6 +1455,8 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Execution",
         "",
         f"- Order: `{run.get('execution_order', 'unknown')}`",
+        f"- AIR return code: `{run.get('air_returncode', 'unknown')}`",
+        f"- AIR route monitor: `{run.get('air_route_monitor')}`",
         "",
         "## Request Shape",
         "",
@@ -1156,6 +1540,8 @@ def copy_workspace(source: Path, target: Path) -> None:
             ".air",
             "--exclude",
             ".env",
+            "--include",
+            ".env.example",
             "--exclude",
             ".env.*",
             "--exclude",
@@ -1232,30 +1618,59 @@ def run_checked(
     stdout: Path | None,
     stderr: Path | None,
     timeout: int,
-) -> None:
+    allow_failure: bool = False,
+) -> int:
     stdout_handle = stdout.open("w", encoding="utf-8") if stdout else None
     stderr_handle = stderr.open("w", encoding="utf-8") if stderr else None
+    command_text = " ".join(shlex.quote(part) for part in command)
+    started_at = time.monotonic()
+    next_heartbeat_at = started_at + 30
+    process: subprocess.Popen[Any] | None = None
     try:
-        print(f"[compare-code-agent-io] $ {' '.join(shlex.quote(part) for part in command)}")
-        result = subprocess.run(
+        log_step(f"$ {command_text}")
+        if stdout:
+            log_step(f"  stdout -> {stdout}")
+        if stderr:
+            log_step(f"  stderr -> {stderr}")
+        process = subprocess.Popen(
             command,
             cwd=cwd,
             env=env,
             stdout=stdout_handle,
             stderr=stderr_handle,
-            timeout=timeout,
-            check=False,
         )
+        while True:
+            returncode = process.poll()
+            if returncode is not None:
+                break
+            now = time.monotonic()
+            elapsed = int(now - started_at)
+            if elapsed >= timeout:
+                process.kill()
+                process.wait()
+                raise SystemExit(f"command timed out after {timeout}s: {command_text}")
+            if now >= next_heartbeat_at:
+                log_step(f"still running after {elapsed}s: {short_command(command)}")
+                next_heartbeat_at = now + 30
+            time.sleep(1)
     finally:
         if stdout_handle:
             stdout_handle.close()
         if stderr_handle:
             stderr_handle.close()
-    if result.returncode != 0:
+    if process is None:
+        return 0
+    if process.returncode != 0 and not allow_failure:
         raise SystemExit(
-            f"command failed with exit {result.returncode}: "
-            f"{' '.join(shlex.quote(part) for part in command)}"
+            f"command failed with exit {process.returncode}: {command_text}"
         )
+    return int(process.returncode or 0)
+
+
+def short_command(command: list[str]) -> str:
+    if len(command) <= 4:
+        return " ".join(shlex.quote(part) for part in command)
+    return " ".join(shlex.quote(part) for part in command[:4]) + " ..."
 
 
 def capture_stdout(command: list[str], cwd: Path) -> str:

@@ -3531,6 +3531,72 @@ mod tests {
     }
 
     #[test]
+    fn take_last_within_bytes_preserves_command_output_log_when_compacting() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "bash",
+                "status": "ok",
+                "input": {
+                    "command": "rg -n \"file_edit\" crates/air-tools/src/tests.rs"
+                },
+                "output": {
+                    "success": true,
+                    "status": 0,
+                    "bytes": 128,
+                    "truncated": false,
+                    "log": "12:file_edit applies exact replacement\n44:file_edit rejects missing oldString"
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"log\""), "{rendered}");
+        assert!(
+            rendered.contains("file_edit applies exact replacement"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("\"status\":0"), "{rendered}");
+    }
+
+    #[test]
+    fn take_last_within_bytes_updates_visible_file_end_line_after_compaction() {
+        let content = (1..=2_000)
+            .map(|line| format!("{line:05}| line {line:04} {}", "x".repeat(40)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "read",
+                "status": "ok",
+                "input": {"filePath": "src/lib.rs"},
+                "output": {
+                    "path": "src/lib.rs",
+                    "content": content,
+                    "content_format": "line_numbered",
+                    "start_line": 1,
+                    "end_line": 2_000,
+                    "total_lines": 2_400,
+                    "max_bytes": 65_536,
+                    "truncated": true
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 200_000).unwrap();
+        let output = &compacted[0]["result"][0]["output"];
+        let visible_end = output["end_line"].as_u64().unwrap();
+
+        assert!(visible_end < 2_000, "{output}");
+        assert!(visible_end > 100, "{output}");
+        assert_eq!(output["next_offset"], json!(visible_end));
+        assert_eq!(output["max_bytes"], json!(50 * 1024));
+    }
+
+    #[test]
     fn take_last_within_bytes_compacts_tool_observations_before_budgeting() {
         let evidence = json!([{
             "action": "tool_result",
@@ -3582,6 +3648,52 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("\"artifacts\""), "{rendered}");
+    }
+
+    #[test]
+    fn take_last_within_bytes_preserves_long_assistant_reasoning_context() {
+        let reasoning = format!(
+            "I have enough context to edit now. {}",
+            "keep this plan visible. ".repeat(500)
+        );
+        let evidence = json!([{
+            "action": "tool_result",
+            "assistant": {
+                "_air_assistant": {
+                    "reasoning": reasoning,
+                    "content": "Now I have a complete picture. Let me implement."
+                },
+                "tool_calls": [{
+                    "tool": "todowrite",
+                    "input": {"todos": []}
+                }]
+            },
+            "requested": [{
+                "tool": "todowrite",
+                "input": {"todos": []}
+            }],
+            "result": [{
+                "tool": "todowrite",
+                "status": "ok",
+                "output": {"todos": []}
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 80_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(
+            rendered.contains("Now I have a complete picture. Let me implement."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("keep this plan visible. keep this plan visible."),
+            "{rendered}"
+        );
+        assert!(
+            rendered.len() > 10_000,
+            "assistant reasoning should not be compacted to the generic 2KB string limit"
+        );
     }
 
     #[test]

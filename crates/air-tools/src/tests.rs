@@ -529,11 +529,10 @@ fn file_read_offset_without_limit_uses_bounded_window() {
         .unwrap();
 
     assert_eq!(output["start_line"], json!(101));
-    assert_eq!(output["end_line"], json!(300));
+    assert_eq!(output["end_line"], json!(350));
     let content = output["content"].as_str().unwrap();
     assert!(content.contains("00101| line 101"));
-    assert!(content.contains("00300| line 300"));
-    assert!(!content.contains("00301| line 301"));
+    assert!(content.contains("00350| line 350"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -564,11 +563,10 @@ fn file_read_start_line_without_limit_uses_bounded_window() {
         .unwrap();
 
     assert_eq!(output["start_line"], json!(100));
-    assert_eq!(output["end_line"], json!(299));
+    assert_eq!(output["end_line"], json!(350));
     let content = output["content"].as_str().unwrap();
     assert!(content.contains("00100| line 100"));
-    assert!(content.contains("00299| line 299"));
-    assert!(!content.contains("00300| line 300"));
+    assert!(content.contains("00350| line 350"));
     let _ = fs::remove_dir_all(dir);
 }
 

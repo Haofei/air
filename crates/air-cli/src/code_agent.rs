@@ -168,8 +168,10 @@ mod tests {
                 "init",
                 "summarize-at-step-limit",
                 "choose",
+                "choose-verification",
                 "act",
                 "edit-applied",
+                "write-applied",
                 "bash-passed-after-patch",
                 "bash-passed-before-patch",
                 "bash-failed",
@@ -227,5 +229,71 @@ mod tests {
         assert!(input.get("observations").is_some());
         assert!(input.get("allowed_tools").is_some());
         assert!(input.get("tool_schemas").is_none());
+    }
+
+    #[test]
+    fn edit_loop_keeps_opencode_sized_observation_window() {
+        let module = code_edit_loop_module();
+        let rules = module["workflow"]["rules"].as_sequence().unwrap();
+        for id in ["choose", "choose-verification"] {
+            let rule = rules
+                .iter()
+                .find(|rule| rule["id"].as_str() == Some(id))
+                .unwrap();
+            assert_eq!(
+                rule["actions"][0]["input"]["object"]["observations"]["max_bytes"],
+                serde_yaml::Value::Number(600000.into())
+            );
+        }
+    }
+
+    #[test]
+    fn edit_loop_summary_includes_untracked_files() {
+        let module = code_edit_loop_module();
+        let rules = module["workflow"]["rules"].as_sequence().unwrap();
+        let summarize = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("summarize"))
+            .unwrap();
+        let calls = summarize["actions"][0]["input"]["array"]
+            .as_sequence()
+            .unwrap();
+        let diff_command = calls[0]["object"]["input"]["literal"]["command"]
+            .as_str()
+            .unwrap();
+        let names_command = calls[1]["object"]["input"]["literal"]["command"]
+            .as_str()
+            .unwrap();
+
+        assert!(diff_command.contains("git diff --no-index -- /dev/null"));
+        assert!(diff_command.contains("git ls-files --others --exclude-standard"));
+        assert!(names_command.contains("git diff --name-only --"));
+        assert!(names_command.contains("git ls-files --others --exclude-standard"));
+    }
+
+    #[test]
+    fn edit_loop_keeps_multi_edit_refactors_in_choose_phase() {
+        let module = code_edit_loop_module();
+        let rules = module["workflow"]["rules"].as_sequence().unwrap();
+        let edit_applied = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("edit-applied"))
+            .unwrap();
+        let write_applied = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("write-applied"))
+            .unwrap();
+
+        assert_eq!(
+            edit_applied["actions"][0]["values"]["phase"],
+            serde_yaml::Value::String("choose".to_string())
+        );
+        assert_eq!(
+            write_applied["actions"][0]["values"]["phase"],
+            serde_yaml::Value::String("choose".to_string())
+        );
+        assert!(rules
+            .iter()
+            .all(|rule| rule["id"].as_str() != Some("continue-verification-after-tool-update")));
     }
 }
