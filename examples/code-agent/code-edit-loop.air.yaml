@@ -132,7 +132,6 @@ workflow:
   kind: state_machine
   initial: init
   max_steps: 80
-  terminal: [done]
   rules:
     - id: init
       when: phase == "init"

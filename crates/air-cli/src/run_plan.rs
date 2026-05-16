@@ -1220,7 +1220,7 @@ fn replay_stats(events: &[TraceEvent]) -> Result<Value> {
 fn is_tool_call_event(event: &TraceEvent) -> bool {
     matches!(
         event.action.as_str(),
-        "tool_call" | "tool_dispatch" | "tool_batch_dispatch_item"
+        "tool_call" | "tool_batch_dispatch_item"
     )
 }
 
@@ -1249,7 +1249,7 @@ mod tests {
         output.insert("ok".to_string(), json!(true));
         let events = vec![
             trace_event("model_call", TraceStatus::Ok),
-            trace_event("tool_dispatch", TraceStatus::Error),
+            trace_event("tool_call", TraceStatus::Error),
             trace_event("tool_batch_dispatch_item", TraceStatus::Ok),
             system_return_event(output),
         ];

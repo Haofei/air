@@ -57,11 +57,11 @@ cargo run -p air-cli -- code "refactor a small helper and run tests" \
 ## Verification
 
 ```bash
-bash scripts/verify_code_agent.sh
+cargo test --workspace code_agent
 ```
 
-The gate validates the minimal profile, checks the OpenCode-style default tool
-surface, and runs a deterministic edit fixture.
+The workspace tests validate the minimal profile, check the OpenCode-style
+default tool surface, and run a deterministic edit fixture.
 
 ## OpenCode Alignment
 

@@ -85,9 +85,6 @@ pub struct StateMachineWorkflow {
     pub max_steps: u32,
 
     #[serde(default)]
-    pub terminal: Vec<String>,
-
-    #[serde(default)]
     pub rules: Vec<StateRule>,
 }
 
@@ -129,22 +126,11 @@ pub enum StateAction {
         #[serde(default)]
         retry: Option<RetryPolicy>,
     },
-    ToolDispatch {
-        input: InputSpec,
-        output: String,
-        timeout_seconds: u64,
-
-        #[serde(default)]
-        retry: Option<RetryPolicy>,
-    },
     ToolBatchDispatch {
         input: InputSpec,
         output: String,
         timeout_seconds: u64,
         max_calls: u32,
-
-        #[serde(default)]
-        allowed_tools: Vec<String>,
 
         #[serde(default)]
         retry: Option<RetryPolicy>,

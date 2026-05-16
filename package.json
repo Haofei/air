@@ -1,30 +1,25 @@
 {
   "name": "air",
-  "version": "1.0.0",
-  "description": "AIR is a typed agent IR, native VM, linker, and generated-backend playground for bounded agent workflows.",
+  "version": "0.0.0",
+  "description": "AIR is a typed agent IR, native VM, and linker for bounded agent workflows.",
   "private": true,
   "directories": {
     "example": "examples",
     "test": "tests"
   },
   "scripts": {
-    "test": "cargo test -q",
-    "verify": "scripts/verify_1_0.sh"
+    "test": "cargo test -q"
   },
   "keywords": [
     "agents",
     "workflow",
     "ir",
-    "langgraph",
     "openai"
   ],
   "author": "Haofei",
   "license": "MIT",
   "type": "commonjs",
   "dependencies": {
-    "@openai/agents": "^0.11.0",
-    "openai": "^6.37.0",
-    "playwright": "^1.59.1",
-    "zod": "^4.4.3"
+    "playwright": "^1.59.1"
   }
 }

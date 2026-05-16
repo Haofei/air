@@ -12,18 +12,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "air-backend-langgraph"
-version = "0.1.0"
-dependencies = [
- "air-core",
- "air-linker",
- "air-parser",
- "air-verify",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "air-backend-openai"
 version = "0.1.0"
 dependencies = [
@@ -35,24 +23,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "air-backend-openai-agents-js"
-version = "0.1.0"
-dependencies = [
- "air-core",
- "air-linker",
- "air-parser",
- "air-verify",
- "serde_json",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "air-cli"
 version = "0.1.0"
 dependencies = [
- "air-backend-langgraph",
  "air-backend-openai",
- "air-backend-openai-agents-js",
  "air-core",
  "air-linker",
  "air-parser",
@@ -132,6 +106,7 @@ dependencies = [
  "air-core",
  "air-parser",
  "serde_json",
+ "serde_yaml",
 ]
 
 [[package]]

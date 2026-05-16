@@ -22,7 +22,7 @@ use crate::run_plan::{
 };
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
@@ -366,49 +366,6 @@ enum Command {
         #[arg(long)]
         stats: bool,
     },
-    /// Lower an AIR module to a backend target.
-    #[command(hide = true)]
-    Lower {
-        /// Path to a .air.yaml, .air.yml, or .air.json file.
-        file: PathBuf,
-
-        /// Backend target to generate.
-        #[arg(long, value_enum)]
-        backend: LowerBackend,
-
-        /// Optional output path. Prints to stdout when omitted.
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-    /// Lower a dynamic AIR run plan to a backend target.
-    LowerPlan {
-        /// Path to a .air-plan.yaml file.
-        plan: PathBuf,
-
-        /// Path to a .air-store.yaml file.
-        #[arg(long)]
-        store: PathBuf,
-
-        /// Backend target to generate.
-        #[arg(long, value_enum)]
-        backend: LowerPlanBackend,
-
-        /// Optional output path. Prints to stdout when omitted.
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum LowerBackend {
-    Langgraph,
-    OpenaiAgentsJsSemantic,
-}
-
-#[derive(Debug, Clone, Copy, ValueEnum)]
-enum LowerPlanBackend {
-    Langgraph,
-    OpenaiJsStrict,
 }
 
 fn main() -> Result<()> {
@@ -591,17 +548,6 @@ fn main() -> Result<()> {
             identity_out,
             stats,
         }),
-        Command::Lower {
-            file,
-            backend,
-            output,
-        } => lower(file, backend, output),
-        Command::LowerPlan {
-            plan,
-            store,
-            backend,
-            output,
-        } => lower_plan(plan, store, backend, output),
     }
 }
 
@@ -861,69 +807,14 @@ fn run_system(
     Ok(())
 }
 
-fn lower(file: PathBuf, backend: LowerBackend, output: Option<PathBuf>) -> Result<()> {
-    let module = air_parser::parse_air_file(&file)?;
-    let report = air_verify::verify(&module);
-    if !report.is_success() {
-        emit_diagnostics(&report.diagnostics);
-        std::process::exit(1);
-    }
-
-    let generated = match backend {
-        LowerBackend::Langgraph => air_backend_langgraph::lower_module(&module)?,
-        LowerBackend::OpenaiAgentsJsSemantic => {
-            air_backend_openai_agents_js::lower_module(&module)?
-        }
-    };
-
-    if let Some(output) = output {
-        fs::write(output, generated)?;
-    } else {
-        print!("{generated}");
-    }
-    Ok(())
-}
-
-fn lower_plan(
-    plan: PathBuf,
-    store: PathBuf,
-    backend: LowerPlanBackend,
-    output: Option<PathBuf>,
-) -> Result<()> {
-    let plan = air_linker::parse_run_plan_file(plan)?;
-    let store_path = store;
-    let store = air_linker::parse_module_store_file(&store_path)?;
-    let base_dir = module_base_dir_for_store_path(&store, &store_path);
-    let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
-    if !report.is_success() {
-        emit_diagnostics(&report.diagnostics);
-        std::process::exit(1);
-    }
-
-    let generated = match backend {
-        LowerPlanBackend::Langgraph => {
-            air_backend_langgraph::lower_run_plan(&plan, &store, base_dir)?
-        }
-        LowerPlanBackend::OpenaiJsStrict => {
-            air_backend_openai_agents_js::lower_run_plan_strict(&plan, &store, base_dir)?
-        }
-    };
-
-    if let Some(output) = output {
-        fs::write(output, generated)?;
-    } else {
-        print!("{generated}");
-    }
-    Ok(())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::planner::{module_catalog, parse_planner_response, planner_request, recipe_catalog};
     use crate::profile::read_json_object;
     use crate::run_plan::{
-        run_plan_with_inputs, write_checkpoint_state, PlanStateFile, RunPlanExecutionOptions,
+        run_plan_with_inputs, run_plan_with_inputs_capture, write_checkpoint_state, PlanStateFile,
+        RunPlanExecutionOptions,
     };
     use crate::tools::{provider_error_snippet, search_docs, ConfigTools, LocalDoc};
     use air_runtime::{read_trace_jsonl, TraceStatus};
@@ -1389,6 +1280,125 @@ mod tests {
         ))
     }
 
+    fn temp_dir_path(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "{prefix}-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ))
+    }
+
+    fn copy_dir_recursive(from: &std::path::Path, to: &std::path::Path) {
+        fs::create_dir_all(to).unwrap();
+        for entry in fs::read_dir(from).unwrap() {
+            let entry = entry.unwrap();
+            let source = entry.path();
+            let target = to.join(entry.file_name());
+            if source.is_dir() {
+                copy_dir_recursive(&source, &target);
+            } else {
+                fs::copy(&source, &target).unwrap();
+            }
+        }
+    }
+
+    #[test]
+    fn code_agent_fixture_runs_through_workspace_tests() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+        let fixture_root = temp_dir_path("air-code-agent-fixture");
+        let trace_path = temp_repo_file_path(&root, "code-agent-minimal", "jsonl");
+        let _ = fs::remove_dir_all(&fixture_root);
+        fs::create_dir_all(fixture_root.join("examples")).unwrap();
+        fs::create_dir_all(fixture_root.join("modules")).unwrap();
+        copy_dir_recursive(
+            &root.join("examples/code-agent"),
+            &fixture_root.join("examples/code-agent"),
+        );
+        copy_dir_recursive(&root.join("modules/std"), &fixture_root.join("modules/std"));
+
+        let git_init = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&fixture_root)
+            .arg("init")
+            .arg("-q")
+            .status()
+            .unwrap();
+        assert!(git_init.success());
+        let git_add = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&fixture_root)
+            .arg("add")
+            .arg("examples")
+            .arg("modules")
+            .status()
+            .unwrap();
+        assert!(git_add.success());
+
+        let result = run_plan_with_inputs_capture(
+            fixture_root.join("examples/code-agent/code-edit.air-plan.yaml"),
+            fixture_root.join("examples/code-agent/module-store.air-store.yaml"),
+            serde_json::Map::from_iter([(
+                "task".to_string(),
+                json!("fix the failing add function and retest"),
+            )]),
+            RunPlanExecutionOptions {
+                model_config: Some(
+                    fixture_root.join("examples/code-agent/fixtures/model-fixtures.json"),
+                ),
+                trace_out: Some(trace_path.clone()),
+                trace_redact: false,
+                state_out: None,
+                checkpoint_out: None,
+                jit_cache: None,
+                parallel: false,
+                log: false,
+                example_tools: false,
+                tool_config: Some(fixture_root.join("examples/code-agent/tools.json")),
+            },
+        )
+        .unwrap();
+
+        let edit = &result["edit"];
+        assert_eq!(edit["final_success"], json!(true));
+        assert_eq!(edit["patch_applied"], json!(true));
+        assert!(edit["workspace_diff"]["diff"]
+            .as_str()
+            .unwrap()
+            .contains("examples/code-agent/edit-fixture/math.js"));
+
+        let trace = read_trace_jsonl(&trace_path).unwrap();
+        let first_decider = trace
+            .iter()
+            .find(|event| {
+                event.action == "model_call_start"
+                    && event.meta.as_ref().unwrap()["model"] == json!("code_edit_decider")
+            })
+            .expect("code_edit_decider model call");
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["allowed_tools"],
+            json!([
+                "question",
+                "bash",
+                "read",
+                "glob",
+                "grep",
+                "edit",
+                "write",
+                "task",
+                "webfetch",
+                "todowrite",
+                "todoread",
+                "skill"
+            ])
+        );
+
+        let _ = fs::remove_file(trace_path);
+        let _ = fs::remove_dir_all(fixture_root);
+    }
+
     #[test]
     fn writes_resume_compatible_checkpoint_state() {
         let path = std::env::temp_dir().join(format!(
@@ -1461,14 +1471,7 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
 
-        for command in [
-            "code",
-            "validate-plan",
-            "plan",
-            "run-plan",
-            "resume-plan",
-            "lower-plan",
-        ] {
+        for command in ["code", "validate-plan", "plan", "run-plan", "resume-plan"] {
             assert!(
                 command_names.contains(&command),
                 "expected {command} in help"
@@ -1481,6 +1484,7 @@ mod tests {
             "validate",
             "run",
             "lower",
+            "lower-plan",
             "replay",
             "deep-research",
         ] {
@@ -1886,40 +1890,12 @@ modules:
     }
 
     #[test]
-    fn lower_plan_accepts_dynamic_run_plan_with_air_runtime() {
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-        let store_path = temp_repo_file_path(&root, "air-dynamic-lower-store", "yaml");
-        let output_path = store_path.with_extension("py");
-        let store = air_linker::parse_module_store_file(
-            root.join("examples/deep-research/module-store.air-store.yaml"),
-        )
-        .unwrap();
-        fs::write(&store_path, serde_yaml::to_string(&store).unwrap()).unwrap();
-
-        lower_plan(
-            root.join("examples/deep-research/deep-research-dynamic.air-plan.yaml"),
-            store_path.clone(),
-            LowerPlanBackend::Langgraph,
-            Some(output_path.clone()),
-        )
-        .unwrap();
-        let generated = fs::read_to_string(&output_path).unwrap();
-        let _ = fs::remove_file(store_path);
-        let _ = fs::remove_file(output_path);
-
-        assert!(generated.contains("def _air_run_dynamic_after"));
-        assert!(generated.contains("\"deep_research.research_topic@0.1.0\""));
-    }
-
-    #[test]
-    fn specialized_dynamic_trace_can_lower_to_generated_backends() {
+    fn specialized_dynamic_trace_can_be_validated() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let trace_path = temp_repo_file_path(&root, "air-dynamic-specialize", "jsonl");
         let store_path = trace_path.with_extension("store.yaml");
         let specialized_path = trace_path.with_extension("specialized.air-plan.yaml");
         let identity_path = trace_path.with_extension("identity.json");
-        let langgraph_path = trace_path.with_extension("py");
-        let openai_path = trace_path.with_extension("mjs");
         let store = air_linker::parse_module_store_file(
             root.join("tests/plans/dynamic-smoke.air-store.yaml"),
         )
@@ -1955,35 +1931,16 @@ modules:
         })
         .unwrap();
 
-        lower_plan(
-            specialized_path.clone(),
-            store_path.clone(),
-            LowerPlanBackend::Langgraph,
-            Some(langgraph_path.clone()),
-        )
-        .unwrap();
-        lower_plan(
-            specialized_path.clone(),
-            store_path.clone(),
-            LowerPlanBackend::OpenaiJsStrict,
-            Some(openai_path.clone()),
-        )
-        .unwrap();
-
         let specialized = air_linker::parse_run_plan_file(&specialized_path).unwrap();
-        let langgraph = fs::read_to_string(&langgraph_path).unwrap();
-        let openai = fs::read_to_string(&openai_path).unwrap();
+        let validation = air_linker::validate_run_plan(&specialized, &store, &root);
         let _ = fs::remove_file(trace_path);
         let _ = fs::remove_file(store_path);
         let _ = fs::remove_file(specialized_path);
         let _ = fs::remove_file(identity_path);
-        let _ = fs::remove_file(langgraph_path);
-        let _ = fs::remove_file(openai_path);
 
+        assert!(validation.is_success(), "{:?}", validation.diagnostics);
         assert!(specialized.dynamic.is_none());
         assert!(specialized.nodes.iter().any(|node| node.id == "topic_1"));
-        assert!(langgraph.contains("\"topic_1\""));
-        assert!(openai.contains("\"topic_1\""));
     }
 
     #[test]

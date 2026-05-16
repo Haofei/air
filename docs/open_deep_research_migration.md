@@ -12,7 +12,7 @@ The migration should prove that AIR can express the product pattern behind deep 
 - compress each researcher's findings;
 - synthesize a final cited report;
 - validate module boundaries and generated topology before execution;
-- lower the same checked plan to more than one backend.
+- replay and specialize dynamic traces back into checked AIR RunPlans.
 
 The goal is not a line-for-line port of LangGraph internals. AIR should keep modules static, typed, bounded, and auditable. Dynamic selection belongs in the planner/linker layer that emits a verified RunPlan.
 
@@ -65,8 +65,6 @@ Generated evidence:
 - `target/generated/deep_research_planned_current.trace.jsonl`
 - `target/generated/deep_research_supervised_real.output.json`
 - `target/generated/deep_research_supervised_real.trace.jsonl`
-- `target/generated/deep_research_planned_array_langgraph.py`
-- `target/generated/deep_research_planned_array_openai_strict.mjs`
 
 The important design point is that users do not author `topic_1`, `topic_2`, or `topic_4` by hand. Users provide a task and a module store. `air plan` selects modules and emits the bounded RunPlan. The verifier checks the generated graph before execution.
 
@@ -120,16 +118,15 @@ Implemented:
 - local search tool normalization with raw-content deduplication and configurable `max_results`, so repeated documents do not consume downstream compression context;
 - artifact provenance in the native AIR VM: tool outputs can register `artifacts[]` or `documents[]`, and later model/return outputs with `sources`, `citations`, or `source_ids` must reference known artifact ids when evidence is available;
 - expanded local deep-research corpus for the EV readiness example, covering 800V platforms, SiC supply chain, charging infrastructure, solid-state battery risks, distributed-drive controls, and comparative 2026-2030 readiness;
-- native HTTP JSON tool provider for production-shaped tool adapters, with capability checks, templated request body/headers, JSON response parsing, and release-gate smoke coverage;
+- native HTTP JSON tool provider for production-shaped tool adapters, with capability checks, templated request body/headers, JSON response parsing, and smoke coverage;
 - AIR input `truncate` expressions, so bounded modules can cap large accumulated evidence before model calls without hiding the truncation in prompt text;
 - explicit researcher reflection via the `research.think` tool, so deliberation appears in trace as a real AIR tool call instead of being hidden inside prompt text;
 - runtime `retry.max_attempts` semantics for model and tool actions, including schema-error feedback through `_air_retry` so real model responses can be corrected and revalidated without weakening AIR schemas;
 - provider token-limit retry policy for model calls, where provider context-length errors can retry with a declared `token_limit.max_input_chars` budget and `_air_retry.reason = "token_limit"` instead of relying on prompt-only fallback;
-- generated LangGraph and OpenAI JS strict runtimes carry the same token-limit retry input semantics, including bounded JSON compaction and `_air_retry.max_input_chars`;
 - AIR state-machine and RunPlan node conditions with `==`, `!=`, `&&`, and `||`, enabling rules such as `phase == "route" && research_direction.complete == false` and optional node routes such as `when: supervisor.decision.action == "conduct_research" || supervisor.decision.needs_more == true`;
-- RunPlan-level `requires.capabilities` admission control, where every static node and dynamic fan-out module must be covered by the plan capability boundary before execution or lowering proceeds;
+- RunPlan-level `requires.capabilities` admission control, where every static node and dynamic fan-out module must be covered by the plan capability boundary before execution proceeds;
 - runtime enforcement of `policy.max_tool_calls` and `policy.max_model_calls`, so bounded researcher loops fail closed if they try to exceed their declared tool-call or model-call budget;
-- runtime tool capability handshake, where provider-configured tool capabilities must match module `tools[].capability` and be present in `requires.capabilities` before the AIR VM runs the tool; generated LangGraph and OpenAI JS strict runtimes also reject undeclared or mismatched tool calls, with LangGraph accepting host-provided `AIR_TOOL_CAPABILITIES`;
+- runtime tool capability handshake, where provider-configured tool capabilities must match module `tools[].capability` and be present in `requires.capabilities` before the AIR VM runs the tool;
 - native VM approval provider hook for `kind: approval`, where the default provider fails closed, explicit providers or `tool-config.approvals` can approve or deny requested capabilities, and approval decisions are emitted in trace;
 - runtime enforcement of action `timeout_seconds` and module-level `policy.timeout_seconds`, with action deadlines forwarded to timeout-aware providers such as OpenAI-compatible model calls and HTTP JSON tools;
 - explicit supervisor reflection through `research.think` before conditional second-wave routing;
@@ -139,15 +136,11 @@ Implemented:
 - array index paths, including `plan.plan.topics[0]`;
 - array append fan-in, including `topic_1.note -> final.notes[]`;
 - AIR schema support for array `min_items` and `max_items`;
-- runtime validation of array item bounds in generated backends;
-- generated LangGraph backend for static and dynamic RunPlans, including a small AIR runtime for `dynamic.fanouts`;
-- generated OpenAI Agents JS strict backend for static and dynamic RunPlans, including a small AIR runtime for `dynamic.fanouts`;
-- generated backend host contracts: LangGraph accepts injected `AIR_TOOL_PROVIDER`, `AIR_TOOL_CAPABILITIES`, and `AIR_APPROVAL_PROVIDER`; OpenAI JS strict accepts the same explicit `tool-config` tool capabilities and approval decisions while defaulting to fail-closed;
-- generated backend trace logging with `AIR_TRACE=1`, emitting AIR-style JSONL action events on stderr for model/tool calls, retry failures, returns, and dynamic fan-out materialization;
+- runtime validation of array item bounds in the native AIR VM;
 - real model execution through an OpenAI-compatible BigModel config.
 - real dynamic fan-out execution through the OpenAI-compatible BigModel config, where one planning model call materializes four researcher instances and then synthesizes a final report.
 
-## Validation Gates
+## Validation
 
 Run these checks before claiming this migration path works:
 
@@ -161,7 +154,7 @@ The script covers formatting, the full Rust test suite, every deep-research modu
 AIR_DEEP_RESEARCH_REAL=1 scripts/verify_deep_research.sh
 ```
 
-The expanded manual commands below are useful when debugging individual gates:
+The expanded manual commands below are useful when debugging individual checks:
 
 ```bash
 cargo fmt --check
@@ -276,9 +269,7 @@ Missing or intentionally simplified:
 - provider-native search behavior for OpenAI and Anthropic web search beyond the generic HTTP JSON adapter;
 - Tavily/API-native summarization and provider-specific search ranking beyond generic HTTP JSON and local search normalization;
 - MCP server auth and tool discovery;
-- generated backend parity for artifact provenance checks; the native AIR VM is currently the conformance runtime for artifact registry and citation validation;
-- report-quality parity with `open_deep_research` remains unproven; AIR now has its own deep-research report quality gate and real BigModel samples that pass it, but it does not yet benchmark output quality against the upstream app or Deep Research Bench;
-- richer generated-backend approval integrations beyond the current explicit host hooks/config decisions, such as interactive human approval queues;
+- report-quality parity with `open_deep_research` remains unproven; AIR has a deep-research report quality evaluator and real BigModel samples that pass it, but it does not yet benchmark output quality against the upstream app or Deep Research Bench;
 - semantic summarization fallback for token-limit recovery beyond the current deterministic char-budget input compaction;
 - intra-module checkpointing and continuation for arbitrary long-running in-flight modules;
 - making parallel execution the default for `run-plan`; current true parallel execution is available through `run-plan --parallel`, while the default public CLI path remains sequential for compatibility;
@@ -296,9 +287,9 @@ For the current AIR-only slice, AIR should be considered to have migrated this a
 
 Current report-quality evidence:
 
-- `scripts/verify_deep_research.sh` checks the richer final-report prompt, richer researcher note schema, expanded local corpus, and a 900+ word report fixture through `scripts/evaluate_deep_research_report.py`;
-- with `AIR_DEEP_RESEARCH_REAL=1`, the same verifier runs a real BigModel final-reporter smoke and evaluates the output with the same quality gate;
+- `scripts/verify_deep_research.sh` checks the richer final-report prompt, richer researcher note schema, expanded local corpus, and a 900+ word report quality sample through `scripts/evaluate_deep_research_report.py`;
+- with `AIR_DEEP_RESEARCH_REAL=1`, the same verifier runs a real BigModel final-reporter smoke and evaluates the output with the same quality check;
 - `target/generated/deep_research_dynamic_real.output.json` is a local real dynamic AIR VM sample from the OpenAI-compatible BigModel provider; it passed the quality evaluator with 1313 report words, 10 key findings, 6 comparison rows, 7 recommendations, 8 sources, and 12 limitations.
 - the checked-in upstream `open_deep_research/examples/*.md` examples are roughly 1257-1680 words, so the current AIR real dynamic sample is in the same report-length band rather than the earlier short-summary shape.
 
-Backend parity is a separate portability gate, not part of the current AIR-only slice.
+Generated backend portability is intentionally out of scope for the current AIR-only slice.

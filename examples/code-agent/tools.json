@@ -1,10 +1,9 @@
 {
-  "workspace_dir": ".",
   "tools": {
     "glob": {
       "kind": "repo_files",
       "capability": "code.read",
-      "repo_dir": ".",
+      "repo_dir": "../..",
       "max_files": 100
     },
     "question": {
@@ -14,13 +13,13 @@
     "read": {
       "kind": "file_read",
       "capability": "file.read",
-      "base_dir": ".",
+      "base_dir": "../..",
       "max_bytes": 65536
     },
     "grep": {
       "kind": "file_search",
       "capability": "file.read",
-      "base_dir": ".",
+      "base_dir": "../..",
       "max_matches": 100,
       "max_context_lines": 2,
       "max_line_chars": 2000,
@@ -29,13 +28,13 @@
     "edit": {
       "kind": "file_edit",
       "capability": "file.write",
-      "base_dir": ".",
+      "base_dir": "../..",
       "max_bytes": 262144
     },
     "write": {
       "kind": "file_write",
       "capability": "file.write",
-      "base_dir": ".",
+      "base_dir": "../..",
       "max_bytes": 262144,
       "create_dirs": true,
       "allow_overwrite": true
@@ -43,7 +42,7 @@
     "bash": {
       "kind": "bash",
       "capability": "code.test",
-      "cwd": ".",
+      "cwd": "../..",
       "timeout_seconds": 120,
       "max_bytes": 65536,
       "truncation_direction": "tail"

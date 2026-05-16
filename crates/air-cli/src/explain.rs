@@ -19,7 +19,6 @@ pub(crate) struct PlanExplanation {
     required_approvals: Vec<String>,
     auto_executable: bool,
     provenance: ProvenanceExplanation,
-    backend_compatibility: Vec<BackendCompatibilityExplanation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -42,13 +41,6 @@ struct ProvenanceExplanation {
     plan_hash: String,
     store_hash: String,
     module_hashes: BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-struct BackendCompatibilityExplanation {
-    backend: String,
-    status: String,
-    reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -163,7 +155,6 @@ pub(crate) fn build_plan_explanation(
         required_approvals: required_approvals.clone(),
         auto_executable: required_approvals.is_empty(),
         provenance,
-        backend_compatibility: collect_backend_compatibility(plan, store, base_dir),
     })
 }
 
@@ -259,19 +250,6 @@ pub(crate) fn format_plan_explanation(explanation: &PlanExplanation) -> String {
         writeln!(output, "    - {}: {}", module_id, hash).unwrap();
     }
 
-    writeln!(output, "Backend compatibility:").unwrap();
-    for backend in &explanation.backend_compatibility {
-        match &backend.reason {
-            Some(reason) => writeln!(
-                output,
-                "  - {}: {} ({})",
-                backend.backend, backend.status, reason
-            )
-            .unwrap(),
-            None => writeln!(output, "  - {}: {}", backend.backend, backend.status).unwrap(),
-        }
-    }
-
     output
 }
 
@@ -291,49 +269,6 @@ fn estimate_plan_risk(
         return ("low", "bounded model-only execution");
     }
     ("low", "no model or tool calls detected")
-}
-
-fn collect_backend_compatibility(
-    plan: &air_linker::RunPlan,
-    store: &air_linker::ModuleStore,
-    base_dir: &Path,
-) -> Vec<BackendCompatibilityExplanation> {
-    let mut backends = vec![BackendCompatibilityExplanation {
-        backend: "native".to_string(),
-        status: "ok".to_string(),
-        reason: None,
-    }];
-
-    backends.push(
-        match air_backend_langgraph::lower_run_plan(plan, store, base_dir) {
-            Ok(_) => BackendCompatibilityExplanation {
-                backend: "langgraph".to_string(),
-                status: "ok".to_string(),
-                reason: None,
-            },
-            Err(error) => BackendCompatibilityExplanation {
-                backend: "langgraph".to_string(),
-                status: "unsupported".to_string(),
-                reason: Some(error.to_string()),
-            },
-        },
-    );
-    backends.push(
-        match air_backend_openai_agents_js::lower_run_plan_strict(plan, store, base_dir) {
-            Ok(_) => BackendCompatibilityExplanation {
-                backend: "openai-js-strict".to_string(),
-                status: "ok".to_string(),
-                reason: None,
-            },
-            Err(error) => BackendCompatibilityExplanation {
-                backend: "openai-js-strict".to_string(),
-                status: "unsupported".to_string(),
-                reason: Some(error.to_string()),
-            },
-        },
-    );
-
-    backends
 }
 
 fn collect_module_usage(plan: &air_linker::RunPlan) -> BTreeMap<String, usize> {
@@ -451,7 +386,6 @@ fn estimate_module_call_budget(module: &air_core::AirModule) -> CallBudget {
                 .flat_map(|rule| &rule.actions)
                 .map(|action| match action {
                     StateAction::ToolCall { retry, .. } => retry_attempts(retry),
-                    StateAction::ToolDispatch { retry, .. } => retry_attempts(retry),
                     StateAction::ToolBatchDispatch {
                         retry, max_calls, ..
                     } => retry_attempts(retry).saturating_mul(*max_calls as usize),
@@ -530,23 +464,10 @@ mod tests {
             .provenance
             .module_hashes
             .contains_key("deep_research.plan_array@0.1.0"));
-        assert!(explanation
-            .backend_compatibility
-            .iter()
-            .any(|backend| backend.backend == "native" && backend.status == "ok"));
-        assert!(explanation
-            .backend_compatibility
-            .iter()
-            .any(|backend| backend.backend == "langgraph"));
-        assert!(explanation
-            .backend_compatibility
-            .iter()
-            .any(|backend| backend.backend == "openai-js-strict"));
         assert!(rendered.contains("Dynamic fanouts:"));
         assert!(rendered.contains(
             "topic_wave: module=deep_research.research_topic@0.1.0, max_items=4, max_parallel=4"
         ));
-        assert!(rendered.contains("Backend compatibility:"));
     }
 
     #[test]
@@ -647,7 +568,6 @@ workflow:
                 store_hash: "sha256:store".to_string(),
                 module_hashes: BTreeMap::new(),
             },
-            backend_compatibility: Vec::new(),
         };
 
         let rendered = format_plan_explanation(&explanation);

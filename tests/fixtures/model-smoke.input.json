@@ -1,3 +1,0 @@
-{
-  "prompt": "Return a short JSON object with keys summary and risk_score. Use risk_score 0.1."
-}

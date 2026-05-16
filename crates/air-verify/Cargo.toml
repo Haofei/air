@@ -11,3 +11,4 @@ serde_json.workspace = true
 
 [dev-dependencies]
 air-parser = { path = "../air-parser" }
+serde_yaml.workspace = true

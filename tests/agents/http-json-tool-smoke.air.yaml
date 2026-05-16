@@ -42,7 +42,6 @@ workflow:
   kind: state_machine
   initial: search
   max_steps: 4
-  terminal: [done, failed]
   rules:
     - id: search
       when: phase == "search"

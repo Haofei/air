@@ -1,7 +1,5 @@
 [workspace]
 members = [
-    "crates/air-backend-langgraph",
-    "crates/air-backend-openai-agents-js",
     "crates/air-backend-openai",
     "crates/air-cli",
     "crates/air-core",

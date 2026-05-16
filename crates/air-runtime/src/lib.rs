@@ -18,8 +18,8 @@ pub use model_context::{
 };
 
 pub type State = Map<String, Value>;
-type ResolvedToolDispatch = Result<(String, Value), RuntimeError>;
-type ResolvedToolBatchItem = (Value, ResolvedToolDispatch);
+type ResolvedToolSelection = Result<(String, Value), RuntimeError>;
+type ResolvedToolBatchItem = (Value, ResolvedToolSelection);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
@@ -149,12 +149,6 @@ pub enum RuntimeError {
 
     #[error("tool_batch_dispatch max_calls exceeded: limit={limit} attempted={attempted}")]
     ToolBatchDispatchLimitExceeded { limit: u32, attempted: u32 },
-
-    #[error("tool_batch_dispatch selected tool {tool}, but allowed_tools only permits {allowed_tools:?}")]
-    ToolBatchDispatchToolNotAllowed {
-        tool: String,
-        allowed_tools: Vec<String>,
-    },
 
     #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
     ModelCallLimitExceeded { limit: u32, attempted: u32 },
@@ -607,38 +601,15 @@ where
                 .unwrap_or_default()
                 .to_string();
 
-            if workflow.terminal.iter().any(|terminal| terminal == &phase) {
-                if let Some(rule) = workflow
-                    .rules
-                    .iter()
-                    .find(|rule| condition_matches(&state, &outputs, &rule.when).unwrap_or(false))
-                {
-                    for action in &rule.actions {
-                        let mut context = ExecutionContext {
-                            module,
-                            state: &mut state,
-                            outputs: &mut outputs,
-                            trace: &mut trace,
-                            observer: &mut observer,
-                            model_calls: &mut model_calls,
-                            tool_calls: &mut tool_calls,
-                            tool_history: &mut tool_history,
-                            artifact_registry: &mut artifact_registry,
-                            module_started_at,
-                            step,
-                            rule: &rule.id,
-                        };
-                        self.execute_action(&mut context, action)?;
-                    }
-                }
-                return Ok(RunResult { outputs, trace });
-            }
-
             let mut matched = false;
             for rule in &workflow.rules {
                 if condition_matches(&state, &outputs, &rule.when)? {
                     matched = true;
+                    let mut did_return = false;
                     for action in &rule.actions {
+                        if did_return && !matches!(action, StateAction::Return { .. }) {
+                            continue;
+                        }
                         let mut context = ExecutionContext {
                             module,
                             state: &mut state,
@@ -654,38 +625,40 @@ where
                             rule: &rule.id,
                         };
                         self.execute_action(&mut context, action)?;
+                        if matches!(action, StateAction::Return { .. }) {
+                            did_return = true;
+                        }
                     }
-                    if workflow.terminal.iter().any(|terminal| {
-                        state
-                            .get("phase")
-                            .and_then(Value::as_str)
-                            .is_some_and(|phase| phase == terminal)
+                    if did_return {
+                        return Ok(RunResult { outputs, trace });
+                    }
+                    if let Some(return_rule) = workflow.rules.iter().find(|candidate| {
+                        candidate.id != rule.id
+                            && candidate
+                                .actions
+                                .iter()
+                                .any(|action| matches!(action, StateAction::Return { .. }))
+                            && condition_matches(&state, &outputs, &candidate.when).unwrap_or(false)
                     }) {
-                        if let Some(terminal_rule) = workflow.rules.iter().find(|candidate| {
-                            candidate.id != rule.id
-                                && condition_matches(&state, &outputs, &candidate.when)
-                                    .unwrap_or(false)
-                        }) {
-                            for action in &terminal_rule.actions {
-                                if !matches!(action, StateAction::Return { .. }) {
-                                    continue;
-                                }
-                                let mut context = ExecutionContext {
-                                    module,
-                                    state: &mut state,
-                                    outputs: &mut outputs,
-                                    trace: &mut trace,
-                                    observer: &mut observer,
-                                    model_calls: &mut model_calls,
-                                    tool_calls: &mut tool_calls,
-                                    tool_history: &mut tool_history,
-                                    artifact_registry: &mut artifact_registry,
-                                    module_started_at,
-                                    step,
-                                    rule: &terminal_rule.id,
-                                };
-                                self.execute_action(&mut context, action)?;
+                        for action in &return_rule.actions {
+                            if !matches!(action, StateAction::Return { .. }) {
+                                continue;
                             }
+                            let mut context = ExecutionContext {
+                                module,
+                                state: &mut state,
+                                outputs: &mut outputs,
+                                trace: &mut trace,
+                                observer: &mut observer,
+                                model_calls: &mut model_calls,
+                                tool_calls: &mut tool_calls,
+                                tool_history: &mut tool_history,
+                                artifact_registry: &mut artifact_registry,
+                                module_started_at,
+                                step,
+                                rule: &return_rule.id,
+                            };
+                            self.execute_action(&mut context, action)?;
                         }
                         return Ok(RunResult { outputs, trace });
                     }
@@ -956,35 +929,11 @@ where
                     },
                 )?;
             }
-            StateAction::ToolDispatch {
-                input,
-                output,
-                timeout_seconds,
-                retry,
-            } => {
-                let dispatch = resolve_input(context.state, context.outputs, input)?;
-                let (tool, tool_input) = resolve_tool_dispatch(&dispatch)?;
-                let (tool, requested_tool) =
-                    normalize_model_selected_tool_name(context.module, tool);
-                self.execute_tool_call(
-                    context,
-                    ToolExecution {
-                        action_name: "tool_dispatch",
-                        tool: &tool,
-                        requested_tool: requested_tool.as_deref(),
-                        input: tool_input,
-                        output,
-                        timeout_seconds: *timeout_seconds,
-                        retry,
-                    },
-                )?;
-            }
             StateAction::ToolBatchDispatch {
                 input,
                 output,
                 timeout_seconds,
                 max_calls,
-                allowed_tools,
                 retry,
                 on_error,
             } => {
@@ -996,7 +945,6 @@ where
                         output,
                         timeout_seconds: *timeout_seconds,
                         max_calls: *max_calls,
-                        allowed_tools,
                         retry,
                         on_error: *on_error,
                     },
@@ -1241,7 +1189,6 @@ where
             output,
             timeout_seconds,
             max_calls,
-            allowed_tools,
             retry,
             on_error,
         } = batch;
@@ -1304,26 +1251,6 @@ where
                     return Err(error);
                 }
             };
-            if let Err(error) = validate_batch_allowed_tool(&tool, allowed_tools) {
-                let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
-                insert_batch_item_meta(&mut meta, index);
-                context.push_event_with_meta(
-                    "tool_batch_dispatch_item",
-                    Some(tool_input.clone()),
-                    None,
-                    Some(meta),
-                    Err(error.to_string()),
-                );
-                if on_error == ToolErrorMode::Observe {
-                    results.push(tool_batch_error_observation_for_runtime_error(
-                        &tool,
-                        &tool_input,
-                        &error,
-                    ));
-                    continue;
-                }
-                return Err(error);
-            }
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
                 insert_batch_item_meta(&mut meta, index);
@@ -1490,7 +1417,7 @@ where
                     "output": result,
                 }));
                 if let Some(output_object) = item_output.as_mut().and_then(Value::as_object_mut) {
-                    copy_tool_dispatch_metadata(&raw_dispatch, output_object);
+                    copy_tool_selection_metadata(&raw_dispatch, output_object);
                 }
                 break;
             }
@@ -2135,20 +2062,10 @@ fn validate_tool_capability<T: ToolProvider>(
     Ok(())
 }
 
-fn validate_batch_allowed_tool(tool: &str, allowed_tools: &[String]) -> Result<(), RuntimeError> {
-    if allowed_tools.is_empty() || allowed_tools.iter().any(|allowed| allowed == tool) {
-        return Ok(());
-    }
-    Err(RuntimeError::ToolBatchDispatchToolNotAllowed {
-        tool: tool.to_string(),
-        allowed_tools: allowed_tools.to_vec(),
-    })
-}
-
-fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeError> {
-    let Some(object) = dispatch.as_object() else {
+fn resolve_tool_selection(selection: &Value) -> Result<(String, Value), RuntimeError> {
+    let Some(object) = selection.as_object() else {
         return Err(RuntimeError::SchemaViolation(
-            "tool_dispatch input must be an object with fields tool and input".to_string(),
+            "tool_batch_dispatch item must be an object with fields tool and input".to_string(),
         ));
     };
     if let Some(tool) = object.get("tool").and_then(Value::as_str) {
@@ -2162,7 +2079,7 @@ fn resolve_tool_dispatch(dispatch: &Value) -> Result<(String, Value), RuntimeErr
     }
     let Some(tool) = object.get("name").and_then(Value::as_str) else {
         return Err(RuntimeError::SchemaViolation(
-            "tool_dispatch input.tool must be a string".to_string(),
+            "tool_batch_dispatch item.tool must be a string".to_string(),
         ));
     };
     let input = object
@@ -2206,7 +2123,7 @@ fn resolve_tool_batch_dispatch_items(
         .iter()
         .enumerate()
         .map(|(index, item)| {
-            let resolved = resolve_tool_dispatch(item).map_err(|error| match error {
+            let resolved = resolve_tool_selection(item).map_err(|error| match error {
                 RuntimeError::SchemaViolation(message) => RuntimeError::SchemaViolation(format!(
                     "tool_batch_dispatch input[{index}] invalid: {message}"
                 )),
@@ -2217,8 +2134,8 @@ fn resolve_tool_batch_dispatch_items(
         .collect())
 }
 
-fn copy_tool_dispatch_metadata(raw_dispatch: &Value, output_object: &mut Map<String, Value>) {
-    let Some(object) = raw_dispatch.as_object() else {
+fn copy_tool_selection_metadata(raw_selection: &Value, output_object: &mut Map<String, Value>) {
+    let Some(object) = raw_selection.as_object() else {
         return;
     };
     for field in ["_air_tool_call_id", "_air_tool_name"] {
@@ -2280,28 +2197,6 @@ fn tool_batch_error_observation_for_runtime_error(
             "message": "This read/search/diagnostic tool call repeats a previous semantic input. Reissue it only if you include repeat_reason naming the exact missing fact; otherwise use existing observations and edit, verify, complete, or abort.",
             "tool": tool,
             "attempted": attempted,
-        });
-        if let Some(object) = observation.as_object_mut() {
-            for (key, value) in policy.as_object().unwrap() {
-                object.insert(key.clone(), value.clone());
-            }
-            if let Some(output) = object.get_mut("output").and_then(Value::as_object_mut) {
-                for (key, value) in policy.as_object().unwrap() {
-                    output.insert(key.clone(), value.clone());
-                }
-            }
-        }
-    } else if let RuntimeError::ToolBatchDispatchToolNotAllowed {
-        tool,
-        allowed_tools,
-    } = error
-    {
-        let policy = json!({
-            "error_code": "tool_not_allowed_in_phase",
-            "permission": "tool_not_allowed_in_phase",
-            "message": "AIR's context ledger has narrowed the productive tool set for this phase. Choose one of the allowed tools for the current recommended action.",
-            "tool": tool,
-            "allowed_tools": allowed_tools,
         });
         if let Some(object) = observation.as_object_mut() {
             for (key, value) in policy.as_object().unwrap() {
@@ -2577,7 +2472,6 @@ struct ToolBatchExecution<'a> {
     output: &'a str,
     timeout_seconds: u64,
     max_calls: u32,
-    allowed_tools: &'a [String],
     retry: &'a Option<RetryPolicy>,
     on_error: ToolErrorMode,
 }
@@ -3335,17 +3229,6 @@ mod tests {
         )
         .unwrap();
         assert_eq!(patch_applied, json!(true));
-    }
-
-    #[test]
-    fn validates_batch_allowed_tools() {
-        assert!(validate_batch_allowed_tool("edit", &["edit".to_string()]).is_ok());
-
-        let error = validate_batch_allowed_tool("file.read", &["edit".to_string()]).unwrap_err();
-        assert!(matches!(
-            error,
-            RuntimeError::ToolBatchDispatchToolNotAllowed { .. }
-        ));
     }
 
     #[test]

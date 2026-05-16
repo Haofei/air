@@ -1,8 +1,8 @@
 # AIR
 
-**Composable Agent IR: compile, link, run, and observe bounded agents across runtimes.**
+**Composable Agent IR: compile, link, run, and observe bounded agents on a native VM.**
 
-AIR is a compiler-first module system for production agent workflows. Agents are written as typed, bounded state machines in `.air.yaml`; applications compose them with verified RunPlans; runtimes execute the checked graph on the native Rust VM or generated backend code.
+AIR is a compiler-first module system for production agent workflows. Agents are written as typed, bounded state machines in `.air.yaml`; applications compose them with verified RunPlans; the native Rust VM executes the checked graph and records auditable traces.
 
 ## Why AIR
 
@@ -12,12 +12,12 @@ designed around that audit surface. opencode optimizes for developer freedom; AI
 bounded freedom with guarantees.
 
 The end state is not an AI that rewrites its own constitution at runtime. It is a stable AIR
-constitution that lets coding agents continuously improve modules, tools, prompts, and backends
+constitution that lets coding agents continuously improve modules, tools, prompts, and runtime adapters
 through auditable traces, tests, benchmarks, and reviewed changes.
 
 | Problem | AIR |
 | --- | --- |
-| Agent code is locked to one SDK | One checked IR can run on the AIR VM or lower to LangGraph / OpenAI JS strict runtimes |
+| Agent code is locked to one SDK | One checked IR runs on the native AIR VM behind a stable module and tool contract |
 | Multi-agent flows are prompt-shaped | RunPlans connect typed module inputs and outputs with static validation |
 | Dynamic agent graphs are hard to audit | Dynamic fan-out/fan-in is bounded, typed, traced, and can be specialized |
 | Tool permissions are implicit | Capabilities, provider tool contracts, budgets, and approval gates are verified |
@@ -36,24 +36,20 @@ For coding agents, that means the important questions have first-class places to
 
 ## Status
 
-AIR is usable as a local compiler/runtime prototype with bounded production-oriented semantics. Backend lowering is available but still experimental; the native Rust VM is the reference runtime.
+AIR is usable as a local compiler/runtime prototype with bounded production-oriented semantics. The native Rust VM is the reference runtime. Generated backend lowering has been removed and can return later as a separate compatibility layer.
 
 | Feature | Status |
 | --- | --- |
 | Typed state-machine AIR modules | Supported |
 | Module schema validation | Supported, including opt-in strict object fields with `additional_properties: false` |
-| Model/tool providers and capability checks | Supported; common native tools live in `air-tools`; `tool_dispatch` and bounded `tool_batch_dispatch` let a model select declared tools without bypassing AIR capability/budget checks |
+| Model/tool providers and capability checks | Supported; common native tools live in `air-tools`; bounded `tool_batch_dispatch` lets a model select declared tools without bypassing AIR capability/budget checks |
 | Reusable standard modules | Supported; `modules/std` includes generic context compaction |
 | Approval gates, retry, budgets, repeated-tool guards, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
 | RunPlan module composition | Supported |
 | Dynamic bounded fan-out/fan-in | Supported |
 | Checkpoint, halt/resume, replay, and JIT hot-path specialization | Supported |
-| LangGraph strict lowering | Experimental |
-| OpenAI Agents JS strict lowering | Experimental |
-| OpenAI Agents JS semantic lowering | Limited: one module shape, local-docs RAG oriented |
 | Hard cancellation of arbitrary synchronous providers | Not yet; OpenAI/http-json providers enforce request deadlines |
 | Trace redaction and sensitive-field policy | Supported: trace files are redacted by default; use `--trace-raw` only in trusted debug runs |
-| Backend conformance suite | Supported for core strict-runtime cases via `scripts/verify_backend_conformance.sh` |
 
 ## Quick Start
 
@@ -83,7 +79,7 @@ The repository intentionally keeps examples focused:
 | Example | Purpose |
 | --- | --- |
 | `examples/simple-helpdesk/` | One-agent RAG workflow with local document search, model call, typed output, and provider capability check |
-| `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, parallel execution, and backend lowering |
+| `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, and parallel execution |
 | `examples/code-agent/` | Bounded coding workflow with exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
 
 The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json` and defaults to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
@@ -114,7 +110,6 @@ workflow:
   kind: state_machine
   initial: init
   max_steps: 8
-  terminal: [done, failed]
   rules:
     - id: retrieve
       when: phase == "retrieve"
@@ -173,7 +168,7 @@ cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-
 
 ## Deep Research
 
-Deep research is the main 1.0 proof case. It maps a LangGraph-style research app into AIR without arbitrary runtime `goto`.
+Deep research is the main research proof case. It maps a LangGraph-style research app into AIR without arbitrary runtime `goto`.
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
@@ -194,27 +189,7 @@ It demonstrates:
 - local tool capability handshakes;
 - checkpoint/resume;
 - JIT hot-path specialization;
-- lowering to LangGraph and OpenAI JS strict runtimes.
-
-## Backend Portability
-
-Lower a checked RunPlan to another backend:
-
-```bash
-cargo run -p air-cli -- lower-plan examples/deep-research/deep-research-dynamic.air-plan.yaml \
-  --store examples/deep-research/module-store.air-store.yaml \
-  --backend langgraph \
-  --output target/generated/deep_research.langgraph.py
-
-cargo run -p air-cli -- lower-plan examples/deep-research/deep-research-dynamic.air-plan.yaml \
-  --store examples/deep-research/module-store.air-store.yaml \
-  --backend openai-js-strict \
-  --output target/generated/deep_research.openai.mjs
-```
-
-The native VM is the conformance runtime. Generated backends preserve AIR schema validation, retry inputs, dynamic fan-out runtime, trace events, tool contracts, and approval host hooks.
-
-Because tools are resolved at the profile/runtime level rather than in the IR, tool implementations can be compiled to WASM and shared across backends. A tool compiled to a `.wasm` module needs no per-platform rewrite: the AIR runtime loads it through the same `ToolProvider` interface used by native Rust tools today.
+- native trace/replay and JIT specialization.
 
 ## CLI Surface
 
@@ -226,23 +201,24 @@ Primary user-facing commands:
 | `validate-plan` | Verify a `.air-plan.yaml` against a module store or profile |
 | `run-plan` | Execute a RunPlan or packaged profile on the native VM |
 | `resume-plan` | Resume a halted/checkpointed plan with typed overrides |
-| `lower-plan` | Compile a checked RunPlan to another backend |
 | `code` | Minimal coding-agent wrapper around the default read/search/edit/verify AIR loop, with `--explain` permission preflight |
 
 Lower-level module, system, and trace commands exist for development and tests, but are hidden from default help output.
 
 ## Verification
 
-Run the 1.0 gate:
+Run the workspace checks:
 
 ```bash
-scripts/verify_1_0.sh
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-Add real model calls through the OpenAI-compatible config:
+Targeted example smoke checks live in `scripts/` when you need them:
 
 ```bash
-AIR_1_0_REAL=1 scripts/verify_1_0.sh
+bash scripts/verify_deep_research.sh
 ```
 
 ## Documentation
@@ -253,6 +229,6 @@ AIR_1_0_REAL=1 scripts/verify_1_0.sh
 
 ## Roadmap
 
-- [ ] **Whole-program compilation (merge + flatten).** The linker currently composes modules into a plan but preserves module boundaries at runtime. A merge compiler would flatten a multi-module plan into a single state machine with a unified state schema, resolved field names, and merged policies. This simplifies backend lowering—each backend becomes a pure syntax translation instead of needing to understand AIR's module dispatch semantics. Analogous to LLVM LTO or TensorFlow XLA: separate compilation for development, whole-program compilation for output.
+- [ ] **Whole-program compilation (merge + flatten).** The linker currently composes modules into a plan but preserves module boundaries at runtime. A merge compiler would flatten a multi-module plan into a single state machine with a unified state schema, resolved field names, and merged policies. This simplifies analysis, replay, and any future execution targets by removing module dispatch from the hot path. Analogous to LLVM LTO or TensorFlow XLA: separate compilation for development, whole-program compilation for output.
 - [ ] **Module registry.** A publish/install system for sharing agent modules across projects. Module stores are currently local files; a registry would let teams publish versioned modules (`air publish context.compact@0.2.0`) and consume them via dependency declarations, enabling a shared standard library of reusable agent components.
 - [ ] **Schema conformance testing.** A lightweight test harness that calls real LLMs but only validates output structure against the declared AIR schema—no assertion on specific content. This catches the most common production failure mode (LLM returning wrong shapes) without brittle mock providers. The runtime already has `validate_output`; the test layer just needs a harness that runs a module's model calls against a real provider and reports schema violations per phase.

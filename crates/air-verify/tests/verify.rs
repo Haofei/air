@@ -1,6 +1,10 @@
 use air_parser::parse_air_file;
 use air_verify::verify;
 
+fn parse_air_yaml(source: &str) -> air_core::AirModule {
+    serde_yaml::from_str(source).unwrap()
+}
+
 #[test]
 fn accepts_pr_review_example() {
     let module = parse_air_file("../../tests/agents/pr-review-example.air.yaml").unwrap();
@@ -97,18 +101,6 @@ fn accepts_append_actions_to_state_arrays() {
 }
 
 #[test]
-fn accepts_tool_dispatch_actions() {
-    let module = parse_air_file("../../tests/agents/tool-dispatch.air.yaml").unwrap();
-    let report = verify(&module);
-
-    assert!(
-        report.is_success(),
-        "expected success, got {:?}",
-        report.diagnostics
-    );
-}
-
-#[test]
 fn accepts_tool_batch_dispatch_actions() {
     let module = parse_air_file("../../tests/agents/tool-batch-dispatch.air.yaml").unwrap();
     let report = verify(&module);
@@ -181,26 +173,6 @@ fn accepts_state_machine_approval_gate() {
     assert!(
         report.is_success(),
         "expected success, got {:?}",
-        report.diagnostics
-    );
-}
-
-#[test]
-fn rejects_tool_dispatch_without_approval_path_for_required_capability() {
-    let mut module = parse_air_file("../../tests/agents/tool-dispatch.air.yaml").unwrap();
-    module
-        .policy
-        .require_approval
-        .push("retrieval.local".to_string());
-
-    let report = verify(&module);
-
-    assert!(
-        report
-            .diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.code == "AIR073"),
-        "expected AIR073, got {:?}",
         report.diagnostics
     );
 }
@@ -287,7 +259,7 @@ fn rejects_unsupported_state_machine_conditions() {
 
 #[test]
 fn rejects_expression_references_to_unknown_fields() {
-    let module = parse_air_file("../../tests/fixtures-invalid-expr-ref.air.yaml").unwrap();
+    let module = parse_air_yaml(INVALID_EXPR_REF);
     let report = verify(&module);
 
     assert!(
@@ -458,7 +430,7 @@ fn rejects_zero_token_limit_retry_budget() {
 
 #[test]
 fn rejects_dangerous_capability_without_approval_path() {
-    let module = parse_air_file("../../tests/fixtures-invalid-approval.air.yaml").unwrap();
+    let module = parse_air_yaml(INVALID_APPROVAL);
     let report = verify(&module);
 
     assert!(
@@ -473,7 +445,7 @@ fn rejects_dangerous_capability_without_approval_path() {
 
 #[test]
 fn rejects_cycles_without_traversing_approval_paths_forever() {
-    let module = parse_air_file("../../tests/fixtures-invalid-cycle.air.yaml").unwrap();
+    let module = parse_air_yaml(INVALID_CYCLE);
     let report = verify(&module);
 
     assert!(
@@ -488,8 +460,7 @@ fn rejects_cycles_without_traversing_approval_paths_forever() {
 
 #[test]
 fn rejects_state_machine_dangerous_capability_without_approval() {
-    let module =
-        parse_air_file("../../tests/fixtures-invalid-state-machine-approval.air.yaml").unwrap();
+    let module = parse_air_yaml(INVALID_STATE_MACHINE_APPROVAL);
     let report = verify(&module);
 
     assert!(
@@ -504,9 +475,7 @@ fn rejects_state_machine_dangerous_capability_without_approval() {
 
 #[test]
 fn rejects_state_machine_dangerous_capability_without_approval_on_one_branch() {
-    let module =
-        parse_air_file("../../tests/fixtures-invalid-state-machine-approval-branch.air.yaml")
-            .unwrap();
+    let module = parse_air_yaml(INVALID_STATE_MACHINE_APPROVAL_BRANCH);
     let report = verify(&module);
 
     assert!(
@@ -521,8 +490,7 @@ fn rejects_state_machine_dangerous_capability_without_approval_on_one_branch() {
 
 #[test]
 fn rejects_state_machine_phase_values_outside_schema() {
-    let module =
-        parse_air_file("../../tests/fixtures-invalid-state-machine-phase.air.yaml").unwrap();
+    let module = parse_air_yaml(INVALID_STATE_MACHINE_PHASE);
     let report = verify(&module);
 
     assert!(
@@ -534,3 +502,279 @@ fn rejects_state_machine_phase_values_outside_schema() {
         report.diagnostics
     );
 }
+
+const INVALID_EXPR_REF: &str = r#"
+agent:
+  name: invalid-expr-ref-agent
+  version: 0.1.0
+
+inputs:
+  text: string
+
+outputs:
+  response: object
+
+state:
+  phase:
+    type: enum
+    enum: [init, call, done]
+  response: object
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 5
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: call
+    - id: call
+      when: phase == "call"
+      actions:
+        - kind: model_call
+          model: expr_model
+          input:
+            object:
+              missing:
+                path: missing.value
+          output: response
+          timeout_seconds: 30
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: response
+"#;
+
+const INVALID_APPROVAL: &str = r#"
+agent:
+  name: invalid-approval
+  version: 0.1.0
+
+outputs:
+  deployment_id: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: dag
+  entry: deploy
+  nodes:
+    - id: deploy
+      kind: tool_call
+      tool: deploy.production
+      timeout_seconds: 60
+      retry:
+        max_attempts: 1
+    - id: done
+      kind: return
+      output: deployment_id
+  edges:
+    - from: deploy
+      to: done
+
+policy:
+  require_approval:
+    - production.deploy
+"#;
+
+const INVALID_CYCLE: &str = r#"
+agent:
+  name: invalid-cycle
+  version: 0.1.0
+
+outputs:
+  done: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: dag
+  entry: first
+  nodes:
+    - id: first
+      kind: tool_call
+      tool: deploy.production
+      timeout_seconds: 30
+      retry:
+        max_attempts: 1
+    - id: second
+      kind: approval
+      approval_for:
+        - production.deploy
+  edges:
+    - from: first
+      to: second
+    - from: second
+      to: first
+
+policy:
+  require_approval:
+    - production.deploy
+"#;
+
+const INVALID_STATE_MACHINE_APPROVAL: &str = r#"
+agent:
+  name: invalid-state-machine-approval
+  version: 0.1.0
+
+outputs:
+  deployment_id: string
+
+state:
+  phase:
+    type: enum
+    enum: [deploy, done, failed]
+  deployment_id: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: state_machine
+  initial: deploy
+  max_steps: 5
+  rules:
+    - id: deploy
+      when: phase == "deploy"
+      actions:
+        - kind: tool_call
+          tool: deploy.production
+          input: deployment_id
+          output: deployment_id
+          timeout_seconds: 60
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+
+policy:
+  require_approval:
+    - production.deploy
+"#;
+
+const INVALID_STATE_MACHINE_APPROVAL_BRANCH: &str = r#"
+agent:
+  name: invalid-state-machine-approval-branch
+  version: 0.1.0
+
+inputs:
+  route: string
+
+outputs:
+  result: string
+
+state:
+  phase:
+    type: enum
+    enum: [start, approved_path, danger_path, done]
+  route: string
+  result: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: state_machine
+  initial: start
+  max_steps: 5
+  rules:
+    - id: choose-approved-path
+      when: phase == "start" && route == "approved"
+      actions:
+        - kind: set
+          values:
+            phase: approved_path
+    - id: choose-danger-path
+      when: phase == "start" && route == "danger"
+      actions:
+        - kind: set
+          values:
+            phase: danger_path
+    - id: approved-path
+      when: phase == "approved_path"
+      actions:
+        - kind: approval
+          approval_for: [production.deploy]
+        - kind: set
+          values:
+            result: approved
+            phase: done
+    - id: danger-path
+      when: phase == "danger_path"
+      actions:
+        - kind: tool_call
+          tool: deploy.production
+          input: route
+          output: result
+          timeout_seconds: 60
+          retry:
+            max_attempts: 1
+        - kind: set
+          values:
+            phase: done
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: result
+
+policy:
+  require_approval:
+    - production.deploy
+"#;
+
+const INVALID_STATE_MACHINE_PHASE: &str = r#"
+agent:
+  name: invalid-state-machine-phase
+  version: 0.1.0
+
+outputs:
+  done: string
+
+state:
+  phase:
+    type: enum
+    enum: [init, done]
+
+workflow:
+  kind: state_machine
+  initial: boot
+  max_steps: 5
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            phase: done
+"#;

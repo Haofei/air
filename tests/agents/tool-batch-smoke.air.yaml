@@ -49,7 +49,6 @@ workflow:
   kind: state_machine
   initial: dispatch
   max_steps: 3
-  terminal: [done]
   rules:
     - id: dispatch
       when: phase == "dispatch"

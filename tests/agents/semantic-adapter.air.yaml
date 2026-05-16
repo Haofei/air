@@ -41,7 +41,6 @@ workflow:
   kind: state_machine
   initial: adapt
   max_steps: 4
-  terminal: [done, failed]
   rules:
     - id: adapt
       when: phase == "adapt"

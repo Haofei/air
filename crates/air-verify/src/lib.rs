@@ -396,13 +396,6 @@ impl Verifier {
             self.error("AIR061", "state_machine.max_steps must be at least 1");
         }
 
-        if workflow.terminal.is_empty() {
-            self.error(
-                "AIR062",
-                "state_machine.terminal must declare at least one terminal state",
-            );
-        }
-
         if !module.state.contains_key("phase") {
             self.error(
                 "AIR063",
@@ -417,18 +410,6 @@ impl Verifier {
                         workflow.initial
                     ),
                 );
-            }
-
-            for terminal in &workflow.terminal {
-                if !phase_values.contains(terminal) {
-                    self.error(
-                        "AIR069",
-                        format!(
-                            "state_machine terminal {} is not present in state.phase enum",
-                            terminal
-                        ),
-                    );
-                }
             }
         }
 
@@ -561,30 +542,11 @@ impl Verifier {
                 self.verify_timeout(rule_id, "tool_call", *timeout_seconds);
                 self.verify_retry(rule_id, retry);
             }
-            StateAction::ToolDispatch {
-                input,
-                output,
-                timeout_seconds,
-                retry,
-            } => {
-                if tools_by_name.is_empty() {
-                    self.error(
-                        "AIR096",
-                        format!("tool_dispatch action in rule {rule_id} requires at least one declared tool"),
-                    );
-                }
-                self.verify_input_spec(rule_id, "tool_dispatch input", input, module);
-                self.verify_control_field_write(rule_id, "tool_dispatch output", output);
-                self.verify_state_ref(rule_id, "tool_dispatch output", output, module);
-                self.verify_timeout(rule_id, "tool_dispatch", *timeout_seconds);
-                self.verify_retry(rule_id, retry);
-            }
             StateAction::ToolBatchDispatch {
                 input,
                 output,
                 timeout_seconds,
                 max_calls,
-                allowed_tools,
                 retry,
                 ..
             } => {
@@ -603,16 +565,6 @@ impl Verifier {
                             "tool_batch_dispatch action in rule {rule_id} max_calls must be at least 1"
                         ),
                     );
-                }
-                for tool in allowed_tools {
-                    if !tools_by_name.contains_key(tool.as_str()) {
-                        self.error(
-                            "AIR098",
-                            format!(
-                                "tool_batch_dispatch action in rule {rule_id} allowed_tools references unknown tool {tool}"
-                            ),
-                        );
-                    }
                 }
                 self.verify_input_spec(rule_id, "tool_batch_dispatch input", input, module);
                 self.verify_control_field_write(rule_id, "tool_batch_dispatch output", output);
@@ -676,10 +628,8 @@ impl Verifier {
         let phases = enum_values(module.state.get("phase")).unwrap_or_else(|| {
             let mut phases = BTreeSet::new();
             phases.insert(workflow.initial.clone());
-            phases.extend(workflow.terminal.iter().cloned());
             phases
         });
-        let terminal: BTreeSet<_> = workflow.terminal.iter().cloned().collect();
         let mut visited = BTreeSet::new();
         let mut reported = BTreeSet::new();
         let mut stack = vec![StateMachineApprovalState {
@@ -727,8 +677,7 @@ impl Verifier {
                                 }
                             }
                         }
-                        StateAction::ToolDispatch { .. }
-                        | StateAction::ToolBatchDispatch { .. } => {
+                        StateAction::ToolBatchDispatch { .. } => {
                             for capability in tools_by_name
                                 .values()
                                 .filter_map(|tool_spec| tool_spec.capability.as_ref())
@@ -749,10 +698,6 @@ impl Verifier {
                         }
                         _ => {}
                     }
-                }
-
-                if terminal.contains(&state.phase) {
-                    continue;
                 }
 
                 for next_phase in next_phases_after_rule(rule, &state.phase, &phases) {

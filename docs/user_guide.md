@@ -6,9 +6,9 @@ AIR has three layers:
 
 - **Module**: a typed, bounded state machine in `.air.yaml`.
 - **RunPlan**: a verified DAG that connects modules, including dynamic fan-out/fan-in.
-- **Runtime/backend**: native AIR VM, LangGraph, or OpenAI JS strict generated runtime.
+- **Runtime**: the native AIR VM executes checked plans and writes auditable traces.
 
-The native VM is the conformance runtime. Generated backends preserve AIR's checked topology and host contract, while host applications still provide model, tool, and approval implementations.
+Host applications provide model, tool, and approval implementations through typed provider contracts.
 
 ## 1. Run The Simple Example
 
@@ -69,7 +69,6 @@ workflow:
   kind: state_machine
   initial: init
   max_steps: 8
-  terminal: [done, failed]
   rules:
     - id: retrieve
       when: phase == "retrieve"
@@ -91,16 +90,16 @@ Important fields:
 - `workflow.max_steps` bounds execution.
 - `policy` can add budgets such as `max_tool_calls`, `max_model_calls`, `max_repeated_tool_calls`, `timeout_seconds`, and `require_approval`.
 
-Use `tool_call` when the AIR module knows the exact tool statically. Use `tool_dispatch` when a
-model or prior tool emits a typed choice shaped like `{ "tool": "declared.tool", "input": {...} }`.
-Use `tool_batch_dispatch` when it emits a bounded array of those choices and the calls are
-independent. The runtime still requires every selected tool to be declared in `tools`, checks the
+Use `tool_call` when the AIR module knows the exact tool statically. Use `tool_batch_dispatch`
+when a model or prior tool emits a bounded array of typed choices shaped like
+`{ "tool": "declared.tool", "input": {...} }`. The runtime still requires every selected tool
+to be declared in `tools`, checks the
 declared capability against `requires.capabilities` and the provider capability, enforces approval
 paths and `policy.max_tool_calls` / `policy.max_repeated_tool_calls`, and records the selected tools
 in trace metadata. This is the bounded AIR version of an opencode-style plan-act-observe step: the
 model can choose the next action, but only inside the module's declared tool boundary.
 
-Object schemas allow undeclared fields by default for compatibility with provider metadata and evolving module contracts. Add `additional_properties: false` to a detailed object schema when the AIR VM and generated strict backends should reject undeclared fields.
+Object schemas allow undeclared fields by default for compatibility with provider metadata and evolving module contracts. Add `additional_properties: false` to a detailed object schema when the AIR VM should reject undeclared fields.
 
 Conditions use AIR's small equality-only condition DSL. `&&` binds tighter than `||`; parentheses and numeric comparisons are not supported. See [condition_dsl.md](condition_dsl.md) for the formal grammar and limits.
 
@@ -275,7 +274,7 @@ OPENAI_MODEL=example-model
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 ```
 
-Generated OpenAI JS strict runtimes read the same model config.
+Every AIR profile can point at the same shared model config, so examples and local apps do not need to repeat provider settings.
 
 ## 7. Tool Config And Capabilities
 
@@ -321,8 +320,8 @@ AIR checks:
 - the provider-configured capability matches the module-declared capability;
 - `policy.max_tool_calls` is not exceeded.
 - when tool outputs register artifacts, later `sources`, `citations`, and `source_ids` in model or return outputs refer only to known artifact ids.
-- for `tool_dispatch` and `tool_batch_dispatch`, every selected tool is one of the module's declared
-  tools and receives only its emitted `input` object.
+- for `tool_batch_dispatch`, every selected tool is one of the module's declared tools and receives
+  only its emitted `input` object.
 
 Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
 Tool kinds are lower-level capabilities; the names exposed to a model are application aliases.
@@ -588,43 +587,18 @@ cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-pr
 
 AIR specializes the resolved topology, validates it, and reuses the static hot path for matching inputs. It does not cache model outputs.
 
-## 10. Lowering To Backends
+## 10. Verification
 
-Lower a validated RunPlan to LangGraph:
+Run the workspace checks:
 
 ```bash
-cargo run -p air-cli -- lower-plan examples/deep-research/deep-research-dynamic.air-plan.yaml \
-  --store examples/deep-research/module-store.air-store.yaml \
-  --backend langgraph \
-  --output target/generated/deep_research.langgraph.py
+cargo fmt --all --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace
 ```
 
-Lower to OpenAI JS strict:
+Use targeted example smoke checks when needed:
 
 ```bash
-cargo run -p air-cli -- lower-plan examples/deep-research/deep-research-dynamic.air-plan.yaml \
-  --store examples/deep-research/module-store.air-store.yaml \
-  --backend openai-js-strict \
-  --output target/generated/deep_research.openai.mjs
-```
-
-Generated host contracts:
-
-- LangGraph exposes `AIR_TOOL_PROVIDER`, `AIR_TOOL_CAPABILITIES`, and `AIR_APPROVAL_PROVIDER`.
-- OpenAI JS strict reads model config and tool config from CLI flags.
-- `AIR_TRACE=1` emits AIR JSONL trace events on stderr.
-- provider logs go to stderr so stdout stays machine-readable JSON.
-
-## 11. Verification
-
-The current 1.0 gate is:
-
-```bash
-scripts/verify_1_0.sh
-```
-
-For the real-model extension:
-
-```bash
-AIR_1_0_REAL=1 scripts/verify_1_0.sh
+bash scripts/verify_deep_research.sh
 ```

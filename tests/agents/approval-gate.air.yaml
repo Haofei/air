@@ -31,7 +31,6 @@ workflow:
   kind: state_machine
   initial: approval
   max_steps: 4
-  terminal: [done, failed]
   rules:
     - id: approval
       when: phase == "approval"

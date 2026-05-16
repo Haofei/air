@@ -1,6 +1,6 @@
 # AIR Examples
 
-AIR keeps release examples intentionally small.
+AIR keeps examples intentionally small.
 
 ## `simple-helpdesk`
 
@@ -21,7 +21,7 @@ cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-
 
 ## `deep-research`
 
-The main 1.0 proof case. It includes clarification, bounded research fan-out, fan-in, optional parallel execution, checkpoint/resume, JIT specialization, and generated backend lowering.
+The main deep-research proof case. It includes clarification, bounded research fan-out, fan-in, optional parallel execution, checkpoint/resume, and JIT specialization.
 
 Run:
 

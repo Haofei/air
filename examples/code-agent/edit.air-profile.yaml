@@ -2,4 +2,4 @@ plan: code-edit.air-plan.yaml
 store: module-store.air-store.yaml
 input_file: edit.input.json
 model_config: fixtures/model-fixtures.json
-tool_config: fixtures/tools.core.json
+tool_config: tools.json

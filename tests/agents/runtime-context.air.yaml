@@ -17,7 +17,6 @@ workflow:
   kind: state_machine
   initial: init
   max_steps: 1
-  terminal: [done]
   rules:
     - id: finish-on-last-step
       when: phase == "init" && _air.is_last_step == true
