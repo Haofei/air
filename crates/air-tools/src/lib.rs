@@ -3710,6 +3710,29 @@ fn is_inspection_bash_command(command: &str) -> bool {
     .any(|prefix| command.starts_with(prefix))
 }
 
+fn validate_todo_item(name: &str, index: usize, todo: &Value) -> Result<(), RuntimeError> {
+    let Some(object) = todo.as_object() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} input.todos[{index}] must be an object"
+        )));
+    };
+    for field in ["content", "status"] {
+        if !object.get(field).is_some_and(Value::is_string) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].{field} must be a string"
+            )));
+        }
+    }
+    if let Some(priority) = object.get("priority") {
+        if !priority.is_string() {
+            return Err(RuntimeError::Provider(format!(
+                "tool {name} input.todos[{index}].priority must be a string"
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn call_todowrite_tool(name: &str, input: &Value) -> Result<Value, RuntimeError> {
     let todos = input
         .get("todos")
@@ -3718,25 +3741,7 @@ fn call_todowrite_tool(name: &str, input: &Value) -> Result<Value, RuntimeError>
             RuntimeError::Provider(format!("tool {name} input.todos must be an array"))
         })?;
     for (index, todo) in todos.iter().enumerate() {
-        let Some(object) = todo.as_object() else {
-            return Err(RuntimeError::Provider(format!(
-                "tool {name} input.todos[{index}] must be an object"
-            )));
-        };
-        for field in ["content", "status"] {
-            if !object.get(field).is_some_and(Value::is_string) {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} input.todos[{index}].{field} must be a string"
-                )));
-            }
-        }
-        if let Some(priority) = object.get("priority") {
-            if !priority.is_string() {
-                return Err(RuntimeError::Provider(format!(
-                    "tool {name} input.todos[{index}].priority must be a string"
-                )));
-            }
-        }
+        validate_todo_item(name, index, todo)?;
     }
     Ok(json!({
         "todos": todos,
