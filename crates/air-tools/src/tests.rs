@@ -2637,6 +2637,38 @@ fn repo_files_lists_and_filters_repo_paths() {
 }
 
 #[test]
+fn repo_files_accepts_absolute_path_inside_repo() {
+    let dir = temp_dir("air-tools-repo-files-absolute-path");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
+    fs::write(dir.join("README.md"), "alpha docs\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "glob": {
+                  "kind": "repo_files",
+                  "capability": "code.read",
+                  "repo_dir": ".",
+                  "max_files": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "glob",
+            &json!({"path": dir.join("src").display().to_string(), "pattern": "**/*.rs"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["files"], json!(["src/lib.rs"]));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn repo_files_accepts_pattern_alias_for_query() {
     let dir = temp_dir("air-tools-repo-files-pattern-query");
     fs::create_dir_all(dir.join("src")).unwrap();
@@ -3027,6 +3059,7 @@ fn code_agent_self_tools_validate_project_paths() {
     assert_eq!(tools.tool_capability("grep"), Some("file.read"));
     assert_eq!(tools.tool_capability("edit"), Some("file.write"));
     assert_eq!(tools.tool_capability("write"), Some("file.write"));
+    assert_eq!(tools.tool_capability("apply_patch"), Some("file.write"));
     assert_eq!(tools.tool_capability("task"), Some("code.read"));
     assert_eq!(tools.tool_capability("webfetch"), Some("code.read"));
     assert_eq!(tools.tool_capability("todowrite"), Some("code.read"));
@@ -3037,6 +3070,53 @@ fn code_agent_self_tools_validate_project_paths() {
         .call_tool("bash", &json!({"description": "missing command"}))
         .unwrap_err();
     assert!(error.to_string().contains("input.command must be a string"));
+}
+
+#[test]
+fn apply_patch_add_update_and_delete_files() {
+    let dir = temp_dir("air-tools-apply-patch");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(
+        dir.join("src/lib.rs"),
+        "fn old() {\n    println!(\"old\");\n}\n",
+    )
+    .unwrap();
+    fs::write(dir.join("obsolete.txt"), "remove me\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "apply_patch": {
+                  "kind": "apply_patch",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 10000
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+    let output = tools
+        .call_tool(
+            "apply_patch",
+            &json!({
+                "patchText": "*** Begin Patch\n*** Add File: src/generated/new.rs\n+pub fn new() {}\n*** Update File: src/lib.rs\n@@\n-fn old() {\n-    println!(\"old\");\n+fn new_name() {\n+    println!(\"new\");\n }\n*** Delete File: obsolete.txt\n*** End Patch"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["applied"], json!(true));
+    assert_eq!(output["file_count"], json!(3));
+    assert_eq!(
+        fs::read_to_string(dir.join("src/generated/new.rs")).unwrap(),
+        "pub fn new() {}\n"
+    );
+    assert_eq!(
+        fs::read_to_string(dir.join("src/lib.rs")).unwrap(),
+        "fn new_name() {\n    println!(\"new\");\n}\n"
+    );
+    assert!(!dir.join("obsolete.txt").exists());
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

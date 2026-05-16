@@ -318,8 +318,7 @@ def run_with_relay(args: argparse.Namespace) -> None:
 
     cassette = load_cassette(args.run_dir, args.side)
     relay = build_relay(args, cassette)
-    env = os.environ.copy()
-    env.update(load_env_file(args.env_file))
+    env = load_env(args.env_file)
     relay.start()
     env["OPENAI_BASE_URL"] = relay.base_url
     try:
@@ -1524,6 +1523,12 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         values[key.strip()] = value.strip().strip('"').strip("'")
+    return values
+
+
+def load_env(path: Path) -> dict[str, str]:
+    values = load_env_file(path)
+    values.update(os.environ)
     return values
 
 

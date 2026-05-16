@@ -39,6 +39,12 @@
       "create_dirs": true,
       "allow_overwrite": true
     },
+    "apply_patch": {
+      "kind": "apply_patch",
+      "capability": "file.write",
+      "base_dir": "../..",
+      "max_bytes": 262144
+    },
     "bash": {
       "kind": "bash",
       "capability": "code.test",

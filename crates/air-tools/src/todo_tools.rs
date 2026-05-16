@@ -1,7 +1,7 @@
 use air_runtime::RuntimeError;
 use serde_json::{json, Value};
 
-fn validate_todo_item(name: &str, index: usize, todo: &Value) -> Result<(), RuntimeError> {
+fn validate_single_todo_item(name: &str, index: usize, todo: &Value) -> Result<(), RuntimeError> {
     let Some(object) = todo.as_object() else {
         return Err(RuntimeError::Provider(format!(
             "tool {name} input.todos[{index}] must be an object"
@@ -32,7 +32,7 @@ pub(super) fn call_todowrite_tool(name: &str, input: &Value) -> Result<Value, Ru
             RuntimeError::Provider(format!("tool {name} input.todos must be an array"))
         })?;
     for (index, todo) in todos.iter().enumerate() {
-        validate_todo_item(name, index, todo)?;
+        validate_single_todo_item(name, index, todo)?;
     }
     Ok(json!({
         "todos": todos,

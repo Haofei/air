@@ -53,7 +53,7 @@ pub(crate) fn call_repo_symbols_tool(
         super::optional_bounded_usize_input(name, input, "max_symbols", max_symbols)?
             .unwrap_or(max_symbols);
     let repo = super::canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let paths = super::repo_tool_paths(name, input)?;
+    let paths = super::repo_tool_paths(name, input, &repo)?;
     let glob = input.get("glob").and_then(Value::as_str);
     if let Some(glob) = glob {
         super::validate_relative_path_filter(name, glob)?;

@@ -114,6 +114,9 @@ tools:
   - name: write
     capability: file.write
     timeout_ms: 10000
+  - name: apply_patch
+    capability: file.write
+    timeout_ms: 10000
   - name: task
     capability: code.read
     timeout_ms: 10000
@@ -180,7 +183,7 @@ workflow:
                   ref: observations
                 max_bytes: 600000
               allowed_tools:
-                literal: [question, bash, read, glob, grep, edit, write, task, webfetch, todowrite, todoread, skill]
+                literal: [question, bash, read, glob, grep, edit, write, apply_patch, task, webfetch, todowrite, todoread, skill]
           output: decision
           timeout_seconds: 180
           retry:
@@ -254,6 +257,14 @@ workflow:
             patch_applied: true
             phase: choose
 
+    - id: apply-patch-applied
+      when: phase == "post_act" && observation[0].tool == "apply_patch" && observation[0].status == "ok" && observation[0].output.applied == true
+      actions:
+        - kind: set
+          values:
+            patch_applied: true
+            phase: choose
+
     - id: bash-passed-after-patch
       when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
       actions:
@@ -279,7 +290,7 @@ workflow:
             phase: choose
 
     - id: complete-needs-verification
-      when: phase == "act" && decision.complete == true && verification_status != "passed"
+      when: phase == "act" && decision.complete == true && verification_status != "passed" && patch_applied != true
       actions:
         - kind: append
           target: observations
@@ -294,7 +305,7 @@ workflow:
             phase: verify
 
     - id: complete-verified
-      when: phase == "act" && decision.complete == true && verification_status == "passed"
+      when: phase == "act" && decision.complete == true && verification_status == "passed" || phase == "act" && decision.complete == true && patch_applied == true
       actions:
         - kind: set
           values:

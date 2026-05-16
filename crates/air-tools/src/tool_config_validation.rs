@@ -393,6 +393,14 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                     *max_changed_lines,
                 )?;
             }
+            ToolConfig::ApplyPatch {
+                base_dir,
+                max_bytes,
+                ..
+            } => {
+                validate_non_empty_path(path, &format!("tools.{name}.base_dir"), base_dir)?;
+                validate_max_bytes(path, name, *max_bytes)?;
+            }
             ToolConfig::RepoFiles {
                 repo_dir,
                 max_files,

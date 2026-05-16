@@ -24,7 +24,7 @@ pub(crate) fn call_repo_references_tool(
         optional_bounded_usize_input(name, input, "context_lines", context_lines)?
             .unwrap_or(context_lines);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let paths = repo_tool_paths(name, input)?;
+    let paths = repo_tool_paths(name, input, &repo)?;
     let mut command = Command::new("rg");
     command.args([
         "--line-number",

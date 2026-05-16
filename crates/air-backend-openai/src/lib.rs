@@ -647,7 +647,7 @@ fn build_chat_completion_body(
         }
     }
     let tool_name_map = if model_config.native_tool_calls == Some(true) {
-        attach_native_tool_calls(&mut body, input, opencode_style)?
+        attach_native_tool_calls(&mut body, input, opencode_style, &request_model_name)?
     } else {
         BTreeMap::new()
     };
@@ -832,6 +832,7 @@ fn attach_native_tool_calls(
     body: &mut Value,
     input: &Value,
     opencode_style: bool,
+    model_name: &str,
 ) -> Result<BTreeMap<String, String>, RuntimeError> {
     let tool_schemas = input.get("tool_schemas").and_then(Value::as_object);
     let mut tool_names =
@@ -850,42 +851,22 @@ fn attach_native_tool_calls(
                 .collect::<Vec<_>>()
         };
     if opencode_style {
-        for name in [
-            "question",
-            "bash",
-            "read",
-            "glob",
-            "grep",
-            "edit",
-            "write",
-            "task",
-            "webfetch",
-            "todowrite",
-            "todoread",
-            "skill",
-        ] {
+        let use_patch = opencode_uses_apply_patch(model_name);
+        for name in opencode_tool_order(use_patch) {
             if !tool_names.iter().any(|existing| existing == name) {
-                tool_names.push(name.to_string());
+                tool_names.push((*name).to_string());
             }
         }
+        if use_patch {
+            tool_names.retain(|name| name != "edit" && name != "write");
+        } else {
+            tool_names.retain(|name| name != "apply_patch");
+        }
         tool_names.sort_by_key(|name| {
-            [
-                "question",
-                "bash",
-                "read",
-                "glob",
-                "grep",
-                "edit",
-                "write",
-                "task",
-                "webfetch",
-                "todowrite",
-                "todoread",
-                "skill",
-            ]
-            .iter()
-            .position(|candidate| candidate == name)
-            .unwrap_or(usize::MAX)
+            opencode_tool_order(use_patch)
+                .iter()
+                .position(|candidate| candidate == name)
+                .unwrap_or(usize::MAX)
         });
     }
     if tool_names.is_empty() {
@@ -932,6 +913,44 @@ fn attach_native_tool_calls(
     Ok(tool_name_map)
 }
 
+fn opencode_uses_apply_patch(model_name: &str) -> bool {
+    let model_name = model_name.to_ascii_lowercase();
+    model_name.contains("gpt-") && !model_name.contains("oss") && !model_name.contains("gpt-4")
+}
+
+fn opencode_tool_order(use_patch: bool) -> &'static [&'static str] {
+    if use_patch {
+        &[
+            "question",
+            "bash",
+            "read",
+            "glob",
+            "grep",
+            "task",
+            "webfetch",
+            "todowrite",
+            "todoread",
+            "skill",
+            "apply_patch",
+        ]
+    } else {
+        &[
+            "question",
+            "bash",
+            "read",
+            "glob",
+            "grep",
+            "edit",
+            "write",
+            "task",
+            "webfetch",
+            "todowrite",
+            "todoread",
+            "skill",
+        ]
+    }
+}
+
 fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize>) -> String {
     let mut base = original
         .chars()
@@ -970,6 +989,7 @@ fn native_tool_description(original_name: &str, schema: Option<&Value>) -> Strin
         "grep" => return opencode_grep_description(),
         "edit" => return opencode_edit_description(),
         "write" => return opencode_write_description(),
+        "apply_patch" => return opencode_apply_patch_description(),
         "task" => return opencode_task_description(),
         "webfetch" => return opencode_webfetch_description(),
         "lsp" => return opencode_lsp_description(),
@@ -1484,6 +1504,43 @@ When in doubt, use this tool. Being proactive with task management demonstrates 
         .to_string()
 }
 
+fn opencode_apply_patch_description() -> String {
+    r##"Use the `apply_patch` tool to edit files. Your patch language is a stripped-down, file-oriented diff format designed to be easy to parse and safe to apply. You can think of it as a high-level envelope:
+
+*** Begin Patch
+[ one or more file sections ]
+*** End Patch
+
+Within that envelope, you get a sequence of file operations.
+You MUST include a header to specify the action you are taking.
+Each operation starts with one of three headers:
+
+*** Add File: <path> - create a new file. Every following line is a + line (the initial contents).
+*** Delete File: <path> - remove an existing file. Nothing follows.
+*** Update File: <path> - patch an existing file in place (optionally with a rename).
+
+Example patch:
+
+```
+*** Begin Patch
+*** Add File: hello.txt
++Hello world
+*** Update File: src/app.py
+*** Move to: src/main.py
+@@ def greet():
+-print("Hi")
++print("Hello, world!")
+*** Delete File: obsolete.txt
+*** End Patch
+```
+
+It is important to remember:
+
+- You must include a header with your intended action (Add/Delete/Update)
+- You must prefix new lines with `+` even when creating a new file"##
+        .to_string()
+}
+
 fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value {
     match original_name {
         "question" => {
@@ -1534,6 +1591,20 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                     "limit": {"type": "number", "description": "The number of lines to read (defaults to 2000)"}
                 },
                 "required": ["filePath"],
+                "additionalProperties": false
+            });
+        }
+        "apply_patch" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "patchText": {
+                        "type": "string",
+                        "description": "The full patch text that describes all changes to be made"
+                    }
+                },
+                "required": ["patchText"],
                 "additionalProperties": false
             });
         }
@@ -2059,7 +2130,7 @@ fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<Str
         "file.read" | "read" => render_file_read_transcript(output, lines),
         "file.read_many" | "read_many" => render_file_read_many_transcript(output, lines),
         "file.search" | "grep" => render_file_search_transcript(output, lines),
-        "file.edit" | "edit" => render_file_edit_transcript(output, lines),
+        "file.edit" | "edit" | "apply_patch" => render_file_edit_transcript(output, lines),
         "repo.files" | "glob" => render_glob_transcript(output, lines),
         "repo.symbols" => render_symbols_transcript(output, lines),
         "rust_analyzer" | "lsp" => render_lsp_transcript(output, lines),
@@ -3222,6 +3293,82 @@ mod tests {
             request.body["stream_options"],
             json!({"include_usage": true})
         );
+    }
+
+    #[test]
+    fn opencode_style_gpt_models_use_apply_patch_instead_of_edit_write() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "gpt-5.3-codex:high".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "gpt-5.3-codex:high".to_string(),
+            &json!({
+                "task": "edit the code",
+                "allowed_tools": ["read", "edit", "write", "apply_patch", "bash"]
+            }),
+        )
+        .unwrap();
+
+        let exposed = request.tool_name_map.values().cloned().collect::<Vec<_>>();
+        assert!(exposed.contains(&"apply_patch".to_string()));
+        assert!(!exposed.contains(&"edit".to_string()));
+        assert!(!exposed.contains(&"write".to_string()));
+        let apply_patch = request.body["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["function"]["name"] == "apply_patch")
+            .unwrap();
+        assert_eq!(
+            apply_patch["function"]["parameters"]["required"],
+            json!(["patchText"])
+        );
+    }
+
+    #[test]
+    fn opencode_style_glm_models_keep_edit_write_tools() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "edit the code",
+                "allowed_tools": ["read", "edit", "write", "apply_patch", "bash"]
+            }),
+        )
+        .unwrap();
+
+        let exposed = request.tool_name_map.values().cloned().collect::<Vec<_>>();
+        assert!(exposed.contains(&"edit".to_string()));
+        assert!(exposed.contains(&"write".to_string()));
+        assert!(!exposed.contains(&"apply_patch".to_string()));
     }
 
     #[test]

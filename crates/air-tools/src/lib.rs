@@ -10,10 +10,13 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod apply_patch_tools;
 mod command_diagnostics;
 mod context_tools;
 mod edit_tools;
+mod file_search_render;
 mod file_tools;
+use apply_patch_tools::{call_apply_patch_tool, ApplyPatchOptions};
 use context_tools::call_context_measure_tool;
 use edit_tools::{call_file_edit_tool, FileEditOptions};
 use file_tools::{
@@ -285,6 +288,15 @@ enum ToolConfig {
         #[serde(default)]
         max_changed_lines: Option<usize>,
     },
+    ApplyPatch {
+        #[serde(default)]
+        capability: Option<String>,
+
+        base_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
     RepoFiles {
         #[serde(default)]
         capability: Option<String>,
@@ -512,6 +524,7 @@ impl ToolConfig {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
+            | ToolConfig::ApplyPatch { capability, .. }
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
@@ -1183,6 +1196,40 @@ impl ToolProvider for ConfigTools {
                 self.note_workspace_may_have_changed();
                 Ok(output)
             }
+            ToolConfig::ApplyPatch {
+                capability: _,
+                base_dir,
+                max_bytes,
+            } => {
+                let output = call_apply_patch_tool(
+                    name,
+                    input,
+                    ApplyPatchOptions {
+                        base_dir: &resolve_config_path(&self.workspace_dir, &base_dir),
+                        max_bytes: max_bytes.unwrap_or(256 * 1024),
+                    },
+                )?;
+                for file in output
+                    .get("files")
+                    .and_then(Value::as_array)
+                    .into_iter()
+                    .flatten()
+                {
+                    if file.get("kind").and_then(Value::as_str) == Some("delete") {
+                        continue;
+                    }
+                    let path = file
+                        .get("move_absolute_path")
+                        .and_then(Value::as_str)
+                        .or_else(|| file.get("absolute_path").and_then(Value::as_str))
+                        .or_else(|| file.get("path").and_then(Value::as_str));
+                    if let Some(path) = path {
+                        self.remember_read_snapshot(Path::new(path))?;
+                    }
+                }
+                self.note_workspace_may_have_changed();
+                Ok(output)
+            }
             ToolConfig::RepoFiles {
                 capability: _,
                 repo_dir,
@@ -1406,6 +1453,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::FileSearch { capability, .. }
             | ToolConfig::FileWrite { capability, .. }
             | ToolConfig::FileEdit { capability, .. }
+            | ToolConfig::ApplyPatch { capability, .. }
             | ToolConfig::RepoFiles { capability, .. }
             | ToolConfig::RepoSearch { capability, .. }
             | ToolConfig::RepoContext { capability, .. }
@@ -1844,15 +1892,18 @@ fn nearest_git_root(start: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
-fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, RuntimeError> {
+fn repo_tool_paths(
+    tool_name: &str,
+    input: &Value,
+    repo_dir: &Path,
+) -> Result<Vec<String>, RuntimeError> {
     let mut paths = Vec::new();
     if let Some(path) = input.get("path") {
         let path = path.as_str().ok_or_else(|| {
             RuntimeError::Provider(format!("tool {tool_name} input.path must be a string"))
         })?;
         if !path.trim().is_empty() {
-            validate_relative_path_filter(tool_name, path)?;
-            paths.push(path.to_string());
+            paths.push(normalize_repo_path_filter(tool_name, repo_dir, path)?);
         }
     }
     if let Some(raw_paths) = input.get("paths") {
@@ -1866,12 +1917,37 @@ fn repo_tool_paths(tool_name: &str, input: &Value) -> Result<Vec<String>, Runtim
                 ))
             })?;
             if !path.trim().is_empty() {
-                validate_relative_path_filter(tool_name, path)?;
-                paths.push(path.to_string());
+                paths.push(normalize_repo_path_filter(tool_name, repo_dir, path)?);
             }
         }
     }
     Ok(paths)
+}
+
+fn normalize_repo_path_filter(
+    tool_name: &str,
+    repo_dir: &Path,
+    path: &str,
+) -> Result<String, RuntimeError> {
+    let path_value = Path::new(path);
+    if path_value.is_absolute() {
+        let repo_dir = canonicalize_tool_path(tool_name, "repo_dir", repo_dir)?;
+        let path = canonicalize_tool_path(tool_name, "path", path_value)?;
+        if !path.starts_with(&repo_dir) {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} path filters must be inside repo_dir"
+            )));
+        }
+        let relative = path.strip_prefix(&repo_dir).map_err(|error| {
+            RuntimeError::Provider(format!("tool {tool_name} normalize path: {error}"))
+        })?;
+        if relative.as_os_str().is_empty() {
+            return Ok(".".to_string());
+        }
+        return Ok(relative.display().to_string());
+    }
+    validate_relative_path_filter(tool_name, path)?;
+    Ok(path.to_string())
 }
 
 fn parse_rg_vimgrep_line(line: &str) -> Value {

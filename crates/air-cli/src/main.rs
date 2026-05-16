@@ -1387,6 +1387,7 @@ mod tests {
                 "grep",
                 "edit",
                 "write",
+                "apply_patch",
                 "task",
                 "webfetch",
                 "todowrite",

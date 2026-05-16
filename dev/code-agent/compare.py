@@ -316,8 +316,15 @@ class HttpCaptureProxy:
             if not chunk:
                 break
             chunks.extend(chunk)
-            handler.wfile.write(chunk)
-            handler.wfile.flush()
+            try:
+                handler.wfile.write(chunk)
+                handler.wfile.flush()
+            except BrokenPipeError:
+                log_step(
+                    f"stream call {call_index}: client closed connection after "
+                    f"{len(chunks)} bytes"
+                )
+                break
             now = time.time()
             if len(chunks) <= len(chunk) or now - last_progress_at >= 5:
                 write_stream_progress(progress_path, call_index, target_url, bytes(chunks))
@@ -472,7 +479,25 @@ def log_step(message: str) -> None:
     print(f"[compare-code-agent-io] {message}", flush=True)
 
 
-def merge_opencode_config_content(existing: str | None, base_url: str) -> str:
+def provider_from_opencode_model(model: str | None) -> str | None:
+    if not model or "/" not in model:
+        return None
+    provider_id = model.split("/", 1)[0].strip()
+    return provider_id or None
+
+
+def model_id_from_opencode_model(model: str | None) -> str | None:
+    if not model or "/" not in model:
+        return None
+    model_id = model.split("/", 1)[1].strip()
+    return model_id or None
+
+
+def merge_opencode_config_content(
+    existing: str | None,
+    base_url: str,
+    opencode_model: str | None = None,
+) -> str:
     config = {}
     if existing:
         try:
@@ -485,15 +510,39 @@ def merge_opencode_config_content(existing: str | None, base_url: str) -> str:
     if not isinstance(provider, dict):
         provider = {}
         config["provider"] = provider
-    entry = provider.setdefault("zhipuai-coding-plan", {})
+
+    active_provider = provider_from_opencode_model(opencode_model) or provider_from_opencode_model(
+        str(config.get("model") or "")
+    )
+    if active_provider is None and len(provider) == 1:
+        active_provider = next(iter(provider))
+    if active_provider is None:
+        active_provider = "zhipuai-coding-plan"
+
+    entry = provider.setdefault(active_provider, {})
     if not isinstance(entry, dict):
         entry = {}
-        provider["zhipuai-coding-plan"] = entry
+        provider[active_provider] = entry
     options = entry.setdefault("options", {})
     if not isinstance(options, dict):
         options = {}
         entry["options"] = options
     options["baseURL"] = base_url
+    options.setdefault("apiKey", os.environ.get("OPENAI_API_KEY", "change-me"))
+    model_id = model_id_from_opencode_model(opencode_model)
+    if model_id:
+        models = entry.setdefault("models", {})
+        if not isinstance(models, dict):
+            models = {}
+            entry["models"] = models
+        model_entry = models.setdefault(model_id, {})
+        if not isinstance(model_entry, dict):
+            model_entry = {}
+            models[model_id] = model_entry
+        model_entry.setdefault("id", model_id)
+        model_entry.setdefault("name", model_id)
+        model_entry.setdefault("tool_call", True)
+        model_entry.setdefault("limit", {"context": 200000, "output": 32000})
     return json.dumps(config, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -527,8 +576,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         copy_workspace(source_repo, opencode_workdir)
         commit_workspace_baseline(opencode_workdir)
 
-    env = os.environ.copy()
-    env.update(load_env_file(args.env_file))
+    env = load_env(args.env_file)
     real_base_url = (env.get("OPENAI_BASE_URL") or "").strip()
     air_http_dir = run_dir / "air-http"
     opencode_http_dir = run_dir / "opencode-http"
@@ -674,7 +722,10 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     }
     write_report(run_dir, report)
 
-    if not args.keep_workdirs:
+    keep_for_debug = should_keep_workdirs_for_debug(report)
+    if keep_for_debug:
+        log_step("keeping workdirs for debug because AIR/OpenCode results differ")
+    if not args.keep_workdirs and not keep_for_debug:
         if args.air_copy:
             shutil.rmtree(air_workdir, ignore_errors=True)
         if reuse_opencode_from is None:
@@ -707,8 +758,7 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
         air_snapshot = WorkspaceSnapshot.capture(air_workdir)
         air_execution = "in-place"
 
-    env = os.environ.copy()
-    env.update(load_env_file(args.env_file))
+    env = load_env(args.env_file)
     air_trace = air_workdir / "target/generated/air.trace.jsonl"
     air_stdout = air_workdir / "target/generated/air.stdout.log"
     air_stderr = air_workdir / "target/generated/air.stderr.log"
@@ -794,7 +844,10 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
     }
     write_report(run_dir, report)
 
-    if not args.keep_workdirs and args.air_copy:
+    keep_for_debug = should_keep_workdirs_for_debug(report)
+    if keep_for_debug:
+        log_step("keeping AIR workdir for debug because replay result differs")
+    if not args.keep_workdirs and not keep_for_debug and args.air_copy:
         shutil.rmtree(air_workdir, ignore_errors=True)
 
 
@@ -802,6 +855,19 @@ def compare_execution_order(reuse_opencode_from: Path | None) -> str:
     if reuse_opencode_from:
         return "sequential: reused opencode then air"
     return "sequential: opencode then air"
+
+
+def should_keep_workdirs_for_debug(report: dict[str, Any]) -> bool:
+    run = report.get("run") if isinstance(report.get("run"), dict) else {}
+    if run.get("air_route_monitor"):
+        return True
+    workspace = report.get("workspace_diff")
+    if isinstance(workspace, dict):
+        if workspace.get("same_changed_files") is False:
+            return True
+        if workspace.get("same_diff") is False:
+            return True
+    return False
 
 
 def load_opencode_http_reference(
@@ -839,6 +905,7 @@ def run_opencode_agent(
             opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
                 opencode_env.get("OPENCODE_CONFIG_CONTENT"),
                 opencode_proxy.base_url,
+                args.opencode_model,
             )
         opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)
         opencode_env["OPENCODE_PROJECT_DIR"] = str(opencode_workdir)
@@ -1163,7 +1230,9 @@ def analyze_air(trace_path: Path, stderr_path: Path | None, http_dir: Path | Non
             requests.append(summarize_air_request(meta, request))
             responses.append(summarize_air_response(event))
     http_requests = summarize_http_requests(http_dir)
+    http_responses = summarize_http_responses(http_dir)
     display_requests = http_requests or requests
+    display_responses = http_responses or responses
 
     tool_sequence = []
     for event in events:
@@ -1200,7 +1269,9 @@ def analyze_air(trace_path: Path, stderr_path: Path | None, http_dir: Path | Non
         "requests": display_requests,
         "trace_requests": requests,
         "http_requests": http_requests,
-        "responses": responses,
+        "responses": display_responses,
+        "trace_responses": responses,
+        "http_responses": http_responses,
         "first_request": display_requests[0] if display_requests else {},
         "tool_sequence": tool_sequence,
         "tool_counts": count_tools(tool_sequence),
@@ -1246,8 +1317,10 @@ def analyze_opencode(raw_dir: Path, events_path: Path | None, http_dir: Path | N
     response_paths = sorted(raw_dir.glob("*provider-response-stream.json"))
     sdk_requests = [summarize_opencode_request(path) for path in request_paths]
     http_requests = summarize_http_requests(http_dir)
+    http_responses = summarize_http_responses(http_dir)
     requests = http_requests or sdk_requests
-    responses = [summarize_opencode_response(path) for path in response_paths]
+    sdk_responses = [summarize_opencode_response(path) for path in response_paths]
+    responses = http_responses or sdk_responses
     tool_sequence = parse_opencode_tool_sequence(events_path) if events_path else []
     first_request = requests[0] if requests else {}
     return {
@@ -1260,6 +1333,8 @@ def analyze_opencode(raw_dir: Path, events_path: Path | None, http_dir: Path | N
         "sdk_requests": sdk_requests,
         "http_requests": http_requests,
         "responses": responses,
+        "sdk_responses": sdk_responses,
+        "http_responses": http_responses,
         "first_request": first_request,
         "tool_sequence": tool_sequence,
         "tool_counts": count_tools(tool_sequence),
@@ -1296,6 +1371,14 @@ def summarize_http_requests(http_dir: Path | None) -> list[dict[str, Any]]:
     return [summarize_http_request(path) for path in sorted(http_dir.glob("*-http-request.json"))]
 
 
+def summarize_http_responses(http_dir: Path | None) -> list[dict[str, Any]]:
+    if not http_dir or not http_dir.exists():
+        return []
+    return [
+        summarize_http_response(path) for path in sorted(http_dir.glob("*-http-response.json"))
+    ]
+
+
 def summarize_http_request(path: Path) -> dict[str, Any]:
     wrapper = read_json(path)
     body = wrapper.get("body") if isinstance(wrapper.get("body"), dict) else {}
@@ -1316,6 +1399,116 @@ def summarize_http_request(path: Path) -> dict[str, Any]:
         "tool_schema": summarize_openai_tools(tools),
         "top_keys": sorted(body.keys()),
     }
+
+
+def summarize_http_response(path: Path) -> dict[str, Any]:
+    wrapper = read_json(path)
+    body = wrapper.get("body")
+    if isinstance(body, str) and body.lstrip().startswith("data:"):
+        parsed = parse_openai_sse_body(body)
+        parsed["path"] = str(path)
+        parsed["source"] = "http"
+        parsed["status"] = wrapper.get("status")
+        return parsed
+    if isinstance(body, dict):
+        choices = body.get("choices") if isinstance(body.get("choices"), list) else []
+        message = choices[0].get("message") if choices and isinstance(choices[0], dict) else {}
+        if not isinstance(message, dict):
+            message = {}
+        return {
+            "path": str(path),
+            "source": "http",
+            "status": wrapper.get("status"),
+            "finish_reason": choices[0].get("finish_reason") if choices else None,
+            "usage": body.get("usage"),
+            "text_preview": truncate(str(message.get("content") or ""), 500),
+            "tool_calls": summarize_openai_message_tool_calls(message.get("tool_calls")),
+        }
+    return {
+        "path": str(path),
+        "source": "http",
+        "status": wrapper.get("status"),
+        "finish_reason": None,
+        "usage": None,
+        "text_preview": "",
+        "tool_calls": [],
+    }
+
+
+def parse_openai_sse_body(body: str) -> dict[str, Any]:
+    text_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    tool_calls: dict[int, dict[str, str]] = {}
+    finish_reason = None
+    usage = None
+    for block in body.split("\n\n"):
+        block = block.strip()
+        if not block.startswith("data: "):
+            continue
+        data = block.removeprefix("data: ").strip()
+        if data == "[DONE]":
+            continue
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        usage = event.get("usage") or usage
+        choices = event.get("choices") if isinstance(event.get("choices"), list) else []
+        for choice in choices:
+            if not isinstance(choice, dict):
+                continue
+            finish_reason = choice.get("finish_reason") or finish_reason
+            delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+            content = delta.get("content")
+            if isinstance(content, str):
+                text_parts.append(content)
+            reasoning = delta.get("reasoning") or delta.get("reasoning_content")
+            if isinstance(reasoning, str):
+                reasoning_parts.append(reasoning)
+            for tool_call in delta.get("tool_calls") or []:
+                if not isinstance(tool_call, dict):
+                    continue
+                index = int(tool_call.get("index") or 0)
+                current = tool_calls.setdefault(index, {"id": "", "tool": "", "input": ""})
+                if isinstance(tool_call.get("id"), str):
+                    current["id"] += tool_call["id"]
+                function = tool_call.get("function") if isinstance(tool_call.get("function"), dict) else {}
+                if isinstance(function.get("name"), str):
+                    current["tool"] += function["name"]
+                if isinstance(function.get("arguments"), str):
+                    current["input"] += function["arguments"]
+    return {
+        "finish_reason": finish_reason,
+        "usage": usage,
+        "reasoning_preview": truncate("".join(reasoning_parts), 500),
+        "text_preview": truncate("".join(text_parts), 500),
+        "tool_calls": [
+            {
+                "id": value["id"],
+                "tool": value["tool"],
+                "input": parse_json_maybe(value["input"]),
+            }
+            for _, value in sorted(tool_calls.items())
+        ],
+    }
+
+
+def summarize_openai_message_tool_calls(tool_calls: Any) -> list[dict[str, Any]]:
+    if not isinstance(tool_calls, list):
+        return []
+    results = []
+    for item in tool_calls:
+        if not isinstance(item, dict):
+            continue
+        function = item.get("function") if isinstance(item.get("function"), dict) else {}
+        results.append(
+            {
+                "id": item.get("id"),
+                "tool": function.get("name"),
+                "input": parse_json_maybe(str(function.get("arguments") or "")),
+            }
+        )
+    return results
 
 
 def summarize_opencode_response(path: Path) -> dict[str, Any]:
@@ -1417,6 +1610,10 @@ def compare_summaries(air: dict[str, Any], opencode: dict[str, Any]) -> dict[str
             "air": air.get("tool_counts"),
             "opencode": opencode.get("tool_counts"),
         },
+        "response_tool_calls": {
+            "air": response_tool_call_route(air.get("responses") or []),
+            "opencode": response_tool_call_route(opencode.get("responses") or []),
+        },
         "first_edit_tool_index": {
             "air": air.get("first_edit_tool_index"),
             "opencode": opencode.get("first_edit_tool_index"),
@@ -1499,6 +1696,22 @@ def parse_opencode_tool_sequence(events_path: Path) -> list[dict[str, Any]]:
     return sequence
 
 
+def response_tool_call_route(responses: list[Any]) -> list[list[str]]:
+    route = []
+    for response in responses:
+        if not isinstance(response, dict):
+            continue
+        calls = response.get("tool_calls") if isinstance(response.get("tool_calls"), list) else []
+        route.append(
+            [
+                str(call.get("tool"))
+                for call in calls
+                if isinstance(call, dict) and call.get("tool")
+            ]
+        )
+    return route
+
+
 def write_report(run_dir: Path, report: dict[str, Any]) -> None:
     summary_json = run_dir / "summary.json"
     summary_md = run_dir / "summary.md"
@@ -1542,6 +1755,7 @@ def render_markdown(report: dict[str, Any]) -> str:
         "## Tool Behavior",
         "",
         f"- Tool counts: AIR `{diff['tool_counts']['air']}`, OpenCode `{diff['tool_counts']['opencode']}`",
+        f"- Response tool calls: AIR `{diff['response_tool_calls']['air']}`, OpenCode `{diff['response_tool_calls']['opencode']}`",
         f"- First edit tool index: AIR `{diff['first_edit_tool_index']['air']}`, OpenCode `{diff['first_edit_tool_index']['opencode']}`",
         f"- Empty glob calls: AIR `{diff['empty_glob_calls']['air']}`, OpenCode `{diff['empty_glob_calls']['opencode']}`",
         "",
@@ -1793,6 +2007,12 @@ def load_env_file(path: Path) -> dict[str, str]:
             continue
         key, value = line.split("=", 1)
         result[key.strip()] = value.strip().strip('"').strip("'")
+    return result
+
+
+def load_env(path: Path) -> dict[str, str]:
+    result = load_env_file(path)
+    result.update(os.environ)
     return result
 
 

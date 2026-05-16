@@ -183,7 +183,7 @@ pub(crate) fn call_repo_files_tool(
         .get("include_all")
         .and_then(Value::as_bool)
         .unwrap_or(false);
-    let paths = repo_tool_paths(name, input)?;
+    let paths = repo_tool_paths(name, input, &repo)?;
     let glob_input = repo_files_glob_input(name, input, query_input.pattern_glob)?;
     let mut command = Command::new("rg");
     command.arg("--files");
@@ -398,7 +398,7 @@ pub(crate) fn call_repo_search_tool(
         optional_bounded_usize_input(name, input, "max_matches", max_matches)?
             .unwrap_or(max_matches);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let paths = repo_tool_paths(name, input)?;
+    let paths = repo_tool_paths(name, input, &repo)?;
     let glob = repo_glob_input(name, input)?;
     if let Some(glob) = glob {
         validate_relative_path_filter(name, glob)?;
@@ -520,7 +520,7 @@ pub(crate) fn call_repo_context_tool(
     let mut mode = requested_mode.to_string();
     let mut effective_query = repo_effective_search_query(&mode, query);
     let repo = canonicalize_tool_path(name, "repo_dir", repo_dir)?;
-    let paths = repo_tool_paths(name, input)?;
+    let paths = repo_tool_paths(name, input, &repo)?;
     let effective_max_matches =
         optional_bounded_usize_input(name, input, "max_matches", max_matches)?
             .unwrap_or(max_matches);
