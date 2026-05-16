@@ -41,7 +41,7 @@ policy:
 state:
   phase:
     type: enum
-    enum: [init, choose, act, post_act, summarize, done]
+    enum: [init, choose, verify, act, post_act, summarize, done]
   observations:
     type: array
     items: object
@@ -189,6 +189,29 @@ workflow:
           values:
             phase: act
 
+    - id: choose-verification
+      when: phase == "verify"
+      actions:
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_bytes: 250000
+              allowed_tools:
+                literal: [bash, todowrite]
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: act
+
     - id: act
       when: phase == "act" && decision.complete == false
       actions:
@@ -221,7 +244,7 @@ workflow:
         - kind: set
           values:
             patch_applied: true
-            phase: choose
+            phase: verify
 
     - id: bash-passed-after-patch
       when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true
@@ -260,7 +283,7 @@ workflow:
                 literal: Run an appropriate bash verification command before finishing.
         - kind: set
           values:
-            phase: choose
+            phase: verify
 
     - id: complete-verified
       when: phase == "act" && decision.complete == true && verification_status == "passed"
@@ -268,6 +291,13 @@ workflow:
         - kind: set
           values:
             phase: summarize
+
+    - id: continue-verification-after-tool-update
+      when: phase == "post_act" && patch_applied == true && verification_status != "passed"
+      actions:
+        - kind: set
+          values:
+            phase: verify
 
     - id: continue-after-act
       when: phase == "post_act"
