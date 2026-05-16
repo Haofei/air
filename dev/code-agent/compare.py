@@ -157,6 +157,33 @@ def default_opencode_command() -> str:
     return "opencode"
 
 
+def opencode_workdir_for_new_run(run_dir: Path) -> Path:
+    temp_root = Path(os.environ.get("TMPDIR") or "/tmp").resolve()
+    return temp_root / "air-code-agent-io-compare" / run_dir.name / "opencode-work"
+
+
+def remember_opencode_workdir(run_dir: Path, opencode_workdir: Path) -> None:
+    (run_dir / "opencode-workdir.txt").write_text(
+        str(opencode_workdir), encoding="utf-8"
+    )
+
+
+def opencode_workdir_for_existing_run(run_dir: Path) -> Path:
+    marker = run_dir / "opencode-workdir.txt"
+    if marker.exists():
+        path = Path(marker.read_text(encoding="utf-8").strip())
+        if path.exists():
+            return path
+    return run_dir / "opencode-work"
+
+
+def opencode_events_for_run(run_dir: Path) -> Path:
+    events = run_dir / "opencode.events.jsonl"
+    if events.exists():
+        return events
+    return run_dir / "opencode-work/target/generated/opencode.events.jsonl"
+
+
 class HttpCaptureProxy:
     def __init__(
         self,
@@ -661,7 +688,9 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         args.reuse_opencode_from.resolve() if args.reuse_opencode_from else None
     )
 
-    opencode_workdir = run_dir / "opencode-work"
+    opencode_workdir = opencode_workdir_for_new_run(run_dir)
+    if reuse_opencode_from is None:
+        remember_opencode_workdir(run_dir, opencode_workdir)
     source_snapshot = WorkspaceSnapshot.capture(source_repo)
     log_step(f"run directory: {run_dir}")
     log_step("preparing AIR workspace")
@@ -701,9 +730,8 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     opencode_stderr = None
     if reuse_opencode_from is None:
         opencode_raw.mkdir(parents=True, exist_ok=True)
-        opencode_events = opencode_workdir / "target/generated/opencode.events.jsonl"
-        opencode_stderr = opencode_workdir / "target/generated/opencode.stderr.log"
-        opencode_events.parent.mkdir(parents=True, exist_ok=True)
+        opencode_events = run_dir / "opencode.events.jsonl"
+        opencode_stderr = run_dir / "opencode.stderr.log"
 
     if reuse_opencode_from is None:
         log_step("running OpenCode reference")
@@ -1286,7 +1314,7 @@ def load_reused_opencode_summary(run_dir: Path) -> tuple[dict[str, Any], dict[st
     opencode = summary.get("opencode")
     if not isinstance(opencode, dict):
         raise SystemExit(f"Cannot reuse OpenCode results: {summary_path} has no opencode section")
-    opencode_workdir = run_dir / "opencode-work"
+    opencode_workdir = opencode_workdir_for_existing_run(run_dir)
     if opencode_workdir.exists():
         return opencode, workspace_diff_summary(opencode_workdir)
     workspace = summary.get("workspace_diff") if isinstance(summary.get("workspace_diff"), dict) else {}
@@ -1307,13 +1335,13 @@ def analyze_source_opencode(run_dir: Path) -> tuple[dict[str, Any], dict[str, An
 
     raw_dir = run_dir / "opencode-raw"
     http_dir = run_dir / "opencode-http"
-    events = run_dir / "opencode-work/target/generated/opencode.events.jsonl"
+    events = opencode_events_for_run(run_dir)
     opencode = analyze_opencode(
         raw_dir,
         events if events.exists() else None,
         http_dir if http_dir.exists() else None,
     )
-    opencode_workdir = run_dir / "opencode-work"
+    opencode_workdir = opencode_workdir_for_existing_run(run_dir)
     if opencode_workdir.exists():
         return opencode, workspace_diff_summary(opencode_workdir)
     return opencode, {

@@ -732,6 +732,46 @@ impl ConfigTools {
             })
     }
 
+    fn observe_file_read_output(
+        &mut self,
+        name: &str,
+        output: &Value,
+    ) -> Result<Option<Value>, RuntimeError> {
+        let Some(path) = output.get("path").and_then(Value::as_str) else {
+            return Ok(None);
+        };
+        let path = Path::new(path);
+        let snapshot = read_snapshot(name, "input.path", path)?;
+        let total_lines = output
+            .get("total_lines")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        let start_line = output
+            .get("start_line")
+            .and_then(Value::as_u64)
+            .map(|line| line as usize)
+            .unwrap_or(1);
+        let end_line = output
+            .get("end_line")
+            .and_then(Value::as_u64)
+            .map(|line| line as usize)
+            .unwrap_or(total_lines);
+        if let Some(covered_by) =
+            self.covered_read_observation(path, snapshot, start_line, end_line)
+        {
+            self.read_snapshots.insert(path.to_path_buf(), snapshot);
+            return Ok(Some(repeated_read_output(
+                output, start_line, end_line, covered_by,
+            )));
+        }
+        let complete = !output
+            .get("truncated")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        self.remember_read_observation(path, snapshot, start_line, end_line, complete)?;
+        Ok(None)
+    }
+
     fn rust_analyzer_session(
         &mut self,
         tool_name: &str,
@@ -1046,36 +1086,8 @@ impl ToolProvider for ConfigTools {
                 let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output =
                     call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))?;
-                if let Some(path) = output.get("path").and_then(Value::as_str) {
-                    let path = Path::new(path);
-                    let snapshot = read_snapshot(name, "input.path", path)?;
-                    let total_lines = output
-                        .get("total_lines")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0) as usize;
-                    let start_line = output
-                        .get("start_line")
-                        .and_then(Value::as_u64)
-                        .map(|line| line as usize)
-                        .unwrap_or(1);
-                    let end_line = output
-                        .get("end_line")
-                        .and_then(Value::as_u64)
-                        .map(|line| line as usize)
-                        .unwrap_or(total_lines);
-                    if let Some(covered_by) =
-                        self.covered_read_observation(path, snapshot, start_line, end_line)
-                    {
-                        self.read_snapshots.insert(path.to_path_buf(), snapshot);
-                        return Ok(repeated_read_output(
-                            &output, start_line, end_line, covered_by,
-                        ));
-                    }
-                    let complete = !output
-                        .get("truncated")
-                        .and_then(Value::as_bool)
-                        .unwrap_or(false);
-                    self.remember_read_observation(path, snapshot, start_line, end_line, complete)?;
+                if let Some(repeated_output) = self.observe_file_read_output(name, &output)? {
+                    return Ok(repeated_output);
                 }
                 Ok(output)
             }
