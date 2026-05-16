@@ -1308,88 +1308,8 @@ Note: LSP servers must be configured for the file type. If no server is availabl
 }
 
 fn opencode_skill_description() -> String {
-    let Some(skills) = opencode_available_skills() else {
-        return r##"Load a skill to get detailed instructions for a specific task. Skills provide specialized knowledge and step-by-step guidance. Use this when a task matches an available skill's description. Only the listed skills are available."##
-            .to_string();
-    };
-    format!(
-        "Load a skill to get detailed instructions for a specific task. Skills provide specialized knowledge and step-by-step guidance. Use this when a task matches an available skill's description. Only the skills listed here are available: {skills}"
-    )
-}
-
-fn opencode_available_skills() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
-    let skills_dir = Path::new(&home).join(".agents/skills");
-    let entries = fs::read_dir(skills_dir).ok()?;
-    let mut skills = entries
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| opencode_skill_frontmatter(&entry.path().join("SKILL.md")))
-        .collect::<Vec<_>>();
-    if skills.is_empty() {
-        return None;
-    }
-    let preferred_order = [
-        "spade-verify",
-        "spade-tech-design",
-        "zippy-fix",
-        "zippy-commit",
-        "spade",
-        "spade-tasks",
-        "zippy-create-mr",
-        "zippy",
-        "spade-ux-design",
-        "spade-prd",
-        "zeta-coding-standards",
-        "spade-implement",
-        "spade-test-plan",
-        "zippy-review",
-        "zippy-assign-reviewers",
-    ];
-    skills.retain(|(name, _)| preferred_order.contains(&name.as_str()));
-    if skills.is_empty() {
-        return None;
-    }
-    skills.sort_by_key(|(name, _)| {
-        preferred_order
-            .iter()
-            .position(|preferred| preferred == name)
-            .unwrap_or(preferred_order.len())
-    });
-    let mut rendered = String::from("<available_skills>");
-    for (name, description) in skills {
-        rendered.push_str("   <skill>     <name>");
-        rendered.push_str(&name);
-        rendered.push_str("</name>     <description>");
-        rendered.push_str(&description);
-        rendered.push_str("</description>   </skill>");
-    }
-    rendered.push_str(" </available_skills>");
-    Some(rendered)
-}
-
-fn opencode_skill_frontmatter(path: &Path) -> Option<(String, String)> {
-    let text = fs::read_to_string(path).ok()?;
-    let mut lines = text.lines();
-    if lines.next()? != "---" {
-        return None;
-    }
-    let mut name = None;
-    let mut description = None;
-    for line in lines {
-        if line == "---" {
-            break;
-        }
-        let Some((key, value)) = line.split_once(':') else {
-            continue;
-        };
-        let value = value.trim().trim_matches('"').to_string();
-        match key.trim() {
-            "name" => name = Some(value),
-            "description" => description = Some(value),
-            _ => {}
-        }
-    }
-    Some((name?, description?))
+    "Load a skill to get detailed instructions for a specific task. No skills are currently available."
+        .to_string()
 }
 
 fn opencode_todowrite_description() -> String {
@@ -1774,7 +1694,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "name": {"description": "The skill identifier from available_skills (e.g., 'spade-verify', 'spade-tech-design', 'zippy-fix', ...)", "type": "string"}
+                    "name": {"description": "The skill to load. No skills are currently available.", "type": "string"}
                 },
                 "required": ["name"],
                 "additionalProperties": false

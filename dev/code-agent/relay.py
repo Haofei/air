@@ -29,7 +29,7 @@ sys.dont_write_bytecode = True
 
 DEFAULT_SIDE = "air"
 MAX_LATE_ACTION_ROUTES = 2
-MAX_TOLERATED_LATE_TARGETED_READS = 1
+MAX_TOLERATED_LATE_TARGETED_INSPECTIONS = 2
 MAX_REFERENCE_EXTRA_MODEL_CALLS = 4
 
 
@@ -159,7 +159,7 @@ class RouteMonitor:
         self.first_reference_action = first_action_route_call(reference)
         self.air_action_seen = False
         self.late_action_routes = 0
-        self.tolerated_late_targeted_reads = 0
+        self.tolerated_late_targeted_inspections = 0
 
     def stop_before(self, call_index: int) -> dict[str, Any] | None:
         if (
@@ -220,9 +220,12 @@ class RouteMonitor:
             and not self.air_action_seen
             and expected_has_action
         ):
-            if is_targeted_read_only_route(body):
-                self.tolerated_late_targeted_reads += 1
-                if self.tolerated_late_targeted_reads <= MAX_TOLERATED_LATE_TARGETED_READS:
+            if is_targeted_inspection_route(body):
+                self.tolerated_late_targeted_inspections += 1
+                if (
+                    self.tolerated_late_targeted_inspections
+                    <= MAX_TOLERATED_LATE_TARGETED_INSPECTIONS
+                ):
                     return None
             self.late_action_routes += 1
             if self.late_action_routes < MAX_LATE_ACTION_ROUTES:
@@ -1046,26 +1049,34 @@ def route_relevant_tools(tools: list[str]) -> list[str]:
     return [tool for tool in tools if tool not in ignored]
 
 
-def is_targeted_read_only_route(body: Any) -> bool:
+def is_targeted_inspection_route(body: Any) -> bool:
     calls = route_body_tool_calls(body)
-    if len(calls) != 1 or calls[0].get("name") != "read":
+    if len(calls) != 1:
         return False
+    name = calls[0].get("name")
     arguments = parse_tool_arguments(calls[0].get("arguments"))
     if not isinstance(arguments, dict):
         return False
-    if not any(arguments.get(key) for key in ("filePath", "path")):
-        return False
-    return any(
-        key in arguments
-        for key in (
-            "offset",
-            "limit",
-            "start_line",
-            "end_line",
-            "startLine",
-            "endLine",
+    if name == "read":
+        if not any(arguments.get(key) for key in ("filePath", "path")):
+            return False
+        return any(
+            key in arguments
+            for key in (
+                "offset",
+                "limit",
+                "start_line",
+                "end_line",
+                "startLine",
+                "endLine",
+            )
         )
-    )
+    if name in {"grep", "glob"}:
+        return bool(arguments.get("pattern"))
+    if name == "bash":
+        command = str(arguments.get("command") or "").strip()
+        return command.startswith("rg ") or command.startswith("git grep ")
+    return False
 
 
 def parse_tool_arguments(arguments: Any) -> Any:
