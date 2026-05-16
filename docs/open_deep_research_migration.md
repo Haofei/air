@@ -145,13 +145,13 @@ Implemented:
 Run these checks before claiming this migration path works:
 
 ```bash
-scripts/verify_deep_research.sh
+examples/deep-research/dev/verify.sh
 ```
 
 The script covers formatting, the full Rust test suite, every deep-research module, every checked deep-research RunPlan, linker AIR VM tests, and local search deduplication. To include real model planning and execution, run:
 
 ```bash
-AIR_DEEP_RESEARCH_REAL=1 scripts/verify_deep_research.sh
+AIR_DEEP_RESEARCH_REAL=1 examples/deep-research/dev/verify.sh
 ```
 
 The expanded manual commands below are useful when debugging individual checks:
@@ -287,7 +287,7 @@ For the current AIR-only slice, AIR should be considered to have migrated this a
 
 Current report-quality evidence:
 
-- `scripts/verify_deep_research.sh` checks the richer final-report prompt, richer researcher note schema, expanded local corpus, and a 900+ word report quality sample through `scripts/evaluate_deep_research_report.py`;
+- `examples/deep-research/dev/verify.sh` checks the richer final-report prompt, richer researcher note schema, expanded local corpus, and a 900+ word report quality sample through `examples/deep-research/dev/evaluate_report.py`;
 - with `AIR_DEEP_RESEARCH_REAL=1`, the same verifier runs a real BigModel final-reporter smoke and evaluates the output with the same quality check;
 - `target/generated/deep_research_dynamic_real.output.json` is a local real dynamic AIR VM sample from the OpenAI-compatible BigModel provider; it passed the quality evaluator with 1313 report words, 10 key findings, 6 comparison rows, 7 recommendations, 8 sources, and 12 limitations.
 - the checked-in upstream `open_deep_research/examples/*.md` examples are roughly 1257-1680 words, so the current AIR real dynamic sample is in the same report-length band rather than the earlier short-summary shape.

@@ -3,7 +3,7 @@
     "web.search": {
       "kind": "playwright_search",
       "capability": "network.search",
-      "script_path": "../../scripts/playwright_search.cjs",
+      "script_path": "../../tools/playwright/search.cjs",
       "query_variants": [
         "{{query}} GitHub",
         "{{query}} documentation",

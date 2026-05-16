@@ -271,7 +271,7 @@ fn file_read_reads_inside_configured_base_dir() {
         .call_tool("file.read", &json!({"path": "note.txt"}))
         .unwrap();
 
-    assert_eq!(output["content"], json!("00001| h"));
+    assert_eq!(output["content"], json!("00001| hello fr"));
     assert_eq!(output["truncated"], json!(true));
     assert_eq!(output["artifacts"][0]["kind"], json!("file_span"));
     assert!(output["artifacts"][0]["id"]
@@ -364,7 +364,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
         )
         .unwrap();
     assert_eq!(output["max_bytes_per_file"], json!(5));
-    assert_eq!(output["files"][0]["content"], json!("00001"));
+    assert_eq!(output["files"][0]["content"], json!("00001| abcde"));
     assert_eq!(output["files"][0]["truncated"], json!(true));
 
     let capped = tools
@@ -374,7 +374,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
         )
         .unwrap();
     assert_eq!(capped["max_bytes_per_file"], json!(12));
-    assert_eq!(capped["files"][0]["content"], json!("00001| abcde"));
+    assert_eq!(capped["files"][0]["content"], json!("00001| abcdefghijkl"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -455,14 +455,14 @@ fn file_read_supports_bounded_per_call_max_bytes() {
     let output = tools
         .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 8}))
         .unwrap();
-    assert_eq!(output["content"], json!("00001| a"));
+    assert_eq!(output["content"], json!("00001| abcdefgh"));
     assert_eq!(output["max_bytes"], json!(8));
     assert_eq!(output["truncated"], json!(true));
 
     let capped = tools
         .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 99}))
         .unwrap();
-    assert_eq!(capped["content"], json!("00001| abcdefghi"));
+    assert_eq!(capped["content"], json!("00001| abcdefghijklmnop"));
     assert_eq!(capped["max_bytes"], json!(16));
     assert_eq!(capped["truncated"], json!(true));
     let _ = fs::remove_dir_all(dir);
@@ -1334,6 +1334,41 @@ fn file_read_defaults_to_numbered_content() {
     assert_eq!(
         output["artifacts"][0]["metadata"]["line_numbers_defaulted"],
         json!(true)
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_does_not_truncate_only_because_line_numbers_expand_output() {
+    let dir = temp_dir("air-tools-file-read-numbered-expanded");
+    let content = (1..=20).map(|_| "x").collect::<Vec<_>>().join("\n");
+    assert!(content.len() <= 64);
+    fs::write(dir.join("note.txt"), content).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 64
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    assert_eq!(output["truncated"], json!(false));
+    assert_eq!(output["full_output_path"], json!(null));
+    assert!(output["content"].as_str().unwrap().contains("00020| x"));
+    assert!(
+        output["content"].as_str().unwrap().len() > 64,
+        "line numbering may expand rendered output beyond the source-byte limit"
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -2390,12 +2425,9 @@ fn file_read_truncates_unscoped_large_reads_with_range_hint() {
 
     assert_eq!(output["truncated"], json!(true));
     assert_eq!(output["unscoped_read"], json!(true));
-    assert_eq!(output["bytes"], json!(512));
+    assert!(output["bytes"].as_u64().unwrap() > 512);
     assert_eq!(output["content_format"], json!("line_numbered"));
-    assert!(
-        output["content"].as_str().unwrap().len() <= 512,
-        "displayed content should respect max_bytes after line numbers are added"
-    );
+    assert!(output["content"].as_str().unwrap().len() > 512);
     assert!(output["content"]
         .as_str()
         .unwrap()
@@ -4227,6 +4259,20 @@ fn bash_search_containing_format_is_not_verification() {
             &json!({
                 "command": "true",
                 "description": "Run the fixture test after the edit"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["verification"], json!(true));
+
+    fs::write(dir.join("check.py"), "print('ok')\n").unwrap();
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "python3 -m py_compile check.py",
+                "description": "Compile check"
             }),
         )
         .unwrap();

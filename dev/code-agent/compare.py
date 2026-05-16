@@ -29,7 +29,7 @@ from typing import Any
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
-import code_agent_relay
+import relay as relay_module
 
 
 DEFAULT_TASK = (
@@ -160,7 +160,7 @@ class HttpCaptureProxy:
         target_base_url: str,
         out_dir: Path,
         *,
-        reference_cassette: list[code_agent_relay.CapturedCall] | None = None,
+        reference_cassette: list[relay_module.CapturedCall] | None = None,
     ):
         self.target_base_url = target_base_url.rstrip("/")
         self.out_dir = out_dir
@@ -171,7 +171,7 @@ class HttpCaptureProxy:
         self._lock = threading.Lock()
         self.base_url = ""
         self.monitor = (
-            code_agent_relay.RouteMonitor(reference_cassette)
+            relay_module.RouteMonitor(reference_cassette)
             if reference_cassette
             else None
         )
@@ -387,7 +387,7 @@ def write_stream_progress(
     path: Path, call_index: int, url: str, body: bytes, *, done: bool = False
 ) -> None:
     text = body.decode("utf-8", errors="replace")
-    assistant = code_agent_relay.assistant_response(text)
+    assistant = relay_module.assistant_response(text)
     progress = {
         "call_index": call_index,
         "url": url,
@@ -572,7 +572,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
             stderr_path=air_stderr,
             http_dir=air_http_dir if capture_http else None,
         )
-        opencode, opencode_diff = load_reused_opencode_summary(reuse_opencode_from)
+        opencode, opencode_diff = analyze_source_opencode(reuse_opencode_from)
         report = {
             "air": air,
             "opencode": opencode,
@@ -633,8 +633,8 @@ def run_and_analyze(args: argparse.Namespace) -> None:
 def replay_air_and_analyze(args: argparse.Namespace) -> None:
     source_repo = args.repo.resolve()
     source_run = args.source_run.resolve()
-    source_air = code_agent_relay.load_cassette(source_run, "air")
-    task = args.task or code_agent_relay.infer_task_from_cassette(source_air)
+    source_air = relay_module.load_cassette(source_run, "air")
+    task = args.task or relay_module.infer_task_from_cassette(source_air)
     if not task:
         raise SystemExit("Cannot infer task from source run; pass --task explicitly")
 
@@ -667,11 +667,11 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
     log_step("building AIR CLI" if args.build_air else "resolving AIR CLI")
     air_bin = resolve_air_bin(args.air_bin, source_repo, args.build_air)
     opencode_reference = load_opencode_http_reference(source_run)
-    relay = code_agent_relay.ReplayRelay(
+    relay = relay_module.ReplayRelay(
         cassette=source_air,
         replay_until=len(source_air) + 1 if args.from_call is None else args.from_call,
         target_base_url=args.target_base_url
-        or code_agent_relay.infer_target_base_url(source_air),
+        or relay_module.infer_target_base_url(source_air),
         out_dir=air_http_dir,
         monitor_reference=opencode_reference,
         path_rewrites=source_air_path_rewrites(source_run, air_workdir),
@@ -681,7 +681,7 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
     air_env["OPENAI_BASE_URL"] = relay.base_url
     air_returncode = 0
     try:
-        print(code_agent_relay.render_relay_banner(relay, source_air), flush=True)
+        print(relay_module.render_relay_banner(relay, source_air), flush=True)
         log_step("running AIR code agent through replay relay")
         air_returncode = run_checked(
             [
@@ -754,15 +754,15 @@ def compare_execution_order(reuse_opencode_from: Path | None) -> str:
 
 def load_opencode_http_reference(
     path: Path,
-) -> list[code_agent_relay.CapturedCall] | None:
+) -> list[relay_module.CapturedCall] | None:
     try:
-        return code_agent_relay.load_cassette(path, "opencode")
+        return relay_module.load_cassette(path, "opencode")
     except SystemExit:
         return None
 
 
 def opencode_http_dir_for_run(run_dir: Path) -> Path:
-    return code_agent_relay.resolve_http_dir(run_dir.resolve(), "opencode")
+    return relay_module.resolve_http_dir(run_dir.resolve(), "opencode")
 
 
 def run_opencode_agent(
@@ -859,10 +859,15 @@ def compare_workspace_diff_summaries(
 
 def workspace_diff_summary(workdir: Path) -> dict[str, Any]:
     diff = capture_stdout(["git", "diff", "--"], workdir)
-    tracked_changed = capture_stdout(["git", "diff", "--name-only", "--"], workdir).splitlines()
+    tracked_changed = [
+        path
+        for path in capture_stdout(["git", "diff", "--name-only", "--"], workdir).splitlines()
+        if not ignored_workspace_path(path)
+    ]
     untracked = capture_stdout(
         ["git", "ls-files", "--others", "--exclude-standard"], workdir
     ).splitlines()
+    untracked = [path for path in untracked if not ignored_workspace_path(path)]
     changed_files = sorted(set(tracked_changed) | set(untracked))
     if untracked:
         after = WorkspaceSnapshot.capture(workdir)
@@ -944,7 +949,7 @@ def workspace_file_list(workdir: Path) -> list[str]:
 
 
 def ignored_workspace_path(path: str) -> bool:
-    return path.startswith(
+    return path.endswith(".pyc") or "/__pycache__/" in path or path.startswith(
         (
             ".git/",
             ".air/",
@@ -1724,7 +1729,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 def content_shape(content: Any) -> str:

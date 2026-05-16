@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 cd "$ROOT"
 
 STORE="examples/deep-research/module-store.air-store.yaml"
@@ -72,7 +72,7 @@ search = tools["tools"]["web.search"]
 assert search["max_results"] >= 8
 assert len(search["documents"]) >= 8
 PY
-"$PYTHON" scripts/evaluate_deep_research_report.py \
+"$PYTHON" examples/deep-research/dev/evaluate_report.py \
   examples/deep-research/report-quality-output.json
 
 echo "[air-verify] parallel CLI smoke"

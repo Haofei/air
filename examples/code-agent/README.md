@@ -69,7 +69,7 @@ Use the comparison harness to run the same task through AIR and OpenCode, then
 diff the actual OpenAI-compatible HTTP request body:
 
 ```bash
-python3 scripts/compare_code_agent_io.py run \
+python3 dev/code-agent/compare.py run \
   --name todo-refactor \
   --opencode-model zhipuai-coding-plan/glm-5.1
 ```
@@ -95,7 +95,7 @@ the source checkout is dirty.
 To analyze existing logs without another model run:
 
 ```bash
-python3 scripts/compare_code_agent_io.py analyze \
+python3 dev/code-agent/compare.py analyze \
   --air-trace /path/to/air.trace.jsonl \
   --air-http-dir /path/to/air-http \
   --opencode-raw-dir /path/to/opencode-raw \
@@ -119,7 +119,7 @@ continue from a specific model call instead of spending the whole budget again.
 Inspect a previous run:
 
 ```bash
-python3 scripts/code_agent_relay.py inspect \
+python3 dev/code-agent/relay.py inspect \
   target/generated/code-agent-io-compare/todo-refactor \
   --side air
 ```
@@ -127,7 +127,7 @@ python3 scripts/code_agent_relay.py inspect \
 Compare AIR and OpenCode at a specific model call:
 
 ```bash
-python3 scripts/code_agent_relay.py diff \
+python3 dev/code-agent/relay.py diff \
   target/generated/code-agent-io-compare/todo-refactor \
   --call 9
 ```
@@ -135,14 +135,14 @@ python3 scripts/code_agent_relay.py diff \
 Find the first likely divergence and suggested replay points:
 
 ```bash
-python3 scripts/code_agent_relay.py divergence \
+python3 dev/code-agent/relay.py divergence \
   target/generated/code-agent-io-compare/todo-refactor
 ```
 
 Resume from call 23:
 
 ```bash
-python3 scripts/code_agent_relay.py run \
+python3 dev/code-agent/relay.py run \
   target/generated/code-agent-io-compare/todo-refactor \
   --side air \
   --from 23 \
@@ -161,7 +161,7 @@ response behavior can be compared at the fork point.
 To keep the normal comparison report flow and reuse a saved OpenCode run:
 
 ```bash
-python3 scripts/compare_code_agent_io.py replay-air \
+python3 dev/code-agent/compare.py replay-air \
   target/generated/code-agent-io-compare/todo-refactor \
   --from 23 \
   --name todo-refactor-replay

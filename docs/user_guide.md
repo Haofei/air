@@ -430,7 +430,7 @@ syntax as HTTP tools. Install the browser runtime once with `npm install` and
     "web.search": {
       "kind": "playwright_search",
       "capability": "network.search",
-      "script_path": "../../scripts/playwright_search.cjs",
+      "script_path": "../../tools/playwright/search.cjs",
       "query_variants": [
         "{{query}} GitHub",
         "{{query}} documentation",
@@ -600,5 +600,5 @@ cargo test --workspace
 Use targeted example smoke checks when needed:
 
 ```bash
-bash scripts/verify_deep_research.sh
+bash examples/deep-research/dev/verify.sh
 ```

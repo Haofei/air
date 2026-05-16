@@ -1,7 +1,7 @@
 use crate::RuntimeError;
 use serde_json::{json, Map, Value};
 
-const OPENCODE_READ_CONTEXT_CHARS: usize = 50 * 1024;
+const OPENCODE_READ_CONTEXT_CHARS: usize = 60 * 1024;
 const OPENCODE_ASSISTANT_CONTEXT_CHARS: usize = 32 * 1024;
 
 pub fn take_last_within_bytes_value(

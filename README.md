@@ -215,10 +215,10 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-Targeted example smoke checks live in `scripts/` when you need them:
+Targeted example smoke checks live with their examples when you need them:
 
 ```bash
-bash scripts/verify_deep_research.sh
+bash examples/deep-research/dev/verify.sh
 ```
 
 ## Documentation

@@ -144,22 +144,34 @@ pub(super) fn call_file_read_tool(
     };
     let effective_end_line = effective_end_line.map(|line| line.min(total_lines));
     let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
-    let display_content = if line_numbers {
-        numbered_content(&selected, effective_start_line.unwrap_or(1))
+    let (limited_selected, truncated, _source_window_bytes) =
+        bytes_to_limited_text(selected.as_bytes(), effective_max_bytes);
+    let content = if line_numbers {
+        numbered_content(&limited_selected, effective_start_line.unwrap_or(1))
     } else {
-        selected
+        limited_selected
     };
-    let (content, truncated, bytes, full_output_path) = limit_and_maybe_save(
-        name,
-        &base,
-        "file-read",
-        display_content.as_bytes(),
-        effective_max_bytes,
-    )?;
+    let bytes = content.len();
+    let full_output_path = if truncated {
+        let full_display_content = if line_numbers {
+            numbered_content(&selected, effective_start_line.unwrap_or(1))
+        } else {
+            selected.clone()
+        };
+        maybe_save_full_output(
+            name,
+            &base,
+            "file-read",
+            full_display_content.as_bytes(),
+            true,
+        )?
+    } else {
+        None
+    };
     let unscoped_read = effective_start_line.is_none()
         && effective_end_line.is_none()
         && match_line.is_none()
-        && display_content.len() > effective_max_bytes;
+        && selected.len() > effective_max_bytes;
     let truncation_hint = file_read_truncation_hint(
         truncated,
         unscoped_read,

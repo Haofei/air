@@ -2446,7 +2446,7 @@ fn compact_observation_history(value: &Value) -> Value {
 
 const NATIVE_ASSISTANT_HISTORY_MAX_CHARS: usize = 32 * 1024;
 const NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
-const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 50 * 1024;
+const NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS: usize = 60 * 1024;
 const NATIVE_FILE_READ_MESSAGE_MAX_CHARS: usize = 60 * 1024;
 
 fn truncate_text(text: &str, max_chars: usize) -> String {

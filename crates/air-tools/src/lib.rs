@@ -3659,33 +3659,22 @@ fn is_verification_bash_command(command: &str, description: Option<&str>) -> boo
         return false;
     }
 
-    if description.contains("verification")
-        || description.contains("verify")
-        || description.contains("retest")
-        || (description.contains("run")
-            && ["check", "clippy", "fmt", "format", "lint", "test", "tests"]
-                .iter()
-                .any(|needle| description.contains(needle)))
-    {
-        return true;
-    }
-
     [
-        "cargo check",
-        "cargo clippy",
-        "cargo fmt",
-        "cargo test",
-        "go test",
-        "make check",
-        "make test",
-        "npm test",
-        "npm run test",
-        "pnpm test",
-        "pytest",
-        "yarn test",
+        "verification",
+        "verify",
+        "retest",
+        "test",
+        "tests",
+        "check",
+        "compile",
+        "typecheck",
+        "type check",
+        "lint",
+        "format",
+        "fmt",
     ]
     .iter()
-    .any(|needle| command.contains(needle))
+    .any(|needle| description.contains(needle))
 }
 
 fn is_inspection_bash_command(command: &str) -> bool {

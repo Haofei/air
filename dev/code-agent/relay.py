@@ -2,7 +2,7 @@
 """Replay captured code-agent HTTP calls and optionally resume with a live provider.
 
 This tool consumes the HTTP capture directories produced by
-scripts/compare_code_agent_io.py. It is intentionally transport-level: replay is
+dev/code-agent/compare.py. It is intentionally transport-level: replay is
 based on call order, while request shape differences are logged for diagnosis.
 """
 
@@ -778,6 +778,32 @@ def render_call_diff(
     return "\n".join(lines)
 
 
+def _build_commands_section(
+    run_dir: Path,
+    first_tool: int | None,
+    suggested_from: int,
+    action_from: int | None,
+) -> list[str]:
+    cmd_lines = [
+        "",
+        "## Commands",
+        "",
+        "```bash",
+        f"python3 dev/code-agent/relay.py diff {run_dir} --call {first_tool or suggested_from}",
+        (
+            f"python3 dev/code-agent/compare.py replay-air {run_dir} "
+            f"--from {suggested_from} --name replay-from-{suggested_from}"
+        ),
+    ]
+    if action_from is not None:
+        cmd_lines.append(
+            f"python3 dev/code-agent/compare.py replay-air {run_dir} "
+            f"--from {action_from} --name replay-action-from-{action_from}"
+        )
+    cmd_lines.extend(["```", ""])
+    return cmd_lines
+
+
 def render_divergence_report(
     run_dir: Path,
     air: list[CapturedCall],
@@ -805,25 +831,8 @@ def render_divergence_report(
     ]
     if action_from is not None:
         lines.append(f"- action-focused replay: `--from {action_from}`")
-    lines.extend(
-        [
-            "",
-            "## Commands",
-            "",
-            "```bash",
-            f"python3 scripts/code_agent_relay.py diff {run_dir} --call {first_tool or suggested_from}",
-            (
-                f"python3 scripts/compare_code_agent_io.py replay-air {run_dir} "
-                f"--from {suggested_from} --name replay-from-{suggested_from}"
-            ),
-        ]
-    )
-    if action_from is not None:
-        lines.append(
-            f"python3 scripts/compare_code_agent_io.py replay-air {run_dir} "
-            f"--from {action_from} --name replay-action-from-{action_from}"
-        )
-    lines.extend(["```", "", "## Timeline", ""])
+    lines.extend(_build_commands_section(run_dir, first_tool, suggested_from, action_from))
+    lines.extend(["## Timeline", ""])
     timeline_at = first_tool or first_size or 1
     lines.extend(render_divergence_timeline(air, opencode, timeline_at, window))
     return "\n".join(lines)
@@ -1379,7 +1388,7 @@ def load_env_file(path: Path) -> dict[str, str]:
 
 
 def repo_root() -> Path:
-    return Path(__file__).resolve().parents[1]
+    return Path(__file__).resolve().parents[2]
 
 
 if __name__ == "__main__":

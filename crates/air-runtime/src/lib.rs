@@ -3593,7 +3593,7 @@ mod tests {
         assert!(visible_end < 2_000, "{output}");
         assert!(visible_end > 100, "{output}");
         assert_eq!(output["next_offset"], json!(visible_end));
-        assert_eq!(output["max_bytes"], json!(50 * 1024));
+        assert_eq!(output["max_bytes"], json!(60 * 1024));
     }
 
     #[test]
