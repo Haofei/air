@@ -1170,17 +1170,14 @@ Usage notes:
 }
 
 fn opencode_read_description() -> String {
-    r##"Read file content only after you have localized a small file, known symbol, or narrow line range.
-This is not the default tool for exploring a path. If you only know a file path or name, use Glob first to inspect line_count and source_bytes without reading the file body. If you need a symbol or phrase, use Grep or LSP before Read.
+    r##"Read a bounded file range after you have localized a known symbol, phrase, or line range.
+Use Glob, Grep, or LSP first when you need to find the relevant file or symbol.
 
 Usage:
 - The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read
 - Do not invent absolute paths from the model server or API bridge process; use the current working directory shown in the environment
-- If you only know a file path, use Glob first to inspect line_count and source_bytes before reading the file body
-- A Read call with only filePath returns metadata and a guidance notice, not file content
-- To read file content, provide offset+limit or contains+context_lines
+- To read file content, provide offset+limit or contains+context_lines.
 - For unfamiliar or large files, use Grep, LSP, or contains first to locate the relevant symbols or line ranges
-- Without offset/limit/contains, no file body is returned; continue with targeted line ranges around known matches
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before reading content
@@ -1579,14 +1576,18 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path to a small file or already-localized line range. If you only know the path, call Glob first for line_count/source_bytes."},
-                    "offset": {"type": "number", "description": "The line number to start reading from (0-based)"},
-                    "limit": {"type": "number", "description": "The number of lines to read (defaults to 200)"},
+                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path returned by Glob/Grep/LSP."},
+                    "offset": {"type": "number", "description": "The 0-based line number to start reading from. Required with limit for range reads."},
+                    "limit": {"type": "number", "description": "The number of lines to read. Required with offset for range reads."},
                     "contains": {"type": "string", "description": "Find the first matching line containing this text and return a narrow context window around it"},
-                    "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return"},
+                    "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return. Required with contains for contains reads."},
                     "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"}
                 },
                 "required": ["filePath"],
+                "oneOf": [
+                    {"required": ["offset", "limit"]},
+                    {"required": ["contains", "context_lines"]}
+                ],
                 "additionalProperties": false
             });
         }
@@ -2249,17 +2250,9 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
         ));
     } else if let Some(total_lines) = output.get("total_lines").and_then(Value::as_u64) {
         if end_line > 0 && total_lines > end_line {
-            let hint = if output
-                .get("range_limited_unscoped_read")
-                .and_then(Value::as_bool)
-                == Some(true)
-            {
-                "Large file preview only. Use Grep, LSP, or contains to locate symbols, then read a narrow line range around the matching lines.".to_string()
-            } else {
-                format!(
-                    "Selected range ended at line {end_line}. Use targeted search or a specific line range for the next relevant symbol."
-                )
-            };
+            let hint = format!(
+                "Selected range ended at line {end_line}. Use targeted search or a specific line range for the next relevant symbol."
+            );
             lines.push(format!("({hint})"));
         } else {
             lines.push(format!("(End of file - total {total_lines} lines)"));
@@ -3755,14 +3748,11 @@ mod tests {
             .find(|tool| tool["function"]["name"] == "read")
             .unwrap();
         let description = read_tool["function"]["description"].as_str().unwrap();
-        assert!(description.starts_with("Read file content only after"));
+        assert!(description.starts_with("Read a bounded file range"));
         assert!(description.contains("use Grep, LSP, or contains first"));
-        assert!(description.contains("use Glob first to inspect line_count"));
-        assert!(description.contains("only filePath returns metadata"));
         assert!(description.contains("provide offset+limit or contains+context_lines"));
         assert!(description.contains("workspace-relative"));
         assert!(description.contains("Do not invent absolute paths"));
-        assert!(description.contains("targeted line ranges"));
         assert!(!description.contains("Reads a file from the local filesystem"));
         assert!(!description.contains("speculatively read multiple files"));
         assert!(!description.contains("If the User provides a path to a file assume"));
@@ -3791,7 +3781,7 @@ mod tests {
         assert!(properties["filePath"]["description"]
             .as_str()
             .unwrap()
-            .contains("call Glob first"));
+            .contains("returned by Glob/Grep/LSP"));
         assert!(properties.get("offset").is_some());
         assert!(properties.get("limit").is_some());
         assert!(properties.get("contains").is_some());
@@ -3799,7 +3789,17 @@ mod tests {
         assert!(properties.get("occurrence").is_some());
         assert_eq!(
             properties["limit"]["description"],
-            json!("The number of lines to read (defaults to 200)")
+            json!("The number of lines to read. Required with offset for range reads.")
+        );
+        let one_of = read_tool["function"]["parameters"]["oneOf"]
+            .as_array()
+            .unwrap();
+        assert_eq!(
+            one_of,
+            &vec![
+                json!({"required": ["offset", "limit"]}),
+                json!({"required": ["contains", "context_lines"]})
+            ]
         );
         assert!(properties.get("start_line").is_none());
         assert!(properties.get("end_line").is_none());

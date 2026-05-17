@@ -590,7 +590,7 @@ fn file_read_start_line_without_limit_uses_bounded_window() {
 }
 
 #[test]
-fn file_read_limits_large_unscoped_reads_to_a_bounded_prefix() {
+fn file_read_rejects_large_unscoped_reads() {
     let dir = temp_dir("air-tools-file-read-large-unscoped");
     let content = (1..=500)
         .map(|line| format!("line {line}"))
@@ -612,24 +612,18 @@ fn file_read_limits_large_unscoped_reads_to_a_bounded_prefix() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
+    let error = tools
         .call_tool("read", &json!({"filePath": "note.txt"}))
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(output["start_line"], json!(1));
-    assert_eq!(output["end_line"], json!(200));
-    assert_eq!(output["total_lines"], json!(500));
-    assert_eq!(output["range_limited_unscoped_read"], json!(true));
-    assert_eq!(output["content_skipped"], json!(true));
-    assert_eq!(output["content"], Value::Null);
-    assert!(output["message"]
-        .as_str()
-        .is_some_and(|hint| hint.contains("contains+context_lines")));
+    assert!(error
+        .to_string()
+        .contains("requires a bounded read selector"));
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn file_read_limits_byte_large_unscoped_reads_even_when_line_count_is_small() {
+fn file_read_rejects_byte_large_unscoped_reads_even_when_line_count_is_small() {
     let dir = temp_dir("air-tools-file-read-byte-large-unscoped");
     let content = (1..=120)
         .map(|line| format!("line {line:03} {}", "x".repeat(300)))
@@ -651,18 +645,13 @@ fn file_read_limits_byte_large_unscoped_reads_even_when_line_count_is_small() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
+    let error = tools
         .call_tool("read", &json!({"filePath": "large.txt"}))
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(output["start_line"], json!(1));
-    assert_eq!(output["total_lines"], json!(120));
-    assert_eq!(output["range_limited_unscoped_read"], json!(true));
-    assert_eq!(output["content_skipped"], json!(true));
-    assert_eq!(output["content"], Value::Null);
-    assert!(output["message"]
-        .as_str()
-        .is_some_and(|hint| hint.contains("contains+context_lines")));
+    assert!(error
+        .to_string()
+        .contains("requires a bounded read selector"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1520,7 +1509,7 @@ fn file_read_defaults_to_numbered_content() {
 }
 
 #[test]
-fn file_read_skips_unscoped_reads() {
+fn file_read_rejects_unscoped_reads() {
     let dir = temp_dir("air-tools-file-read-unscoped-skip");
     fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
     let config_path = write_config(
@@ -1537,18 +1526,13 @@ fn file_read_skips_unscoped_reads() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
-    let output = tools
+    let error = tools
         .call_tool("file.read", &json!({"path": "note.txt"}))
-        .unwrap();
+        .unwrap_err();
 
-    assert_eq!(output["content"], Value::Null);
-    assert_eq!(output["content_skipped"], json!(true));
-    assert_eq!(output["range_limited_unscoped_read"], json!(true));
-    assert!(output["message"]
-        .as_str()
-        .unwrap()
-        .contains("Unscoped read skipped"));
-    assert_eq!(output["artifacts"][0]["kind"], json!("tool_notice"));
+    assert!(error
+        .to_string()
+        .contains("requires a bounded read selector"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1895,7 +1879,10 @@ fn file_edit_accepts_partial_single_line_code_anchor() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "src/lib.rs"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "src/lib.rs", "start_line": 1, "end_line": 5}),
+        )
         .unwrap();
 
     let output = tools
@@ -1985,7 +1972,10 @@ fn file_edit_reports_missing_old_string_as_structured_validation_failure() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.rs"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.rs", "start_line": 1, "end_line": 1}),
+        )
         .unwrap();
 
     let output = tools
@@ -2030,7 +2020,10 @@ fn file_edit_rejects_diff_that_exceeds_max_changed_lines() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 3}),
+        )
         .unwrap();
 
     let error = tools
@@ -2076,7 +2069,10 @@ fn file_edit_dry_run_checks_without_writing() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 1}),
+        )
         .unwrap();
 
     let output = tools
@@ -2193,7 +2189,10 @@ fn file_edit_accepts_opencode_style_multi_edit_fields() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("read", &json!({"filePath": "note.txt"}))
+        .call_tool(
+            "read",
+            &json!({"filePath": "note.txt", "offset": 0, "limit": 2}),
+        )
         .unwrap();
 
     let output = tools
@@ -2249,7 +2248,10 @@ fn file_edit_multi_edit_is_atomic_when_later_edit_fails() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 3}),
+        )
         .unwrap();
 
     let output = tools
@@ -2312,7 +2314,10 @@ fn file_edit_auto_supports_line_trimmed_match_strategy() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 3}),
+        )
         .unwrap();
 
     let output = tools
@@ -2361,7 +2366,10 @@ fn file_edit_supports_explicit_context_aware_match_strategy() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 4}),
+        )
         .unwrap();
 
     let output = tools
@@ -2407,7 +2415,10 @@ fn file_edit_rejects_unknown_match_strategy() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 1}),
+        )
         .unwrap();
 
     let error = tools
@@ -2452,7 +2463,10 @@ fn file_edit_rejects_noop_replacement() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 1}),
+        )
         .unwrap();
 
     let error = tools
@@ -2493,7 +2507,10 @@ fn file_edit_requires_replace_all_for_multiple_matches() {
     );
     let mut tools = ConfigTools::from_file(config_path).unwrap();
     tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "start_line": 1, "end_line": 1}),
+        )
         .unwrap();
 
     let output = tools

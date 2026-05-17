@@ -33,10 +33,6 @@ pub(crate) fn observe_file_read_output(
     let path = Path::new(path);
     let snapshot = read_snapshot(name, "input.path", path)?;
     let (start_line, end_line) = extract_read_line_range(output);
-    if let Some(output) = large_unscoped_read_guard_output(output, start_line, end_line) {
-        read_snapshots.insert(path.to_path_buf(), snapshot);
-        return Ok(Some(output));
-    }
     if let Some(covered_by) =
         covered_read_observation(read_observations, path, snapshot, start_line, end_line)
     {
@@ -181,45 +177,6 @@ fn covered_read_observation(
             && seen.start_line == start_line
             && seen.end_line == end_line
     })
-}
-
-fn large_unscoped_read_guard_output(
-    output: &Value,
-    start_line: usize,
-    end_line: usize,
-) -> Option<Value> {
-    if output
-        .get("range_limited_unscoped_read")
-        .and_then(Value::as_bool)
-        != Some(true)
-    {
-        return None;
-    }
-    if output.get("match_line").and_then(Value::as_u64).is_some() {
-        return None;
-    }
-    Some(json!({
-        "path": output.get("path").cloned().unwrap_or(Value::Null),
-        "start_line": start_line,
-        "end_line": end_line,
-        "total_lines": output.get("total_lines").cloned().unwrap_or(Value::Null),
-        "range_limited_unscoped_read": true,
-        "content_skipped": true,
-        "message": "Unscoped read skipped. Use grep, read with contains+context_lines, LSP, or a small range around known line numbers before requesting file content.",
-        "suggested_tools": ["grep", "read.contains", "lsp"],
-        "artifacts": [{
-            "kind": "tool_notice",
-            "title": "read skipped: locate before reading",
-            "content": "No file content returned because broad reads are intentionally skipped. Locate the relevant symbol or line range first.",
-            "metadata": {
-                "provider": "file_read",
-                "content_skipped": true,
-                "range_limited_unscoped_read": true,
-                "start_line": start_line,
-                "end_line": end_line
-            }
-        }]
-    }))
 }
 
 fn extract_read_line_range(output: &Value) -> (usize, usize) {
