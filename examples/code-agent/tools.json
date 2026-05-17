@@ -54,8 +54,28 @@
       "truncation_direction": "tail"
     },
     "task": {
-      "kind": "local_reflection",
-      "capability": "code.read"
+      "kind": "subagent",
+      "capability": "code.read",
+      "subagents": {
+        "explore": {
+          "cwd": "../..",
+          "command": [
+            "{air_exe}",
+            "run-plan",
+            "--profile",
+            "examples/code-agent/explore.air-profile.yaml",
+            "--input",
+            "{input_file}",
+            "--model-config",
+            "{env:AIR_CODE_MODEL_CONFIG}",
+            "--tool-config",
+            "examples/code-agent/tools.explore.json"
+          ],
+          "timeout_seconds": 600,
+          "max_bytes": 51200,
+          "truncation_direction": "tail"
+        }
+      }
     },
     "webfetch": {
       "kind": "web_fetch",

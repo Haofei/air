@@ -14,3 +14,11 @@ modules:
     tags: [coding, edit, tool_loop, test]
     covers: [code_exploration, code_edit, bounded_tool_loop, retest]
     priority: 80
+  code.explore@0.1.0:
+    path: examples/code-agent/code-explore-loop.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Read-only opencode-style subagent loop for isolated codebase exploration."
+    tags: [coding, explore, subagent, read_only]
+    covers: [code_exploration, bounded_tool_loop]
+    priority: 60

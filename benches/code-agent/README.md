@@ -38,6 +38,7 @@ python3 dev/code-agent/analyze_metrics.py \
   target/generated/code-agent-bench/<run-id>/run.json
 ```
 
-The first baseline suite is `rust-small`: ten small Rust refactor tasks that
-should preserve behavior, pass `cargo test -q`, and touch only the requested
-source file.
+The first baseline suite is `rust-small`: a small set of classic Rust refactor
+tasks that should preserve behavior, pass `cargo test -q`, and touch only the
+requested source file. Keep this suite compact; add new cases when they capture
+a real failure mode rather than another copy of the same refactor.

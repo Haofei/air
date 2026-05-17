@@ -233,6 +233,14 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
     if object.get("log").and_then(Value::as_str).is_some() {
         return compact_command_output_context(object);
     }
+    if object
+        .get("subagent_type")
+        .and_then(Value::as_str)
+        .is_some()
+        && object.get("output").and_then(Value::as_str).is_some()
+    {
+        return compact_subagent_output_context(object);
+    }
 
     let mut compact = Map::new();
     for field in [
@@ -293,6 +301,32 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
     } else {
         Value::Object(compact)
     }
+}
+
+fn compact_subagent_output_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in [
+        "success",
+        "status",
+        "bytes",
+        "raw_output_bytes",
+        "truncated",
+        "truncation_hint",
+        "title",
+        "subagent_type",
+    ] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(output) = object.get("output").and_then(Value::as_str) {
+        compact.insert(
+            "output".to_string(),
+            Value::String(compact_model_context_string(output, 16_000)),
+        );
+    }
+    if let Some(handoff) = object.get("handoff") {
+        compact.insert("handoff".to_string(), compact_model_context_value(handoff));
+    }
+    Value::Object(compact)
 }
 
 fn compact_command_output_context(object: &Map<String, Value>) -> Value {

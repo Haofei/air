@@ -134,7 +134,7 @@ pub(super) fn call_bash_tool(
     Ok(output)
 }
 
-fn run_command_argv(
+pub(super) fn run_command_argv(
     name: &str,
     command_name: &str,
     cwd: &Path,

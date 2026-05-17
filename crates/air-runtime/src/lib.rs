@@ -3637,6 +3637,49 @@ mod tests {
     }
 
     #[test]
+    fn take_last_within_bytes_preserves_subagent_output_when_compacting() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "task",
+                "status": "ok",
+                "_air_tool_name": "task",
+                "_air_tool_call_id": "call_task",
+                "input": {
+                    "description": "Explore transcript rendering",
+                    "subagent_type": "explore"
+                },
+                "output": {
+                    "success": true,
+                    "status": 0,
+                    "bytes": 7104,
+                    "raw_output_bytes": 7104,
+                    "subagent_type": "explore",
+                    "output": "Findings:\n- crates/air-backend-openai/src/lib.rs:2147-2169 `render_tool_output_transcript` - dispatches tool transcript rendering\nNext action:\n- read crates/air-backend-openai/src/lib.rs lines 2121-2169"
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"output\""), "{rendered}");
+        assert!(
+            rendered.contains("render_tool_output_transcript"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("Next action"), "{rendered}");
+        assert!(
+            rendered.contains("\"subagent_type\":\"explore\""),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("\"_air_tool_call_id\":\"call_task\""),
+            "{rendered}"
+        );
+    }
+
+    #[test]
     fn take_last_within_bytes_updates_visible_file_end_line_after_compaction() {
         let content = (1..=2_000)
             .map(|line| format!("{line:05}| line {line:04} {}", "x".repeat(40)))

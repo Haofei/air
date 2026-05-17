@@ -110,7 +110,6 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     let effective_trace_out = trace_out.clone().or_else(|| artifact_trace_path.clone());
     let trace_out_for_patch = trace_out.clone();
     let trace_redact_for_patch = trace_redact || !trace_raw;
-
     let mut outputs = run_plan_capture(RunPlanOptions {
         plan: None,
         profile: Some(profile),

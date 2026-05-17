@@ -425,6 +425,9 @@ fn task_is_read_only_exploration(task_terms: &BTreeSet<String>) -> bool {
 
 fn component_intent_penalty(component: &Value, read_only_exploration: bool) -> i64 {
     let mut penalty = 0;
+    if component_matches_any(component, &["subagent"]) {
+        penalty -= 3_000;
+    }
     if read_only_exploration && component_requires_capability(component, "file.write") {
         penalty -= 900;
     }

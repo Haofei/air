@@ -43,6 +43,10 @@ OpenCode-style terminal workflow instead of exposing AIR-specific git wrappers.
 If verification fails, the result goes back into the next model turn as ordinary
 tool output.
 
+`task` launches a separate read-only AIR exploration loop through
+`explore.air-profile.yaml`. Use it for broad investigation that would otherwise
+fill the main edit loop context.
+
 `tools.json` uses the same OpenCode-style tool names against the current repository.
 
 ## Dogfood

@@ -28,6 +28,7 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Prefer specialized tools over shell for file operations:
   - Use Read to view files, Edit to modify files, and Write only when needed.
   - Use Glob to find files by name and Grep to search file contents.
+- Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and reading.
 - Use Bash for terminal operations (git, bun, builds, tests, running scripts).
 - Run tool calls in parallel when neither call needs the other's output; otherwise run sequentially.
 
@@ -1235,12 +1236,13 @@ fn opencode_task_description() -> String {
     r##"Launch a new agent to handle complex, multistep tasks autonomously.
 
 Available agent types and the tools they have access to:
-- general: General-purpose agent for researching complex questions and executing multi-step tasks. Use this agent to execute multiple units of work in parallel.
-- explore: Fast agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
+- explore: Fast read-only agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
 
 When to use the Task tool:
+- Use the explore subagent proactively for broad or open-ended codebase investigation that would otherwise require multiple rounds of Glob, Grep, and Read.
+- Use the explore subagent when you need a concise map of relevant files, symbols, line ranges, and next steps before editing.
 - When you are instructed to execute custom slash commands. Use the Task tool with the slash command invocation as the entire prompt. The slash command can take arguments. For example: Task(description="Check the file", prompt="/check-file path/to/file.py")
 
 When NOT to use the Task tool:
@@ -1255,43 +1257,15 @@ Usage notes:
 2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 3. Each agent invocation is stateless unless you provide a session_id. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
 4. The agent's outputs should generally be trusted
-5. Clearly tell the agent whether you expect it to write code or just to do research (search, file reads, web fetches, etc.), since it is not aware of the user's intent
+5. The explore agent is read-only. Ask it for findings, evidence, and exact next read/edit/test recommendations; do not ask it to modify files.
 6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 
-Example usage (NOTE: The agents below are fictional examples for illustration only - use the actual agents listed above):
-
-<example_agent_descriptions>
-"code-reviewer": use this agent after you are done writing a significant piece of code
-"greeting-responder": use this agent when to respond to user greetings with a friendly joke
-</example_agent_description>
-
 <example>
-user: "Please write a function that checks if a number is prime"
-assistant: Sure let me write a function that checks if a number is prime
-assistant: First let me use the Write tool to write a function that checks if a number is prime
-assistant: I'm going to use the Write tool to write the following code:
-<code>
-function isPrime(n) {
-  if (n <= 1) return false
-  for (let i = 2; i * i <= n; i++) {
-    if (n % i === 0) return false
-  }
-  return true
-}
-</code>
+user: "Refactor the code agent tool handling."
 <commentary>
-Since a significant piece of code was written and the task was completed, now use the code-reviewer agent to review the code
+The request is broad and may require several searches across the codebase. Use the explore subagent first.
 </commentary>
-assistant: Now let me use the code-reviewer agent to review the code
-assistant: Uses the Task tool to launch the code-reviewer agent
-</example>
-
-<example>
-user: "Hello"
-<commentary>
-Since the user is greeting, use the greeting-responder agent to respond with a friendly joke
-</commentary>
-assistant: "I'm going to use the Task tool to launch the with the greeting-responder agent"
+assistant: Uses the Task tool with subagent_type="explore".
 </example>
 "##
         .to_string()
@@ -1677,7 +1651,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "properties": {
                     "description": {"description": "A short (3-5 words) description of the task", "type": "string"},
                     "prompt": {"description": "The task for the agent to perform", "type": "string"},
-                    "subagent_type": {"description": "The type of specialized agent to use for this task", "type": "string"},
+                    "subagent_type": {"description": "The type of specialized agent to use for this task", "type": "string", "enum": ["explore"]},
                     "session_id": {"description": "Existing Task session to continue", "type": "string"},
                     "command": {"description": "The command that triggered this task", "type": "string"}
                 },
@@ -1821,6 +1795,10 @@ fn schema_description(value: &Value) -> String {
 
 fn compact_json(value: &Value) -> String {
     serde_json::to_string(value).unwrap_or_else(|_| value.to_string())
+}
+
+fn compact_json_fallback(value: &Value) -> String {
+    truncate_text(&compact_json(value), 4_000)
 }
 
 fn resolved_response_format(model_config: &OpenAiModelConfig) -> Option<Value> {
@@ -2128,7 +2106,7 @@ fn render_native_tool_message_content(value: &Value, exposed_tool_name: Option<&
         render_tool_output_transcript(tool, output, &mut lines);
     }
     if lines.is_empty() {
-        lines.push(truncate_text(&compact_json(value), 4_000));
+        lines.push(compact_json_fallback(value));
     }
     let transcript = lines.join("\n");
     if matches!(
@@ -2154,13 +2132,28 @@ fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<Str
         "repo.symbols" | "repo_symbols" => render_symbols_transcript(output, lines),
         "rust_analyzer" | "lsp" => render_lsp_transcript(output, lines),
         "bash" | "command.run" | "command_run" => render_bash_transcript(output, lines),
+        "task" => render_task_transcript(output, lines),
         "todowrite" | "todo.write" | "todo_write" => render_todowrite_transcript(output, lines),
         _ => {
-            lines.push(format!(
-                "output: {}",
-                truncate_text(&compact_json(output), 4_000)
-            ));
+            lines.push(format!("output: {}", compact_json_fallback(output)));
         }
+    }
+}
+
+fn task_transcript_output_text(output: &Value) -> String {
+    if let Some(text) = output.get("output").and_then(Value::as_str) {
+        truncate_text(text, NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS)
+    } else {
+        compact_json_fallback(output)
+    }
+}
+
+fn render_task_transcript(output: &Value, lines: &mut Vec<String>) {
+    lines.push(task_transcript_output_text(output));
+    if let Some(subagent_type) = output.get("subagent_type").and_then(Value::as_str) {
+        lines.push(format!(
+            "<task_metadata>\nsubagent_type: {subagent_type}\n</task_metadata>"
+        ));
     }
 }
 
@@ -2201,7 +2194,7 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
         .and_then(Value::as_str)
         .unwrap_or("");
     if content.is_empty() {
-        lines.push(truncate_text(&compact_json(output), 4_000));
+        lines.push(compact_json_fallback(output));
     } else {
         lines.push(truncate_tail_text(
             content,
@@ -2235,10 +2228,7 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
 
 fn render_file_read_many_transcript(output: &Value, lines: &mut Vec<String>) {
     let Some(files) = output.get("files").and_then(Value::as_array) else {
-        lines.push(format!(
-            "output: {}",
-            truncate_text(&compact_json(output), 4_000)
-        ));
+        lines.push(format!("output: {}", compact_json_fallback(output)));
         return;
     };
     for file in files.iter().take(8) {
@@ -2282,7 +2272,7 @@ fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
 
 fn render_glob_transcript(output: &Value, lines: &mut Vec<String>) {
     let Some(files) = output.get("files").and_then(Value::as_array) else {
-        lines.push(truncate_text(&compact_json(output), 4_000));
+        lines.push(compact_json_fallback(output));
         return;
     };
     if files.is_empty() {
@@ -2344,12 +2334,12 @@ fn render_lsp_transcript(output: &Value, lines: &mut Vec<String>) {
         }
         return;
     }
-    lines.push(truncate_text(&compact_json(output), 4_000));
+    lines.push(compact_json_fallback(output));
 }
 
 fn render_todowrite_transcript(output: &Value, lines: &mut Vec<String>) {
     let Some(todos) = output.get("todos").and_then(Value::as_array) else {
-        lines.push(truncate_text(&compact_json(output), 4_000));
+        lines.push(compact_json_fallback(output));
         return;
     };
     lines.push(
@@ -2437,10 +2427,7 @@ fn display_file_search_path(path: &str, base_path: Option<&str>) -> String {
 
 fn render_symbols_transcript(output: &Value, lines: &mut Vec<String>) {
     let Some(symbols) = output.get("symbols").and_then(Value::as_array) else {
-        lines.push(format!(
-            "output: {}",
-            truncate_text(&compact_json(output), 4_000)
-        ));
+        lines.push(format!("output: {}", compact_json_fallback(output)));
         return;
     };
     lines.push("symbols:".to_string());
@@ -3890,6 +3877,88 @@ mod tests {
             serde_json::from_str::<Value>(content).is_err(),
             "native tool result content should be plain text"
         );
+    }
+
+    #[test]
+    fn native_tool_messages_render_task_output_as_subagent_answer() {
+        let input = json!({
+            "task": "continue after subagent",
+            "observations": [{
+                "action": "tool_batch_dispatch",
+                "requested": [{
+                    "tool": "task",
+                    "input": {"description": "Inspect helper", "subagent_type": "explore"}
+                }],
+                "result": [{
+                    "tool": "task",
+                    "status": "ok",
+                    "input": {"description": "Inspect helper", "subagent_type": "explore"},
+                    "output": {
+                        "output": "target file: crates/air-tools/src/subagent_tools.rs\nnext action: read lines 80-115",
+                        "subagent_type": "explore",
+                        "raw_output_bytes": 33937
+                    }
+                }]
+            }]
+        });
+
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert!(content.contains("target file: crates/air-tools/src/subagent_tools.rs"));
+        assert!(content.contains("next action: read lines 80-115"));
+        assert!(content.contains("subagent_type: explore"));
+        assert!(!content.contains("raw_output_bytes"), "{content}");
+    }
+
+    #[test]
+    fn opencode_tool_messages_render_task_output_as_subagent_answer() {
+        let input = json!({
+            "task": "continue after subagent",
+            "observations": [{
+                "action": "tool_batch_dispatch",
+                "requested": [{
+                    "tool": "task",
+                    "input": {"description": "Inspect helper", "subagent_type": "explore"}
+                }],
+                "result": [{
+                    "_air_tool_call_id": "call_task_1",
+                    "_air_tool_name": "task",
+                    "tool": "task",
+                    "status": "ok",
+                    "input": {"description": "Inspect helper", "subagent_type": "explore"},
+                    "output": {
+                        "output": "Findings:\n- crates/air-tools/src/subagent_tools.rs:135-147 `normalize_subagent_command_output` - raw log lookup lives here\nNext action:\n- read crates/air-tools/src/subagent_tools.rs lines 131-150",
+                        "subagent_type": "explore",
+                        "raw_output_bytes": 6530
+                    }
+                }]
+            }]
+        });
+
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("task".to_string(), "task".to_string());
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &tool_name_map, true).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert!(content.contains("Findings:"), "{content}");
+        assert!(
+            content.contains("normalize_subagent_command_output"),
+            "{content}"
+        );
+        assert!(content.contains("Next action:"), "{content}");
+        assert!(!content.contains("raw_output_bytes"), "{content}");
+    }
+
+    #[test]
+    fn opencode_task_description_encourages_proactive_exploration() {
+        let description = opencode_task_description();
+
+        assert!(description.contains("Use the explore subagent proactively"));
+        assert!(description.contains("broad or open-ended codebase investigation"));
+        assert!(!description.contains("- general:"), "{description}");
     }
 
     #[test]

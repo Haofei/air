@@ -227,6 +227,7 @@ pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
             .as_ref()
             .and_then(|(_, profile)| profile.example_tools)
             .unwrap_or(false);
+    set_subagent_model_config_env(model_config.as_deref());
 
     run_plan_with_inputs_capture(
         plan,
@@ -246,6 +247,13 @@ pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
             model_replay,
         },
     )
+}
+
+fn set_subagent_model_config_env(model_config: Option<&Path>) {
+    let Some(model_config) = model_config else {
+        return;
+    };
+    std::env::set_var("AIR_CODE_MODEL_CONFIG", model_config.display().to_string());
 }
 
 #[cfg(test)]

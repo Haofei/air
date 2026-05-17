@@ -1,5 +1,6 @@
 use super::{
     command_run::{command_template_parameters, validate_command_parameter_value},
+    subagent_tools::validate_subagent_profiles,
     ToolConfig, ToolConfigFile,
 };
 use anyhow::{Context, Result};
@@ -507,6 +508,9 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                 validate_positive_usize(path, &format!("tools.{name}.max_ids"), *max_ids)?;
             }
             ToolConfig::TodoWrite { .. } => {}
+            ToolConfig::Subagent { subagents, .. } => {
+                validate_subagent_profiles(name, subagents, path)?
+            }
             ToolConfig::Bash {
                 cwd,
                 timeout_seconds,

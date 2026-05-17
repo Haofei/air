@@ -37,6 +37,8 @@ use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAn
 mod command_run;
 use command_config::{CommandParameterRule, CommandRunOptions, TruncationDirection};
 use command_run::{call_bash_tool, call_command_run_tool};
+mod subagent_tools;
+use subagent_tools::{call_subagent_tool, SubagentProfileConfig};
 mod playwright;
 use playwright::{
     call_playwright_page_audit_tool, call_playwright_search_tool, PlaywrightPageAuditConfig,
@@ -441,6 +443,12 @@ enum ToolConfig {
         #[serde(default)]
         capability: Option<String>,
     },
+    Subagent {
+        #[serde(default)]
+        capability: Option<String>,
+
+        subagents: BTreeMap<String, SubagentProfileConfig>,
+    },
     Bash {
         #[serde(default)]
         capability: Option<String>,
@@ -504,6 +512,7 @@ impl ToolConfig {
             | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::ArtifactValidate { capability, .. }
             | ToolConfig::TodoWrite { capability }
+            | ToolConfig::Subagent { capability, .. }
             | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
@@ -1111,6 +1120,10 @@ impl ToolProvider for ConfigTools {
                 max_ids.unwrap_or(512),
             ),
             ToolConfig::TodoWrite { capability: _ } => call_todowrite_tool(name, input),
+            ToolConfig::Subagent {
+                capability: _,
+                subagents,
+            } => call_subagent_tool(name, input, &subagents, &self.workspace_dir),
             ToolConfig::Bash {
                 capability: _,
                 cwd,
@@ -1185,6 +1198,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::ArtifactValidate { capability, .. }
             | ToolConfig::TodoWrite { capability }
+            | ToolConfig::Subagent { capability, .. }
             | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }

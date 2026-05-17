@@ -3114,6 +3114,200 @@ fn code_agent_self_tools_validate_project_paths() {
 }
 
 #[test]
+fn subagent_tool_runs_isolated_command_with_input_file() {
+    let dir = temp_dir("air-tools-subagent");
+    std::env::set_var("AIR_TEST_SUBAGENT_ENV", "ok");
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "task": {
+                    "kind": "subagent",
+                    "capability": "code.read",
+                    "subagents": {
+                        "explore": {
+                            "cwd": ".",
+                            "command": [
+                                "printf",
+                                "%s",
+                                "agent:{subagent_type}:{prompt}:{env:AIR_TEST_SUBAGENT_ENV}:{input_file}"
+                            ],
+                            "timeout_seconds": 10,
+                            "max_bytes": 4096
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "task",
+            &json!({
+                "description": "Inspect helper",
+                "prompt": "find target",
+                "subagent_type": "explore"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    let summary = output["output"].as_str().unwrap();
+    assert!(summary.starts_with("agent:explore:find target"));
+    assert!(summary.contains("ok:"));
+    assert!(output.get("log").is_none());
+    assert!(output.get("artifacts").is_none());
+    let input_file = output["input_file"].as_str().unwrap();
+    let payload: Value = serde_json::from_slice(&fs::read(input_file).unwrap()).unwrap();
+    let task = payload["task"].as_str().unwrap();
+    assert!(task.starts_with("find target"));
+    assert!(task.contains("Subagent output contract"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn subagent_tool_extracts_air_final_answer_from_run_plan_json() {
+    let dir = temp_dir("air-tools-subagent-json");
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "task": {
+                    "kind": "subagent",
+                    "capability": "code.read",
+                    "subagents": {
+                        "explore": {
+                            "cwd": ".",
+                            "command": [
+                                "printf",
+                                "%s",
+                                "{\"result\":{\"answer\":\"target file: src/lib.rs\\nnext action: read lines 10-20\"}}"
+                            ],
+                            "timeout_seconds": 10,
+                            "max_bytes": 4096
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "task",
+            &json!({
+                "description": "Inspect helper",
+                "prompt": "find target",
+                "subagent_type": "explore"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output["output"],
+        json!("target file: src/lib.rs\nnext action: read lines 10-20")
+    );
+    assert_eq!(output["raw_output_bytes"], output["bytes"]);
+    assert!(output.get("log").is_none());
+    assert!(output.get("artifacts").is_none());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn subagent_tool_returns_structured_handoff_when_contract_sections_are_present() {
+    let dir = temp_dir("air-tools-subagent-handoff");
+    let handoff = "Findings:\n- src/lib.rs:10-20 `target` - useful context\nEvidence:\n- test points here\nNext action:\n- read src/lib.rs lines 10-20\nParent read again:\n- yes, src/lib.rs:10-20";
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "task": {
+                    "kind": "subagent",
+                    "capability": "code.read",
+                    "subagents": {
+                        "explore": {
+                            "cwd": ".",
+                            "command": ["printf", "%s", handoff],
+                            "timeout_seconds": 10,
+                            "max_bytes": 4096
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "task",
+            &json!({
+                "description": "Inspect helper",
+                "prompt": "find target",
+                "subagent_type": "explore"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        output["handoff"]["findings"][0],
+        json!("src/lib.rs:10-20 `target` - useful context")
+    );
+    assert_eq!(
+        output["handoff"]["next_action"][0],
+        json!("read src/lib.rs lines 10-20")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn subagent_tool_rejects_unregistered_type() {
+    let dir = temp_dir("air-tools-subagent-unknown");
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "task": {
+                    "kind": "subagent",
+                    "capability": "code.read",
+                    "subagents": {
+                        "explore": {
+                            "cwd": ".",
+                            "command": ["printf", "%s", "unused"],
+                            "timeout_seconds": 10,
+                            "max_bytes": 4096
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool(
+            "task",
+            &json!({
+                "description": "Inspect helper",
+                "prompt": "find target",
+                "subagent_type": "general"
+            }),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("unknown subagent_type"));
+    assert!(error.to_string().contains("available subagents: explore"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn apply_patch_add_update_and_delete_files() {
     let dir = temp_dir("air-tools-apply-patch");
     fs::create_dir_all(dir.join("src")).unwrap();
