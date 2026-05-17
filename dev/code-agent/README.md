@@ -75,6 +75,6 @@ runtime or tool changes.
 The same artifact path can be used outside benchmarks:
 
 ```bash
-cargo run -p air-cli -- code "refactor the target helper" \
+cargo run -p air-cli -- skill run code-agent "refactor the target helper" \
   --artifact-out target/generated/code-run-artifacts/manual-run
 ```

@@ -102,7 +102,7 @@ pub(super) fn call_file_read_tool(
     let requested_unscoped_read = is_unscoped_read_request(contains, start_line, end_line);
     if requested_unscoped_read {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} requires a bounded read selector: use offset+limit, start_line/end_line, lines, or contains+context_lines"
+            "tool {name} requires a bounded selector: use offset+limit, start_line/end_line, lines, or contains+context_lines"
         )));
     }
     let (effective_start_line, effective_end_line, match_line) = if let Some(needle) = contains {
@@ -244,7 +244,7 @@ fn file_read_truncation_hint(
             .unwrap_or_default();
         if unscoped_read {
             format!(
-                "Output was truncated from {} bytes.{saved} Use file.search, contains+context_lines, or file.read with start_line/end_line to inspect a narrow range instead of repeating an unscoped read.",
+                "Output was truncated from {} bytes.{saved} Use file.search, contains+context_lines, or exact line ranges to inspect a narrow span instead of repeating an unbounded request.",
                 source_bytes,
             )
         } else {
@@ -515,7 +515,7 @@ fn file_search_truncation_hint(
         if let Some(path) = full_output_path {
             parts.push(format!("Full returned search preview saved to: {path}."));
         }
-        parts.push("Use file.search with a narrower pattern or file.read with exact line ranges to inspect specific sections.".to_string());
+        parts.push("Use file.search with a narrower pattern or exact line ranges to inspect specific sections.".to_string());
     }
     if match_truncated {
         parts.push("Search matches exceeded max_matches; narrow the pattern/path or increase max_matches only when the broader match set is immediately needed.".to_string());
@@ -1003,7 +1003,7 @@ fn has_parent_dir_component(path: &Path) -> bool {
 
 fn outside_base_error(tool_name: &str) -> RuntimeError {
     RuntimeError::Provider(format!(
-        "tool {tool_name} input.path is outside configured base_dir. Use a workspace-relative path or an exact path returned by Glob/Grep/Read."
+        "tool {tool_name} input.path is outside configured base_dir. Use a workspace-relative path or an exact path returned by discovery, search, or span-inspection tools."
     ))
 }
 

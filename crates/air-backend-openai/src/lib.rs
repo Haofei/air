@@ -25,12 +25,12 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Try to use apply_patch for single file edits when that tool is available, but it is fine to explore other options to make the edit if it does not work well. Do not use apply_patch for changes that are auto-generated (i.e. generating package.json or running a lint or format command like gofmt) or when scripting is more efficient (such as search and replacing a string across a codebase).
 
 ## Tool usage
-- Prefer locator tools before reading file bodies:
+- Prefer locator tools before inspecting file spans:
   - Use Grep to search file contents, Glob to find files by name, and LSP to inspect known symbols/references.
-  - Use Glob first when you only know a file path or name; it reports line counts and byte sizes without reading file bodies.
-  - Read file content with Grep/LSP plus a narrow range, contains+context_lines, or offset+limit.
+  - Use Glob first when you only know a file path or name; it reports line counts and byte sizes without loading contents.
+  - Inspect only exact bounded spans with Grep/LSP plus a narrow range, contains+context_lines, or offset+limit.
   - Use Edit to modify files and Write only when needed.
-- Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and reading.
+- Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and span inspection.
 - Use Bash for terminal operations (git, bun, builds, tests, running scripts).
 - Run tool calls in parallel when neither call needs the other's output; otherwise run sequentially.
 
@@ -60,9 +60,9 @@ Exception: If working within an existing website or design system, preserve the 
 You are producing plain text that will later be styled by the CLI. Follow these rules exactly. Formatting should make results easy to scan, but not feel mechanical. Use judgment to decide how much structure adds value.
 
 - Default: be very concise; friendly coding teammate tone.
-- Default: do the work without asking questions. Treat short tasks as sufficient direction; infer missing details by reading the codebase and following existing conventions.
+- Default: do the work without asking questions. Treat short tasks as sufficient direction; infer missing details by inspecting the codebase and following existing conventions.
 - Questions: only ask when you are truly blocked after checking relevant context AND you cannot safely pick a reasonable default. This usually means one of:
-  * The request is ambiguous in a way that materially changes the result and you cannot disambiguate by reading the repo.
+  * The request is ambiguous in a way that materially changes the result and you cannot disambiguate by inspecting the repo.
   * The action is destructive/irreversible, touches production, or changes billing/security posture.
   * You need a secret/credential/value that cannot be inferred (API key, account id, etc.).
 - If you must ask: do all non-blocked work first, then ask exactly one targeted question, include your recommended default, and state what would change based on the answer.
@@ -1038,7 +1038,7 @@ fn opencode_bash_description() -> String {
 
 All commands run in ${directory} by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (inspecting, writing, editing, searching, finding files) - use the specialized tools for this instead.
 
 Before executing the command, please follow these steps:
 
@@ -1060,12 +1060,12 @@ Usage notes:
   - The command argument is required.
   - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-  - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. You can use Read with offset/limit to read specific sections or Grep to search the full content. Because of this, you do NOT need to use `head`, `tail`, or other truncation commands to limit output - just run the command directly.
+  - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. Use bounded span inspection with offset/limit for specific sections or Grep to search the full content. Because of this, you do NOT need to use `head`, `tail`, or other truncation commands to limit output - just run the command directly.
 
   - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands, unless explicitly instructed or when these commands are truly necessary for the task. Instead, always prefer using the dedicated tools for these commands:
     - File search: Use Glob (NOT find or ls)
     - Content search: Use Grep (NOT grep or rg)
-    - Read files: Use Read (NOT cat/head/tail)
+    - Inspect file spans: use the dedicated bounded file span tool (NOT cat/head/tail)
     - Edit files: Use Edit (NOT sed/awk)
     - Write files: Use Write (NOT echo >/cat <<EOF)
     - Communication: Output text directly (NOT echo/printf)
@@ -1170,19 +1170,18 @@ Usage notes:
 }
 
 fn opencode_read_description() -> String {
-    r##"Read a bounded file range after you have localized a known symbol, phrase, or line range.
+    r##"Inspect a bounded, line-numbered file span after you have localized a known symbol, phrase, or line range.
 Use Glob, Grep, or LSP first when you need to find the relevant file or symbol.
 
 Usage:
-- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read
+- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by locator tools
 - Do not invent absolute paths from the model server or API bridge process; use the current working directory shown in the environment
-- To read file content, provide offset+limit or contains+context_lines.
+- To inspect text content, provide offset+limit or contains+context_lines.
 - For unfamiliar or large files, use Grep, LSP, or contains first to locate the relevant symbols or line ranges
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
-- You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before reading content
-- If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
-- You can read image files using this tool.
+- You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before span inspection
+- If the target file exists but has empty contents you will receive a system reminder warning in place of file contents.
 "##
         .to_string()
 }
@@ -1193,7 +1192,7 @@ fn opencode_grep_description() -> String {
 - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
 - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
 - Returns file paths and line numbers with at least one match sorted by modification time
-- Use this tool before Read when you know a function, type, error text, config key, or other symbol-like phrase
+- Use this tool to locate exact files and line numbers for function, type, error text, config key, or other symbol-like phrases
 - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 "##
@@ -1205,7 +1204,7 @@ fn opencode_glob_description() -> String {
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
 - Returns matching file paths sorted by modification time, plus line_count and source_bytes metadata
 - Use this tool when you need to find files by name patterns
-- Use this tool before Read when you only know a file path or file name, so you can decide whether the file is small enough to read whole
+- Use this tool when you only know a file path or file name and need size metadata or candidate files
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 - You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.
 "##
@@ -1216,9 +1215,9 @@ fn opencode_edit_description() -> String {
     r##"Performs exact string replacements in files.
 
 Usage:
-- Before editing an existing file, gather localized evidence for the exact target region. Valid evidence includes Grep/LSP results plus a narrow Read, Read with contains+context_lines, or Read with offset+limit. Whole-file Read is not required.
-- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read.
-- When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
+- Before editing an existing file, gather localized evidence for the exact target region. Valid evidence includes search/LSP results plus a bounded line-numbered span using offset+limit or contains+context_lines.
+- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by discovery, search, or span-inspection tools.
+- When editing text from line-numbered file output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
 - The edit will FAIL if `oldString` is not found in the file with an error "oldString not found in content".
@@ -1246,19 +1245,19 @@ fn opencode_task_description() -> String {
     r##"Launch a new agent to handle complex, multistep tasks autonomously.
 
 Available agent types and the tools they have access to:
-- explore: Fast read-only agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
+- explore: Fast non-mutating agent specialized for exploring codebases. Use this when you need to quickly find files by patterns (eg. "src/components/**/*.tsx"), search code for keywords (eg. "API endpoints"), or answer questions about the codebase (eg. "how do API endpoints work?"). When calling this agent, specify the desired thoroughness level: "quick" for basic searches, "medium" for moderate exploration, or "very thorough" for comprehensive analysis across multiple locations and naming conventions.
 
 When using the Task tool, you must specify a subagent_type parameter to select which agent type to use.
 
 When to use the Task tool:
-- Use the explore subagent proactively for broad or open-ended codebase investigation that would otherwise require multiple rounds of Glob, Grep, and Read.
+- Use the explore subagent proactively for broad or open-ended codebase investigation that would otherwise require multiple rounds of file discovery, content search, and bounded span inspection.
 - Use the explore subagent when you need a concise map of relevant files, symbols, line ranges, and next steps before editing.
 - When you are instructed to execute custom slash commands. Use the Task tool with the slash command invocation as the entire prompt. The slash command can take arguments. For example: Task(description="Check the file", prompt="/check-file path/to/file.py")
 
 When NOT to use the Task tool:
 - If you only know a specific file path, use Glob first to inspect line_count/source_bytes instead of launching Task
 - If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use Grep/LSP first and then Read the narrow matching range
+- If you are searching for code within a specific file or set of 2-3 files, use Grep/LSP first and then inspect only the narrow matching range
 - Other tasks that are not related to the agent descriptions above
 
 
@@ -1267,7 +1266,7 @@ Usage notes:
 2. When the agent is done, it will return a single message back to you. The result returned by the agent is not visible to the user. To show the user the result, you should send a text message back to the user with a concise summary of the result.
 3. Each agent invocation is stateless unless you provide a session_id. Your prompt should contain a highly detailed task description for the agent to perform autonomously and you should specify exactly what information the agent should return back to you in its final and only message to you.
 4. The agent's outputs should generally be trusted
-5. The explore agent is read-only. Ask it for findings, evidence, and exact next read/edit/test recommendations; do not ask it to modify files.
+5. The explore agent is non-mutating. Ask it for findings, evidence, and exact next inspect/edit/test recommendations; do not ask it to modify files.
 6. If the agent description mentions that it should be used proactively, then you should try your best to use it without the user having to ask for it first. Use your judgement.
 
 <example>
@@ -1293,7 +1292,7 @@ Usage notes:
   - The URL must be a fully-formed valid URL
   - HTTP URLs will be automatically upgraded to HTTPS
   - Format options: "markdown" (default), "text", or "html"
-  - This tool is read-only and does not modify any files
+  - This tool does not modify any files
   - Results may be summarized if the content is very large
 "##
         .to_string()
@@ -1306,7 +1305,7 @@ Supported operations:
 - diagnostics: Get workspace or file diagnostics
 - references/findReferences: Find all references for a known Rust symbol in a known file
 
-Use LSP after Grep/Read has identified the relevant file or symbol. For initial symbol lookup across unknown files, use Grep first, then LSP references once you have a file path.
+Use LSP after search or bounded span inspection has identified the relevant file or symbol. For initial symbol lookup across unknown files, use Grep first, then LSP references once you have a file path.
 
 References accepts:
 - filePath/path: file to operate on
@@ -1577,10 +1576,10 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "type": "object",
                 "properties": {
                     "filePath": {"type": "string", "description": "Workspace-relative or absolute path returned by Glob/Grep/LSP."},
-                    "offset": {"type": "number", "description": "The 0-based line number to start reading from. Required with limit for range reads."},
-                    "limit": {"type": "number", "description": "The number of lines to read. Required with offset for range reads."},
+                    "offset": {"type": "number", "description": "The 0-based line number where range inspection starts. Required with limit."},
+                    "limit": {"type": "number", "description": "The number of lines to inspect. Required with offset for range inspection."},
                     "contains": {"type": "string", "description": "Find the first matching line containing this text and return a narrow context window around it"},
-                    "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return. Required with contains for contains reads."},
+                    "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return. Required with contains for span inspection."},
                     "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"}
                 },
                 "required": ["filePath"],
@@ -1635,7 +1634,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path to the file to modify. Prefer workspace-relative paths or exact paths returned by Glob/Grep/Read."},
+                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path to the file to modify. Prefer workspace-relative paths or exact paths returned by discovery, search, or span-inspection tools."},
                     "oldString": {"type": "string", "description": "The text to replace"},
                     "newString": {"type": "string", "description": "The text to replace it with (must be different from oldString)"},
                     "replaceAll": {"type": "boolean", "description": "Replace all occurrences of oldString (default false)"}
@@ -2305,7 +2304,7 @@ fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
     }
     if match_count > 0 {
         lines.push(
-            "(Use Read with a small offset+limit around the relevant matching lines.)".to_string(),
+            "(Inspect a small offset+limit span around the relevant matching lines.)".to_string(),
         );
     }
 }
@@ -2351,7 +2350,9 @@ fn render_glob_file_line(path: &str, file_infos: Option<&Vec<Value>>) -> String 
         .map(|bytes| format!("{bytes} bytes"))
         .unwrap_or_else(|| "unknown bytes".to_string());
     if info.get("large").and_then(Value::as_bool) == Some(true) {
-        format!("{path} ({line_count}, {source_bytes}; large, use Grep/contains/range before Read)")
+        format!(
+            "{path} ({line_count}, {source_bytes}; large, locate symbols before inspecting bounded ranges)"
+        )
     } else {
         format!("{path} ({line_count}, {source_bytes}; small, use offset+limit or contains for the relevant region)")
     }
@@ -3562,7 +3563,7 @@ mod tests {
     }
 
     #[test]
-    fn opencode_style_prioritizes_locator_tools_before_read() {
+    fn opencode_style_prioritizes_locator_tools_before_span_inspection() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
@@ -3614,10 +3615,10 @@ mod tests {
         assert!(task_index < read_index, "{exposed:?}");
 
         let system = request.body["messages"][0]["content"].as_str().unwrap();
-        assert!(system.contains("Prefer locator tools before reading file bodies"));
+        assert!(system.contains("Prefer locator tools before inspecting file spans"));
         assert!(system.contains("Use Glob first when you only know a file path"));
         assert!(system.contains("offset+limit"));
-        assert!(!system.contains("Use Read after you have a target file"));
+        assert!(!system.contains("Use file inspection after you have a target file"));
     }
 
     #[test]
@@ -3735,7 +3736,7 @@ mod tests {
             &config,
             "glm-5.1".to_string(),
             &json!({
-                "task": "read file",
+                "task": "inspect file span",
                 "allowed_tools": ["read"]
             }),
         )
@@ -3748,12 +3749,12 @@ mod tests {
             .find(|tool| tool["function"]["name"] == "read")
             .unwrap();
         let description = read_tool["function"]["description"].as_str().unwrap();
-        assert!(description.starts_with("Read a bounded file range"));
+        assert!(description.starts_with("Inspect a bounded, line-numbered file span"));
         assert!(description.contains("use Grep, LSP, or contains first"));
         assert!(description.contains("provide offset+limit or contains+context_lines"));
         assert!(description.contains("workspace-relative"));
         assert!(description.contains("Do not invent absolute paths"));
-        assert!(!description.contains("Reads a file from the local filesystem"));
+        assert!(!description.contains("Loads a file from the local filesystem"));
         assert!(!description.contains("speculatively read multiple files"));
         assert!(!description.contains("If the User provides a path to a file assume"));
         assert!(!description.contains("must be an absolute path"));
@@ -3789,7 +3790,7 @@ mod tests {
         assert!(properties.get("occurrence").is_some());
         assert_eq!(
             properties["limit"]["description"],
-            json!("The number of lines to read. Required with offset for range reads.")
+            json!("The number of lines to inspect. Required with offset for range inspection.")
         );
         let one_of = read_tool["function"]["parameters"]["oneOf"]
             .as_array()
@@ -4044,7 +4045,7 @@ mod tests {
         assert!(!content.contains("\"tool_schemas\""));
         assert!(!content.contains("\"recent_tool_results\""));
         assert!(!content.contains("\"observations\""));
-        assert!(!content.contains("rationale: read file"));
+        assert!(!content.contains("rationale: inspect file"));
         assert!(content.len() < 70_000, "{content}");
     }
 
@@ -4460,7 +4461,7 @@ mod tests {
             "{content}"
         );
         assert!(
-            content.contains("small offset+limit around the relevant matching lines"),
+            content.contains("small offset+limit span around the relevant matching lines"),
             "{content}"
         );
         assert!(!content.contains(":0:"), "{content}");
@@ -4510,7 +4511,7 @@ mod tests {
             "{content}"
         );
         assert!(
-            content.contains("use Grep/contains/range before Read"),
+            content.contains("locate symbols before inspecting bounded ranges"),
             "{content}"
         );
     }
@@ -4530,7 +4531,7 @@ mod tests {
                     "output": {
                         "match_count": 0,
                         "matches": [],
-                        "search_hint": "No matches in the current directory scope. Read a known likely file instead of repeating speculative searches."
+                        "search_hint": "No matches in the current directory scope. Inspect a known likely bounded span instead of repeating speculative searches."
                     }
                 }]
             }]
@@ -4542,7 +4543,9 @@ mod tests {
 
         assert!(content.contains("Found 0 matches"), "{content}");
         assert!(
-            content.contains("Read a known likely file instead of repeating speculative searches."),
+            content.contains(
+                "Inspect a known likely bounded span instead of repeating speculative searches."
+            ),
             "{content}"
         );
     }

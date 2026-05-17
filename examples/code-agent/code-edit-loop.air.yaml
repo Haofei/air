@@ -1,7 +1,7 @@
 agent:
   name: code-edit-loop-agent
   version: 0.2.0
-  description: "Minimal OpenCode-style code edit loop with line-numbered reads, search, edit, bash, and todo tracking."
+  description: "Minimal OpenCode-style code edit loop with line-numbered bounded spans, search, edit, bash, and todo tracking."
 
 inputs:
   task: string

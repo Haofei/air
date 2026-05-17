@@ -66,33 +66,77 @@ fn is_shell_command_boundary(character: char) -> bool {
 }
 
 pub(super) fn normalize_bash_verification_result(object: &mut Map<String, Value>) {
-    let Some(log) = object.get("log").and_then(Value::as_str) else {
+    let Some(log) = object
+        .get("log")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+    else {
         return;
     };
-    let Some(status) = echoed_exit_status(log) else {
-        return;
-    };
-    object.insert(
-        "reported_exit_status".to_string(),
-        Value::Number(status.into()),
-    );
-    if status != 0 {
+    if cargo_test_log_has_only_zero_tests(&log) {
         object.insert("success".to_string(), Value::Bool(false));
-        object.insert("status".to_string(), Value::Number(status.into()));
-        if let Some(Value::Array(artifacts)) = object.get_mut("artifacts") {
-            for artifact in artifacts {
-                if let Some(metadata) = artifact.get_mut("metadata").and_then(Value::as_object_mut)
-                {
-                    metadata.insert("success".to_string(), Value::Bool(false));
-                    metadata.insert("status".to_string(), Value::Number(status.into()));
-                    metadata.insert(
-                        "reported_exit_status".to_string(),
-                        Value::Number(status.into()),
-                    );
-                }
+        object.insert("verification_no_tests".to_string(), Value::Bool(true));
+        object.insert(
+            "verification_failure_reason".to_string(),
+            Value::String("verification command matched zero tests".to_string()),
+        );
+        update_artifact_metadata(object, |metadata| {
+            metadata.insert("success".to_string(), Value::Bool(false));
+            metadata.insert("verification_no_tests".to_string(), Value::Bool(true));
+            metadata.insert(
+                "verification_failure_reason".to_string(),
+                Value::String("verification command matched zero tests".to_string()),
+            );
+        });
+    }
+    if let Some(status) = echoed_exit_status(&log) {
+        object.insert(
+            "reported_exit_status".to_string(),
+            Value::Number(status.into()),
+        );
+        if status != 0 {
+            object.insert("success".to_string(), Value::Bool(false));
+            object.insert("status".to_string(), Value::Number(status.into()));
+            update_artifact_metadata(object, |metadata| {
+                metadata.insert("success".to_string(), Value::Bool(false));
+                metadata.insert("status".to_string(), Value::Number(status.into()));
+                metadata.insert(
+                    "reported_exit_status".to_string(),
+                    Value::Number(status.into()),
+                );
+            });
+        }
+    }
+}
+
+fn update_artifact_metadata(
+    object: &mut Map<String, Value>,
+    mut update: impl FnMut(&mut Map<String, Value>),
+) {
+    if let Some(Value::Array(artifacts)) = object.get_mut("artifacts") {
+        for artifact in artifacts {
+            if let Some(metadata) = artifact.get_mut("metadata").and_then(Value::as_object_mut) {
+                update(metadata);
             }
         }
     }
+}
+
+fn cargo_test_log_has_only_zero_tests(log: &str) -> bool {
+    let counts = log
+        .lines()
+        .filter_map(cargo_running_test_count)
+        .collect::<Vec<_>>();
+    !counts.is_empty() && counts.iter().all(|count| *count == 0)
+}
+
+fn cargo_running_test_count(line: &str) -> Option<u64> {
+    let line = line.trim();
+    let rest = line.strip_prefix("running ")?;
+    let mut parts = rest.split_whitespace();
+    let count = parts.next()?.parse::<u64>().ok()?;
+    let unit = parts.next()?;
+    matches!(unit, "test" | "tests").then_some(count)
 }
 
 fn echoed_exit_status(log: &str) -> Option<i64> {
@@ -238,7 +282,8 @@ fn is_inspection_bash_command(command: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_verification_bash_command;
+    use super::{is_verification_bash_command, normalize_bash_verification_result};
+    use serde_json::{json, Map, Value};
 
     #[test]
     fn verification_classification_is_command_first() {
@@ -274,5 +319,70 @@ mod tests {
             "prettier --write src/app.ts",
             Some("verify formatting")
         ));
+    }
+
+    #[test]
+    fn cargo_test_zero_tests_is_not_successful_verification() {
+        let mut output = json!({
+            "success": true,
+            "status": 0,
+            "log": "\
+running 0 tests\n\
+\n\
+test result: ok. 0 passed; 0 failed; 0 ignored; 60 filtered out; finished in 0.00s\n\
+\n\
+running 0 tests\n\
+\n\
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n",
+            "artifacts": [{
+                "metadata": {
+                    "success": true
+                }
+            }]
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_else(Map::new);
+
+        normalize_bash_verification_result(&mut output);
+
+        assert_eq!(output.get("success"), Some(&Value::Bool(false)));
+        assert_eq!(
+            output.get("verification_no_tests"),
+            Some(&Value::Bool(true))
+        );
+        assert_eq!(
+            output
+                .get("artifacts")
+                .and_then(Value::as_array)
+                .and_then(|artifacts| artifacts.first())
+                .and_then(|artifact| artifact.pointer("/metadata/success")),
+            Some(&Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn cargo_test_zero_doctests_after_unit_test_remains_successful() {
+        let mut output = json!({
+            "success": true,
+            "status": 0,
+            "log": "\
+running 1 test\n\
+test tests::example ... ok\n\
+\n\
+test result: ok. 1 passed; 0 failed; 0 ignored; 59 filtered out; finished in 0.00s\n\
+\n\
+running 0 tests\n\
+\n\
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n"
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_else(Map::new);
+
+        normalize_bash_verification_result(&mut output);
+
+        assert_eq!(output.get("success"), Some(&Value::Bool(true)));
+        assert_eq!(output.get("verification_no_tests"), None);
     }
 }

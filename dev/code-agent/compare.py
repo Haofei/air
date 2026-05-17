@@ -638,7 +638,9 @@ def _build_air_code_agent_command(
 ) -> list[str]:
     command = [
         str(air_bin),
-        "code",
+        "skill",
+        "run",
+        "code-agent",
         task,
         "--model-config",
         str(workdir / model_config),

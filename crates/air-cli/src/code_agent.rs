@@ -14,6 +14,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const DEFAULT_CODE_PROFILE: &str = "examples/code-agent/edit.air-profile.yaml";
+pub(crate) const CODE_AGENT_SKILL: &str = "code-agent";
 
 pub(crate) struct CodeOptions {
     pub(crate) task: String,
@@ -23,7 +24,6 @@ pub(crate) struct CodeOptions {
     pub(crate) trace_redact: bool,
     pub(crate) trace_raw: bool,
     pub(crate) log: bool,
-    pub(crate) explain: bool,
     pub(crate) tool_config: Option<PathBuf>,
     pub(crate) artifact_out: Option<PathBuf>,
     pub(crate) artifact_extra: BTreeMap<String, Value>,
@@ -31,12 +31,31 @@ pub(crate) struct CodeOptions {
     pub(crate) replay_from: Option<usize>,
 }
 
-pub(crate) fn code(options: CodeOptions) -> Result<()> {
-    let explain = options.explain;
+pub(crate) fn run_code_skill(skill: &str, options: CodeOptions) -> Result<()> {
+    ensure_code_skill(skill)?;
     let outputs = run_code_agent(options)?;
-    if !explain {
-        println!("{}", serde_json::to_string_pretty(&outputs)?);
-    }
+    println!("{}", serde_json::to_string_pretty(&outputs)?);
+    Ok(())
+}
+
+pub(crate) fn explain_code_skill(skill: &str, profile: Option<PathBuf>) -> Result<()> {
+    ensure_code_skill(skill)?;
+    let profile = profile.unwrap_or_else(|| PathBuf::from(DEFAULT_CODE_PROFILE));
+    let input = build_input("<task>".to_string());
+    print_explain(&profile, &input)
+}
+
+pub(crate) fn list_code_skills() -> Result<()> {
+    let skills = json!({
+        "skills": [{
+            "id": CODE_AGENT_SKILL,
+            "description": "General AIR coding agent skill with bounded file spans, edits, verification, trace, and artifact replay.",
+            "profile": DEFAULT_CODE_PROFILE,
+            "run": "air skill run code-agent \"<task>\"",
+            "explain": "air skill explain code-agent"
+        }]
+    });
+    println!("{}", serde_json::to_string_pretty(&skills)?);
     Ok(())
 }
 
@@ -49,7 +68,6 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
         trace_redact,
         trace_raw,
         log,
-        explain,
         tool_config,
         artifact_out,
         artifact_extra,
@@ -58,16 +76,11 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     } = options;
 
     if task.trim().is_empty() {
-        bail!("air code task must not be empty");
+        bail!("air skill run code-agent task must not be empty");
     }
 
     let profile = profile.unwrap_or_else(|| PathBuf::from(DEFAULT_CODE_PROFILE));
     let input = build_input(task);
-
-    if explain {
-        print_explain(&profile, &input)?;
-        return Ok(Value::Null);
-    }
 
     let cwd = std::env::current_dir().context("resolve current directory")?;
     if let Some(artifact_dir) = replay_artifact.as_ref().filter(|_| replay_from.is_none()) {
@@ -164,7 +177,8 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
 fn print_explain(profile: &Path, input: &Map<String, Value>) -> Result<()> {
     let metadata = explain_metadata_for_profile(profile)?;
     let explanation = json!({
-        "command": "code",
+        "command": "skill run",
+        "skill": CODE_AGENT_SKILL,
         "will_run": false,
         "profile": path_ref_to_input_string(profile),
         "plan": path_ref_to_input_string(&metadata.plan),
@@ -177,6 +191,14 @@ fn print_explain(profile: &Path, input: &Map<String, Value>) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), &explanation)?;
     println!();
     Ok(())
+}
+
+fn ensure_code_skill(skill: &str) -> Result<()> {
+    if skill == CODE_AGENT_SKILL {
+        Ok(())
+    } else {
+        bail!("unknown AIR skill `{skill}`; run `air skill list`")
+    }
 }
 
 fn build_input(task: String) -> Map<String, Value> {

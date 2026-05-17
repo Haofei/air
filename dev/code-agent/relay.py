@@ -2,8 +2,9 @@
 """Inspect captured code-agent HTTP calls and request/response divergence.
 
 This tool consumes the HTTP capture directories produced by
-dev/code-agent/compare.py. AIR replay now lives in `air code --replay-artifact`;
-this script is only for analyzing raw provider I/O.
+dev/code-agent/compare.py. AIR replay now lives in
+`air skill run code-agent --replay-artifact`; this script is only for analyzing
+raw provider I/O.
 """
 
 from __future__ import annotations

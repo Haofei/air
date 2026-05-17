@@ -616,9 +616,7 @@ fn file_read_rejects_large_unscoped_reads() {
         .call_tool("read", &json!({"filePath": "note.txt"}))
         .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("requires a bounded read selector"));
+    assert!(error.to_string().contains("requires a bounded selector"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -649,9 +647,7 @@ fn file_read_rejects_byte_large_unscoped_reads_even_when_line_count_is_small() {
         .call_tool("read", &json!({"filePath": "large.txt"}))
         .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("requires a bounded read selector"));
+    assert!(error.to_string().contains("requires a bounded selector"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1530,9 +1526,7 @@ fn file_read_rejects_unscoped_reads() {
         .call_tool("file.read", &json!({"path": "note.txt"}))
         .unwrap_err();
 
-    assert!(error
-        .to_string()
-        .contains("requires a bounded read selector"));
+    assert!(error.to_string().contains("requires a bounded selector"));
     let _ = fs::remove_dir_all(dir);
 }
 

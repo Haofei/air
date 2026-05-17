@@ -11,7 +11,7 @@ mod project;
 mod run_plan;
 mod tools;
 use crate::bench::{bench_code_agent, BenchCodeAgentOptions};
-use crate::code_agent::{code, CodeOptions};
+use crate::code_agent::{explain_code_skill, list_code_skills, run_code_skill, CodeOptions};
 use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
@@ -90,54 +90,10 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Run the AIR coding agent from a task prompt.
-    Code {
-        /// Natural-language coding task.
-        task: String,
-
-        /// Coding-agent run profile. Defaults to the generic edit loop profile.
-        #[arg(long)]
-        profile: Option<PathBuf>,
-
-        /// Optional OpenAI-compatible model config JSON.
-        #[arg(long)]
-        model_config: Option<PathBuf>,
-
-        /// Optional JSONL trace output path.
-        #[arg(long)]
-        trace_out: Option<PathBuf>,
-
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact")]
-        trace_raw: bool,
-
-        /// Print human-readable execution logs to stderr.
-        #[arg(long)]
-        log: bool,
-
-        /// Print the resolved loop, profile, and typed input without running.
-        #[arg(long)]
-        explain: bool,
-
-        /// Optional tool provider config JSON.
-        #[arg(long)]
-        tool_config: Option<PathBuf>,
-
-        /// Optional directory for an auditable code-run artifact.
-        #[arg(long)]
-        artifact_out: Option<PathBuf>,
-
-        /// Replay a previous code-run artifact, optionally switching to live execution with --replay-from.
-        #[arg(long)]
-        replay_artifact: Option<PathBuf>,
-
-        /// 1-based trace event line where replay should switch to the live provider.
-        #[arg(long, requires = "replay_artifact")]
-        replay_from: Option<usize>,
+    /// Run or inspect installed AIR skills.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
     },
     /// Run AIR benchmark suites.
     Bench {
@@ -439,6 +395,69 @@ enum Command {
 }
 
 #[derive(Debug, Subcommand)]
+enum SkillCommand {
+    /// List built-in AIR skills.
+    List,
+    /// Run an AIR skill from a task prompt.
+    Run {
+        /// Skill id, for example code-agent.
+        skill: String,
+
+        /// Natural-language task.
+        task: String,
+
+        /// Skill run profile override.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+
+        /// Optional OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Optional JSONL trace output path.
+        #[arg(long)]
+        trace_out: Option<PathBuf>,
+
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
+        #[arg(long)]
+        trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact")]
+        trace_raw: bool,
+
+        /// Print human-readable execution logs to stderr.
+        #[arg(long)]
+        log: bool,
+
+        /// Optional tool provider config JSON.
+        #[arg(long)]
+        tool_config: Option<PathBuf>,
+
+        /// Optional directory for an auditable code-run artifact.
+        #[arg(long)]
+        artifact_out: Option<PathBuf>,
+
+        /// Replay a previous code-run artifact, optionally switching to live execution with --replay-from.
+        #[arg(long)]
+        replay_artifact: Option<PathBuf>,
+
+        /// 1-based trace event line where replay should switch to the live provider.
+        #[arg(long, requires = "replay_artifact")]
+        replay_from: Option<usize>,
+    },
+    /// Explain what a skill is allowed to do without running it.
+    Explain {
+        /// Skill id, for example code-agent.
+        skill: String,
+
+        /// Skill run profile override.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
 enum BenchCommand {
     /// Run the code-agent benchmark suite.
     CodeAgent {
@@ -550,34 +569,40 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Code {
-            task,
-            profile,
-            model_config,
-            trace_out,
-            trace_redact,
-            trace_raw,
-            log,
-            explain,
-            tool_config,
-            artifact_out,
-            replay_artifact,
-            replay_from,
-        } => code(CodeOptions {
-            task,
-            profile,
-            model_config,
-            trace_out,
-            trace_redact,
-            trace_raw,
-            log,
-            explain,
-            tool_config,
-            artifact_out,
-            artifact_extra: std::collections::BTreeMap::new(),
-            replay_artifact,
-            replay_from,
-        }),
+        Command::Skill { command } => match command {
+            SkillCommand::List => list_code_skills(),
+            SkillCommand::Run {
+                skill,
+                task,
+                profile,
+                model_config,
+                trace_out,
+                trace_redact,
+                trace_raw,
+                log,
+                tool_config,
+                artifact_out,
+                replay_artifact,
+                replay_from,
+            } => run_code_skill(
+                &skill,
+                CodeOptions {
+                    task,
+                    profile,
+                    model_config,
+                    trace_out,
+                    trace_redact,
+                    trace_raw,
+                    log,
+                    tool_config,
+                    artifact_out,
+                    artifact_extra: std::collections::BTreeMap::new(),
+                    replay_artifact,
+                    replay_from,
+                },
+            ),
+            SkillCommand::Explain { skill, profile } => explain_code_skill(&skill, profile),
+        },
         Command::Bench { command } => match command {
             BenchCommand::CodeAgent {
                 suite,
@@ -1707,7 +1732,7 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
 
-        for command in ["code", "validate-plan", "plan", "run-plan", "resume-plan"] {
+        for command in ["skill", "validate-plan", "plan", "run-plan", "resume-plan"] {
             assert!(
                 command_names.contains(&command),
                 "expected {command} in help"
@@ -1719,6 +1744,7 @@ mod tests {
             "run-system",
             "validate",
             "run",
+            "code",
             "lower",
             "lower-plan",
             "replay",
@@ -1732,40 +1758,47 @@ mod tests {
     }
 
     #[test]
-    fn code_command_accepts_minimal_typed_edit_input() {
-        let cli = Cli::try_parse_from(["air", "code", "fix the failing add function and retest"])
-            .unwrap();
-
-        let Command::Code {
-            task,
-            profile,
-            explain,
-            ..
-        } = cli.command
-        else {
-            panic!("expected code command");
-        };
-
-        assert_eq!(task, "fix the failing add function and retest");
-        assert_eq!(profile, None);
-        assert!(!explain);
-    }
-
-    #[test]
-    fn code_command_accepts_explain_flag() {
+    fn skill_run_accepts_code_agent_task() {
         let cli = Cli::try_parse_from([
             "air",
-            "code",
+            "skill",
+            "run",
+            "code-agent",
             "fix the failing add function and retest",
-            "--explain",
         ])
         .unwrap();
 
-        let Command::Code { explain, .. } = cli.command else {
-            panic!("expected code command");
+        let Command::Skill {
+            command:
+                SkillCommand::Run {
+                    skill,
+                    task,
+                    profile,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected skill run command");
         };
 
-        assert!(explain);
+        assert_eq!(skill, "code-agent");
+        assert_eq!(task, "fix the failing add function and retest");
+        assert_eq!(profile, None);
+    }
+
+    #[test]
+    fn skill_explain_accepts_code_agent() {
+        let cli = Cli::try_parse_from(["air", "skill", "explain", "code-agent"]).unwrap();
+
+        let Command::Skill {
+            command: SkillCommand::Explain { skill, profile },
+        } = cli.command
+        else {
+            panic!("expected skill explain command");
+        };
+
+        assert_eq!(skill, "code-agent");
+        assert_eq!(profile, None);
     }
 
     #[test]

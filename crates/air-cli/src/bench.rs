@@ -341,7 +341,6 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
             trace_redact: false,
             trace_raw: true,
             log: context.log,
-            explain: false,
             tool_config: Some(tool_config.clone()),
             artifact_out: Some(artifact_dir.clone()),
             artifact_extra,

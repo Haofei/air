@@ -312,7 +312,7 @@ fn repo_file_info(repo: &Path, relative_path: &str) -> Value {
         "large": large,
         "whole_read_ok": !large,
         "read_guidance": if large {
-            "large file: use grep, contains+context_lines, LSP, or a narrow line range before Read"
+            "large file: locate symbols first, then inspect a bounded line range or contains+context_lines span"
         } else {
             "small file: use offset+limit or contains+context_lines for the relevant region"
         }

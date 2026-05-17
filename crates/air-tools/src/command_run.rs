@@ -75,7 +75,7 @@ pub(super) fn call_bash_tool(
     }
     if let Some(git_subcommand) = forbidden_git_workspace_command(command) {
         return Err(RuntimeError::Provider(format!(
-            "tool {name} refuses workspace-mutating git command `git {git_subcommand}`; use read-only git commands such as git diff or git status for inspection"
+            "tool {name} refuses workspace-mutating git command `git {git_subcommand}`; use non-mutating git commands such as git diff or git status for inspection"
         )));
     }
     if let Some(timeout_ms) = input.get("timeout").and_then(Value::as_u64) {
@@ -220,7 +220,7 @@ pub(super) fn run_command_argv(
                 };
                 let truncation_hint = full_log_path.as_ref().map(|path| {
                     format!(
-                        "The command output was truncated. Full command output saved to: {path}. Use file.search or file.read with a narrow range to inspect specific sections."
+                        "The command output was truncated. Full command output saved to: {path}. Use file.search or bounded span inspection to inspect specific sections."
                     )
                 });
                 return Ok(json!({

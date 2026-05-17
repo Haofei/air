@@ -1,4 +1,4 @@
-# AIR Code Agent
+# AIR Code Agent Skill
 
 This example is intentionally small. It is a minimal coding loop that lets the
 model use familiar tools, while AIR records the trace, enforces capabilities,
@@ -7,11 +7,11 @@ runs verification, and reports the final diff.
 ## Interface
 
 ```bash
-cargo run -p air-cli -- code "fix the failing add function and retest"
+cargo run -p air-cli -- skill run code-agent "fix the failing add function and retest"
 ```
 
-There is one loop and one default tool set. The default path is a direct
-read/search/edit/verify loop.
+There is one built-in skill, one loop, and one default tool set. The default path
+is a direct search/context/edit/verify loop.
 
 ## Loop
 
@@ -43,7 +43,7 @@ OpenCode-style terminal workflow instead of exposing AIR-specific git wrappers.
 If verification fails, the result goes back into the next model turn as ordinary
 tool output.
 
-`task` launches a separate read-only AIR exploration loop through
+`task` launches a separate non-mutating AIR exploration loop through
 `explore.air-profile.yaml`. Use it for broad investigation that would otherwise
 fill the main edit loop context. Each subagent call writes its own child
 trace/output under `.air/subagents/` and returns those paths in the parent trace
@@ -54,7 +54,7 @@ so the handoff stays concise without losing auditability.
 ## Dogfood
 
 ```bash
-cargo run -p air-cli -- code "refactor a small helper and run tests" \
+cargo run -p air-cli -- skill run code-agent "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
   --tool-config examples/code-agent/tools.json \
   --trace-out target/generated/code-agent.trace.jsonl \
@@ -76,7 +76,7 @@ Use `--artifact-out` when you want an auditable, replayable record of one code
 agent run:
 
 ```bash
-cargo run -p air-cli -- code "refactor a small helper and run tests" \
+cargo run -p air-cli -- skill run code-agent "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
   --tool-config examples/code-agent/tools.json \
   --artifact-out target/generated/code-run-artifacts/manual-run

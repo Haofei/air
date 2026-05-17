@@ -32,7 +32,7 @@ For coding agents, that means the important questions have first-class places to
 | What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
 | Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
 | Did it exceed the budget or repeat itself? | `max_tool_calls`, `max_model_calls`, `max_repeated_tool_calls`, timeouts, and capability gates are checked by the runtime |
-| What will this agent be allowed to do? | `air code --explain` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
+| What will this agent be allowed to do? | `air skill explain code-agent` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
 
 ## Status
 
@@ -83,9 +83,9 @@ The profile packages a RunPlan, module store, input, model config, and tool conf
 ## Project Workflows
 
 For coding work that is larger than one edit loop, AIR has a thin project
-orchestrator. The project layer does not replace `air code`; it gives a larger
-task an explicit manifest, task DAG, per-task verification, diff constraints,
-status, and artifact-backed replay surface.
+orchestrator. The project layer does not replace the `code-agent` skill; it gives
+a larger task an explicit manifest, task DAG, per-task verification, diff
+constraints, status, and artifact-backed replay surface.
 
 ```bash
 cargo run -p air-cli -- project plan "refactor the tools crate into smaller modules" \

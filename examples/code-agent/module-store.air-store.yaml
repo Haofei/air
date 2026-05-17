@@ -10,7 +10,7 @@ modules:
     path: examples/code-agent/code-edit-loop.air.yaml
     kind: composite
     visibility: public
-    description: "Minimal opencode-style code loop using question/bash/read/search/edit/write/task/webfetch/todo/skill tools."
+    description: "Minimal opencode-style code-agent skill using question/bash/search/context/edit/write/task/webfetch/todo/skill tools."
     tags: [coding, edit, tool_loop, test]
     covers: [code_exploration, code_edit, bounded_tool_loop, retest]
     priority: 80
@@ -18,7 +18,7 @@ modules:
     path: examples/code-agent/code-explore-loop.air.yaml
     kind: primitive
     visibility: internal
-    description: "Read-only opencode-style subagent loop for isolated codebase exploration."
+    description: "Non-mutating opencode-style subagent loop for isolated codebase exploration."
     tags: [coding, explore, subagent, read_only]
     covers: [code_exploration, bounded_tool_loop]
     priority: 60

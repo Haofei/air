@@ -1,7 +1,7 @@
 plan:
   name: project-scout
   version: 0.1.0
-description: "Read-only project planning scout."
+description: "Non-mutating project planning scout."
 
 requires:
   capabilities: [file.read, code.read]
@@ -20,5 +20,5 @@ outputs:
 
 decisions:
   - id: choose-project-scout
-    rationale: "Run the bounded read-only project scout."
+    rationale: "Run the bounded non-mutating project scout."
     selected: [scout]

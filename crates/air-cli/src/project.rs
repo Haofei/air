@@ -374,7 +374,7 @@ fn project_explorer_handoff(goal: &str, repo_root: &Path, model_config: &Path) -
 
 fn project_scout_prompt(goal: &str) -> String {
     format!(
-        "You are the read-only project scout for AIR project planning.\n\nProject goal: {goal}\n\nYour job is project-level scouting, not implementation. Explore freely enough to split this project into real code-agent tasks, but stop before reading implementation details that the later task agents can read themselves.\n\nLarge projects can contain hundreds of thousands of files, so do not scan the whole repository. Use targeted glob, grep, LSP, and narrow reads to find evidence for this specific goal. Prefer path and symbol search before reading file content. Use narrow reads only to identify architectural boundaries, public API surfaces, existing module layout, test/verification entry points, or dependency order.\n\nGood scout evidence is enough to answer:\n- what package/root is relevant\n- what files or symbol groups define natural task boundaries\n- what task should run before another task\n- what focused command can verify each task\n- what files each task should be allowed to touch\n- what risks or unknowns the task agent must handle\n\nDo not try to understand every function body. Do not collect a complete function list. Do not inspect tests or helper internals unless they change task boundaries or verification. Once you can propose credible task boundaries, finish with a concise handoff for the project planner.\n\nFinal handoff format:\n- relevant files or directories and why\n- proposed task boundaries small enough for one code edit loop each\n- dependency order\n- focused verification commands\n- allowed file scopes for each task\n- risks or unknowns\n\nThe next model will turn your handoff into an AIR project DAG. The later code agents will do detailed file reading during each task."
+        "You are the non-mutating project scout for AIR project planning.\n\nProject goal: {goal}\n\nYour job is project-level scouting, not implementation. Explore freely enough to split this project into real code-agent tasks, but stop before inspecting implementation details that the later task agents can inspect themselves.\n\nLarge projects can contain hundreds of thousands of files, so do not scan the whole repository. Use targeted glob, grep, LSP, and bounded span inspection to find evidence for this specific goal. Prefer path and symbol search before inspecting file content. Inspect bounded spans only to identify architectural boundaries, public API surfaces, existing module layout, test/verification entry points, or dependency order.\n\nGood scout evidence is enough to answer:\n- what package/root is relevant\n- what files or symbol groups define natural task boundaries\n- what task should run before another task\n- what focused command can verify each task\n- what files each task should be allowed to touch\n- what risks or unknowns the task agent must handle\n\nDo not try to understand every function body. Do not collect a complete function list. Do not inspect tests or helper internals unless they change task boundaries or verification. Once you can propose credible task boundaries, finish with a concise handoff for the project planner.\n\nFinal handoff format:\n- relevant files or directories and why\n- proposed task boundaries small enough for one code edit loop each\n- dependency order\n- focused verification commands\n- allowed file scopes for each task\n- risks or unknowns\n\nThe next model will turn your handoff into an AIR project DAG. The later code agents will inspect exact file spans during each task."
     )
 }
 
@@ -914,7 +914,7 @@ fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) ->
             },
             "tasks": [{
                 "id": "lower_snake_case_task_id",
-                "goal": "one concrete coding task for air code, including concrete file/symbol/line-range evidence from explorer_handoff when available",
+                "goal": "one concrete coding task for the code-agent skill, including concrete file/symbol/line-range evidence from explorer_handoff when available",
                 "depends_on": [],
                 "allowed_files": ["glob-like/path/**"],
                 "forbidden_files": ["target/**", ".air/**"],
@@ -930,10 +930,10 @@ fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) ->
         "instructions": [
             "Return exactly one JSON object matching output_contract; no markdown.",
             "Use explorer_handoff as the repository evidence. Do not assume the CLI already scanned the repository.",
-            "Preserve useful file paths, symbol names, and line ranges from explorer_handoff directly in each task goal so the code agent can read targeted spans instead of rediscovering context.",
+            "Preserve useful file paths, symbol names, and line ranges from explorer_handoff directly in each task goal so the code agent can inspect targeted spans instead of rediscovering context.",
             "Split the project into 2-8 well-scoped coding tasks when the goal is larger than a single edit.",
             "Use depends_on to form a DAG; avoid cycles.",
-            "Each task must be executable by the existing air code edit loop.",
+            "Each task must be executable by the existing code-agent skill edit loop.",
             "Prefer focused allowed_files and verification commands.",
             "Make tasks small: one cohesive move/add/change per task, max_changed_files <= 4, max_diff_lines <= 350 unless the goal is impossible otherwise.",
             "Use forbidden_files to exclude target/**, .git/**, .air/**, and generated outputs.",
@@ -1145,7 +1145,6 @@ fn run_project_task(
         trace_redact: false,
         trace_raw: true,
         log,
-        explain: false,
         tool_config: Some(tool_config),
         artifact_out: Some(artifact_dir.clone()),
         artifact_extra,

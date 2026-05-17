@@ -1,7 +1,7 @@
 agent:
   name: code-explore-loop-agent
   version: 0.1.0
-  description: "Read-only subagent loop for isolated codebase exploration."
+  description: "Non-mutating subagent loop for isolated codebase exploration."
 
 inputs:
   task: string
