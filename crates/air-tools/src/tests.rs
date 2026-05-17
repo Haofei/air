@@ -43,7 +43,10 @@ fn tool_config_workspace_dir_rebases_file_tool_roots() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("read", &json!({ "path": "note.txt" }))
+        .call_tool(
+            "read",
+            &json!({ "path": "note.txt", "allow_whole_file": true }),
+        )
         .unwrap();
 
     assert_eq!(output["content"], json!("00001| hello from workspace"));
@@ -269,7 +272,10 @@ fn file_read_reads_inside_configured_base_dir() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "allow_whole_file": true}),
+        )
         .unwrap();
 
     assert_eq!(output["content"], json!("00001| hello fr"));
@@ -309,7 +315,10 @@ fn file_read_many_reads_multiple_files_with_artifacts() {
             "file.read_many",
             &json!({
                 "files": [
-                    "one.txt",
+                    {
+                        "path": "one.txt",
+                        "allow_whole_file": true
+                    },
                     {
                         "path": "two.txt",
                         "contains": "needle",
@@ -361,7 +370,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
     let output = tools
         .call_tool(
             "file.read_many",
-            &json!({"files": ["one.txt"], "max_bytes_per_file": 5}),
+            &json!({"files": [{"path": "one.txt", "allow_whole_file": true}], "max_bytes_per_file": 5}),
         )
         .unwrap();
     assert_eq!(output["max_bytes_per_file"], json!(5));
@@ -371,7 +380,7 @@ fn file_read_many_supports_bounded_per_call_max_bytes() {
     let capped = tools
         .call_tool(
             "file.read_many",
-            &json!({"files": ["one.txt"], "max_bytes_per_file": 99}),
+            &json!({"files": [{"path": "one.txt", "allow_whole_file": true}], "max_bytes_per_file": 99}),
         )
         .unwrap();
     assert_eq!(capped["max_bytes_per_file"], json!(12));
@@ -454,14 +463,20 @@ fn file_read_supports_bounded_per_call_max_bytes() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 8}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "max_bytes": 8, "allow_whole_file": true}),
+        )
         .unwrap();
     assert_eq!(output["content"], json!("00001| abcdefgh"));
     assert_eq!(output["max_bytes"], json!(8));
     assert_eq!(output["truncated"], json!(true));
 
     let capped = tools
-        .call_tool("file.read", &json!({"path": "note.txt", "max_bytes": 99}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "max_bytes": 99, "allow_whole_file": true}),
+        )
         .unwrap();
     assert_eq!(capped["content"], json!("00001| abcdefghijklmnop"));
     assert_eq!(capped["max_bytes"], json!(16));
@@ -1336,7 +1351,10 @@ fn file_tools_rebase_external_absolute_paths_by_workspace_suffix() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let read = tools
-        .call_tool("read", &json!({"filePath": fake_bridge_file}))
+        .call_tool(
+            "read",
+            &json!({"filePath": fake_bridge_file, "allow_whole_file": true}),
+        )
         .unwrap();
     assert_eq!(read["path_rebased_from"], json!(fake_bridge_file));
     assert!(read["path"]
@@ -1480,7 +1498,10 @@ fn file_read_defaults_to_numbered_content() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "allow_whole_file": true}),
+        )
         .unwrap();
 
     assert_eq!(
@@ -1494,6 +1515,40 @@ fn file_read_defaults_to_numbered_content() {
         output["artifacts"][0]["metadata"]["line_numbers_defaulted"],
         json!(true)
     );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_skips_unscoped_reads_without_whole_file_opt_in() {
+    let dir = temp_dir("air-tools-file-read-unscoped-skip");
+    fs::write(dir.join("note.txt"), "one\ntwo\nthree\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "file.read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .unwrap();
+
+    assert_eq!(output["content"], Value::Null);
+    assert_eq!(output["content_skipped"], json!(true));
+    assert_eq!(output["range_limited_unscoped_read"], json!(true));
+    assert_eq!(output["allow_whole_file"], json!(false));
+    assert!(output["message"]
+        .as_str()
+        .unwrap()
+        .contains("allow_whole_file=true"));
+    assert_eq!(output["artifacts"][0]["kind"], json!("tool_notice"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1519,7 +1574,10 @@ fn file_read_does_not_truncate_only_because_line_numbers_expand_output() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("file.read", &json!({"path": "note.txt"}))
+        .call_tool(
+            "file.read",
+            &json!({"path": "note.txt", "allow_whole_file": true}),
+        )
         .unwrap();
 
     assert_eq!(output["truncated"], json!(false));
@@ -1553,7 +1611,7 @@ fn file_read_can_disable_default_line_numbers() {
     let output = tools
         .call_tool(
             "file.read",
-            &json!({"path": "note.txt", "line_numbers": false}),
+            &json!({"path": "note.txt", "line_numbers": false, "allow_whole_file": true}),
         )
         .unwrap();
 
@@ -2580,7 +2638,7 @@ fn file_read_truncates_unscoped_large_reads_with_range_hint() {
     let output = tools
         .call_tool(
             "file.read",
-            &json!({"path": "large.txt", "line_numbers": true}),
+            &json!({"path": "large.txt", "line_numbers": true, "allow_whole_file": true}),
         )
         .unwrap();
 

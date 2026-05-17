@@ -1,8 +1,5 @@
-use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
-use std::collections::BTreeSet;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
@@ -10,7 +7,6 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use air_runtime::RuntimeError;
-use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 
 use super::bash_classify::{
@@ -20,40 +16,8 @@ use super::bash_classify::{
 use super::command_config::{CommandParameterAllow, CommandParameterRule, CommandRunOptions};
 use super::command_diagnostics::extract_command_diagnostics;
 use super::text_utils::bytes_to_limited_text_with_direction;
+use super::workspace_snapshot::{workspace_snapshot_ignore_set, CommandWorkspaceSnapshot};
 use super::{canonicalize_tool_path, validate_relative_path_filter};
-
-const COMMAND_SNAPSHOT_MAX_HASH_BYTES: u64 = 2 * 1024 * 1024;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct CommandWorkspaceFile {
-    bytes: u64,
-    modified_ms: u128,
-    content_hash: Option<u64>,
-}
-
-#[derive(Debug, Clone, Default)]
-struct CommandWorkspaceSnapshot {
-    files: BTreeMap<String, CommandWorkspaceFile>,
-}
-
-impl CommandWorkspaceSnapshot {
-    fn capture(root: &Path, ignore: &GlobSet) -> Self {
-        let mut snapshot = Self::default();
-        collect_workspace_files(root, root, ignore, &mut snapshot.files);
-        snapshot
-    }
-
-    fn changed_files(&self, after: &Self) -> Vec<String> {
-        self.files
-            .keys()
-            .chain(after.files.keys())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter(|path| self.files.get(*path) != after.files.get(*path))
-            .cloned()
-            .collect()
-    }
-}
 
 pub(super) fn call_command_run_tool(
     name: &str,
@@ -388,76 +352,6 @@ fn sanitize_command_output_filename(command_name: &str) -> String {
     } else {
         trimmed.to_string()
     }
-}
-
-fn collect_workspace_files(
-    root: &Path,
-    dir: &Path,
-    ignore: &GlobSet,
-    files: &mut BTreeMap<String, CommandWorkspaceFile>,
-) {
-    let Ok(entries) = fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let Ok(relative) = path.strip_prefix(root) else {
-            continue;
-        };
-        if ignore.is_match(relative) {
-            continue;
-        }
-        let Ok(metadata) = entry.metadata() else {
-            continue;
-        };
-        if metadata.is_dir() {
-            collect_workspace_files(root, &path, ignore, files);
-            continue;
-        }
-        if !metadata.is_file() {
-            continue;
-        }
-        let relative = relative.to_string_lossy().replace('\\', "/");
-        files.insert(
-            relative,
-            CommandWorkspaceFile {
-                bytes: metadata.len(),
-                modified_ms: metadata
-                    .modified()
-                    .ok()
-                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
-                    .map(|duration| duration.as_millis())
-                    .unwrap_or_default(),
-                content_hash: command_file_hash(&path, metadata.len()),
-            },
-        );
-    }
-}
-
-fn workspace_snapshot_ignore_set(patterns: &[String]) -> Result<GlobSet, RuntimeError> {
-    let mut builder = GlobSetBuilder::new();
-    for pattern in patterns {
-        builder.add(Glob::new(pattern).map_err(|error| {
-            RuntimeError::Provider(format!(
-                "invalid workspace_snapshot_ignore glob {pattern:?}: {error}"
-            ))
-        })?);
-    }
-    builder.build().map_err(|error| {
-        RuntimeError::Provider(format!(
-            "invalid workspace_snapshot_ignore glob set: {error}"
-        ))
-    })
-}
-
-fn command_file_hash(path: &Path, bytes: u64) -> Option<u64> {
-    if bytes > COMMAND_SNAPSHOT_MAX_HASH_BYTES {
-        return None;
-    }
-    let content = fs::read(path).ok()?;
-    let mut hasher = DefaultHasher::new();
-    content.hash(&mut hasher);
-    Some(hasher.finish())
 }
 
 fn render_command_args(

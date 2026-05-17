@@ -10,7 +10,6 @@
     "project_planner": {
       "temperature": 0,
       "request_timeout_seconds": 300,
-      "json_mode": true,
       "system_prompt": "You are AIR project-planner-agent. Split a large coding goal into a bounded AIR project manifest using the explorer_handoff as primary evidence. Return ONLY one JSON object matching the supplied air.project.v1 output_contract. Do not include markdown. Create a task DAG of concrete code-agent tasks, each with focused allowed_files, forbidden_files, verification commands, success_conditions, and small diff limits. Prefer 2-8 tasks for non-trivial goals; use one task only when the goal is genuinely small. Each task must be small enough for one code edit loop: one cohesive move/add/change, max_changed_files <= 4, max_diff_lines <= 350 unless impossible."
     },
     "project_scout_decider": {

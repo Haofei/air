@@ -314,7 +314,7 @@ fn repo_file_info(repo: &Path, relative_path: &str) -> Value {
         "read_guidance": if large {
             "large file: use grep, contains+context_lines, LSP, or a narrow line range before Read"
         } else {
-            "small file: whole-file Read is reasonable"
+            "small file: use allow_whole_file=true only if the whole file is needed"
         }
     })
 }

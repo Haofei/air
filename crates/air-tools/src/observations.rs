@@ -203,14 +203,15 @@ fn large_unscoped_read_guard_output(
         "start_line": start_line,
         "end_line": end_line,
         "total_lines": output.get("total_lines").cloned().unwrap_or(Value::Null),
+        "allow_whole_file": output.get("allow_whole_file").cloned().unwrap_or(Value::Bool(false)),
         "range_limited_unscoped_read": true,
         "content_skipped": true,
-        "message": "This is a large unscoped read. Use grep, read with contains+context_lines, LSP, or a small range around known line numbers before requesting file content.",
+        "message": "Unscoped read skipped. Use grep, read with contains+context_lines, LSP, or a small range around known line numbers before requesting file content. If the whole file is truly needed, retry with allow_whole_file=true after locating or confirming the file is small.",
         "suggested_tools": ["grep", "read.contains", "lsp"],
         "artifacts": [{
             "kind": "tool_notice",
             "title": "read skipped: locate before reading",
-            "content": "No file content returned because broad reads of large files are intentionally skipped. Locate the relevant symbol or line range first.",
+            "content": "No file content returned because broad reads require an explicit allow_whole_file opt-in. Locate the relevant symbol or line range first.",
             "metadata": {
                 "provider": "file_read",
                 "content_skipped": true,

@@ -4,9 +4,16 @@ use super::text_utils::{bytes_to_limited_text, select_line_range};
 use super::*;
 
 const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 200;
-const DEFAULT_UNSCOPED_READ_BYTE_LIMIT: usize = 20 * 1024;
 const DEFAULT_UNSCOPED_READ_PREVIEW_BYTES: usize = 16 * 1024;
 const DEFAULT_OPEN_ENDED_RANGE_LINE_LIMIT: usize = DEFAULT_UNSCOPED_READ_LINE_LIMIT;
+
+fn is_unscoped_read_request(
+    contains: Option<&str>,
+    start_line: Option<usize>,
+    end_line: Option<usize>,
+) -> bool {
+    contains.is_none() && start_line.is_none() && end_line.is_none()
+}
 
 pub(super) fn call_file_read_tool(
     name: &str,
@@ -84,6 +91,7 @@ pub(super) fn call_file_read_tool(
     let occurrence = optional_positive_usize_input(name, input, "occurrence")?.unwrap_or(1);
     let explicit_line_numbers = input.get("line_numbers").is_some();
     let line_numbers = optional_bool_input(name, input, "line_numbers")?.unwrap_or(true);
+    let allow_whole_file = optional_bool_input(name, input, "allow_whole_file")?.unwrap_or(false);
     let effective_max_bytes =
         optional_bounded_usize_input(name, input, "max_bytes", max_bytes)?.unwrap_or(max_bytes);
     if let (Some(start), Some(end)) = (start_line, end_line) {
@@ -93,10 +101,8 @@ pub(super) fn call_file_read_tool(
             )));
         }
     }
-    let requested_unscoped_read = contains.is_none() && start_line.is_none() && end_line.is_none();
-    let range_limited_unscoped_read = requested_unscoped_read
-        && (total_lines > DEFAULT_UNSCOPED_READ_LINE_LIMIT
-            || body.len() > DEFAULT_UNSCOPED_READ_BYTE_LIMIT);
+    let requested_unscoped_read = is_unscoped_read_request(contains, start_line, end_line);
+    let range_limited_unscoped_read = requested_unscoped_read && !allow_whole_file;
     let (effective_start_line, effective_end_line, match_line) = if let Some(needle) = contains {
         if start_line.is_some() || end_line.is_some() {
             return Err(RuntimeError::Provider(format!(
@@ -203,6 +209,7 @@ pub(super) fn call_file_read_tool(
             "full_output_path": full_output_path,
             "unscoped_read": unscoped_read,
             "range_limited_unscoped_read": range_limited_unscoped_read,
+            "allow_whole_file": allow_whole_file,
             "line_numbers": line_numbers,
             "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
             "selected_max_bytes": selected_max_bytes,
@@ -229,6 +236,7 @@ pub(super) fn call_file_read_tool(
         "truncation_hint": truncation_hint,
         "unscoped_read": unscoped_read,
         "range_limited_unscoped_read": range_limited_unscoped_read,
+        "allow_whole_file": allow_whole_file,
         "line_numbers": line_numbers,
         "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
         "path_rebased_from": path_rebased_from,
@@ -246,7 +254,7 @@ fn file_read_truncation_hint(
 ) -> Option<String> {
     if range_limited_unscoped_read {
         return Some(format!(
-            "Unscoped read was limited to the first {DEFAULT_UNSCOPED_READ_LINE_LIMIT} of {total_lines} lines. Use file.search, contains+context_lines, or a targeted line range around known matches."
+            "Unscoped read was skipped. Use file.search, contains+context_lines, or a targeted line range around known matches. If the whole file is truly needed, retry with allow_whole_file=true after locating or confirming the file is small. File metadata: {total_lines} lines, {source_bytes} bytes."
         ));
     }
     truncated.then(|| {

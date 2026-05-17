@@ -28,7 +28,7 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Prefer locator tools before reading file bodies:
   - Use Grep to search file contents, Glob to find files by name, and LSP to inspect known symbols/references.
   - Use Glob first when you only know a file path or name; it reports line counts and byte sizes without reading file bodies.
-  - Only read a whole file when Glob shows it is small: 200 lines or fewer and 20KB or less. For larger files, use Grep, LSP, contains, or a narrow line range.
+  - Read file content with Grep/LSP plus a narrow range, contains+context_lines, or offset+limit. Use allow_whole_file only when Glob shows the file is small: 200 lines or fewer and 20KB or less.
   - Use Edit to modify files and Write only when needed.
 - Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and reading.
 - Use Bash for terminal operations (git, bun, builds, tests, running scripts).
@@ -1177,10 +1177,11 @@ Usage:
 - The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read
 - Do not invent absolute paths from the model server or API bridge process; use the current working directory shown in the environment
 - If you only know a file path, use Glob first to inspect line_count and source_bytes before reading the file body
-- Do not whole-file Read files larger than 200 lines or 20KB
+- A Read call with only filePath returns metadata and a guidance notice, not file content
+- To read file content, provide offset+limit, contains+context_lines, or set allow_whole_file=true only after locating or confirming the file is small
 - For unfamiliar or large files, use Grep, LSP, or contains first to locate the relevant symbols or line ranges
 - Whole-file Read is only reasonable after Glob shows the file is 200 lines or fewer and 20KB or less
-- Without offset/limit, large files may return only a bounded preview; continue with targeted line ranges around known matches
+- Without offset/limit/contains/allow_whole_file, no file body is returned; continue with targeted line ranges around known matches
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before reading content
@@ -1219,7 +1220,7 @@ fn opencode_edit_description() -> String {
     r##"Performs exact string replacements in files.
 
 Usage:
-- You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- Before editing an existing file, gather localized evidence for the exact target region. Valid evidence includes Grep/LSP results plus a narrow Read, Read with contains+context_lines, or Read with offset+limit. Whole-file Read is not required.
 - The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
@@ -1237,7 +1238,7 @@ fn opencode_write_description() -> String {
 Usage:
 - This tool will overwrite the existing file if there is one at the provided path.
 - The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths under the current workspace.
-- If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
+- For an existing file, gather localized evidence for the target region before overwriting. Prefer Edit for existing files and Write for new files.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
 - Only use emojis if the user explicitly requests it. Avoid writing emojis to files unless asked.
@@ -1584,7 +1585,8 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                     "limit": {"type": "number", "description": "The number of lines to read (defaults to 200)"},
                     "contains": {"type": "string", "description": "Find the first matching line containing this text and return a narrow context window around it"},
                     "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return"},
-                    "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"}
+                    "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"},
+                    "allow_whole_file": {"type": "boolean", "description": "Set true only when the whole file is intentionally needed, ideally after Glob confirms it is 200 lines or fewer and 20KB or less. Without this or a range/contains locator, Read returns metadata and guidance but no file body."}
                 },
                 "required": ["filePath"],
                 "additionalProperties": false
@@ -2360,7 +2362,7 @@ fn render_glob_file_line(path: &str, file_infos: Option<&Vec<Value>>) -> String 
     if info.get("large").and_then(Value::as_bool) == Some(true) {
         format!("{path} ({line_count}, {source_bytes}; large, use Grep/contains/range before Read)")
     } else {
-        format!("{path} ({line_count}, {source_bytes}; small, whole-file Read is reasonable)")
+        format!("{path} ({line_count}, {source_bytes}; small, use allow_whole_file=true only if the whole file is needed)")
     }
 }
 
@@ -3758,7 +3760,8 @@ mod tests {
         assert!(description.starts_with("Read file content only after"));
         assert!(description.contains("use Grep, LSP, or contains first"));
         assert!(description.contains("use Glob first to inspect line_count"));
-        assert!(description.contains("larger than 200 lines or 20KB"));
+        assert!(description.contains("only filePath returns metadata"));
+        assert!(description.contains("allow_whole_file=true"));
         assert!(description.contains("workspace-relative"));
         assert!(description.contains("Do not invent absolute paths"));
         assert!(description.contains("targeted line ranges"));
@@ -3778,6 +3781,11 @@ mod tests {
         assert!(properties.get("contains").is_some());
         assert!(properties.get("context_lines").is_some());
         assert!(properties.get("occurrence").is_some());
+        assert!(properties.get("allow_whole_file").is_some());
+        assert!(properties["allow_whole_file"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("no file body"));
         assert_eq!(
             properties["limit"]["description"],
             json!("The number of lines to read (defaults to 200)")

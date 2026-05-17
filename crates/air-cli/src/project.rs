@@ -914,7 +914,7 @@ fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) ->
             },
             "tasks": [{
                 "id": "lower_snake_case_task_id",
-                "goal": "one concrete coding task for air code",
+                "goal": "one concrete coding task for air code, including concrete file/symbol/line-range evidence from explorer_handoff when available",
                 "depends_on": [],
                 "allowed_files": ["glob-like/path/**"],
                 "forbidden_files": ["target/**", ".air/**"],
@@ -930,6 +930,7 @@ fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) ->
         "instructions": [
             "Return exactly one JSON object matching output_contract; no markdown.",
             "Use explorer_handoff as the repository evidence. Do not assume the CLI already scanned the repository.",
+            "Preserve useful file paths, symbol names, and line ranges from explorer_handoff directly in each task goal so the code agent can read targeted spans instead of rediscovering context.",
             "Split the project into 2-8 well-scoped coding tasks when the goal is larger than a single edit.",
             "Use depends_on to form a DAG; avoid cycles.",
             "Each task must be executable by the existing air code edit loop.",
@@ -1390,8 +1391,7 @@ fn evaluate_project_task(
     let constraints =
         check_task_constraints(task, &artifact.delta.changed_files, &artifact.delta.diff);
     let verification_passed = verification.iter().all(|result| result.success);
-    let failure_reason =
-        project_failure_reason(&verification, &constraints, &artifact.delta.changed_files);
+    let failure_reason = project_failure_reason(&verification, &constraints);
     Ok(ProjectTaskState {
         status: if verification_passed && constraints.passed {
             ProjectTaskStatus::Passed
@@ -1524,7 +1524,6 @@ fn normalized_project_path(path: &str) -> String {
 fn project_failure_reason(
     verification: &[ProjectVerificationResult],
     constraints: &ProjectConstraintResult,
-    changed_files: &[String],
 ) -> Option<FailureReason> {
     if let Some(failed) = verification.iter().find(|result| !result.success) {
         return Some(FailureReason {
@@ -1541,13 +1540,6 @@ fn project_failure_reason(
             category: FailureCategory::DiffConstraintFailed,
             message: "project task diff constraints failed".to_string(),
             details: BTreeMap::from([("violations".to_string(), json!(constraints.violations))]),
-        });
-    }
-    if changed_files.is_empty() {
-        return Some(FailureReason {
-            category: FailureCategory::NoPatchApplied,
-            message: "project task produced no workspace diff".to_string(),
-            details: BTreeMap::new(),
         });
     }
     None
@@ -2183,7 +2175,26 @@ mod tests {
         assert!(rendered.contains("explorer_handoff"), "{rendered}");
         assert!(rendered.contains("Relevant file"), "{rendered}");
         assert!(rendered.contains("output_contract"), "{rendered}");
+        assert!(rendered.contains("line-range evidence"), "{rendered}");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn project_failure_reason_allows_verify_only_passed_tasks_without_patch() {
+        let verification = vec![ProjectVerificationResult {
+            command: "cargo test -p air-tools".to_string(),
+            description: None,
+            success: true,
+            status: Some(0),
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+        }];
+        let constraints = ProjectConstraintResult {
+            passed: true,
+            violations: Vec::new(),
+        };
+
+        assert!(project_failure_reason(&verification, &constraints).is_none());
     }
 
     #[test]

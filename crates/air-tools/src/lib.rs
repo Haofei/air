@@ -35,6 +35,7 @@ use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
 mod rust_lsp_tools;
 use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
 mod command_run;
+mod workspace_snapshot;
 use command_config::{
     workspace_snapshot_ignore_patterns, CommandParameterRule, CommandRunOptions,
     TruncationDirection,
