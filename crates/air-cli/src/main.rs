@@ -29,6 +29,45 @@ use std::path::PathBuf;
 
 fn load_dotenv() {
     let _ = dotenvy::from_filename(".env");
+    apply_model_profile_env();
+}
+
+fn apply_model_profile_env() {
+    let Ok(profile) = std::env::var("AIR_MODEL_PROFILE") else {
+        return;
+    };
+    let profile = normalize_model_profile_key(&profile);
+    if profile.is_empty() {
+        return;
+    }
+    for (target, suffix) in [
+        ("OPENAI_API_KEY", "API_KEY"),
+        ("OPENAI_BASE_URL", "BASE_URL"),
+        ("OPENAI_MODEL", "MODEL"),
+    ] {
+        let source = format!("AIR_MODEL_{profile}_{suffix}");
+        if let Ok(value) = std::env::var(source) {
+            if !value.trim().is_empty() {
+                std::env::set_var(target, value);
+            }
+        }
+    }
+}
+
+fn normalize_model_profile_key(profile: &str) -> String {
+    profile
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string()
 }
 
 #[derive(Debug, Parser)]
@@ -2036,5 +2075,12 @@ modules:
             error.kind(),
             clap::error::ErrorKind::MissingRequiredArgument
         );
+    }
+
+    #[test]
+    fn model_profile_keys_are_env_safe() {
+        assert_eq!(normalize_model_profile_key("glm"), "GLM");
+        assert_eq!(normalize_model_profile_key("local-api"), "LOCAL_API");
+        assert_eq!(normalize_model_profile_key(" local api "), "LOCAL_API");
     }
 }

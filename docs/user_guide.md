@@ -21,10 +21,13 @@ cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-
 `air` auto-loads a repository-root `.env`. Put real provider settings there:
 
 ```dotenv
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-OPENAI_MODEL=GLM-5.1
+AIR_MODEL_PROFILE=glm
+AIR_MODEL_GLM_API_KEY=...
+AIR_MODEL_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+AIR_MODEL_GLM_MODEL=GLM-5.1
 ```
+
+Use `AIR_MODEL_PROFILE=local` with `AIR_MODEL_LOCAL_*` variables to switch to a local OpenAI-compatible API without changing commands.
 
 The profile points to:
 
@@ -265,9 +268,10 @@ quality evaluation.
 Run with a matching `.env`:
 
 ```dotenv
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://example.com/v1
-OPENAI_MODEL=example-model
+AIR_MODEL_PROFILE=local
+AIR_MODEL_LOCAL_API_KEY=...
+AIR_MODEL_LOCAL_BASE_URL=https://example.com/v1
+AIR_MODEL_LOCAL_MODEL=example-model
 ```
 
 ```bash

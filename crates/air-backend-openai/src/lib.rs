@@ -594,11 +594,8 @@ fn build_chat_completion_body(
 ) -> Result<ChatCompletionBody, RuntimeError> {
     let opencode_style = model_config.native_tool_calls == Some(true)
         && (uses_opencode_prompt(model_config) || is_opencode_code_input(input));
-    let request_model_name = if opencode_style {
-        model_name.to_ascii_lowercase()
-    } else {
-        model_name
-    };
+    let request_model_name = model_name;
+    let model_feature_name = request_model_name.to_ascii_lowercase();
     let mut body = json!({
         "model": request_model_name
     });
@@ -609,7 +606,7 @@ fn build_chat_completion_body(
         body["stream_options"] = json!({
             "include_usage": true
         });
-        if let Some(reasoning_effort) = opencode_reasoning_effort(&request_model_name) {
+        if let Some(reasoning_effort) = opencode_reasoning_effort(&model_feature_name) {
             body["reasoning_effort"] = json!(reasoning_effort);
         }
     } else {
@@ -3290,6 +3287,36 @@ mod tests {
             request.body["stream_options"],
             json!({"include_usage": true})
         );
+    }
+
+    #[test]
+    fn opencode_style_preserves_request_model_case() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "GLM-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "GLM-5.1".to_string(),
+            &json!({
+                "task": "edit the code",
+                "allowed_tools": ["read", "edit", "bash"]
+            }),
+        )
+        .unwrap();
+
+        assert_eq!(request.body["model"], json!("GLM-5.1"));
     }
 
     #[test]

@@ -65,10 +65,18 @@ cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-
 `air` now auto-loads a repository-root `.env`. Put provider settings there:
 
 ```dotenv
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-OPENAI_MODEL=GLM-5.1
+AIR_MODEL_PROFILE=glm
+
+AIR_MODEL_GLM_API_KEY=...
+AIR_MODEL_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+AIR_MODEL_GLM_MODEL=GLM-5.1
+
+AIR_MODEL_LOCAL_API_KEY=change-me
+AIR_MODEL_LOCAL_BASE_URL=http://localhost:8080/v1
+AIR_MODEL_LOCAL_MODEL=gpt-5.3-codex:high
 ```
+
+Switch providers by changing only `AIR_MODEL_PROFILE` to `glm` or `local`. If you want to set `OPENAI_*` directly, leave `AIR_MODEL_PROFILE` unset.
 
 The profile packages a RunPlan, module store, input, model config, and tool config. It is the recommended shape for user-facing AIR apps.
 
@@ -82,7 +90,7 @@ The repository intentionally keeps examples focused:
 | `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, and parallel execution |
 | `examples/code-agent/` | Bounded coding workflow with exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
 
-The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json` and defaults to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`.
+The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json` and defaults to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. `AIR_MODEL_PROFILE` fills those variables from the selected profile at startup.
 
 ## What An Agent Looks Like
 

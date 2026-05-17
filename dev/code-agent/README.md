@@ -8,9 +8,13 @@ Run the same task through OpenCode and AIR, capture provider HTTP request/respon
 
 ```bash
 python3 dev/code-agent/compare.py run \
-  --name todo-refactor \
-  --opencode-model zhipuai-coding-plan/glm-5.1
+  --name todo-refactor
 ```
+
+The harness reads the repository `.env` for AIR provider settings. Use
+`AIR_MODEL_PROFILE=glm` or `AIR_MODEL_PROFILE=local` to switch the comparison.
+AIR and OpenCode both use the selected `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and
+`OPENAI_MODEL`; OpenCode receives a temporary compare-only config for that run.
 
 The harness runs OpenCode first, then AIR. When a previous OpenCode capture is available, use `replay-air` to reuse it and avoid spending model calls on both systems again:
 

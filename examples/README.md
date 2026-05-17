@@ -65,7 +65,11 @@ cargo run -p air-cli -- run-plan examples/context-compact/context-compact.air-pl
 `bigmodel-openai-compatible.json` is a sample OpenAI-compatible model config. `air` auto-loads a repository-root `.env` before real model calls:
 
 ```dotenv
-OPENAI_API_KEY=...
-OPENAI_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-OPENAI_MODEL=GLM-5.1
+AIR_MODEL_PROFILE=glm
+AIR_MODEL_GLM_API_KEY=...
+AIR_MODEL_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
+AIR_MODEL_GLM_MODEL=GLM-5.1
 ```
+
+For a local OpenAI-compatible proxy, set `AIR_MODEL_PROFILE=local` and define
+`AIR_MODEL_LOCAL_API_KEY`, `AIR_MODEL_LOCAL_BASE_URL`, and `AIR_MODEL_LOCAL_MODEL`.

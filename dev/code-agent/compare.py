@@ -45,6 +45,7 @@ DEFAULT_MODIFIED_OPENCODE = Path("/Users/hwang/work/opencode/packages/opencode/s
 DEFAULT_BUN = Path("/Users/hwang/.bun/bin/bun")
 ACTION_TOOLS = {"apply_patch", "edit", "write"}
 MAX_REPEATED_IDENTICAL_TOOL_ROUTES = 5
+MODEL_PROFILE_ENV = "AIR_MODEL_PROFILE"
 
 
 def main() -> None:
@@ -75,7 +76,6 @@ def main() -> None:
             "the modified local checkout when available."
         ),
     )
-    run_parser.add_argument("--opencode-model", default=None)
     run_parser.add_argument("--opencode-agent", default="build")
     run_parser.add_argument(
         "--reuse-opencode-from",
@@ -589,71 +589,32 @@ def log_step(message: str) -> None:
     print(f"[compare-code-agent-io] {message}", flush=True)
 
 
-def provider_from_opencode_model(model: str | None) -> str | None:
-    if not model or "/" not in model:
-        return None
-    provider_id = model.split("/", 1)[0].strip()
-    return provider_id or None
-
-
-def model_id_from_opencode_model(model: str | None) -> str | None:
-    if not model or "/" not in model:
-        return None
-    model_id = model.split("/", 1)[1].strip()
-    return model_id or None
-
-
-def merge_opencode_config_content(
-    existing: str | None,
-    base_url: str,
-    api_key: str | None,
-    opencode_model: str | None = None,
-) -> str:
-    config = {}
-    if existing:
-        try:
-            parsed = json.loads(existing)
-            if isinstance(parsed, dict):
-                config = parsed
-        except json.JSONDecodeError:
-            pass
-    provider = config.setdefault("provider", {})
-    if not isinstance(provider, dict):
-        provider = {}
-        config["provider"] = provider
-
-    active_provider = provider_from_opencode_model(opencode_model) or provider_from_opencode_model(
-        str(config.get("model") or "")
-    )
-    if active_provider is None and len(provider) == 1:
-        active_provider = next(iter(provider))
-    if active_provider is None:
-        active_provider = "zhipuai-coding-plan"
-
-    entry = provider.setdefault(active_provider, {})
-    if not isinstance(entry, dict):
-        entry = {}
-        provider[active_provider] = entry
-    options = entry.setdefault("options", {})
-    if not isinstance(options, dict):
-        options = {}
-        entry["options"] = options
-    options["baseURL"] = base_url
-    options.setdefault("apiKey", api_key or "change-me")
-    model_id = model_id_from_opencode_model(opencode_model)
-    if model_id:
-        models = entry.setdefault("models", {})
-        if not isinstance(models, dict):
-            models = {}
-            entry["models"] = models
-        model_entry = models.setdefault(model_id, {})
-        if not isinstance(model_entry, dict):
-            model_entry = {}
-            models[model_id] = model_entry
-        model_entry.setdefault("id", model_id)
-        model_entry.setdefault("name", model_id)
-        model_entry.setdefault("tool_call", True)
-        model_entry.setdefault("limit", {"context": 200000, "output": 32000})
+def build_opencode_compare_config(base_url: str, api_key: str | None, model: str) -> str:
+    provider_id = "air-compare"
+    model_ref = f"{provider_id}/{model}"
+    config = {
+        "model": model_ref,
+        "small_model": model_ref,
+        "provider": {
+            provider_id: {
+                "options": {
+                    "baseURL": base_url,
+                    "apiKey": api_key or "change-me",
+                },
+                "models": {
+                    model: {
+                        "id": model,
+                        "name": model,
+                        "tool_call": True,
+                        "limit": {
+                            "context": 200000,
+                            "output": 32000,
+                        },
+                    }
+                },
+            }
+        },
+    }
     return json.dumps(config, separators=(",", ":"), ensure_ascii=False)
 
 
@@ -1050,11 +1011,13 @@ def run_opencode_agent(
         opencode_proxy.start()
     try:
         if opencode_proxy:
-            opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
-                opencode_env.get("OPENCODE_CONFIG_CONTENT"),
+            model = (opencode_env.get("OPENAI_MODEL") or "").strip()
+            if not model:
+                raise SystemExit("OPENAI_MODEL is required when comparing AIR and OpenCode")
+            opencode_env["OPENCODE_CONFIG_CONTENT"] = build_opencode_compare_config(
                 opencode_proxy.base_url,
                 opencode_env.get("OPENAI_API_KEY"),
-                args.opencode_model,
+                model,
             )
         opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)
         opencode_env["OPENCODE_PROJECT_DIR"] = str(opencode_workdir)
@@ -1067,8 +1030,6 @@ def run_opencode_agent(
             "--agent",
             args.opencode_agent,
         ]
-        if args.opencode_model:
-            opencode_cmd.extend(["--model", args.opencode_model])
         opencode_cmd.append(args.task)
         returncode = run_checked(
             opencode_cmd,
@@ -2179,7 +2140,29 @@ def load_env_file(path: Path) -> dict[str, str]:
 def load_env(path: Path) -> dict[str, str]:
     result = load_env_file(path)
     result.update(os.environ)
+    apply_model_profile_env(result)
     return result
+
+
+def apply_model_profile_env(env: dict[str, str]) -> None:
+    profile = normalize_model_profile_key(env.get(MODEL_PROFILE_ENV, ""))
+    if not profile:
+        return
+    for target, suffix in [
+        ("OPENAI_API_KEY", "API_KEY"),
+        ("OPENAI_BASE_URL", "BASE_URL"),
+        ("OPENAI_MODEL", "MODEL"),
+    ]:
+        value = env.get(f"AIR_MODEL_{profile}_{suffix}", "").strip()
+        if value:
+            env[target] = value
+
+
+def normalize_model_profile_key(profile: str) -> str:
+    normalized = "".join(
+        character.upper() if character.isalnum() else "_" for character in profile.strip()
+    )
+    return normalized.strip("_")
 
 
 def repo_root() -> Path:

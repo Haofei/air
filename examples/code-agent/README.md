@@ -69,9 +69,7 @@ Use the comparison harness to run the same task through AIR and OpenCode, then
 diff the actual OpenAI-compatible HTTP request body:
 
 ```bash
-python3 dev/code-agent/compare.py run \
-  --name todo-refactor \
-  --opencode-model zhipuai-coding-plan/glm-5.1
+python3 dev/code-agent/compare.py run --name todo-refactor
 ```
 
 By default the harness uses the modified local OpenCode checkout at
@@ -81,10 +79,11 @@ OpenCode command must support `OPENCODE_RAW_IO_DIR`; the harness fails if no
 `*provider-request.json` files are produced.
 
 When `OPENAI_BASE_URL` is set, the harness starts local forwarding proxies for
-both AIR and OpenCode, points each client at its proxy, records the final POST
-JSON body under `air-http/` and `opencode-http/`, then forwards the request to
-the real provider. Authorization headers are redacted; request bodies are kept
-intact for shape comparison.
+both AIR and OpenCode, points each client at its proxy, and gives both clients
+the same `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. It records the
+final POST JSON body under `air-http/` and `opencode-http/`, then forwards the
+request to the real provider. Authorization headers are redacted; request bodies
+are kept intact for shape comparison.
 
 AIR runs in the current repository by default, while OpenCode always runs in an
 isolated copy for comparison. The harness snapshots AIR before it runs and commits
