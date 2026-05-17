@@ -43,6 +43,8 @@ use command_config::{
 use command_run::{call_bash_tool, call_command_run_tool};
 mod subagent_tools;
 use subagent_tools::{call_subagent_tool, SubagentProfileConfig};
+mod skill_tools;
+use skill_tools::call_skill_tool;
 mod playwright;
 use playwright::{
     call_playwright_page_audit_tool, call_playwright_search_tool, PlaywrightPageAuditConfig,
@@ -447,6 +449,15 @@ enum ToolConfig {
         #[serde(default)]
         capability: Option<String>,
     },
+    Skill {
+        #[serde(default)]
+        capability: Option<String>,
+
+        root_dir: PathBuf,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
     Subagent {
         #[serde(default)]
         capability: Option<String>,
@@ -522,6 +533,7 @@ impl ToolConfig {
             | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::ArtifactValidate { capability, .. }
             | ToolConfig::TodoWrite { capability }
+            | ToolConfig::Skill { capability, .. }
             | ToolConfig::Subagent { capability, .. }
             | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
@@ -1130,6 +1142,16 @@ impl ToolProvider for ConfigTools {
                 max_ids.unwrap_or(512),
             ),
             ToolConfig::TodoWrite { capability: _ } => call_todowrite_tool(name, input),
+            ToolConfig::Skill {
+                capability: _,
+                root_dir,
+                max_bytes,
+            } => call_skill_tool(
+                name,
+                input,
+                &resolve_config_path(&self.workspace_dir, &root_dir),
+                max_bytes.unwrap_or(64 * 1024),
+            ),
             ToolConfig::Subagent {
                 capability: _,
                 subagents,
@@ -1228,6 +1250,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::ContextMeasure { capability, .. }
             | ToolConfig::ArtifactValidate { capability, .. }
             | ToolConfig::TodoWrite { capability }
+            | ToolConfig::Skill { capability, .. }
             | ToolConfig::Subagent { capability, .. }
             | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),

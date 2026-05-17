@@ -1,0 +1,26 @@
+schema: air.skill.v1
+id: tdd-workflow
+version: 0.1.0
+description: Imported AIR skill wrapper for https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow
+source:
+  original: https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow
+  type: imported
+instructions:
+  files:
+  - SKILL.md
+capabilities:
+  allow:
+  - file.read
+  - code.read
+  deny:
+  - file.write
+  - shell.unrestricted
+  - network
+  - secrets.read
+tools:
+  config: null
+workflow:
+  profile: ../../code-agent/edit.air-profile.yaml
+verification:
+  mode: instruction_only
+  scripts: disabled

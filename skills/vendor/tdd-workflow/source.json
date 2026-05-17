@@ -1,0 +1,6 @@
+{
+  "imported_at_unix_ms": 1779048712960,
+  "manifest": "skills/vendor/tdd-workflow/air-skill.yaml",
+  "sha256": "sha256:154a603ee41fa06c9b44c821a471e4ecaa6df981c2afc1b91ad3e70950cf6243",
+  "source": "https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow"
+}

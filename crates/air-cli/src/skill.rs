@@ -6,8 +6,9 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -197,8 +198,9 @@ pub(crate) fn run_skill(options: SkillRunOptions) -> Result<()> {
     let skill = resolve_skill(&options.reference)?;
     validate_resolved_skill(&skill)?;
     let metadata = skill_metadata(&skill)?;
+    let task = skill_run_task(&skill.manifest.id, &options.task);
     let outputs = run_code_agent(CodeOptions {
-        task: options.task,
+        task,
         skill: Some(metadata.clone()),
         profile: Some(
             options
@@ -219,6 +221,14 @@ pub(crate) fn run_skill(options: SkillRunOptions) -> Result<()> {
         replay_from: options.replay_from,
     })?;
     print_json(&outputs)
+}
+
+fn skill_run_task(skill_id: &str, task: &str) -> String {
+    if skill_id == "code-agent" {
+        task.to_string()
+    } else {
+        format!("Use the `{skill_id}` skill before acting.\n\nTask: {task}")
+    }
 }
 
 pub(crate) fn audit_skill(reference: &str, write: bool) -> Result<()> {
@@ -294,16 +304,8 @@ fn discover_skills() -> Result<Vec<ResolvedSkill>> {
         if !root.exists() {
             continue;
         }
-        for entry in fs::read_dir(&root).with_context(|| format!("read {}", root.display()))? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let manifest = entry.path().join(SKILL_MANIFEST);
-            if manifest.exists() {
-                skills.push(read_skill_manifest(&manifest)?);
-            }
-        }
+        collect_skill_manifests_from_dir(&root, &mut skills)?;
+        collect_skill_manifests_from_dir(&root.join("vendor"), &mut skills)?;
     }
     let mut seen = BTreeSet::new();
     skills.retain(|skill| seen.insert(skill.manifest.id.clone()));
@@ -311,11 +313,32 @@ fn discover_skills() -> Result<Vec<ResolvedSkill>> {
     Ok(skills)
 }
 
+fn collect_skill_manifests_from_dir(root: &Path, skills: &mut Vec<ResolvedSkill>) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let manifest = entry.path().join(SKILL_MANIFEST);
+        if manifest.exists() {
+            skills.push(read_skill_manifest(&manifest)?);
+        }
+    }
+    Ok(())
+}
+
 fn find_skill_manifest_by_id(skill_id: &str) -> Result<PathBuf> {
     for root in skill_roots() {
-        let candidate = root.join(skill_id).join(SKILL_MANIFEST);
-        if candidate.exists() {
-            return Ok(candidate);
+        for candidate in [
+            root.join(skill_id).join(SKILL_MANIFEST),
+            root.join("vendor").join(skill_id).join(SKILL_MANIFEST),
+        ] {
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
     }
     bail!("skill manifest not found")
@@ -580,6 +603,25 @@ fn import_source_to_temp(source: &str, temp_dir: &Path) -> Result<PathBuf> {
         }
         bail!("skill import source must be a directory, git URL, or zip: {source}");
     }
+    if let Some(github_tree) = parse_github_tree_url(source) {
+        let destination = temp_dir.join("repo");
+        run_status(
+            Command::new("git")
+                .args(["clone", "--depth", "1", "--branch"])
+                .arg(&github_tree.branch)
+                .arg(&github_tree.repo_url)
+                .arg(&destination),
+            "git clone skill source",
+        )?;
+        let skill_dir = destination.join(&github_tree.subpath);
+        if !skill_dir.exists() {
+            bail!(
+                "GitHub tree skill path does not exist after clone: {}",
+                github_tree.subpath.display()
+            );
+        }
+        return Ok(skill_dir);
+    }
     if source.ends_with(".git") || source.contains("github.com") {
         let destination = temp_dir.join("repo");
         run_status(
@@ -601,6 +643,36 @@ fn import_source_to_temp(source: &str, temp_dir: &Path) -> Result<PathBuf> {
         return unzip_to_temp(&zip_path, temp_dir);
     }
     bail!("skill import source does not exist: {source}")
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitHubTreeSource {
+    repo_url: String,
+    branch: String,
+    subpath: PathBuf,
+}
+
+fn parse_github_tree_url(source: &str) -> Option<GitHubTreeSource> {
+    let clean = source.split(['?', '#']).next()?.trim_end_matches('/');
+    let path = clean
+        .strip_prefix("https://github.com/")
+        .or_else(|| clean.strip_prefix("http://github.com/"))?;
+    let segments = path.split('/').collect::<Vec<_>>();
+    if segments.len() < 5 || segments[2] != "tree" {
+        return None;
+    }
+    let owner = segments[0];
+    let repo = segments[1].trim_end_matches(".git");
+    let branch = segments[3].to_string();
+    let mut subpath = PathBuf::new();
+    for segment in &segments[4..] {
+        subpath.push(segment);
+    }
+    Some(GitHubTreeSource {
+        repo_url: format!("https://github.com/{owner}/{repo}.git"),
+        branch,
+        subpath,
+    })
 }
 
 fn unzip_to_temp(zip_path: &Path, temp_dir: &Path) -> Result<PathBuf> {
@@ -641,7 +713,10 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
         .to_string();
     let description = format!("Imported AIR skill wrapper for {source}");
     let default_profile = resolve_skill("code-agent")
-        .map(|skill| skill.profile_path())
+        .map(|skill| {
+            let profile = skill.profile_path();
+            relative_path_from(out, &profile).unwrap_or_else(|| absolutize_path(&profile))
+        })
         .unwrap_or_else(|_| {
             std::env::current_dir()
                 .unwrap_or_else(|_| PathBuf::from("."))
@@ -800,6 +875,57 @@ fn resolve_skill_path(base: &Path, path: &Path) -> PathBuf {
     }
 }
 
+fn absolutize_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .unwrap_or_else(|_| PathBuf::from("."))
+            .join(path)
+    }
+}
+
+fn relative_path_from(base_dir: &Path, target: &Path) -> Option<PathBuf> {
+    let base = absolutize_path(base_dir).canonicalize().ok()?;
+    let target = absolutize_path(target).canonicalize().ok()?;
+    let base_components = path_components(&base)?;
+    let target_components = path_components(&target)?;
+    let common = base_components
+        .iter()
+        .zip(target_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for _ in common..base_components.len() {
+        relative.push("..");
+    }
+    for component in target_components.iter().skip(common) {
+        relative.push(component);
+    }
+    if relative.as_os_str().is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(relative)
+    }
+}
+
+fn path_components(path: &Path) -> Option<Vec<OsString>> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => components.push(prefix.as_os_str().to_os_string()),
+            Component::RootDir => components.push(OsString::from(std::path::MAIN_SEPARATOR_STR)),
+            Component::Normal(part) => components.push(part.to_os_string()),
+            Component::CurDir => {}
+            Component::ParentDir => return None,
+        }
+    }
+    Some(components)
+}
+
 fn path_ref(path: &Path) -> String {
     path_ref_to_input_string(path)
 }
@@ -854,5 +980,25 @@ instructions:
         let audit = audit_resolved_skill(&skill).unwrap();
         assert_eq!(audit.risk, "critical");
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn external_skill_run_task_prompts_model_to_load_skill() {
+        assert_eq!(skill_run_task("code-agent", "fix bug"), "fix bug");
+        assert!(skill_run_task("tdd-workflow", "fix bug").contains("Use the `tdd-workflow` skill"));
+    }
+
+    #[test]
+    fn parses_github_tree_skill_url() {
+        let parsed = parse_github_tree_url(
+            "https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow",
+        )
+        .unwrap();
+        assert_eq!(
+            parsed.repo_url,
+            "https://github.com/affaan-m/everything-claude-code.git"
+        );
+        assert_eq!(parsed.branch, "main");
+        assert_eq!(parsed.subpath, PathBuf::from("skills/tdd-workflow"));
     }
 }

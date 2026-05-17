@@ -508,6 +508,14 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                 validate_positive_usize(path, &format!("tools.{name}.max_ids"), *max_ids)?;
             }
             ToolConfig::TodoWrite { .. } => {}
+            ToolConfig::Skill {
+                root_dir,
+                max_bytes,
+                ..
+            } => {
+                validate_non_empty_path(path, &format!("tools.{name}.root_dir"), root_dir)?;
+                validate_max_bytes(path, name, *max_bytes)?;
+            }
             ToolConfig::Subagent { subagents, .. } => {
                 validate_subagent_profiles(name, subagents, path)?
             }

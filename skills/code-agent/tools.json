@@ -102,8 +102,10 @@
       "capability": "code.read"
     },
     "skill": {
-      "kind": "local_reflection",
-      "capability": "code.read"
+      "kind": "skill",
+      "capability": "code.read",
+      "root_dir": "../..",
+      "max_bytes": 65536
     }
   },
   "approvals": {

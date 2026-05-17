@@ -3310,6 +3310,68 @@ fn code_agent_self_tools_validate_project_paths() {
 }
 
 #[test]
+fn skill_tool_lists_and_loads_installed_skills() {
+    let dir = temp_dir("air-tools-skill-tool");
+    let skill_dir = dir.join("skills/vendor/tdd-workflow");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("air-skill.yaml"),
+        r#"
+schema: air.skill.v1
+id: tdd-workflow
+version: 0.1.0
+description: TDD workflow
+instructions:
+  files: [SKILL.md]
+workflow:
+  profile: /tmp/unused-profile.yaml
+"#,
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("SKILL.md"),
+        "# TDD\nWrite failing tests before production code.\n",
+    )
+    .unwrap();
+    fs::write(
+        skill_dir.join("audit.json"),
+        r#"{"schema":"air.skill_audit.v1","skill_id":"tdd-workflow","risk":"low","allowed_to_run":true,"findings":[]}"#,
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "skill": {
+                    "kind": "skill",
+                    "capability": "code.read",
+                    "root_dir": ".",
+                    "max_bytes": 4096
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let list = tools.call_tool("skill", &json!({})).unwrap();
+    assert_eq!(list["skills"][0]["id"], json!("tdd-workflow"));
+
+    let loaded = tools
+        .call_tool("skill", &json!({"name": "tdd-workflow"}))
+        .unwrap();
+    assert_eq!(loaded["skill"]["id"], json!("tdd-workflow"));
+    assert_eq!(loaded["skill"]["audit_risk"], json!("low"));
+    assert!(loaded["instructions"][0]["content"]
+        .as_str()
+        .unwrap()
+        .contains("Write failing tests"));
+    assert_eq!(loaded["artifacts"][0]["kind"], json!("skill_instruction"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn subagent_tool_runs_isolated_command_with_input_file() {
     let dir = temp_dir("air-tools-subagent");
     std::env::set_var("AIR_TEST_SUBAGENT_ENV", "ok");

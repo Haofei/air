@@ -1317,7 +1317,7 @@ Note: LSP servers must be configured for the file type. If no server is availabl
 }
 
 fn opencode_skill_description() -> String {
-    "Load a skill to get detailed instructions for a specific task. No skills are currently available."
+    "Load an installed AIR skill by name to get task-specific instructions. Use this when a task asks for a known workflow, methodology, or imported skill such as TDD."
         .to_string()
 }
 
@@ -1761,9 +1761,8 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "name": {"description": "The skill to load. No skills are currently available.", "type": "string"}
+                    "name": {"description": "The AIR skill id to load. Omit this field to list available skills.", "type": "string"}
                 },
-                "required": ["name"],
                 "additionalProperties": false
             });
         }

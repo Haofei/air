@@ -11,6 +11,7 @@ air-runtime = { path = "../air-runtime" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml.workspace = true
 reqwest.workspace = true
 regex.workspace = true
 globset.workspace = true

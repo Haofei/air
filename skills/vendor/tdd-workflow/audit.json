@@ -1,0 +1,7 @@
+{
+  "schema": "air.skill_audit.v1",
+  "skill_id": "tdd-workflow",
+  "risk": "low",
+  "allowed_to_run": true,
+  "findings": []
+}
