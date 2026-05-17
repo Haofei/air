@@ -547,6 +547,7 @@ impl Verifier {
                 output,
                 timeout_seconds,
                 max_calls,
+                allowed_tools,
                 retry,
                 ..
             } => {
@@ -565,6 +566,23 @@ impl Verifier {
                             "tool_batch_dispatch action in rule {rule_id} max_calls must be at least 1"
                         ),
                     );
+                }
+                for tool in allowed_tools {
+                    if tool.trim().is_empty() {
+                        self.error(
+                            "AIR098",
+                            format!(
+                                "tool_batch_dispatch action in rule {rule_id} allowed_tools contains an empty tool name"
+                            ),
+                        );
+                    } else if !tools_by_name.contains_key(tool.as_str()) {
+                        self.error(
+                            "AIR099",
+                            format!(
+                                "tool_batch_dispatch action in rule {rule_id} allowed_tools references unknown tool {tool}"
+                            ),
+                        );
+                    }
                 }
                 self.verify_input_spec(rule_id, "tool_batch_dispatch input", input, module);
                 self.verify_control_field_write(rule_id, "tool_batch_dispatch output", output);

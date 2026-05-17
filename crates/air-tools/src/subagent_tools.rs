@@ -109,6 +109,7 @@ pub(super) fn call_subagent_tool(
             timeout_seconds: options.timeout_seconds,
             max_bytes: options.max_bytes,
             truncation_direction: options.truncation_direction,
+            workspace_snapshot_ignore: Vec::new(),
         },
     )?;
     persist_subagent_output(name, &run_paths.output_file, &output)?;

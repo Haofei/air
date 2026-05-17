@@ -41,7 +41,7 @@ policy:
 state:
   phase:
     type: enum
-    enum: [init, choose, verify, act, post_act, summarize, done]
+    enum: [init, choose, verify, act, verify_act, post_act, summarize, done]
   observations:
     type: array
     items: object
@@ -227,7 +227,7 @@ workflow:
             max_attempts: 4
         - kind: set
           values:
-            phase: act
+            phase: verify_act
 
     - id: act
       when: phase == "act" && decision.complete == false
@@ -237,6 +237,33 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 64
+          timeout_seconds: 600
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: tool_result
+              assistant:
+                ref: decision
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: post_act
+
+    - id: verify-act
+      when: phase == "verify_act" && decision.complete == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            path: decision.tool_calls
+          output: observation
+          max_calls: 64
+          allowed_tools: [bash]
           timeout_seconds: 600
           on_error: observe
         - kind: append
@@ -281,6 +308,21 @@ workflow:
 
     - id: complete-needs-verification
       when: phase == "act" && decision.complete == true && verification_status != "passed"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_required
+              result:
+                literal: Run an appropriate bash verification command before finishing.
+        - kind: set
+          values:
+            phase: verify
+
+    - id: verify-complete-needs-command
+      when: phase == "verify_act" && decision.complete == true
       actions:
         - kind: append
           target: observations

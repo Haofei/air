@@ -35,7 +35,10 @@ use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
 mod rust_lsp_tools;
 use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
 mod command_run;
-use command_config::{CommandParameterRule, CommandRunOptions, TruncationDirection};
+use command_config::{
+    workspace_snapshot_ignore_patterns, CommandParameterRule, CommandRunOptions,
+    TruncationDirection,
+};
 use command_run::{call_bash_tool, call_command_run_tool};
 mod subagent_tools;
 use subagent_tools::{call_subagent_tool, SubagentProfileConfig};
@@ -463,6 +466,9 @@ enum ToolConfig {
 
         #[serde(default)]
         truncation_direction: Option<TruncationDirection>,
+
+        #[serde(default)]
+        workspace_snapshot_ignore: Vec<String>,
     },
     CommandRun {
         #[serde(default)]
@@ -483,6 +489,9 @@ enum ToolConfig {
 
         #[serde(default)]
         truncation_direction: Option<TruncationDirection>,
+
+        #[serde(default)]
+        workspace_snapshot_ignore: Vec<String>,
     },
 }
 
@@ -1130,6 +1139,7 @@ impl ToolProvider for ConfigTools {
                 timeout_seconds,
                 max_bytes,
                 truncation_direction,
+                workspace_snapshot_ignore,
             } => {
                 let output = call_bash_tool(
                     name,
@@ -1140,6 +1150,9 @@ impl ToolProvider for ConfigTools {
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         truncation_direction: truncation_direction
                             .unwrap_or(TruncationDirection::Tail),
+                        workspace_snapshot_ignore: workspace_snapshot_ignore_patterns(
+                            &workspace_snapshot_ignore,
+                        ),
                     },
                 )?;
                 if output
@@ -1159,6 +1172,7 @@ impl ToolProvider for ConfigTools {
                 timeout_seconds,
                 max_bytes,
                 truncation_direction,
+                workspace_snapshot_ignore,
             } => {
                 let output = call_command_run_tool(
                     name,
@@ -1171,6 +1185,9 @@ impl ToolProvider for ConfigTools {
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         truncation_direction: truncation_direction
                             .unwrap_or(TruncationDirection::Head),
+                        workspace_snapshot_ignore: workspace_snapshot_ignore_patterns(
+                            &workspace_snapshot_ignore,
+                        ),
                     },
                 )?;
                 if output

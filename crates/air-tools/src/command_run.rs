@@ -10,6 +10,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use air_runtime::RuntimeError;
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde_json::{json, Value};
 
 use super::bash_classify::{
@@ -36,9 +37,9 @@ struct CommandWorkspaceSnapshot {
 }
 
 impl CommandWorkspaceSnapshot {
-    fn capture(root: &Path) -> Self {
+    fn capture(root: &Path, ignore: &GlobSet) -> Self {
         let mut snapshot = Self::default();
-        collect_workspace_files(root, root, &mut snapshot.files);
+        collect_workspace_files(root, root, ignore, &mut snapshot.files);
         snapshot
     }
 
@@ -88,7 +89,7 @@ pub(super) fn call_command_run_tool(
     let mut argv = Vec::with_capacity(command.len());
     argv.push(program.clone());
     argv.extend(rendered_args.iter().cloned());
-    run_command_argv_with_workspace_change(name, command_name, &cwd, &argv, options)
+    run_command_argv_with_workspace_change(name, command_name, &cwd, &cwd, &argv, options)
 }
 
 pub(super) fn call_bash_tool(
@@ -141,14 +142,15 @@ pub(super) fn call_bash_tool(
         }
         workdir
     } else {
-        base_cwd
+        base_cwd.clone()
     };
     let argv = vec![
         "bash".to_string(),
         "-lc".to_string(),
         format!("set -o pipefail; {command}"),
     ];
-    let mut output = run_command_argv_with_workspace_change(name, "bash", &cwd, &argv, options)?;
+    let mut output =
+        run_command_argv_with_workspace_change(name, "bash", &cwd, &base_cwd, &argv, options)?;
     if let Some(object) = output.as_object_mut() {
         let description = input.get("description").and_then(Value::as_str);
         let verification = is_verification_bash_command(command, description);
@@ -174,12 +176,15 @@ fn run_command_argv_with_workspace_change(
     name: &str,
     command_name: &str,
     cwd: &Path,
+    snapshot_root: &Path,
     argv: &[String],
     options: CommandRunOptions,
 ) -> Result<Value, RuntimeError> {
-    let before = CommandWorkspaceSnapshot::capture(cwd);
+    let ignore = workspace_snapshot_ignore_set(&options.workspace_snapshot_ignore)?;
+    let snapshot_root = canonicalize_tool_path(name, "snapshot_root", snapshot_root)?;
+    let before = CommandWorkspaceSnapshot::capture(&snapshot_root, &ignore);
     let mut output = run_command_argv(name, command_name, cwd, argv, options)?;
-    let after = CommandWorkspaceSnapshot::capture(cwd);
+    let after = CommandWorkspaceSnapshot::capture(&snapshot_root, &ignore);
     let changed_files = before.changed_files(&after);
     if let Some(object) = output.as_object_mut() {
         object.insert(
@@ -388,6 +393,7 @@ fn sanitize_command_output_filename(command_name: &str) -> String {
 fn collect_workspace_files(
     root: &Path,
     dir: &Path,
+    ignore: &GlobSet,
     files: &mut BTreeMap<String, CommandWorkspaceFile>,
 ) {
     let Ok(entries) = fs::read_dir(dir) else {
@@ -398,14 +404,14 @@ fn collect_workspace_files(
         let Ok(relative) = path.strip_prefix(root) else {
             continue;
         };
-        if ignored_workspace_snapshot_path(relative) {
+        if ignore.is_match(relative) {
             continue;
         }
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
         if metadata.is_dir() {
-            collect_workspace_files(root, &path, files);
+            collect_workspace_files(root, &path, ignore, files);
             continue;
         }
         if !metadata.is_file() {
@@ -428,10 +434,19 @@ fn collect_workspace_files(
     }
 }
 
-fn ignored_workspace_snapshot_path(path: &Path) -> bool {
-    path.components().next().is_some_and(|component| {
-        let value = component.as_os_str().to_string_lossy();
-        matches!(value.as_ref(), ".air" | ".git" | "target")
+fn workspace_snapshot_ignore_set(patterns: &[String]) -> Result<GlobSet, RuntimeError> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        builder.add(Glob::new(pattern).map_err(|error| {
+            RuntimeError::Provider(format!(
+                "invalid workspace_snapshot_ignore glob {pattern:?}: {error}"
+            ))
+        })?);
+    }
+    builder.build().map_err(|error| {
+        RuntimeError::Provider(format!(
+            "invalid workspace_snapshot_ignore glob set: {error}"
+        ))
     })
 }
 

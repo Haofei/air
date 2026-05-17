@@ -150,6 +150,12 @@ pub enum RuntimeError {
     #[error("tool_batch_dispatch max_calls exceeded: limit={limit} attempted={attempted}")]
     ToolBatchDispatchLimitExceeded { limit: u32, attempted: u32 },
 
+    #[error("tool_batch_dispatch tool {tool} is not in allowed_tools {allowed_tools:?}")]
+    ToolNotAllowedByAction {
+        tool: String,
+        allowed_tools: Vec<String>,
+    },
+
     #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
     ModelCallLimitExceeded { limit: u32, attempted: u32 },
 
@@ -934,6 +940,7 @@ where
                 output,
                 timeout_seconds,
                 max_calls,
+                allowed_tools,
                 retry,
                 on_error,
             } => {
@@ -945,6 +952,7 @@ where
                         output,
                         timeout_seconds: *timeout_seconds,
                         max_calls: *max_calls,
+                        allowed_tools,
                         retry,
                         on_error: *on_error,
                     },
@@ -1189,6 +1197,7 @@ where
             output,
             timeout_seconds,
             max_calls,
+            allowed_tools,
             retry,
             on_error,
         } = batch;
@@ -1251,6 +1260,32 @@ where
                     return Err(error);
                 }
             };
+            if let Err(error) = validate_tool_batch_allowlist(&tool, allowed_tools) {
+                let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
+                insert_batch_item_meta(&mut meta, index);
+                if let Value::Object(object) = &mut meta {
+                    object.insert(
+                        "allowed_tools".to_string(),
+                        Value::Array(allowed_tools.iter().cloned().map(Value::String).collect()),
+                    );
+                }
+                context.push_event_with_meta(
+                    "tool_batch_dispatch_item",
+                    Some(tool_input.clone()),
+                    None,
+                    Some(meta),
+                    Err(error.to_string()),
+                );
+                if on_error == ToolErrorMode::Observe {
+                    results.push(tool_batch_error_observation_for_runtime_error(
+                        &tool,
+                        &tool_input,
+                        &error,
+                    ));
+                    continue;
+                }
+                return Err(error);
+            }
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
                 insert_batch_item_meta(&mut meta, index);
@@ -2141,6 +2176,16 @@ fn validate_tool_capability<T: ToolProvider>(
     Ok(())
 }
 
+fn validate_tool_batch_allowlist(tool: &str, allowed_tools: &[String]) -> Result<(), RuntimeError> {
+    if allowed_tools.is_empty() || allowed_tools.iter().any(|allowed| allowed == tool) {
+        return Ok(());
+    }
+    Err(RuntimeError::ToolNotAllowedByAction {
+        tool: tool.to_string(),
+        allowed_tools: allowed_tools.to_vec(),
+    })
+}
+
 fn resolve_tool_selection(selection: &Value) -> Result<(String, Value), RuntimeError> {
     let Some(object) = selection.as_object() else {
         return Err(RuntimeError::SchemaViolation(
@@ -2551,6 +2596,7 @@ struct ToolBatchExecution<'a> {
     output: &'a str,
     timeout_seconds: u64,
     max_calls: u32,
+    allowed_tools: &'a [String],
     retry: &'a Option<RetryPolicy>,
     on_error: ToolErrorMode,
 }

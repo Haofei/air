@@ -722,6 +722,93 @@ fn dispatches_bounded_model_selected_tool_batch() {
 }
 
 #[test]
+fn tool_batch_dispatch_allowed_tools_rejects_disallowed_model_tool() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch { allowed_tools, .. } =
+        workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *allowed_tools = vec!["docs.other".to_string()];
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([{"tool": "docs.search", "input": {"query": "alpha"}}]),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::ToolNotAllowedByAction { tool, allowed_tools }
+            if tool == "docs.search" && allowed_tools == vec!["docs.other".to_string()]
+    ));
+    assert_eq!(vm.tools.calls, 0);
+}
+
+#[test]
+fn tool_batch_dispatch_allowed_tools_can_observe_disallowed_model_tool() {
+    let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
+    module.outputs.insert(
+        "observations".to_string(),
+        air_core::TypeSpec::Detailed(air_core::DetailedType {
+            kind: air_core::DetailedTypeKind::Array,
+            additional_properties: true,
+            required: Vec::new(),
+            properties: Default::default(),
+            items: Some(Box::new(air_core::TypeSpec::Shorthand(
+                air_core::PrimitiveType::Object,
+            ))),
+            min_items: None,
+            max_items: None,
+            enum_values: Vec::new(),
+        }),
+    );
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::ToolBatchDispatch {
+        allowed_tools,
+        on_error,
+        ..
+    } = workflow.rules[2].actions.first_mut().unwrap()
+    else {
+        panic!("expected tool_batch_dispatch action");
+    };
+    *allowed_tools = vec!["docs.other".to_string()];
+    *on_error = air_core::ToolErrorMode::Observe;
+    let mut vm = Vm {
+        tools: CountingTools { calls: 0 },
+        models: BatchDispatchModels {
+            choices: json!([{"tool": "docs.search", "input": {"query": "alpha"}}]),
+        },
+    };
+
+    let result = vm
+        .run(
+            &module,
+            State::from_iter([("text".to_string(), json!("batch search"))]),
+        )
+        .unwrap();
+
+    assert_eq!(vm.tools.calls, 0);
+    assert_eq!(result.outputs["observations"][0]["status"], json!("error"));
+    assert!(result.outputs["observations"][0]["error"]
+        .as_str()
+        .unwrap()
+        .contains("allowed_tools"));
+}
+
+#[test]
 fn tool_batch_dispatch_can_observe_provider_errors() {
     let mut module = load_agent("tests/agents/tool-batch-dispatch.air.yaml");
     let Workflow::StateMachine(workflow) = &mut module.workflow else {

@@ -4828,6 +4828,120 @@ fn bash_reports_workspace_changed_only_when_files_change() {
 }
 
 #[test]
+fn bash_workspace_snapshot_uses_configured_cwd_not_requested_workdir() {
+    let dir = temp_dir("air-tools-bash-workspace-root");
+    fs::create_dir_all(dir.join("nested")).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "printf changed > ../root-generated.txt",
+                "workdir": "nested",
+                "description": "write from nested cwd"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["workspace_changed"], json!(true));
+    assert_eq!(
+        output["workspace_changed_files"],
+        json!(["root-generated.txt"])
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_workspace_snapshot_ignores_common_large_dirs_by_default() {
+    let dir = temp_dir("air-tools-bash-workspace-ignore-default");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "mkdir -p node_modules/pkg && printf cache > node_modules/pkg/cache.txt",
+                "description": "write ignored cache"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["workspace_changed"], json!(false));
+    assert_eq!(output["workspace_changed_files"], json!([]));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_workspace_snapshot_accepts_configured_ignore_globs() {
+    let dir = temp_dir("air-tools-bash-workspace-ignore-config");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10,
+                  "workspace_snapshot_ignore": ["generated", "generated/**"]
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let ignored = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "mkdir -p generated && printf ignored > generated/out.txt",
+                "description": "write ignored output"
+            }),
+        )
+        .unwrap();
+    assert_eq!(ignored["workspace_changed"], json!(false));
+
+    let tracked = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "printf tracked > kept.txt", "description": "write tracked output"}),
+        )
+        .unwrap();
+    assert_eq!(tracked["workspace_changed"], json!(true));
+    assert_eq!(tracked["workspace_changed_files"], json!(["kept.txt"]));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_reports_workspace_changed_for_configured_commands() {
     let dir = temp_dir("air-tools-command-workspace-changed");
     let config_path = write_config(

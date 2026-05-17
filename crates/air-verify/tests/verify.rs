@@ -137,6 +137,30 @@ fn rejects_zero_tool_batch_dispatch_bound() {
 }
 
 #[test]
+fn rejects_unknown_tool_batch_dispatch_allowlist_tool() {
+    let mut module = parse_air_file("../../tests/agents/tool-batch-dispatch.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    for action in workflow.rules.iter_mut().flat_map(|rule| &mut rule.actions) {
+        if let air_core::StateAction::ToolBatchDispatch { allowed_tools, .. } = action {
+            *allowed_tools = vec!["missing.tool".to_string()];
+        }
+    }
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR099"),
+        "expected AIR099, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn accepts_repeated_tool_call_policy() {
     let module = parse_air_file("../../tests/agents/repeated-tool-call.air.yaml").unwrap();
     let report = verify(&module);

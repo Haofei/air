@@ -291,10 +291,12 @@ mod tests {
                 "choose",
                 "verify",
                 "act",
+                "verify-act",
                 "verification-passed",
                 "verification-failed",
                 "verification-reset-after-write",
                 "complete-needs-verification",
+                "verify-complete-needs-command",
                 "complete-verified",
                 "continue-after-act",
                 "summarize",
@@ -472,6 +474,7 @@ mod tests {
         let rules = module["workflow"]["rules"].as_sequence().unwrap();
         let phase_enum = module["state"]["phase"]["enum"].as_sequence().unwrap();
         assert!(phase_enum.contains(&serde_yaml::Value::String("verify".to_string())));
+        assert!(phase_enum.contains(&serde_yaml::Value::String("verify_act".to_string())));
 
         let needs_verification = rules
             .iter()
@@ -490,7 +493,16 @@ mod tests {
             .find(|rule| rule["id"].as_str() == Some("verify"))
             .unwrap();
         assert_eq!(
-            verify["actions"][0]["input"]["object"]["allowed_tools"]["literal"],
+            verify["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("verify_act".to_string())
+        );
+
+        let verify_act = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("verify-act"))
+            .unwrap();
+        assert_eq!(
+            verify_act["actions"][0]["allowed_tools"],
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("bash".to_string())])
         );
 

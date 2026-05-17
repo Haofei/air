@@ -13,3 +13,4 @@ serde.workspace = true
 serde_json.workspace = true
 reqwest.workspace = true
 regex.workspace = true
+globset.workspace = true

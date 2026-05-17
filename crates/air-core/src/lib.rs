@@ -132,6 +132,9 @@ pub enum StateAction {
         timeout_seconds: u64,
         max_calls: u32,
 
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        allowed_tools: Vec<String>,
+
         #[serde(default)]
         retry: Option<RetryPolicy>,
 
