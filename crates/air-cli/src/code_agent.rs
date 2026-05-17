@@ -1,13 +1,17 @@
+use crate::code_artifact::{
+    build_code_run_artifact, code_run_path_rewrites, code_run_trace_path, git_changed_files,
+    patch_code_output_with_workspace_delta, patch_trace_return, path_content_identity,
+    replay_code_run_artifact, write_code_run_artifact, CodeRunDescriptor, FailureCategory,
+    FailureReason, WorkspaceDelta, WorkspaceSnapshot,
+};
+use crate::models::ModelReplayOptions;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
-use crate::run_plan::{run_plan_capture, write_trace, RunPlanOptions};
-use air_runtime::{read_trace_jsonl, system_return_event};
+use crate::run_plan::{run_plan_capture, RunPlanOptions};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Map, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CODE_PROFILE: &str = "examples/code-agent/edit.air-profile.yaml";
 
@@ -21,9 +25,22 @@ pub(crate) struct CodeOptions {
     pub(crate) log: bool,
     pub(crate) explain: bool,
     pub(crate) tool_config: Option<PathBuf>,
+    pub(crate) artifact_out: Option<PathBuf>,
+    pub(crate) artifact_extra: BTreeMap<String, Value>,
+    pub(crate) replay_artifact: Option<PathBuf>,
+    pub(crate) replay_from: Option<usize>,
 }
 
 pub(crate) fn code(options: CodeOptions) -> Result<()> {
+    let explain = options.explain;
+    let outputs = run_code_agent(options)?;
+    if !explain {
+        println!("{}", serde_json::to_string_pretty(&outputs)?);
+    }
+    Ok(())
+}
+
+pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     let CodeOptions {
         task,
         profile,
@@ -34,6 +51,10 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         log,
         explain,
         tool_config,
+        artifact_out,
+        artifact_extra,
+        replay_artifact,
+        replay_from,
     } = options;
 
     if task.trim().is_empty() {
@@ -45,12 +66,48 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
 
     if explain {
         print_explain(&profile, &input)?;
-        return Ok(());
+        return Ok(Value::Null);
     }
 
     let cwd = std::env::current_dir().context("resolve current directory")?;
+    if let Some(artifact_dir) = replay_artifact.as_ref().filter(|_| replay_from.is_none()) {
+        return replay_code_run_artifact(artifact_dir, &cwd);
+    }
     let before = WorkspaceSnapshot::capture(&cwd)?;
     let preexisting_changed_files = git_changed_files(&cwd).unwrap_or_default();
+    let descriptor = CodeRunDescriptor {
+        task: input
+            .get("task")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+        profile: path_content_identity(&profile)?,
+        model_config: model_config
+            .as_ref()
+            .map(|path| path_content_identity(path))
+            .transpose()?,
+        tool_config: tool_config
+            .as_ref()
+            .map(|path| path_content_identity(path))
+            .transpose()?,
+        extra: artifact_extra,
+    };
+    let artifact_trace_path = artifact_out.as_ref().map(|dir| dir.join("trace.jsonl"));
+    if let Some(artifact_dir) = &artifact_out {
+        fs::create_dir_all(artifact_dir)
+            .with_context(|| format!("create {}", artifact_dir.display()))?;
+    }
+    let model_replay = replay_artifact
+        .as_ref()
+        .map(|artifact_dir| {
+            Ok::<_, anyhow::Error>(ModelReplayOptions {
+                trace: code_run_trace_path(artifact_dir)?,
+                live_from_event: replay_from,
+                path_rewrites: code_run_path_rewrites(artifact_dir, &cwd)?,
+            })
+        })
+        .transpose()?;
+    let effective_trace_out = trace_out.clone().or_else(|| artifact_trace_path.clone());
     let trace_out_for_patch = trace_out.clone();
     let trace_redact_for_patch = trace_redact || !trace_raw;
 
@@ -61,7 +118,7 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         input: None,
         input_values: Some(input),
         model_config,
-        trace_out,
+        trace_out: effective_trace_out.clone(),
         trace_redact,
         trace_raw,
         state_out: None,
@@ -71,16 +128,38 @@ pub(crate) fn code(options: CodeOptions) -> Result<()> {
         log,
         example_tools: false,
         tool_config,
+        model_replay,
     })?;
 
     let after = WorkspaceSnapshot::capture(&cwd)?;
     let delta = before.delta(&after)?;
-    patch_code_output_with_workspace_delta(&mut outputs, &delta, &preexisting_changed_files);
-    if let Some(trace_path) = trace_out_for_patch {
+    let failure_reason = derive_code_failure_reason(&outputs, &delta);
+    patch_code_output_with_workspace_delta(
+        &mut outputs,
+        &delta,
+        &preexisting_changed_files,
+        failure_reason.as_ref(),
+    );
+    if let Some(trace_path) = trace_out_for_patch.or(artifact_trace_path) {
         patch_trace_return(&trace_path, &outputs, trace_redact_for_patch)?;
     }
-    println!("{}", serde_json::to_string_pretty(&outputs)?);
-    Ok(())
+    if let Some(artifact_dir) = artifact_out {
+        let artifact = build_code_run_artifact(
+            descriptor,
+            &before,
+            &after,
+            delta,
+            preexisting_changed_files,
+            failure_reason,
+        )?;
+        write_code_run_artifact(
+            &artifact_dir,
+            &artifact,
+            &outputs,
+            effective_trace_out.as_deref(),
+        )?;
+    }
+    Ok(outputs)
 }
 
 fn print_explain(profile: &Path, input: &Map<String, Value>) -> Result<()> {
@@ -111,257 +190,27 @@ fn path_ref_to_input_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-#[derive(Debug, Clone, Default)]
-struct WorkspaceSnapshot {
-    files: BTreeMap<String, Vec<u8>>,
-}
-
-#[derive(Debug, Clone)]
-struct WorkspaceDelta {
-    changed_files: Vec<String>,
-    diff: String,
-}
-
-impl WorkspaceSnapshot {
-    fn capture(root: &Path) -> Result<Self> {
-        let mut files = BTreeMap::new();
-        for relative in workspace_file_list(root)? {
-            let path = root.join(&relative);
-            if !path.is_file() {
-                continue;
-            }
-            let content = match fs::read(&path) {
-                Ok(content) => content,
-                Err(_) => continue,
-            };
-            files.insert(relative, content);
-        }
-        Ok(Self { files })
-    }
-
-    fn delta(&self, after: &Self) -> Result<WorkspaceDelta> {
-        let changed_files = self
-            .files
-            .keys()
-            .chain(after.files.keys())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .filter(|path| self.files.get(*path) != after.files.get(*path))
-            .cloned()
-            .collect::<Vec<_>>();
-        let diff = render_workspace_delta_diff(self, after, &changed_files)?;
-        Ok(WorkspaceDelta {
-            changed_files,
-            diff,
-        })
-    }
-}
-
-fn patch_code_output_with_workspace_delta(
-    outputs: &mut Value,
-    delta: &WorkspaceDelta,
-    preexisting_changed_files: &[String],
-) {
-    let Some(edit) = outputs.get_mut("edit").and_then(Value::as_object_mut) else {
-        return;
-    };
-    let changed_files = Value::Array(
-        delta
-            .changed_files
-            .iter()
-            .cloned()
-            .map(Value::String)
-            .collect(),
-    );
-    edit.insert("changed_files".to_string(), changed_files.clone());
-    edit.insert("workspace_changed_files".to_string(), changed_files);
-    edit.insert(
-        "preexisting_changed_files".to_string(),
-        Value::Array(
-            preexisting_changed_files
-                .iter()
-                .map(|path| json!({ "path": path }))
-                .collect(),
-        ),
-    );
-    edit.insert(
-        "patch_applied".to_string(),
-        Value::Bool(!delta.changed_files.is_empty()),
-    );
-    edit.insert(
-        "workspace_diff".to_string(),
-        json!({
-            "provider": "air-code-baseline",
-            "command": "workspace snapshot diff",
-            "success": true,
-            "diff": delta.diff,
-            "bytes": delta.diff.len(),
-            "truncated": false,
-        }),
-    );
-}
-
-fn patch_trace_return(path: &Path, outputs: &Value, trace_redact: bool) -> Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
-    let mut events = read_trace_jsonl(path)
-        .map_err(|error| anyhow::anyhow!("read trace for code output patch: {error}"))?;
-    let mut output_object = match outputs {
-        Value::Object(object) => object.clone(),
-        _ => return Ok(()),
-    };
-    let replacement = system_return_event(std::mem::take(&mut output_object));
-    if let Some(event) = events
-        .iter_mut()
-        .rev()
-        .find(|event| event.agent == "$system" && event.action == "return")
+fn derive_code_failure_reason(outputs: &Value, delta: &WorkspaceDelta) -> Option<FailureReason> {
+    let edit = outputs.get("edit")?;
+    if edit
+        .get("final_success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
     {
-        *event = replacement;
-    } else {
-        events.push(replacement);
+        return None;
     }
-    write_trace(path, &events, trace_redact)
-}
-
-fn workspace_file_list(root: &Path) -> Result<Vec<String>> {
-    if root.join(".git").exists() {
-        let output = Command::new("git")
-            .args(["ls-files", "-co", "--exclude-standard", "-z"])
-            .current_dir(root)
-            .output()
-            .context("run git ls-files for workspace snapshot")?;
-        if output.status.success() {
-            return Ok(output
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter_map(|entry| std::str::from_utf8(entry).ok())
-                .map(str::trim)
-                .filter(|path| !path.is_empty() && !ignored_workspace_path(path))
-                .map(|path| path.replace('\\', "/"))
-                .collect());
-        }
+    if delta.changed_files.is_empty() {
+        return Some(FailureReason {
+            category: FailureCategory::NoPatchApplied,
+            message: "code agent finished without changing workspace files".to_string(),
+            details: BTreeMap::new(),
+        });
     }
-    let mut paths = Vec::new();
-    collect_workspace_files(root, root, &mut paths)?;
-    paths.sort();
-    Ok(paths)
-}
-
-fn collect_workspace_files(root: &Path, dir: &Path, paths: &mut Vec<String>) -> Result<()> {
-    for entry in fs::read_dir(dir).with_context(|| format!("read directory {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        let relative = path
-            .strip_prefix(root)
-            .unwrap_or(&path)
-            .to_string_lossy()
-            .replace('\\', "/");
-        if ignored_workspace_path(&relative) {
-            continue;
-        }
-        if path.is_dir() {
-            collect_workspace_files(root, &path, paths)?;
-        } else if path.is_file() {
-            paths.push(relative);
-        }
-    }
-    Ok(())
-}
-
-fn ignored_workspace_path(path: &str) -> bool {
-    path == ".git"
-        || path == ".air"
-        || path == "target"
-        || path == "node_modules"
-        || path == "__pycache__"
-        || path.starts_with(".git/")
-        || path.starts_with(".air/")
-        || path.starts_with("target/")
-        || path.starts_with("node_modules/")
-        || path.starts_with("__pycache__/")
-        || path.ends_with(".pyc")
-        || path.contains("/__pycache__/")
-}
-
-fn git_changed_files(root: &Path) -> Result<Vec<String>> {
-    if !root.join(".git").exists() {
-        return Ok(Vec::new());
-    }
-    let mut files = BTreeSet::new();
-    for args in [
-        ["diff", "--name-only", "--cached", "--"].as_slice(),
-        ["diff", "--name-only", "--"].as_slice(),
-        ["ls-files", "--deleted", "--"].as_slice(),
-        ["ls-files", "--others", "--exclude-standard"].as_slice(),
-    ] {
-        let output = Command::new("git")
-            .args(args)
-            .current_dir(root)
-            .output()
-            .with_context(|| format!("run git {}", args.join(" ")))?;
-        if !output.status.success() {
-            continue;
-        }
-        for line in String::from_utf8_lossy(&output.stdout).lines() {
-            let path = line.trim().replace('\\', "/");
-            if !path.is_empty() && !ignored_workspace_path(&path) {
-                files.insert(path);
-            }
-        }
-    }
-    Ok(files.into_iter().collect())
-}
-
-fn render_workspace_delta_diff(
-    before: &WorkspaceSnapshot,
-    after: &WorkspaceSnapshot,
-    changed_files: &[String],
-) -> Result<String> {
-    if changed_files.is_empty() {
-        return Ok(String::new());
-    }
-    let temp_dir = std::env::temp_dir().join(format!(
-        "air-code-diff-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    fs::create_dir_all(&temp_dir)?;
-    let mut parts = Vec::new();
-    for (index, path) in changed_files.iter().enumerate() {
-        let before_path = temp_dir.join(format!("{index}.before"));
-        let after_path = temp_dir.join(format!("{index}.after"));
-        fs::write(
-            &before_path,
-            before.files.get(path).map(Vec::as_slice).unwrap_or(&[]),
-        )?;
-        fs::write(
-            &after_path,
-            after.files.get(path).map(Vec::as_slice).unwrap_or(&[]),
-        )?;
-        let output = Command::new("diff")
-            .args([
-                "-u",
-                "--label",
-                &format!("a/{path}"),
-                "--label",
-                &format!("b/{path}"),
-            ])
-            .arg(&before_path)
-            .arg(&after_path)
-            .output()
-            .with_context(|| format!("render diff for {path}"))?;
-        if !output.stdout.is_empty() {
-            parts.push(String::from_utf8_lossy(&output.stdout).to_string());
-        } else if !output.stderr.is_empty() {
-            parts.push(String::from_utf8_lossy(&output.stderr).to_string());
-        }
-    }
-    let _ = fs::remove_dir_all(&temp_dir);
-    Ok(parts.join(""))
+    Some(FailureReason {
+        category: FailureCategory::AgentError,
+        message: "code agent did not report final_success=true".to_string(),
+        details: BTreeMap::new(),
+    })
 }
 
 struct CodeExplainMetadata {
@@ -666,7 +515,7 @@ mod tests {
         };
         let preexisting = vec!["crates/air-cli/src/code_agent.rs".to_string()];
 
-        patch_code_output_with_workspace_delta(&mut outputs, &delta, &preexisting);
+        patch_code_output_with_workspace_delta(&mut outputs, &delta, &preexisting, None);
 
         let edit = &outputs["edit"];
         assert_eq!(
@@ -680,7 +529,7 @@ mod tests {
         assert_eq!(edit["patch_applied"], json!(true));
         assert_eq!(
             edit["workspace_diff"]["provider"],
-            json!("air-code-baseline")
+            json!("air-code-artifact")
         );
         assert!(edit["workspace_diff"]["diff"]
             .as_str()

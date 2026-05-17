@@ -63,6 +63,22 @@ cargo test --workspace code_agent
 The workspace tests validate the minimal profile, check the OpenCode-style
 default tool surface, and run a deterministic edit fixture.
 
+## Code-Run Artifacts
+
+Use `--artifact-out` when you want an auditable, replayable record of one code
+agent run:
+
+```bash
+cargo run -p air-cli -- code "refactor a small helper and run tests" \
+  --model-config examples/bigmodel-openai-compatible.json \
+  --tool-config examples/code-agent/tools.json \
+  --artifact-out target/generated/code-run-artifacts/manual-run
+```
+
+The artifact contains the input fingerprint, workspace snapshots, final output,
+trace, diff, and structured failure reason. The benchmark runner uses the same
+artifact format as its replay cache, but the format is not benchmark-specific.
+
 ## OpenCode Alignment
 
 Use the comparison harness to run the same task through AIR and OpenCode, then
@@ -112,8 +128,11 @@ budget on a known-bad path.
 
 ## Relay Debugging
 
-When a run diverges late, use the relay to replay the known-good prefix and
-continue from a specific model call instead of spending the whole budget again.
+When a run diverges late, prefer AIR artifact replay. `compare.py replay-air`
+uses the saved `air-artifact/` directory from a previous comparison. Without
+`--from`, it applies the cached AIR diff without model calls. With `--from N`,
+AIR replays model outputs before 1-based trace event line `N`, then continues
+with the live provider.
 
 Inspect a previous run:
 
@@ -138,26 +157,7 @@ python3 dev/code-agent/relay.py divergence \
   target/generated/code-agent-io-compare/todo-refactor
 ```
 
-Resume from call 23:
-
-```bash
-python3 dev/code-agent/relay.py run \
-  target/generated/code-agent-io-compare/todo-refactor \
-  --side air \
-  --from 23 \
-  -- cargo run -p air-cli -- code "refactor a small helper and run tests" \
-    --model-config examples/bigmodel-openai-compatible.json \
-    --tool-config examples/code-agent/tools.json \
-    --trace-out target/generated/code-agent.trace.jsonl \
-    --log
-```
-
-Calls before `--from` are served from the captured HTTP responses. Calls at and
-after `--from` are forwarded to the original provider URL inferred from the
-capture. The relay writes a new `relay-air-http/` directory so request shape and
-response behavior can be compared at the fork point.
-
-To keep the normal comparison report flow and reuse a saved OpenCode run:
+Replay from trace event 23:
 
 ```bash
 python3 dev/code-agent/compare.py replay-air \
@@ -165,3 +165,7 @@ python3 dev/code-agent/compare.py replay-air \
   --from 23 \
   --name todo-refactor-replay
 ```
+
+`relay.py` remains useful for inspecting older raw HTTP captures and comparing
+request/response shape at a specific model call, but AIR replay no longer
+depends on the Python relay.

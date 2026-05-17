@@ -1,0 +1,166 @@
+{
+  "name": "rust-small",
+  "description": "Small deterministic Rust refactor tasks for AIR code-agent baselines.",
+  "tasks": [
+    {
+      "id": "extract_math_sum_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/math.rs by extracting the arithmetic inside add_then_double into a small private helper named sum_pair. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/math.rs"],
+        "required_changed_files": ["src/math.rs"],
+        "required_diff_contains": ["sum_pair"]
+      }
+    },
+    {
+      "id": "extract_pricing_discount_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/pricing.rs by extracting the discount clamping expression from apply_discount into a small private helper named clamp_discount. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/pricing.rs"],
+        "required_changed_files": ["src/pricing.rs"],
+        "required_diff_contains": ["clamp_discount"]
+      }
+    },
+    {
+      "id": "extract_strings_clean_part_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/strings.rs by extracting the trim/filter logic inside normalize_words into a small private helper named clean_part. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/strings.rs"],
+        "required_changed_files": ["src/strings.rs"],
+        "required_diff_contains": ["clean_part"]
+      }
+    },
+    {
+      "id": "extract_config_key_char_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/config.rs by extracting the per-character environment key normalization from env_key into a small private helper named normalize_key_char. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/config.rs"],
+        "required_changed_files": ["src/config.rs"],
+        "required_diff_contains": ["normalize_key_char"]
+      }
+    },
+    {
+      "id": "extract_report_status_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/report.rs by extracting the score-to-status classification from report_status into a small private helper named status_for_score. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/report.rs"],
+        "required_changed_files": ["src/report.rs"],
+        "required_diff_contains": ["status_for_score"]
+      }
+    },
+    {
+      "id": "extract_errors_prefix_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/errors.rs by extracting the prefix selection from error_message into a small private helper named error_prefix. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/errors.rs"],
+        "required_changed_files": ["src/errors.rs"],
+        "required_diff_contains": ["error_prefix"]
+      }
+    },
+    {
+      "id": "extract_collections_active_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/collections.rs by extracting the active-item predicate from active_names into a small private helper named is_active_item. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/collections.rs"],
+        "required_changed_files": ["src/collections.rs"],
+        "required_diff_contains": ["is_active_item"]
+      }
+    },
+    {
+      "id": "extract_schedule_window_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/schedule.rs by extracting the start/end ordering logic from normalized_window into a small private helper named ordered_window. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/schedule.rs"],
+        "required_changed_files": ["src/schedule.rs"],
+        "required_diff_contains": ["ordered_window"]
+      }
+    },
+    {
+      "id": "extract_features_flag_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/features.rs by extracting the tier flag matching from feature_enabled into a small private helper named tier_allows_feature. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/features.rs"],
+        "required_changed_files": ["src/features.rs"],
+        "required_diff_contains": ["tier_allows_feature"]
+      }
+    },
+    {
+      "id": "extract_http_status_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/http.rs by extracting the numeric status classification from status_class into a small private helper named classify_status_code. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/http.rs"],
+        "required_changed_files": ["src/http.rs"],
+        "required_diff_contains": ["classify_status_code"]
+      }
+    }
+  ]
+}

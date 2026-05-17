@@ -1,5 +1,5 @@
 use crate::diagnostics::emit_diagnostics;
-use crate::models::ModelProviderChoice;
+use crate::models::{ModelProviderChoice, ModelReplayOptions};
 use crate::planner::module_base_dir_for_store_path;
 use crate::profile::{read_json_object, read_run_plan_profile, resolve_profile_path};
 use crate::tools::ToolProviderChoice;
@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) struct RunPlanOptions {
     pub(crate) plan: Option<PathBuf>,
@@ -31,6 +31,7 @@ pub(crate) struct RunPlanOptions {
     pub(crate) log: bool,
     pub(crate) example_tools: bool,
     pub(crate) tool_config: Option<PathBuf>,
+    pub(crate) model_replay: Option<ModelReplayOptions>,
 }
 
 pub(crate) struct ResumePlanOptions {
@@ -62,6 +63,7 @@ pub(crate) struct RunPlanExecutionOptions {
     pub(crate) log: bool,
     pub(crate) example_tools: bool,
     pub(crate) tool_config: Option<PathBuf>,
+    pub(crate) model_replay: Option<ModelReplayOptions>,
 }
 
 pub(crate) struct ReplayOptions {
@@ -124,6 +126,7 @@ pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
         log,
         example_tools,
         tool_config,
+        model_replay,
     } = options;
 
     let profile = match profile {
@@ -240,6 +243,7 @@ pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
             log,
             example_tools,
             tool_config,
+            model_replay,
         },
     )
 }
@@ -273,6 +277,7 @@ pub(crate) fn run_plan_with_inputs_capture(
         log,
         example_tools,
         tool_config,
+        model_replay,
     } = options;
 
     let original_plan = air_linker::parse_run_plan_file(plan)?;
@@ -294,8 +299,8 @@ pub(crate) fn run_plan_with_inputs_capture(
     let mut observed_trace = Vec::new();
     let tools = ToolProviderChoice::from_config(tool_config, example_tools)?;
     let result = if parallel {
-        if let Some(model_config) = model_config {
-            let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
+        if model_config.is_some() || model_replay.is_some() {
+            let models = build_model_provider(model_config, log, model_replay.clone())?;
             run_plan_parallel(
                 &plan,
                 &store,
@@ -326,8 +331,8 @@ pub(crate) fn run_plan_with_inputs_capture(
                 &mut observed_trace,
             )?
         }
-    } else if let Some(model_config) = model_config {
-        let models = ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?;
+    } else if model_config.is_some() || model_replay.is_some() {
+        let models = build_model_provider(model_config, log, model_replay)?;
         if observe {
             let result = air_linker::run_run_plan_with_observer_and_checkpoint(
                 &plan,
@@ -605,6 +610,23 @@ fn run_plan_parallel(
                 |checkpoint| write_checkpoint_state(checkpoint_out, checkpoint),
             )?,
         )
+    }
+}
+
+fn build_model_provider(
+    model_config: Option<PathBuf>,
+    log: bool,
+    model_replay: Option<ModelReplayOptions>,
+) -> Result<ModelProviderChoice> {
+    let models = if let Some(model_config) = model_config {
+        ModelProviderChoice::from_config_file_with_provider_io(model_config, log)?
+    } else {
+        ModelProviderChoice::echo()
+    };
+    if let Some(model_replay) = model_replay {
+        models.with_replay_prefix(model_replay)
+    } else {
+        Ok(models)
     }
 }
 
@@ -924,10 +946,17 @@ pub(crate) fn write_partial_trace(
 }
 
 pub(crate) fn write_trace(
-    path: impl AsRef<std::path::Path>,
+    path: impl AsRef<Path>,
     trace: &[TraceEvent],
     redact: bool,
 ) -> Result<()> {
+    let path = path.as_ref();
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
     if redact {
         write_trace_jsonl_with_options(path, trace, &TraceWriteOptions::redacted())?;
     } else {
@@ -1297,6 +1326,25 @@ mod tests {
         assert!(content.contains("model_call_start"));
         assert!(content.contains("[AIR_REDACTED]"));
         assert!(!content.contains("sk-test-123"));
+    }
+
+    #[test]
+    fn write_trace_creates_parent_directories() {
+        let root = std::env::temp_dir().join(format!(
+            "air-trace-parent-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let path = root.join("nested").join("trace.jsonl");
+        let events = vec![trace_event("model_call", TraceStatus::Ok)];
+
+        write_trace(&path, &events, true).unwrap();
+
+        assert!(path.exists());
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

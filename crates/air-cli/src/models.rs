@@ -1,5 +1,7 @@
 use air_backend_openai::{OpenAiCompatibleConfig, OpenAiCompatibleModelProvider};
-use air_runtime::{ModelProvider, RuntimeError};
+use air_runtime::{
+    read_trace_jsonl, ModelProvider, ModelRequestStats, RuntimeError, TraceEvent, TraceStatus,
+};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -62,6 +64,33 @@ pub(crate) enum ModelProviderChoice {
     Echo(EchoModels),
     Fixture(FixtureModels),
     OpenAi(OpenAiCompatibleModelProvider),
+    Replay(ReplayModels),
+}
+
+#[derive(Clone)]
+pub(crate) struct ReplayModels {
+    live: Box<ModelProviderChoice>,
+    calls: Vec<ReplayModelCall>,
+    live_from_event: Option<usize>,
+    call_index: usize,
+    path_rewrites: Vec<(String, String)>,
+    last_request_stats: Option<ModelRequestStats>,
+}
+
+#[derive(Clone)]
+struct ReplayModelCall {
+    event_index: usize,
+    model: Option<String>,
+    output: Option<Value>,
+    error: Option<String>,
+    stats: Option<ModelRequestStats>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ModelReplayOptions {
+    pub(crate) trace: PathBuf,
+    pub(crate) live_from_event: Option<usize>,
+    pub(crate) path_rewrites: Vec<(String, String)>,
 }
 
 impl ModelProviderChoice {
@@ -86,6 +115,20 @@ impl ModelProviderChoice {
         }
         Self::openai(config)
     }
+
+    pub(crate) fn with_replay_prefix(self, options: ModelReplayOptions) -> Result<Self> {
+        let events = read_trace_jsonl(&options.trace).map_err(|error| {
+            anyhow::anyhow!("read replay trace {}: {error}", options.trace.display())
+        })?;
+        Ok(Self::Replay(ReplayModels {
+            live: Box::new(self),
+            calls: replay_model_calls(&events)?,
+            live_from_event: options.live_from_event,
+            call_index: 0,
+            path_rewrites: options.path_rewrites,
+            last_request_stats: None,
+        }))
+    }
 }
 
 fn force_trace_provider_io(config: &mut OpenAiCompatibleConfig) {
@@ -100,6 +143,7 @@ impl ModelProvider for ModelProviderChoice {
             ModelProviderChoice::Echo(provider) => provider.call_model(name, input),
             ModelProviderChoice::Fixture(provider) => provider.call_model(name, input),
             ModelProviderChoice::OpenAi(provider) => provider.call_model(name, input),
+            ModelProviderChoice::Replay(provider) => provider.call_model(name, input),
         }
     }
 
@@ -119,6 +163,9 @@ impl ModelProvider for ModelProviderChoice {
             ModelProviderChoice::OpenAi(provider) => {
                 provider.call_model_with_timeout(name, input, timeout)
             }
+            ModelProviderChoice::Replay(provider) => {
+                provider.call_model_with_timeout(name, input, timeout)
+            }
         }
     }
 
@@ -127,7 +174,163 @@ impl ModelProvider for ModelProviderChoice {
             ModelProviderChoice::Echo(provider) => provider.take_last_request_stats(),
             ModelProviderChoice::Fixture(provider) => provider.take_last_request_stats(),
             ModelProviderChoice::OpenAi(provider) => provider.take_last_request_stats(),
+            ModelProviderChoice::Replay(provider) => provider.take_last_request_stats(),
         }
+    }
+}
+
+impl ModelProvider for ReplayModels {
+    fn call_model(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
+        self.call_model_with_timeout(name, input, Duration::from_secs(0))
+    }
+
+    fn call_model_with_timeout(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        self.call_index = self.call_index.saturating_add(1);
+        let Some(call) = self.calls.get(self.call_index - 1).cloned() else {
+            return self.call_live_model(name, input, timeout);
+        };
+        if self
+            .live_from_event
+            .is_none_or(|from_event| call.event_index < from_event)
+        {
+            if let Some(model) = call.model.as_deref() {
+                if model != name {
+                    return Err(RuntimeError::Provider(format!(
+                        "model replay call {} expected model {model}, got {name}",
+                        self.call_index
+                    )));
+                }
+            }
+            self.last_request_stats = call
+                .stats
+                .map(|stats| rewrite_model_request_stats(stats, &self.path_rewrites));
+            if let Some(error) = call.error {
+                return Err(RuntimeError::Provider(error));
+            }
+            let Some(output) = call.output else {
+                return Err(RuntimeError::Provider(format!(
+                    "model replay call {} has no output",
+                    self.call_index
+                )));
+            };
+            return Ok(rewrite_value(output, &self.path_rewrites));
+        }
+        self.call_live_model(name, input, timeout)
+    }
+
+    fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
+        self.last_request_stats.take()
+    }
+}
+
+impl ReplayModels {
+    fn call_live_model(
+        &mut self,
+        name: &str,
+        input: &Value,
+        timeout: Duration,
+    ) -> Result<Value, RuntimeError> {
+        let result = self.live.call_model_with_timeout(name, input, timeout);
+        self.last_request_stats = self.live.take_last_request_stats();
+        result
+    }
+}
+
+fn replay_model_calls(events: &[TraceEvent]) -> Result<Vec<ReplayModelCall>> {
+    events
+        .iter()
+        .enumerate()
+        .filter(|(_, event)| event.action == "model_call")
+        .map(|(index, event)| {
+            let meta = event.meta.as_ref();
+            let model = meta
+                .and_then(|meta| meta.get("model"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let stats = meta.map(model_request_stats_from_meta).transpose()?;
+            let error = (event.status == TraceStatus::Error)
+                .then(|| event.error.clone())
+                .flatten();
+            Ok(ReplayModelCall {
+                event_index: index + 1,
+                model,
+                output: event.output.clone(),
+                error,
+                stats,
+            })
+        })
+        .collect()
+}
+
+fn model_request_stats_from_meta(meta: &Value) -> Result<ModelRequestStats> {
+    let provider_request = meta.get("provider_request").cloned();
+    let provider_response = meta.get("provider_response").cloned();
+    Ok(ModelRequestStats {
+        provider_request_bytes: meta
+            .get("provider_request_bytes")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .or_else(|| {
+                provider_request
+                    .as_ref()
+                    .and_then(|value| serde_json::to_vec(value).ok())
+                    .map(|bytes| bytes.len())
+            })
+            .unwrap_or(0),
+        provider_user_content_bytes: meta
+            .get("provider_user_content_bytes")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0),
+        provider_tools_bytes: meta
+            .get("provider_tools_bytes")
+            .and_then(Value::as_u64)
+            .map(|value| value as usize)
+            .unwrap_or(0),
+        provider_request,
+        provider_response,
+    })
+}
+
+fn rewrite_model_request_stats(
+    mut stats: ModelRequestStats,
+    rewrites: &[(String, String)],
+) -> ModelRequestStats {
+    stats.provider_request = stats
+        .provider_request
+        .map(|value| rewrite_value(value, rewrites));
+    stats.provider_response = stats
+        .provider_response
+        .map(|value| rewrite_value(value, rewrites));
+    stats
+}
+
+fn rewrite_value(value: Value, rewrites: &[(String, String)]) -> Value {
+    match value {
+        Value::String(mut string) => {
+            for (from, to) in rewrites {
+                string = string.replace(from, to);
+            }
+            Value::String(string)
+        }
+        Value::Array(values) => Value::Array(
+            values
+                .into_iter()
+                .map(|value| rewrite_value(value, rewrites))
+                .collect(),
+        ),
+        Value::Object(object) => Value::Object(
+            object
+                .into_iter()
+                .map(|(key, value)| (key, rewrite_value(value, rewrites)))
+                .collect(),
+        ),
+        value => value,
     }
 }
 

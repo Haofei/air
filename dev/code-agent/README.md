@@ -16,7 +16,10 @@ The harness reads the repository `.env` for AIR provider settings. Use
 AIR and OpenCode both use the selected `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and
 `OPENAI_MODEL`; OpenCode receives a temporary compare-only config for that run.
 
-The harness runs OpenCode first, then AIR. When a previous OpenCode capture is available, use `replay-air` to reuse it and avoid spending model calls on both systems again:
+The harness runs OpenCode first, then AIR. Every AIR run writes an
+`air-artifact/` directory. Use `replay-air` to reuse that artifact without
+spending model calls again, or pass `--from N` to replay the prefix before
+1-based AIR trace event line `N` and continue with the live provider:
 
 ```bash
 python3 dev/code-agent/compare.py replay-air \
@@ -27,7 +30,7 @@ python3 dev/code-agent/compare.py replay-air \
 
 ## Relay
 
-Inspect a previous run or replay captured AIR/OpenCode HTTP calls from a specific model-call index:
+Inspect a previous run or compare captured AIR/OpenCode HTTP calls:
 
 ```bash
 python3 dev/code-agent/relay.py inspect \
@@ -39,4 +42,35 @@ python3 dev/code-agent/relay.py diff \
   --call 9
 ```
 
-These tools are intentionally not part of the AIR CLI. They are dogfood/debug infrastructure for keeping AIR's code-agent request shape close to OpenCode.
+`relay.py` is now mostly an inspection tool for old HTTP captures. New AIR
+replay should go through `compare.py replay-air`, which delegates replay to AIR
+code-run artifacts instead of emulating AIR state in Python.
+
+## Benchmark Metrics
+
+Use the AIR-native benchmark runner when you want a repeatable baseline instead
+of an OpenCode comparison:
+
+```bash
+cargo run -p air-cli -- bench code-agent --limit 1 --keep-workdirs
+python3 dev/code-agent/analyze_metrics.py \
+  target/generated/code-agent-bench/<run-id>/run.json
+```
+
+The benchmark runner records pass/fail, changed files, model calls, tool calls,
+repeated reads, verification failures, and the first edit tool index for each
+task.
+
+Benchmark runs use AIR code-run artifacts as their cache layer. A fresh run
+with `--refresh` writes an artifact containing the task fingerprint, workspace
+snapshot, trace, output, diff, and structured failure reason. Later runs with
+the same fingerprint replay that artifact locally and report
+`model_calls_spent: 0`, so you can iterate on metrics and reporting without
+paying for another model run.
+
+The same artifact path can be used outside benchmarks:
+
+```bash
+cargo run -p air-cli -- code "refactor the target helper" \
+  --artifact-out target/generated/code-run-artifacts/manual-run
+```

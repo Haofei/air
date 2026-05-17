@@ -1,5 +1,7 @@
 use air_runtime::{system_return_event, Vm};
+mod bench;
 mod code_agent;
+mod code_artifact;
 mod diagnostics;
 mod explain;
 mod models;
@@ -7,6 +9,7 @@ mod planner;
 mod profile;
 mod run_plan;
 mod tools;
+use crate::bench::{bench_code_agent, BenchCodeAgentOptions};
 use crate::code_agent::{code, CodeOptions};
 use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
@@ -117,6 +120,23 @@ enum Command {
         /// Optional tool provider config JSON.
         #[arg(long)]
         tool_config: Option<PathBuf>,
+
+        /// Optional directory for an auditable code-run artifact.
+        #[arg(long)]
+        artifact_out: Option<PathBuf>,
+
+        /// Replay a previous code-run artifact, optionally switching to live execution with --replay-from.
+        #[arg(long)]
+        replay_artifact: Option<PathBuf>,
+
+        /// 1-based trace event line where replay should switch to the live provider.
+        #[arg(long, requires = "replay_artifact")]
+        replay_from: Option<usize>,
+    },
+    /// Run AIR benchmark suites.
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommand,
     },
     /// Parse and statically verify an AIR module.
     #[command(hide = true)]
@@ -407,6 +427,48 @@ enum Command {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum BenchCommand {
+    /// Run the code-agent benchmark suite.
+    CodeAgent {
+        /// Benchmark suite JSON file.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Output directory for run.json, traces, and workdirs.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Coding-agent run profile.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+
+        /// OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Run only one task id.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Run at most N selected tasks.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Print AIR execution logs while the benchmark runs.
+        #[arg(long)]
+        log: bool,
+
+        /// Keep successful task workdirs. Failed task workdirs are always kept.
+        #[arg(long)]
+        keep_workdirs: bool,
+
+        /// Ignore cached code-run artifacts and spend model calls again.
+        #[arg(long)]
+        refresh: bool,
+    },
+}
+
 fn main() -> Result<()> {
     load_dotenv();
     let cli = Cli::parse();
@@ -422,6 +484,9 @@ fn main() -> Result<()> {
             log,
             explain,
             tool_config,
+            artifact_out,
+            replay_artifact,
+            replay_from,
         } => code(CodeOptions {
             task,
             profile,
@@ -432,7 +497,34 @@ fn main() -> Result<()> {
             log,
             explain,
             tool_config,
+            artifact_out,
+            artifact_extra: std::collections::BTreeMap::new(),
+            replay_artifact,
+            replay_from,
         }),
+        Command::Bench { command } => match command {
+            BenchCommand::CodeAgent {
+                suite,
+                out_dir,
+                profile,
+                model_config,
+                task,
+                limit,
+                log,
+                keep_workdirs,
+                refresh,
+            } => bench_code_agent(BenchCodeAgentOptions {
+                suite,
+                out_dir,
+                profile,
+                model_config,
+                task,
+                limit,
+                log,
+                keep_workdirs,
+                refresh,
+            }),
+        },
         Command::Validate { file } => validate(file),
         Command::ValidateSystem { file } => validate_system(file),
         Command::ValidatePlan {
@@ -538,6 +630,7 @@ fn main() -> Result<()> {
             log,
             example_tools,
             tool_config,
+            model_replay: None,
         }),
         Command::ResumePlan {
             plan,
@@ -1396,6 +1489,7 @@ mod tests {
                 log: false,
                 example_tools: false,
                 tool_config: Some(fixture_root.join("examples/code-agent/tools.json")),
+                model_replay: None,
             },
         )
         .unwrap();
@@ -1652,6 +1746,7 @@ mod tests {
                 log: false,
                 example_tools: false,
                 tool_config: None,
+                model_replay: None,
             },
         )
         .unwrap();
@@ -1685,6 +1780,7 @@ mod tests {
                 log: false,
                 example_tools: false,
                 tool_config: None,
+                model_replay: None,
             },
         )
         .unwrap();
@@ -1749,6 +1845,7 @@ mod tests {
                 log: false,
                 example_tools: false,
                 tool_config: Some(tool_config),
+                model_replay: None,
             },
         )
         .unwrap();
@@ -1842,6 +1939,7 @@ modules:
                 log: false,
                 example_tools: false,
                 tool_config: None,
+                model_replay: None,
             },
         )
         .unwrap();
@@ -1900,6 +1998,7 @@ modules:
                 log: false,
                 example_tools: false,
                 tool_config: None,
+                model_replay: None,
             },
         )
         .unwrap();
@@ -1957,6 +2056,7 @@ modules:
                 log: false,
                 example_tools: false,
                 tool_config: None,
+                model_replay: None,
             },
         )
         .unwrap();

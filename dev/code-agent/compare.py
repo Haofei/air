@@ -97,7 +97,14 @@ def main() -> None:
     )
     add_common_output_args(replay_parser)
     replay_parser.add_argument("source_run", type=Path)
-    replay_parser.add_argument("--from", dest="from_call", type=int, default=None)
+    replay_parser.add_argument(
+        "--from",
+        dest="replay_from",
+        metavar="TRACE_EVENT",
+        type=int,
+        default=None,
+        help="1-based AIR trace event line where replay switches to the live provider",
+    )
     replay_parser.add_argument("--task", default=None)
     replay_parser.add_argument("--repo", type=Path, default=repo_root())
     replay_parser.add_argument("--env-file", type=Path, default=repo_root() / ".env")
@@ -625,8 +632,11 @@ def _build_air_code_agent_command(
     model_config: str,
     tool_config: str,
     trace_path: Path,
+    artifact_out: Path | None = None,
+    replay_artifact: Path | None = None,
+    replay_from: int | None = None,
 ) -> list[str]:
-    return [
+    command = [
         str(air_bin),
         "code",
         task,
@@ -639,6 +649,13 @@ def _build_air_code_agent_command(
         "--trace-raw",
         "--log",
     ]
+    if artifact_out is not None:
+        command.extend(["--artifact-out", str(artifact_out)])
+    if replay_artifact is not None:
+        command.extend(["--replay-artifact", str(replay_artifact)])
+        if replay_from is not None:
+            command.extend(["--replay-from", str(replay_from)])
+    return command
 
 
 def run_and_analyze(args: argparse.Namespace) -> None:
@@ -685,6 +702,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
     air_trace = air_workdir / "target/generated/air.trace.jsonl"
     air_stdout = air_workdir / "target/generated/air.stdout.log"
     air_stderr = air_workdir / "target/generated/air.stderr.log"
+    air_artifact = run_dir / "air-artifact"
     air_trace.parent.mkdir(parents=True, exist_ok=True)
 
     opencode_raw = run_dir / "opencode-raw"
@@ -743,6 +761,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
                 model_config=args.model_config,
                 tool_config=args.tool_config,
                 trace_path=air_trace,
+                artifact_out=air_artifact,
             ),
             cwd=air_workdir,
             env=air_env,
@@ -799,6 +818,7 @@ def run_and_analyze(args: argparse.Namespace) -> None:
         "opencode_workdir": None if reuse_opencode_from else str(opencode_workdir),
         "reuse_opencode_from": str(reuse_opencode_from) if reuse_opencode_from else None,
         "air_trace": str(air_trace),
+        "air_artifact": str(air_artifact),
         "air_http_dir": str(air_http_dir) if capture_http else None,
         "air_stdout": str(air_stdout),
         "air_stderr": str(air_stderr),
@@ -849,10 +869,16 @@ def assert_opencode_did_not_modify_source(
 def replay_air_and_analyze(args: argparse.Namespace) -> None:
     source_repo = args.repo.resolve()
     source_run = args.source_run.resolve()
-    source_air = relay_module.load_cassette(source_run, "air")
-    task = args.task or relay_module.infer_task_from_cassette(source_air)
+    source_artifact = source_run / "air-artifact"
+    if not (source_artifact / "artifact.json").exists():
+        raise SystemExit(
+            f"{source_run} does not contain air-artifact/artifact.json; "
+            "run compare.py run with the updated AIR first"
+        )
+    source_artifact_json = read_json(source_artifact / "artifact.json")
+    task = args.task or source_artifact_json.get("task")
     if not task:
-        raise SystemExit("Cannot infer task from source run; pass --task explicitly")
+        raise SystemExit("Cannot infer task from source artifact; pass --task explicitly")
 
     run_name = args.name or f"replay-air-{time.strftime('%Y%m%d-%H%M%S')}"
     run_dir = (args.out_dir / run_name).resolve()
@@ -873,31 +899,35 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
         air_execution = "in-place"
 
     env = load_env(args.env_file)
+    real_base_url = (env.get("OPENAI_BASE_URL") or "").strip()
     air_trace = air_workdir / "target/generated/air.trace.jsonl"
     air_stdout = air_workdir / "target/generated/air.stdout.log"
     air_stderr = air_workdir / "target/generated/air.stderr.log"
+    air_artifact = run_dir / "air-artifact"
     air_trace.parent.mkdir(parents=True, exist_ok=True)
     air_http_dir = run_dir / "air-http"
 
     log_step("building AIR CLI" if args.build_air else "resolving AIR CLI")
     air_bin = resolve_air_bin(args.air_bin, source_repo, args.build_air)
     opencode_reference = load_opencode_http_reference(source_run)
-    relay = relay_module.ReplayRelay(
-        cassette=source_air,
-        replay_until=len(source_air) + 1 if args.from_call is None else args.from_call,
-        target_base_url=args.target_base_url
-        or relay_module.infer_target_base_url(source_air),
-        out_dir=air_http_dir,
-        monitor_reference=opencode_reference,
-        path_rewrites=source_air_path_rewrites(source_run, air_workdir),
-    )
-    relay.start()
     air_env = env.copy()
-    air_env["OPENAI_BASE_URL"] = relay.base_url
+    air_proxy = None
+    if real_base_url and args.replay_from is not None:
+        air_proxy = HttpCaptureProxy(
+            args.target_base_url or real_base_url,
+            air_http_dir,
+            reference_cassette=opencode_reference,
+        )
+        air_proxy.start()
+        air_env["OPENAI_BASE_URL"] = air_proxy.base_url
     air_returncode = 0
     try:
-        print(relay_module.render_relay_banner(relay, source_air), flush=True)
-        log_step("running AIR code agent through replay relay")
+        if args.replay_from is None:
+            log_step("replaying AIR code artifact without model calls")
+        else:
+            log_step(
+                f"running AIR code agent with built-in replay from trace event {args.replay_from}"
+            )
         air_returncode = run_checked(
             _build_air_code_agent_command(
                 air_bin=air_bin,
@@ -906,6 +936,9 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
                 model_config=args.model_config,
                 tool_config=args.tool_config,
                 trace_path=air_trace,
+                artifact_out=air_artifact,
+                replay_artifact=source_artifact,
+                replay_from=args.replay_from,
             ),
             cwd=air_workdir,
             env=air_env,
@@ -913,14 +946,28 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
             stderr=air_stderr,
             timeout=args.timeout_seconds,
             allow_failure=bool(opencode_reference),
-            stop_when=relay.rate_limit_message,
+            stop_when=air_proxy.stop_message if air_proxy else None,
         )
     finally:
-        relay.stop()
-    if air_returncode != 0 and not (relay.monitor and relay.monitor.stop_reason):
+        if air_proxy:
+            air_proxy.stop()
+    if air_returncode != 0 and not (
+        air_proxy and air_proxy.monitor and air_proxy.monitor.stop_reason
+    ):
         raise SystemExit(f"AIR command failed with exit {air_returncode}")
+    if args.replay_from is None:
+        if air_artifact.exists():
+            shutil.rmtree(air_artifact)
+        copy_dir(source_artifact, air_artifact)
+        air_trace = air_artifact / str(
+            source_artifact_json.get("files", {}).get("trace", "trace.jsonl")
+        )
 
-    air = analyze_air(air_trace, stderr_path=air_stderr, http_dir=air_http_dir)
+    air = analyze_air(
+        air_trace,
+        stderr_path=air_stderr,
+        http_dir=air_http_dir if air_http_dir.exists() else None,
+    )
     opencode, opencode_diff = analyze_source_opencode(source_run)
     air_diff = (
         workspace_delta_summary(air_workdir, air_snapshot)
@@ -939,13 +986,15 @@ def replay_air_and_analyze(args: argparse.Namespace) -> None:
             "air_execution": air_execution,
             "air_workdir": str(air_workdir),
             "source_run": str(source_run),
-            "replay_from": args.from_call,
+            "replay_from": args.replay_from,
             "air_trace": str(air_trace),
-            "air_http_dir": str(air_http_dir),
+            "air_artifact": str(air_artifact),
+            "source_air_artifact": str(source_artifact),
+            "air_http_dir": str(air_http_dir) if air_http_dir.exists() else None,
             "air_stdout": str(air_stdout),
             "air_stderr": str(air_stderr),
             "air_returncode": air_returncode,
-            "air_route_monitor": relay.monitor.stop_reason if relay.monitor else None,
+            "air_route_monitor": air_proxy.monitor.stop_reason if air_proxy and air_proxy.monitor else None,
             "opencode_raw_dir": str(source_run / "opencode-raw"),
             "opencode_http_dir": str(opencode_http_dir_for_run(source_run)),
             "opencode_events": str(source_run / "opencode-work/target/generated/opencode.events.jsonl"),

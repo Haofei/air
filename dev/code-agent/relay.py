@@ -1,29 +1,22 @@
 #!/usr/bin/env python3
-"""Replay captured code-agent HTTP calls and optionally resume with a live provider.
+"""Inspect captured code-agent HTTP calls and request/response divergence.
 
 This tool consumes the HTTP capture directories produced by
-dev/code-agent/compare.py. It is intentionally transport-level: replay is
-based on call order, while request shape differences are logged for diagnosis.
+dev/code-agent/compare.py. AIR replay now lives in `air code --replay-artifact`;
+this script is only for analyzing raw provider I/O.
 """
 
 from __future__ import annotations
 
 import argparse
-import http.server
 import json
 import os
-import shlex
-import socket
-import subprocess
 import sys
-import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 sys.dont_write_bytecode = True
 
@@ -35,9 +28,8 @@ ACTION_TOOLS = {"apply_patch", "edit", "write"}
 
 
 def main() -> None:
-    argv, child_command = split_child_command(sys.argv[1:])
     parser = argparse.ArgumentParser(
-        description="Inspect or replay captured AIR/OpenCode model HTTP calls."
+        description="Inspect captured AIR/OpenCode model HTTP calls."
     )
     subcommands = parser.add_subparsers(dest="command", required=True)
 
@@ -70,42 +62,8 @@ def main() -> None:
     )
     divergence_parser.set_defaults(func=divergence_run)
 
-    serve_parser = subcommands.add_parser(
-        "serve", help="start a local replay/forwarding OpenAI-compatible relay"
-    )
-    add_capture_args(serve_parser)
-    add_relay_args(serve_parser)
-    serve_parser.set_defaults(func=serve_relay)
-
-    run_parser = subcommands.add_parser(
-        "run",
-        help="run a command with OPENAI_BASE_URL pointed at a relay",
-        epilog="Put the child command after --, for example: run CAPTURE --from 23 -- cargo run ...",
-    )
-    add_capture_args(run_parser)
-    add_relay_args(run_parser)
-    run_parser.add_argument(
-        "--env-file",
-        type=Path,
-        default=repo_root() / ".env",
-        help="environment file loaded before the child command",
-    )
-    run_parser.set_defaults(func=run_with_relay)
-
-    args = parser.parse_args(argv)
-    if args.command == "run":
-        args.child_command = child_command
+    args = parser.parse_args()
     args.func(args)
-
-
-def split_child_command(argv: list[str]) -> tuple[list[str], list[str]]:
-    if not argv or argv[0] != "run":
-        return argv, []
-    try:
-        separator = argv.index("--")
-    except ValueError:
-        return argv, []
-    return argv[:separator], argv[separator + 1 :]
 
 
 def add_capture_args(parser: argparse.ArgumentParser) -> None:
@@ -117,29 +75,6 @@ def add_capture_args(parser: argparse.ArgumentParser) -> None:
         help="which captured side to use",
     )
 
-
-def add_relay_args(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--from",
-        dest="from_call",
-        type=int,
-        default=None,
-        help=(
-            "1-based call number where live forwarding begins. Calls before it "
-            "are replayed. Defaults to replaying the whole capture."
-        ),
-    )
-    parser.add_argument(
-        "--target-base-url",
-        default=None,
-        help="live upstream base URL. Defaults to the base URL in the captured requests.",
-    )
-    parser.add_argument(
-        "--out-dir",
-        type=Path,
-        default=None,
-        help="where relay request/response logs are written",
-    )
 
 
 @dataclass
@@ -296,432 +231,6 @@ def divergence_run(args: argparse.Namespace) -> None:
     print(render_divergence_report(args.run_dir, air, opencode, args.window))
 
 
-def serve_relay(args: argparse.Namespace) -> None:
-    cassette = load_cassette(args.run_dir, args.side)
-    relay = build_relay(args, cassette)
-    relay.start()
-    try:
-        print(render_relay_banner(relay, cassette), flush=True)
-        while True:
-            time.sleep(3600)
-    except KeyboardInterrupt:
-        print("\n[code-agent-relay] stopping", flush=True)
-    finally:
-        relay.stop()
-
-
-def run_with_relay(args: argparse.Namespace) -> None:
-    child_command = list(args.child_command)
-    if child_command and child_command[0] == "--":
-        child_command = child_command[1:]
-    if not child_command:
-        raise SystemExit("run requires a child command after --")
-
-    cassette = load_cassette(args.run_dir, args.side)
-    relay = build_relay(args, cassette)
-    env = load_env(args.env_file)
-    relay.start()
-    env["OPENAI_BASE_URL"] = relay.base_url
-    try:
-        print(render_relay_banner(relay, cassette), flush=True)
-        print(
-            f"[code-agent-relay] running: {shlex.join(child_command)}",
-            flush=True,
-        )
-        raise SystemExit(
-            run_child(
-                child_command,
-                env=env,
-                cwd=repo_root(),
-                stop_when=relay.rate_limit_message,
-            )
-        )
-    finally:
-        relay.stop()
-
-
-def run_child(
-    command: list[str],
-    *,
-    env: dict[str, str],
-    cwd: Path,
-    stop_when: Callable[[], str | None] | None = None,
-) -> int:
-    process = subprocess.Popen(command, env=env, cwd=cwd)
-    while True:
-        returncode = process.poll()
-        if returncode is not None:
-            if stop_when:
-                stop_reason = stop_when()
-                if stop_reason:
-                    raise SystemExit(stop_reason)
-            return int(returncode)
-        if stop_when:
-            stop_reason = stop_when()
-            if stop_reason:
-                process.kill()
-                process.wait()
-                raise SystemExit(stop_reason)
-        time.sleep(1)
-
-
-def build_relay(args: argparse.Namespace, cassette: list[CapturedCall]) -> "ReplayRelay":
-    replay_until = len(cassette) + 1 if args.from_call is None else args.from_call
-    if replay_until < 1:
-        raise SystemExit("--from must be >= 1")
-    target_base_url = args.target_base_url or infer_target_base_url(cassette)
-    log_dir = args.out_dir or default_relay_log_dir(args.run_dir, args.side)
-    return ReplayRelay(
-        cassette=cassette,
-        replay_until=replay_until,
-        target_base_url=target_base_url,
-        out_dir=log_dir,
-    )
-
-
-class ReplayRelay:
-    def __init__(
-        self,
-        *,
-        cassette: list[CapturedCall],
-        replay_until: int,
-        target_base_url: str | None,
-        out_dir: Path,
-        monitor_reference: list[CapturedCall] | None = None,
-        path_rewrites: list[tuple[str, str]] | None = None,
-    ):
-        self.cassette = cassette
-        self.replay_until = replay_until
-        self.target_base_url = target_base_url.rstrip("/") if target_base_url else None
-        self.out_dir = out_dir
-        self._server: http.server.ThreadingHTTPServer | None = None
-        self._thread: threading.Thread | None = None
-        self._lock = threading.Lock()
-        self._counter = 0
-        self._call_index = 0
-        self.base_url = ""
-        self.monitor = RouteMonitor(monitor_reference) if monitor_reference else None
-        self.path_rewrites = path_rewrites or []
-        self.rate_limit_stop: dict[str, Any] | None = None
-
-    def start(self) -> None:
-        self.out_dir.mkdir(parents=True, exist_ok=True)
-        relay = self
-
-        class Handler(http.server.BaseHTTPRequestHandler):
-            def log_message(self, _format: str, *_args: Any) -> None:
-                return
-
-            def do_POST(self) -> None:
-                relay.handle(self)
-
-        self._server = http.server.ThreadingHTTPServer(("127.0.0.1", free_port()), Handler)
-        host, port = self._server.server_address
-        self.base_url = f"http://{host}:{port}"
-        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-        self._thread.start()
-
-    def stop(self) -> None:
-        if self._server:
-            self._server.shutdown()
-            self._server.server_close()
-        if self._thread:
-            self._thread.join(timeout=5)
-
-    def handle(self, handler: http.server.BaseHTTPRequestHandler) -> None:
-        body_bytes = handler.rfile.read(int(handler.headers.get("content-length", "0") or "0"))
-        body = parse_json_bytes(body_bytes)
-        call_index = self.next_call_index()
-        target_url = self.target_url(handler.path)
-        request_log = {
-            "call_index": call_index,
-            "mode": "replay" if call_index < self.replay_until else "forward",
-            "method": handler.command,
-            "path": handler.path,
-            "url": target_url,
-            "headers": redact_headers(dict(handler.headers.items())),
-            "body_bytes": len(body_bytes),
-            "body": body,
-            "shape": request_shape(body),
-        }
-        cassette_call = self.cassette[call_index - 1] if call_index <= len(self.cassette) else None
-        if cassette_call:
-            request_log["cassette_shape"] = request_shape(cassette_call.request.get("body"))
-            request_log["shape_delta"] = shape_delta(
-                request_log["shape"],
-                request_log["cassette_shape"],
-            )
-        self.write_json("http-request", request_log)
-        if self.rate_limit_stop:
-            self.send_json_error(
-                handler,
-                429,
-                "relay stopped after upstream HTTP 429",
-                call_index,
-            )
-            return
-
-        if call_index < self.replay_until:
-            self.replay_response(handler, call_index)
-            return
-        if self.monitor:
-            stop_reason = self.monitor.stop_before(call_index)
-            if stop_reason:
-                self.send_json_error(handler, 409, stop_reason["message"], call_index)
-                return
-        self.forward_request(handler, body_bytes, target_url, call_index)
-
-    def replay_response(self, handler: http.server.BaseHTTPRequestHandler, call_index: int) -> None:
-        if call_index > len(self.cassette):
-            self.send_json_error(
-                handler,
-                502,
-                f"no captured response for replay call {call_index}",
-                call_index,
-            )
-            return
-        captured = self.cassette[call_index - 1]
-        if not captured.response:
-            self.send_json_error(
-                handler,
-                502,
-                f"captured call {call_index} has no response",
-                call_index,
-            )
-            return
-
-        status = int(captured.response.get("status") or 200)
-        headers = captured.response.get("headers") or {}
-        captured_body = rewrite_json_strings(captured.response.get("body"), self.path_rewrites)
-        response_body = encode_captured_body(captured_body)
-        parsed_body = parse_json_bytes(response_body)
-        if self.monitor and status < 400:
-            self.monitor.observe_response(call_index, parsed_body, enforce=False)
-        self.send_response(handler, status, headers, response_body)
-        self.write_json(
-            "http-response",
-            {
-                "call_index": call_index,
-                "mode": "replay",
-                "replayed_from": str(captured.response_path),
-                "status": status,
-                "headers": redact_headers(headers),
-                "body_bytes": len(response_body),
-                "body": parsed_body,
-            },
-        )
-        print(f"[code-agent-relay] call {call_index}: replayed", flush=True)
-
-    def forward_request(
-        self,
-        handler: http.server.BaseHTTPRequestHandler,
-        body_bytes: bytes,
-        target_url: str | None,
-        call_index: int,
-    ) -> None:
-        if not target_url:
-            self.send_json_error(
-                handler,
-                502,
-                "live forwarding needs --target-base-url or a captured request URL",
-                call_index,
-            )
-            return
-        headers = {
-            key: value
-            for key, value in handler.headers.items()
-            if key.lower() not in {"host", "content-length", "accept-encoding", "connection"}
-        }
-        request = urllib.request.Request(
-            target_url,
-            data=body_bytes,
-            headers=headers,
-            method=handler.command,
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=600) as response:
-                request_body = parse_json_bytes(body_bytes)
-                if isinstance(request_body, dict) and request_body.get("stream") is True:
-                    response_body = self.forward_stream_response(
-                        handler, response, call_index, target_url
-                    )
-                else:
-                    response_body = response.read()
-                    self.send_response(
-                        handler, response.status, dict(response.headers.items()), response_body
-                    )
-                self.write_forward_response(call_index, target_url, response.status, response.headers, response_body)
-        except urllib.error.HTTPError as error:
-            response_body = error.read()
-            self.record_rate_limit(call_index, target_url, error.code, response_body)
-            self.send_response(handler, error.code, dict(error.headers.items()), response_body)
-            self.write_forward_response(call_index, target_url, error.code, error.headers, response_body)
-        except urllib.error.URLError as error:
-            self.send_json_error(handler, 502, f"upstream request failed: {error}", call_index)
-            return
-        print(f"[code-agent-relay] call {call_index}: forwarded -> {target_url}", flush=True)
-
-    def forward_stream_response(
-        self,
-        handler: http.server.BaseHTTPRequestHandler,
-        response: Any,
-        call_index: int,
-        target_url: str,
-    ) -> bytes:
-        chunks = bytearray()
-        progress_path = self.next_path("http-stream-progress")
-        last_progress_at = time.time()
-        handler.send_response(response.status)
-        for key, value in response.headers.items():
-            if key.lower() in {"content-length", "transfer-encoding", "connection"}:
-                continue
-            handler.send_header(key, value)
-        handler.end_headers()
-        while True:
-            chunk = response.readline()
-            if not chunk:
-                break
-            chunks.extend(chunk)
-            handler.wfile.write(chunk)
-            handler.wfile.flush()
-            now = time.time()
-            if len(chunks) <= len(chunk) or now - last_progress_at >= 5:
-                write_stream_progress(progress_path, call_index, target_url, bytes(chunks))
-                print(
-                    f"[code-agent-relay] stream call {call_index}: received {len(chunks)} bytes "
-                    f"(progress: {progress_path})",
-                    flush=True,
-                )
-                last_progress_at = now
-        write_stream_progress(progress_path, call_index, target_url, bytes(chunks), done=True)
-        return bytes(chunks)
-
-    def write_forward_response(
-        self,
-        call_index: int,
-        target_url: str,
-        status: int,
-        headers: Any,
-        response_body: bytes,
-    ) -> None:
-        parsed_body = parse_json_bytes(response_body)
-        stop_reason = (
-            self.monitor.observe_response(call_index, parsed_body)
-            if self.monitor and status < 400
-            else None
-        )
-        self.write_json(
-            "http-response",
-            {
-                "call_index": call_index,
-                "mode": "forward",
-                "url": target_url,
-                "status": status,
-                "headers": redact_headers(dict(headers.items())),
-                "body_bytes": len(response_body),
-                "body": parsed_body,
-                "route_monitor": stop_reason,
-            },
-        )
-        if stop_reason:
-            print(f"[code-agent-relay] route divergence detected: {stop_reason['message']}", flush=True)
-
-    def record_rate_limit(
-        self, call_index: int, target_url: str, status: int, body: bytes
-    ) -> None:
-        if status != 429 or self.rate_limit_stop:
-            return
-        self.rate_limit_stop = {
-            "kind": "upstream_rate_limited",
-            "call_index": call_index,
-            "url": target_url,
-            "status": status,
-            "body": parse_json_bytes(body),
-        }
-        print(
-            f"[code-agent-relay] upstream returned HTTP 429 at model call {call_index}; stopping",
-            flush=True,
-        )
-
-    def rate_limit_message(self) -> str | None:
-        if not self.rate_limit_stop:
-            return None
-        call_index = self.rate_limit_stop.get("call_index")
-        return f"upstream returned HTTP 429 at model call {call_index}; stopping run"
-
-    def send_json_error(
-        self,
-        handler: http.server.BaseHTTPRequestHandler,
-        status: int,
-        message: str,
-        call_index: int,
-    ) -> None:
-        body = json.dumps({"error": message}, ensure_ascii=False).encode("utf-8")
-        handler.send_response(status)
-        handler.send_header("content-type", "application/json")
-        handler.send_header("content-length", str(len(body)))
-        handler.end_headers()
-        handler.wfile.write(body)
-        self.write_json(
-            "http-response",
-            {
-                "call_index": call_index,
-                "mode": "error",
-                "status": status,
-                "headers": {"content-type": "application/json"},
-                "body_bytes": len(body),
-                "body": parse_json_bytes(body),
-            },
-        )
-        print(f"[code-agent-relay] call {call_index}: error: {message}", flush=True)
-
-    def send_response(
-        self,
-        handler: http.server.BaseHTTPRequestHandler,
-        status: int,
-        headers: dict[str, Any],
-        body: bytes,
-    ) -> None:
-        handler.send_response(status)
-        for key, value in headers.items():
-            if key.lower() in {
-                "content-length",
-                "transfer-encoding",
-                "connection",
-                "server",
-                "date",
-            }:
-                continue
-            handler.send_header(key, str(value))
-        if not any(key.lower() == "content-type" for key in headers):
-            handler.send_header("content-type", "application/json")
-        handler.send_header("content-length", str(len(body)))
-        handler.end_headers()
-        handler.wfile.write(body)
-
-    def target_url(self, path: str) -> str | None:
-        if not self.target_base_url:
-            return None
-        return self.target_base_url + path
-
-    def next_call_index(self) -> int:
-        with self._lock:
-            self._call_index += 1
-            return self._call_index
-
-    def next_path(self, kind: str) -> Path:
-        with self._lock:
-            self._counter += 1
-            counter = self._counter
-        return self.out_dir / f"{int(time.time() * 1000)}-{counter:04d}-{kind}.json"
-
-    def write_json(self, kind: str, value: dict[str, Any]) -> None:
-        self.next_path(kind).write_text(
-            json.dumps(value, indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-
-
 def load_cassette(path: Path, side: str) -> list[CapturedCall]:
     http_dir = resolve_http_dir(path.resolve(), side)
     request_paths = sorted(http_dir.glob("*http-request.json"))
@@ -803,22 +312,6 @@ def render_inspection(cassette: list[CapturedCall]) -> str:
         top = ", ".join(f"{name}={count}" for name, count in sorted(tool_names.items(), key=lambda item: (-item[1], item[0]))[:12])
         lines.append(f"assistant_tool_calls: {top}")
     return "\n".join(lines)
-
-
-def render_relay_banner(relay: ReplayRelay, cassette: list[CapturedCall]) -> str:
-    replayed = max(0, min(len(cassette), relay.replay_until - 1))
-    live = "disabled" if not relay.target_base_url else relay.target_base_url
-    monitor = getattr(relay, "monitor", None)
-    return "\n".join(
-        [
-            f"[code-agent-relay] listening: {relay.base_url}",
-            f"[code-agent-relay] replaying calls: 1..{replayed}",
-            f"[code-agent-relay] forwarding from call: {relay.replay_until}",
-            f"[code-agent-relay] live target: {live}",
-            f"[code-agent-relay] log dir: {relay.out_dir}",
-            f"[code-agent-relay] route monitor: {monitor.label if monitor else 'disabled'}",
-        ]
-    )
 
 
 def render_call_diff(
@@ -1399,38 +892,6 @@ def infer_target_base_url(cassette: list[CapturedCall]) -> str | None:
     return None
 
 
-def default_relay_log_dir(run_dir: Path, side: str) -> Path:
-    base = run_dir.resolve()
-    if base.name.endswith("-http"):
-        base = base.parent
-    return base / f"relay-{side}-http"
-
-
-def encode_captured_body(body: Any) -> bytes:
-    if isinstance(body, str):
-        return body.encode("utf-8")
-    return json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-
-
-def rewrite_json_strings(value: Any, rewrites: list[tuple[str, str]]) -> Any:
-    if not rewrites:
-        return value
-    if isinstance(value, str):
-        rewritten = value
-        for old, new in rewrites:
-            if old:
-                rewritten = rewritten.replace(old, new)
-        return rewritten
-    if isinstance(value, list):
-        return [rewrite_json_strings(item, rewrites) for item in value]
-    if isinstance(value, dict):
-        return {
-            key: rewrite_json_strings(item, rewrites)
-            for key, item in value.items()
-        }
-    return value
-
-
 def read_json_file(path: Path | None) -> dict[str, Any] | None:
     if path is None:
         return None
@@ -1498,12 +959,6 @@ def redact_headers(headers: dict[str, Any]) -> dict[str, Any]:
 def median(values: list[int]) -> int:
     ordered = sorted(values)
     return ordered[len(ordered) // 2]
-
-
-def free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
-        sock.bind(("127.0.0.1", 0))
-        return int(sock.getsockname()[1])
 
 
 def load_env_file(path: Path) -> dict[str, str]:
