@@ -77,6 +77,7 @@
       "request_timeout_seconds": 180,
       "json_mode": true,
       "native_tool_calls": true,
+      "opencode_tool_mode": "edit_write",
       "trace_provider_io": true,
       "extra_body": {
         "thinking": {

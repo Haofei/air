@@ -188,6 +188,14 @@ pub(crate) fn patch_code_output_with_workspace_delta(
         "patch_applied".to_string(),
         Value::Bool(!delta.changed_files.is_empty()),
     );
+    if edit
+        .get("final_success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        && delta.changed_files.is_empty()
+    {
+        edit.insert("final_success".to_string(), Value::Bool(false));
+    }
     edit.insert(
         "workspace_diff".to_string(),
         json!({

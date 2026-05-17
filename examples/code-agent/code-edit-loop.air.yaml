@@ -64,6 +64,15 @@ state:
   observation:
     type: array
     items: object
+  observation_summary:
+    type: object
+    properties:
+      any_workspace_change: boolean
+      any_verification_passed: boolean
+      any_verification_failed: boolean
+      verification_status_update:
+        type: enum
+        enum: [unchanged, unknown, passed, failed]
   final_diff_result:
     type: array
     items: object
@@ -144,6 +153,11 @@ workflow:
         - kind: set
           values:
             observations: []
+            observation_summary:
+              verification_status_update: unchanged
+              any_workspace_change: false
+              any_verification_passed: false
+              any_verification_failed: false
             verification_status: unknown
             phase: choose
 
@@ -216,7 +230,7 @@ workflow:
             phase: post_act
 
     - id: verification-passed
-      when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
+      when: phase == "post_act" && observation_summary.verification_status_update == "passed"
       actions:
         - kind: set
           values:
@@ -224,11 +238,19 @@ workflow:
             phase: choose
 
     - id: verification-failed
-      when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.verification == true || phase == "post_act" && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == false && observation[1].output.verification == true
+      when: phase == "post_act" && observation_summary.verification_status_update == "failed"
       actions:
         - kind: set
           values:
             verification_status: failed
+            phase: choose
+
+    - id: verification-reset-after-write
+      when: phase == "post_act" && observation_summary.verification_status_update == "unknown"
+      actions:
+        - kind: set
+          values:
+            verification_status: unknown
             phase: choose
 
     - id: complete-needs-verification

@@ -192,19 +192,19 @@ fn path_ref_to_input_string(path: &Path) -> String {
 
 fn derive_code_failure_reason(outputs: &Value, delta: &WorkspaceDelta) -> Option<FailureReason> {
     let edit = outputs.get("edit")?;
-    if edit
-        .get("final_success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    }
     if delta.changed_files.is_empty() {
         return Some(FailureReason {
             category: FailureCategory::NoPatchApplied,
             message: "code agent finished without changing workspace files".to_string(),
             details: BTreeMap::new(),
         });
+    }
+    if edit
+        .get("final_success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return None;
     }
     Some(FailureReason {
         category: FailureCategory::AgentError,
@@ -293,6 +293,7 @@ mod tests {
                 "act",
                 "verification-passed",
                 "verification-failed",
+                "verification-reset-after-write",
                 "complete-needs-verification",
                 "complete-verified",
                 "continue-after-act",
@@ -432,8 +433,9 @@ mod tests {
                 .find(|rule| rule["id"].as_str() == Some(id))
                 .unwrap();
             let condition = rule["when"].as_str().unwrap();
-            assert!(condition.contains("observation[0].tool == \"bash\""));
-            assert!(condition.contains("observation[1].tool == \"bash\""));
+            assert!(condition.contains("observation_summary.verification_status_update"));
+            assert!(!condition.contains("observation[0]"));
+            assert!(!condition.contains("observation[1]"));
         }
 
         let verification_passed = rules
@@ -447,6 +449,19 @@ mod tests {
         assert_eq!(
             verification_passed["actions"][0]["values"]["phase"],
             serde_yaml::Value::String("choose".to_string())
+        );
+
+        let reset_after_write = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("verification-reset-after-write"))
+            .unwrap();
+        assert!(reset_after_write["when"]
+            .as_str()
+            .unwrap()
+            .contains("verification_status_update == \"unknown\""));
+        assert_eq!(
+            reset_after_write["actions"][0]["values"]["verification_status"],
+            serde_yaml::Value::String("unknown".to_string())
         );
     }
 
@@ -527,6 +542,7 @@ mod tests {
             json!([{"path": "crates/air-cli/src/code_agent.rs"}])
         );
         assert_eq!(edit["patch_applied"], json!(true));
+        assert_eq!(edit["final_success"], json!(true));
         assert_eq!(
             edit["workspace_diff"]["provider"],
             json!("air-code-artifact")
@@ -535,5 +551,36 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("crates/air-tools/src/lib.rs"));
+    }
+
+    #[test]
+    fn code_output_marks_no_patch_as_failed_even_when_verified() {
+        let mut outputs = json!({
+            "edit": {
+                "changed_files": [],
+                "workspace_changed_files": [],
+                "preexisting_changed_files": [],
+                "patch_applied": false,
+                "workspace_diff": {
+                    "provider": "bash",
+                    "diff": ""
+                },
+                "final_success": true
+            }
+        });
+        let delta = WorkspaceDelta {
+            changed_files: vec![],
+            diff: String::new(),
+        };
+        let failure = derive_code_failure_reason(&outputs, &delta);
+
+        patch_code_output_with_workspace_delta(&mut outputs, &delta, &[], failure.as_ref());
+
+        assert_eq!(outputs["edit"]["patch_applied"], json!(false));
+        assert_eq!(outputs["edit"]["final_success"], json!(false));
+        assert_eq!(
+            outputs["edit"]["failure_reason"]["category"],
+            json!("no_patch_applied")
+        );
     }
 }

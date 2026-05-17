@@ -1277,6 +1277,7 @@ pub(super) fn call_file_write_tool(
         "bytes": content_bytes.len(),
         "created": !existed,
         "overwritten": existed,
+        "workspace_changed": true,
         "artifacts": [{
             "id": format!("file-write:{}", path.display()),
             "kind": "file_write",
@@ -1291,7 +1292,8 @@ pub(super) fn call_file_write_tool(
                 "path": path.display().to_string(),
                 "bytes": content_bytes.len(),
                 "created": !existed,
-                "overwritten": existed
+                "overwritten": existed,
+                "workspace_changed": true
             }
         }]
     }))

@@ -22,7 +22,7 @@ You are an interactive CLI tool that helps users with software engineering tasks
 ## Editing constraints
 - Default to ASCII when editing or creating files. Only introduce non-ASCII or other Unicode characters when there is a clear justification and the file already uses them.
 - Only add comments if they are necessary to make a non-obvious block easier to understand.
-- Try to use apply_patch for single file edits, but it is fine to explore other options to make the edit if it does not work well. Do not use apply_patch for changes that are auto-generated (i.e. generating package.json or running a lint or format command like gofmt) or when scripting is more efficient (such as search and replacing a string across a codebase).
+- Try to use apply_patch for single file edits when that tool is available, but it is fine to explore other options to make the edit if it does not work well. Do not use apply_patch for changes that are auto-generated (i.e. generating package.json or running a lint or format command like gofmt) or when scripting is more efficient (such as search and replacing a string across a codebase).
 
 ## Tool usage
 - Prefer specialized tools over shell for file operations:
@@ -140,7 +140,18 @@ pub struct OpenAiModelConfig {
     pub native_tool_calls: Option<bool>,
 
     #[serde(default)]
+    pub opencode_tool_mode: Option<OpenCodeToolMode>,
+
+    #[serde(default)]
     pub trace_provider_io: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OpenCodeToolMode {
+    Auto,
+    ApplyPatch,
+    EditWrite,
 }
 
 #[derive(Debug, Error)]
@@ -618,7 +629,13 @@ fn build_chat_completion_body(
         }
     }
     let tool_name_map = if model_config.native_tool_calls == Some(true) {
-        attach_native_tool_calls(&mut body, input, opencode_style, &request_model_name)?
+        attach_native_tool_calls(
+            &mut body,
+            input,
+            opencode_style,
+            model_config,
+            &request_model_name,
+        )?
     } else {
         BTreeMap::new()
     };
@@ -817,6 +834,7 @@ fn attach_native_tool_calls(
     body: &mut Value,
     input: &Value,
     opencode_style: bool,
+    model_config: &OpenAiModelConfig,
     model_name: &str,
 ) -> Result<BTreeMap<String, String>, RuntimeError> {
     let tool_schemas = input.get("tool_schemas").and_then(Value::as_object);
@@ -836,7 +854,7 @@ fn attach_native_tool_calls(
                 .collect::<Vec<_>>()
         };
     if opencode_style {
-        let use_patch = opencode_uses_apply_patch(model_name);
+        let use_patch = opencode_uses_apply_patch(model_config.opencode_tool_mode, model_name);
         for name in opencode_tool_order(use_patch) {
             if !tool_names.iter().any(|existing| existing == name) {
                 tool_names.push((*name).to_string());
@@ -898,9 +916,17 @@ fn attach_native_tool_calls(
     Ok(tool_name_map)
 }
 
-fn opencode_uses_apply_patch(model_name: &str) -> bool {
-    let model_name = model_name.to_ascii_lowercase();
-    model_name.contains("gpt-") && !model_name.contains("oss") && !model_name.contains("gpt-4")
+fn opencode_uses_apply_patch(mode: Option<OpenCodeToolMode>, model_name: &str) -> bool {
+    match mode.unwrap_or(OpenCodeToolMode::Auto) {
+        OpenCodeToolMode::ApplyPatch => true,
+        OpenCodeToolMode::EditWrite => false,
+        OpenCodeToolMode::Auto => {
+            let model_name = model_name.to_ascii_lowercase();
+            model_name.contains("gpt-")
+                && !model_name.contains("oss")
+                && !model_name.contains("gpt-4")
+        }
+    }
 }
 
 fn opencode_tool_order(use_patch: bool) -> &'static [&'static str] {
@@ -2896,6 +2922,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_config_file_accepts_opencode_tool_mode() {
+        let path = temp_file_path("air-model-config-opencode-tool-mode", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "code_edit_decider": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "GLM-5.1",
+                  "native_tool_calls": true,
+                  "opencode_tool_mode": "edit_write"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let config = parse_config_file(&path).unwrap();
+        let _ = fs::remove_file(&path);
+
+        assert_eq!(
+            config.models["code_edit_decider"].opencode_tool_mode,
+            Some(OpenCodeToolMode::EditWrite)
+        );
+    }
+
+    #[test]
+    fn parse_config_file_rejects_invalid_opencode_tool_mode() {
+        let path = temp_file_path("air-model-config-opencode-tool-mode-invalid", "json");
+        fs::write(
+            &path,
+            r#"{
+              "models": {
+                "code_edit_decider": {
+                  "base_url": "https://example.com/v1",
+                  "api_key_env": "OPENAI_API_KEY",
+                  "model": "GLM-5.1",
+                  "opencode_tool_mode": "unknown"
+                }
+              }
+            }"#,
+        )
+        .unwrap();
+
+        let error = parse_config_file(&path).unwrap_err();
+        let _ = fs::remove_file(&path);
+
+        assert!(error.to_string().contains("unknown variant"));
+    }
+
+    #[test]
     fn parse_config_file_rejects_zero_request_timeout_seconds() {
         let path = temp_file_path("air-model-config-timeout-zero", "json");
         fs::write(
@@ -2936,6 +3014,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 
@@ -2963,6 +3042,7 @@ mod tests {
             })),
             extra_body: None,
             native_tool_calls: None,
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 
@@ -3135,6 +3215,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3211,6 +3292,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3259,6 +3341,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3304,6 +3387,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3334,6 +3418,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3378,6 +3463,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3397,6 +3483,40 @@ mod tests {
     }
 
     #[test]
+    fn opencode_style_explicit_apply_patch_mode_overrides_model_name() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "GLM-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            opencode_tool_mode: Some(OpenCodeToolMode::ApplyPatch),
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "GLM-5.1".to_string(),
+            &json!({
+                "task": "edit the code",
+                "allowed_tools": ["read", "edit", "write", "apply_patch", "bash"]
+            }),
+        )
+        .unwrap();
+
+        let exposed = request.tool_name_map.values().cloned().collect::<Vec<_>>();
+        assert!(exposed.contains(&"apply_patch".to_string()));
+        assert!(!exposed.contains(&"edit".to_string()));
+        assert!(!exposed.contains(&"write".to_string()));
+    }
+
+    #[test]
     fn native_tool_calls_include_lsp_tool_schemas() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
@@ -3411,6 +3531,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let request = build_chat_completion_body(
@@ -3468,6 +3589,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 
@@ -3519,6 +3641,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let input = json!({
@@ -3591,6 +3714,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let long_content = "x".repeat(60_000);
@@ -3783,6 +3907,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let large_diff = "diff-line\n".repeat(5_000);
@@ -3855,6 +3980,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let large_diff = "diff-line\n".repeat(5_000);
@@ -4113,6 +4239,7 @@ mod tests {
             response_format: None,
             extra_body: None,
             native_tool_calls: Some(true),
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
         let target_context = "target-context-".repeat(1_000);
@@ -4439,6 +4566,7 @@ data: [DONE]
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 
@@ -4466,6 +4594,7 @@ data: [DONE]
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 
@@ -4494,6 +4623,7 @@ data: [DONE]
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 
@@ -4518,6 +4648,7 @@ data: [DONE]
             response_format: None,
             extra_body: None,
             native_tool_calls: None,
+            opencode_tool_mode: None,
             trace_provider_io: None,
         };
 

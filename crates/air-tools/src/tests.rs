@@ -1508,6 +1508,7 @@ fn file_write_writes_inside_configured_base_dir() {
         "<h1>AIR</h1>"
     );
     assert_eq!(output["created"], json!(true));
+    assert_eq!(output["workspace_changed"], json!(true));
     assert_eq!(output["artifacts"][0]["kind"], json!("file_write"));
     assert_eq!(tools.tool_capability("file.write"), Some("file.write"));
     let _ = fs::remove_dir_all(dir);
@@ -1642,6 +1643,7 @@ fn file_edit_replaces_unique_string() {
         "hello agent IR\n"
     );
     assert_eq!(output["replacements"], json!(1));
+    assert_eq!(output["workspace_changed"], json!(true));
     assert_eq!(output["diff_truncated"], json!(false));
     assert!(output["diff"].as_str().unwrap().contains("-AIR"));
     assert!(output["diff"].as_str().unwrap().contains("+agent IR"));
@@ -3145,6 +3147,7 @@ fn apply_patch_add_update_and_delete_files() {
         .unwrap();
 
     assert_eq!(output["applied"], json!(true));
+    assert_eq!(output["workspace_changed"], json!(true));
     assert_eq!(output["file_count"], json!(3));
     assert_eq!(
         fs::read_to_string(dir.join("src/generated/new.rs")).unwrap(),
@@ -3155,6 +3158,47 @@ fn apply_patch_add_update_and_delete_files() {
         "fn new_name() {\n    println!(\"new\");\n}\n"
     );
     assert!(!dir.join("obsolete.txt").exists());
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn apply_patch_pure_insert_uses_context_position() {
+    let dir = temp_dir("air-tools-apply-patch-context-insert");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    let source = dir.join("src/lib.rs");
+    fs::write(
+        &source,
+        "fn first() {\n    println!(\"first\");\n}\n\nfn target() {\n    println!(\"target\");\n}\n\nfn last() {\n    println!(\"last\");\n}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "apply_patch": {
+                  "kind": "apply_patch",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "max_bytes": 10000
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    tools
+        .call_tool(
+            "apply_patch",
+            &json!({
+                "patchText": "*** Begin Patch\n*** Update File: src/lib.rs\n@@ fn target() {\n+    inserted_line();\n*** End Patch"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(
+        fs::read_to_string(source).unwrap(),
+        "fn first() {\n    println!(\"first\");\n}\n\nfn target() {\n    inserted_line();\n    println!(\"target\");\n}\n\nfn last() {\n    println!(\"last\");\n}\n"
+    );
     let _ = fs::remove_dir_all(dir);
 }
 

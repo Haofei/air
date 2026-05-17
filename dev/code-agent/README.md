@@ -68,6 +68,10 @@ the same fingerprint replay that artifact locally and report
 `model_calls_spent: 0`, so you can iterate on metrics and reporting without
 paying for another model run.
 
+Treat replayed benchmark runs as cache/replay checks, not stability
+measurements. Use `--refresh` when comparing code-agent behavior across AIR
+runtime or tool changes.
+
 The same artifact path can be used outside benchmarks:
 
 ```bash

@@ -1426,6 +1426,7 @@ where
             }
         }
 
+        let summary = tool_batch_summary(&results);
         let output_value = Value::Array(results);
         if let Err(error) = validate_output(context.module, output, &output_value) {
             context.push_event_with_meta(
@@ -1438,6 +1439,9 @@ where
             return Err(error);
         }
         context.state.insert(output.to_string(), output_value);
+        context
+            .state
+            .insert(format!("{output}_summary"), summary.clone());
         context.push_event_with_meta(
             "tool_batch_dispatch",
             Some(input),
@@ -1445,6 +1449,7 @@ where
             Some(json!({
                 "count": attempted,
                 "max_calls": max_calls,
+                "summary": summary,
                 "error_count": context
                     .state
                     .get(output)
@@ -1483,15 +1488,85 @@ fn observe_tool_batch_dispatch_error(
         );
         return Err(error);
     }
+    let summary = output_value
+        .as_array()
+        .map(|results| tool_batch_summary(results))
+        .unwrap_or_else(|| tool_batch_summary(&[]));
     context.state.insert(output.to_string(), output_value);
+    context
+        .state
+        .insert(format!("{output}_summary"), summary.clone());
     context.push_event_with_meta(
         "tool_batch_dispatch",
         Some(input),
         context.state.get(output).cloned(),
-        Some(json!({"count": attempted, "max_calls": max_calls, "error_count": 1})),
+        Some(json!({
+            "count": attempted,
+            "max_calls": max_calls,
+            "error_count": 1,
+            "summary": summary
+        })),
         Ok(()),
     );
     Ok(())
+}
+
+fn tool_batch_summary(results: &[Value]) -> Value {
+    let mut any_workspace_change = false;
+    let mut any_verification_passed = false;
+    let mut any_verification_failed = false;
+    let mut verification_status_update = "unchanged";
+    let mut workspace_change_tools = Vec::new();
+    let mut verification_tools = Vec::new();
+    let mut error_count = 0usize;
+
+    for item in results {
+        if item.get("status").and_then(Value::as_str) == Some("error") {
+            error_count += 1;
+        }
+        let tool = item.get("tool").and_then(Value::as_str).unwrap_or_default();
+        let output = item.get("output").unwrap_or(&Value::Null);
+
+        if output
+            .get("workspace_changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            any_workspace_change = true;
+            workspace_change_tools.push(Value::String(tool.to_string()));
+            verification_status_update = "unknown";
+        }
+
+        if output
+            .get("verification")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            verification_tools.push(Value::String(tool.to_string()));
+            if output
+                .get("success")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+            {
+                any_verification_passed = true;
+                verification_status_update = "passed";
+            } else {
+                any_verification_failed = true;
+                verification_status_update = "failed";
+            }
+        }
+    }
+
+    json!({
+        "tool_count": results.len(),
+        "error_count": error_count,
+        "any_workspace_change": any_workspace_change,
+        "workspace_change_tools": workspace_change_tools,
+        "any_verification_passed": any_verification_passed,
+        "any_verification_failed": any_verification_failed,
+        "verification_tools": verification_tools,
+        "verification_status_update": verification_status_update
+    })
 }
 
 struct ModelOutputSchemaError {
@@ -3845,6 +3920,58 @@ mod tests {
         assert!(rendered.contains("\"path\":\"src/lib.rs\""), "{rendered}");
         assert!(rendered.contains("\"replacements\":1"), "{rendered}");
         assert!(!rendered.contains("large diff body"), "{rendered}");
+    }
+
+    #[test]
+    fn tool_batch_summary_resets_stale_verification_after_workspace_change() {
+        let summary = tool_batch_summary(&[
+            json!({
+                "tool": "bash",
+                "status": "ok",
+                "output": {
+                    "verification": true,
+                    "success": true
+                }
+            }),
+            json!({
+                "tool": "edit",
+                "status": "ok",
+                "output": {
+                    "workspace_changed": true,
+                    "success": true
+                }
+            }),
+        ]);
+
+        assert_eq!(summary["any_verification_passed"], json!(true));
+        assert_eq!(summary["any_workspace_change"], json!(true));
+        assert_eq!(summary["verification_status_update"], json!("unknown"));
+    }
+
+    #[test]
+    fn tool_batch_summary_allows_verification_after_workspace_change() {
+        let summary = tool_batch_summary(&[
+            json!({
+                "tool": "edit",
+                "status": "ok",
+                "output": {
+                    "workspace_changed": true,
+                    "success": true
+                }
+            }),
+            json!({
+                "tool": "bash",
+                "status": "ok",
+                "output": {
+                    "verification": true,
+                    "success": true
+                }
+            }),
+        ]);
+
+        assert_eq!(summary["any_workspace_change"], json!(true));
+        assert_eq!(summary["any_verification_passed"], json!(true));
+        assert_eq!(summary["verification_status_update"], json!("passed"));
     }
 
     #[test]

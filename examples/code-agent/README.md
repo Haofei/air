@@ -31,6 +31,7 @@ The model sees the user task, recent tool results, and these tools:
 - `grep`
 - `edit`
 - `write`
+- `apply_patch`
 - `task`
 - `webfetch`
 - `todowrite`

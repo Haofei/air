@@ -17,10 +17,14 @@ tool config, fixture snapshot, and constraints match a previous run. Replayed
 runs apply the cached diff and spend zero model calls. Use `--refresh` when you
 want to force a live model run and replace the cache entry.
 
+Use replayed runs for debugging artifact/replay behavior and report generation.
+Use `--refresh` for stability measurements: replay does not exercise the current
+model, runtime, or tool implementation.
+
 Run the full small Rust suite:
 
 ```bash
-cargo run -p air-cli -- bench code-agent
+cargo run -p air-cli -- bench code-agent --refresh
 ```
 
 The runner writes `run.json`, per-task `trace.jsonl`, per-task `output.json`,

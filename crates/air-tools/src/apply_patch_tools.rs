@@ -156,6 +156,7 @@ pub(super) fn call_apply_patch_tool(
         "success": true,
         "checked": true,
         "applied": true,
+        "workspace_changed": true,
         "files": files,
         "file_count": changes.len(),
         "diagnostics": [],
@@ -175,6 +176,7 @@ pub(super) fn call_apply_patch_tool(
                 "success": true,
                 "checked": true,
                 "applied": true,
+                "workspace_changed": true,
                 "file_count": changes.len(),
                 "diff_bytes": diff_bytes,
                 "diff_truncated": diff_truncated,
@@ -595,7 +597,11 @@ fn compute_replacements(
             }
         }
         if chunk.old_lines.is_empty() {
-            let insertion = original_lines.len();
+            let insertion = if chunk.is_end_of_file {
+                original_lines.len()
+            } else {
+                line_index
+            };
             replacements.push((insertion, 0, chunk.new_lines.clone()));
             continue;
         }

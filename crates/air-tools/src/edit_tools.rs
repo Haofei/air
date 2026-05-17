@@ -1073,6 +1073,7 @@ pub(super) fn call_file_edit_tool(
         "success": true,
         "checked": true,
         "applied": !dry_run,
+        "workspace_changed": !dry_run,
         "files": [{
             "path": input_path,
             "kind": "existing"
@@ -1103,6 +1104,7 @@ pub(super) fn call_file_edit_tool(
                 "success": true,
                 "checked": true,
                 "applied": !dry_run,
+                "workspace_changed": !dry_run,
                 "dry_run": dry_run,
                 "bytes": updated_bytes.len(),
                 "replacements": total_replacements,
