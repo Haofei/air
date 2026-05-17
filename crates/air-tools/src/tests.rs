@@ -970,6 +970,45 @@ fn file_search_treats_include_glob_as_file_filter() {
 }
 
 #[test]
+fn file_search_skips_air_tool_output_by_default() {
+    let dir = temp_dir("air-tools-file-search-skip-air-output");
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::create_dir_all(dir.join(".air").join("tool-output")).unwrap();
+    fs::write(
+        dir.join("src").join("lib.rs"),
+        "fn provider_error_snippet() {}\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join(".air").join("tool-output").join("old.log"),
+        "fn provider_error_snippet() {}\n",
+    )
+    .unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_matches": 8
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("grep", &json!({"pattern": "provider_error_snippet"}))
+        .unwrap();
+
+    assert_eq!(output["match_count"], json!(1));
+    assert_eq!(output["matches"][0]["path"], json!("src/lib.rs"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_search_accepts_query_alias_for_pattern() {
     let dir = temp_dir("air-tools-file-search-query-alias");
     fs::write(dir.join("note.txt"), "alpha\nneedle\n").unwrap();

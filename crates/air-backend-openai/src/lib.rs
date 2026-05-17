@@ -1,6 +1,6 @@
 use air_runtime::{
-    compact_model_context_value, sanitize_trace_text, truncate_middle_context_string,
-    ModelProvider, ModelRequestStats, RuntimeError, TraceWriteOptions,
+    sanitize_trace_text, truncate_middle_context_string, ModelProvider, ModelRequestStats,
+    RuntimeError, TraceWriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -1871,8 +1871,7 @@ fn input_to_native_tool_messages_with_names(
     let Some(observations) = object.get("observations") else {
         return Ok(messages);
     };
-    let compacted = compact_observation_history(observations);
-    let Some(items) = compacted.as_array() else {
+    let Some(items) = observations.as_array() else {
         return Ok(messages);
     };
 
@@ -2109,7 +2108,10 @@ fn render_native_tool_message_content(value: &Value, exposed_tool_name: Option<&
         lines.push(truncate_text(&compact_json(value), 4_000));
     }
     let transcript = lines.join("\n");
-    if matches!(tool, "file.read" | "read" | "file.read_many" | "read_many") {
+    if matches!(
+        tool,
+        "file.read" | "file_read" | "read" | "file.read_many" | "file_read_many" | "read_many"
+    ) {
         truncate_tail_text(&transcript, NATIVE_FILE_READ_MESSAGE_MAX_CHARS)
     } else {
         truncate_text(&transcript, NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS)
@@ -2118,16 +2120,18 @@ fn render_native_tool_message_content(value: &Value, exposed_tool_name: Option<&
 
 fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<String>) {
     match tool {
-        "file.read" | "read" => render_file_read_transcript(output, lines),
-        "file.read_many" | "read_many" => render_file_read_many_transcript(output, lines),
-        "file.search" | "grep" => render_file_search_transcript(output, lines),
+        "file.read" | "file_read" | "read" => render_file_read_transcript(output, lines),
+        "file.read_many" | "file_read_many" | "read_many" => {
+            render_file_read_many_transcript(output, lines)
+        }
+        "file.search" | "file_search" | "grep" => render_file_search_transcript(output, lines),
         "apply_patch" => render_apply_patch_transcript(output, lines),
-        "file.edit" | "edit" => render_file_edit_transcript(output, lines),
-        "repo.files" | "glob" => render_glob_transcript(output, lines),
-        "repo.symbols" => render_symbols_transcript(output, lines),
+        "file.edit" | "file_edit" | "edit" => render_file_edit_transcript(output, lines),
+        "repo.files" | "repo_files" | "glob" => render_glob_transcript(output, lines),
+        "repo.symbols" | "repo_symbols" => render_symbols_transcript(output, lines),
         "rust_analyzer" | "lsp" => render_lsp_transcript(output, lines),
         "bash" | "command.run" | "command_run" => render_bash_transcript(output, lines),
-        "todowrite" | "todo.write" => render_todowrite_transcript(output, lines),
+        "todowrite" | "todo.write" | "todo_write" => render_todowrite_transcript(output, lines),
         _ => {
             lines.push(format!(
                 "output: {}",
@@ -2431,13 +2435,6 @@ fn render_symbols_transcript(output: &Value, lines: &mut Vec<String>) {
         let name = object.get("name").and_then(Value::as_str).unwrap_or("");
         lines.push(format!("{path}:{line}-{end_line} {kind} {name}"));
     }
-}
-
-fn compact_observation_history(value: &Value) -> Value {
-    let Some(items) = value.as_array() else {
-        return compact_model_context_value(value);
-    };
-    Value::Array(items.iter().map(compact_model_context_value).collect())
 }
 
 const NATIVE_ASSISTANT_HISTORY_MAX_CHARS: usize = 32 * 1024;

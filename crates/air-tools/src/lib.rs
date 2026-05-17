@@ -1,15 +1,15 @@
-use air_runtime::{
-    sanitize_trace_text, ApprovalDecision, RuntimeError, ToolProvider, TraceWriteOptions,
-};
+use air_runtime::{ApprovalDecision, RuntimeError, ToolProvider};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+mod config_types;
+use config_types::{ApprovalConfig, ToolConfigFile};
 mod apply_patch_tools;
 mod command_config;
 mod command_diagnostics;
@@ -28,6 +28,8 @@ mod helpdesk;
 use helpdesk::helpdesk_docs;
 mod provider;
 pub use provider::{EchoTools, ToolProviderChoice};
+mod provider_error;
+pub use provider_error::provider_error_snippet;
 mod repo_symbols;
 use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
 mod rust_lsp_tools;
@@ -59,6 +61,8 @@ use artifact_tools::call_artifact_validate_tool;
 mod bash_classify;
 mod repo_discovery;
 use repo_discovery::{call_repo_context_tool, call_repo_files_tool, call_repo_search_tool};
+mod local_docs;
+pub use local_docs::{search_docs, LocalDoc};
 mod repo_reference_tools;
 use repo_reference_tools::call_repo_references_tool;
 mod text_utils;
@@ -66,18 +70,6 @@ use text_utils::{bytes_to_limited_text, merge_line_ranges, numbered_line_range};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
-
-#[derive(Debug, Deserialize)]
-struct ToolConfigFile {
-    #[serde(default)]
-    workspace_dir: Option<PathBuf>,
-
-    #[serde(default)]
-    tools: BTreeMap<String, ToolConfig>,
-
-    #[serde(default)]
-    approvals: BTreeMap<String, ApprovalConfig>,
-}
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -518,27 +510,6 @@ impl ToolConfig {
 
 fn default_http_method() -> String {
     "POST".to_string()
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct LocalDoc {
-    pub id: String,
-    pub title: String,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ApprovalConfig {
-    approved: bool,
-
-    #[serde(default)]
-    approver: Option<String>,
-
-    #[serde(default)]
-    reason: Option<String>,
-
-    #[serde(default)]
-    metadata: Option<Value>,
 }
 
 #[derive(Debug)]
@@ -1371,17 +1342,6 @@ fn is_identifier_character(character: char) -> bool {
     character.is_ascii_alphanumeric() || character == '_' || character == '$'
 }
 
-pub fn provider_error_snippet(body: &str) -> String {
-    sanitize_trace_text(
-        body,
-        &TraceWriteOptions {
-            redact_sensitive: true,
-            max_string_chars: Some(2048),
-            max_event_bytes: None,
-        },
-    )
-}
-
 fn required_input_string<'a>(
     tool_name: &str,
     input: &'a Value,
@@ -1712,69 +1672,6 @@ fn template_input_value(input: &Value, path: &str) -> String {
         .as_str()
         .map(str::to_string)
         .unwrap_or_else(|| value.to_string())
-}
-
-pub fn search_docs(input: &Value, documents: &[LocalDoc], max_results: usize) -> Value {
-    let query = input
-        .get("query")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_lowercase();
-    let mut seen = BTreeSet::new();
-    let docs = documents
-        .iter()
-        .filter(|doc| {
-            query.split_whitespace().any(|term| {
-                doc.title.to_lowercase().contains(term) || doc.content.to_lowercase().contains(term)
-            })
-        })
-        .filter(|doc| seen.insert(doc_dedupe_key(doc)))
-        .take(max_results)
-        .map(|doc| {
-            json!({
-                "id": doc.id,
-                "title": doc.title,
-                "content": doc.content,
-                "kind": "doc_chunk",
-                "uri": format!("local-doc://{}", doc.id),
-            })
-        })
-        .collect::<Vec<_>>();
-    let artifacts = docs
-        .iter()
-        .map(|doc| {
-            json!({
-                "id": doc["id"],
-                "kind": "doc_chunk",
-                "title": doc["title"],
-                "uri": doc["uri"],
-                "content": doc["content"],
-                "metadata": {
-                    "provider": "local_docs"
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    json!({
-        "query": input.get("query").cloned().unwrap_or(Value::String(String::new())),
-        "documents": docs,
-        "artifacts": artifacts,
-    })
-}
-
-fn doc_dedupe_key(doc: &LocalDoc) -> String {
-    let content = doc.content.trim().to_lowercase();
-    if !content.is_empty() {
-        return format!("content:{content}");
-    }
-
-    let title = doc.title.trim().to_lowercase();
-    if !title.is_empty() {
-        return format!("title:{title}");
-    }
-
-    format!("id:{}", doc.id.trim().to_lowercase())
 }
 
 pub(crate) fn json_char_count(value: &Value) -> usize {

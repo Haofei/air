@@ -606,6 +606,7 @@ def model_id_from_opencode_model(model: str | None) -> str | None:
 def merge_opencode_config_content(
     existing: str | None,
     base_url: str,
+    api_key: str | None,
     opencode_model: str | None = None,
 ) -> str:
     config = {}
@@ -638,7 +639,7 @@ def merge_opencode_config_content(
         options = {}
         entry["options"] = options
     options["baseURL"] = base_url
-    options.setdefault("apiKey", os.environ.get("OPENAI_API_KEY", "change-me"))
+    options.setdefault("apiKey", api_key or "change-me")
     model_id = model_id_from_opencode_model(opencode_model)
     if model_id:
         models = entry.setdefault("models", {})
@@ -1052,6 +1053,7 @@ def run_opencode_agent(
             opencode_env["OPENCODE_CONFIG_CONTENT"] = merge_opencode_config_content(
                 opencode_env.get("OPENCODE_CONFIG_CONTENT"),
                 opencode_proxy.base_url,
+                opencode_env.get("OPENAI_API_KEY"),
                 args.opencode_model,
             )
         opencode_env["OPENCODE_RAW_IO_DIR"] = str(opencode_raw)

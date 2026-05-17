@@ -810,7 +810,7 @@ fn file_search_directory_files(
 fn should_skip_file_search_dir(path: &Path) -> bool {
     matches!(
         path.file_name().and_then(|name| name.to_str()),
-        Some(".git" | "target" | "node_modules" | "dist" | "build" | "__pycache__")
+        Some(".air" | ".git" | "target" | "node_modules" | "dist" | "build" | "__pycache__")
     )
 }
 

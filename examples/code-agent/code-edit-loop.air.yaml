@@ -48,8 +48,6 @@ state:
   verification_status:
     type: enum
     enum: [unknown, passed, failed]
-  patch_applied:
-    type: boolean
   decision:
     type: object
     required: [complete, tool_calls]
@@ -147,7 +145,6 @@ workflow:
           values:
             observations: []
             verification_status: unknown
-            patch_applied: false
             phase: choose
 
     - id: summarize-at-step-limit
@@ -218,48 +215,15 @@ workflow:
           values:
             phase: post_act
 
-    - id: edit-applied
-      when: phase == "post_act" && observation[0].tool == "edit" && observation[0].status == "ok" && observation[0].output.applied == true
-      actions:
-        - kind: set
-          values:
-            patch_applied: true
-            phase: choose
-
-    - id: write-applied
-      when: phase == "post_act" && observation[0].tool == "write" && observation[0].status == "ok"
-      actions:
-        - kind: set
-          values:
-            patch_applied: true
-            phase: choose
-
-    - id: bash-passed-after-patch
-      when: phase == "post_act" && patch_applied == true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true || phase == "post_act" && observation[0].tool == "apply_patch" && observation[0].status == "ok" && observation[0].output.applied == true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
-      actions:
-        - kind: set
-          values:
-            patch_applied: true
-            verification_status: passed
-            phase: choose
-
-    - id: apply-patch-applied
-      when: phase == "post_act" && observation[0].tool == "apply_patch" && observation[0].status == "ok" && observation[0].output.applied == true
-      actions:
-        - kind: set
-          values:
-            patch_applied: true
-            phase: choose
-
-    - id: bash-passed-before-patch
-      when: phase == "post_act" && patch_applied != true && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && patch_applied != true && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
+    - id: verification-passed
+      when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == true && observation[0].output.verification == true || phase == "post_act" && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == true && observation[1].output.verification == true
       actions:
         - kind: set
           values:
             verification_status: passed
             phase: choose
 
-    - id: bash-failed
+    - id: verification-failed
       when: phase == "post_act" && observation[0].tool == "bash" && observation[0].status == "ok" && observation[0].output.success == false && observation[0].output.verification == true || phase == "post_act" && observation[1].tool == "bash" && observation[1].status == "ok" && observation[1].output.success == false && observation[1].output.verification == true
       actions:
         - kind: set
@@ -331,7 +295,10 @@ workflow:
                     - ref: verification_status
                     - literal: passed
                 patch_applied:
-                  ref: patch_applied
+                  not:
+                    is_empty:
+                      split_lines:
+                        ref: final_diff_result[1].output.log
                 changed_files:
                   split_lines:
                     ref: final_diff_result[1].output.log
