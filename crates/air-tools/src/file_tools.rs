@@ -3,7 +3,9 @@ use super::file_search_render::{render_search_matches, stable_pattern_id};
 use super::text_utils::{bytes_to_limited_text, select_line_range};
 use super::*;
 
-const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 2000;
+const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 200;
+const DEFAULT_UNSCOPED_READ_BYTE_LIMIT: usize = 20 * 1024;
+const DEFAULT_UNSCOPED_READ_PREVIEW_BYTES: usize = 16 * 1024;
 const DEFAULT_OPEN_ENDED_RANGE_LINE_LIMIT: usize = DEFAULT_UNSCOPED_READ_LINE_LIMIT;
 
 pub(super) fn call_file_read_tool(
@@ -14,17 +16,9 @@ pub(super) fn call_file_read_tool(
 ) -> Result<Value, RuntimeError> {
     let input_path = required_path_input(name, input)?;
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
-    let candidate = if Path::new(&input_path).is_absolute() {
-        PathBuf::from(input_path)
-    } else {
-        base.join(input_path)
-    };
-    let path = canonicalize_tool_path(name, "input.path", &candidate)?;
-    if !path.starts_with(&base) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.path is outside configured base_dir"
-        )));
-    }
+    let resolved = resolve_existing_input_path_in_base(name, "input.path", &base, input_path)?;
+    let path_rebased_from = resolved.rebased_from.clone();
+    let path = resolved.path;
     let body = fs::read(&path)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} read file: {error}")))?;
     if is_likely_binary(&body) {
@@ -99,10 +93,10 @@ pub(super) fn call_file_read_tool(
             )));
         }
     }
-    let range_limited_unscoped_read = contains.is_none()
-        && start_line.is_none()
-        && end_line.is_none()
-        && total_lines > DEFAULT_UNSCOPED_READ_LINE_LIMIT;
+    let requested_unscoped_read = contains.is_none() && start_line.is_none() && end_line.is_none();
+    let range_limited_unscoped_read = requested_unscoped_read
+        && (total_lines > DEFAULT_UNSCOPED_READ_LINE_LIMIT
+            || body.len() > DEFAULT_UNSCOPED_READ_BYTE_LIMIT);
     let (effective_start_line, effective_end_line, match_line) = if let Some(needle) = contains {
         if start_line.is_some() || end_line.is_some() {
             return Err(RuntimeError::Provider(format!(
@@ -147,8 +141,13 @@ pub(super) fn call_file_read_tool(
     };
     let effective_end_line = effective_end_line.map(|line| line.min(total_lines));
     let selected = select_line_range(&full_content, effective_start_line, effective_end_line);
+    let selected_max_bytes = if range_limited_unscoped_read {
+        effective_max_bytes.min(DEFAULT_UNSCOPED_READ_PREVIEW_BYTES)
+    } else {
+        effective_max_bytes
+    };
     let (limited_selected, truncated, _source_window_bytes) =
-        bytes_to_limited_text(selected.as_bytes(), effective_max_bytes);
+        bytes_to_limited_text(selected.as_bytes(), selected_max_bytes);
     let content = if line_numbers {
         numbered_content(&limited_selected, effective_start_line.unwrap_or(1))
     } else {
@@ -171,10 +170,7 @@ pub(super) fn call_file_read_tool(
     } else {
         None
     };
-    let unscoped_read = effective_start_line.is_none()
-        && effective_end_line.is_none()
-        && match_line.is_none()
-        && selected.len() > effective_max_bytes;
+    let unscoped_read = requested_unscoped_read;
     let truncation_hint = file_read_truncation_hint(
         truncated,
         unscoped_read,
@@ -208,7 +204,9 @@ pub(super) fn call_file_read_tool(
             "unscoped_read": unscoped_read,
             "range_limited_unscoped_read": range_limited_unscoped_read,
             "line_numbers": line_numbers,
-            "line_numbers_defaulted": !explicit_line_numbers && line_numbers
+            "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
+            "selected_max_bytes": selected_max_bytes,
+            "path_rebased_from": path_rebased_from
         }
     });
     Ok(json!({
@@ -225,6 +223,7 @@ pub(super) fn call_file_read_tool(
         "occurrence": occurrence,
         "total_lines": total_lines,
         "max_bytes": effective_max_bytes,
+        "selected_max_bytes": selected_max_bytes,
         "truncated": truncated,
         "full_output_path": full_output_path,
         "truncation_hint": truncation_hint,
@@ -232,6 +231,7 @@ pub(super) fn call_file_read_tool(
         "range_limited_unscoped_read": range_limited_unscoped_read,
         "line_numbers": line_numbers,
         "line_numbers_defaulted": !explicit_line_numbers && line_numbers,
+        "path_rebased_from": path_rebased_from,
         "artifacts": [artifact],
     }))
 }
@@ -246,7 +246,7 @@ fn file_read_truncation_hint(
 ) -> Option<String> {
     if range_limited_unscoped_read {
         return Some(format!(
-            "Unscoped read was limited to the first {DEFAULT_UNSCOPED_READ_LINE_LIMIT} of {total_lines} lines. Use offset+limit, start_line/end_line, or contains+context_lines to inspect the relevant range."
+            "Unscoped read was limited to the first {DEFAULT_UNSCOPED_READ_LINE_LIMIT} of {total_lines} lines. Use file.search, contains+context_lines, or a targeted line range around known matches."
         ));
     }
     truncated.then(|| {
@@ -376,17 +376,7 @@ pub(super) fn call_file_search_tool(
     let base = canonicalize_tool_path(name, "base_dir", base_dir)?;
     let (input_path, include_glob) = file_search_path_input(name, input, &base)?;
     let input_path = input_path.unwrap_or_else(|| ".".to_string());
-    let candidate = if Path::new(&input_path).is_absolute() {
-        PathBuf::from(&input_path)
-    } else {
-        base.join(&input_path)
-    };
-    let path = canonicalize_tool_path(name, "input.path", &candidate)?;
-    if !path.starts_with(&base) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.path is outside configured base_dir"
-        )));
-    }
+    let path = resolve_existing_input_path_in_base(name, "input.path", &base, &input_path)?.path;
     let context_lines = optional_bounded_zero_or_positive_usize_alias_input(
         name,
         input,
@@ -848,6 +838,186 @@ pub(super) fn required_path_input<'a>(
     required_input_string_alias(tool_name, input, "path", "filePath")
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct ResolvedToolPath {
+    pub(super) path: PathBuf,
+    pub(super) rebased_from: Option<String>,
+}
+
+pub(super) fn resolve_existing_input_path_in_base(
+    tool_name: &str,
+    label: &str,
+    base: &Path,
+    input_path: &str,
+) -> Result<ResolvedToolPath, RuntimeError> {
+    let input = Path::new(input_path);
+    let candidate = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        base.join(input)
+    };
+    match canonicalize_tool_path(tool_name, label, &candidate) {
+        Ok(path) if path.starts_with(base) => Ok(ResolvedToolPath {
+            path,
+            rebased_from: None,
+        }),
+        Ok(_) | Err(_) if input.is_absolute() => {
+            if let Some(path) =
+                rebase_existing_absolute_path_by_suffix(tool_name, label, base, input)?
+            {
+                return Ok(ResolvedToolPath {
+                    path,
+                    rebased_from: Some(input_path.to_string()),
+                });
+            }
+            Err(outside_base_error(tool_name))
+        }
+        Ok(_) => Err(outside_base_error(tool_name)),
+        Err(error) => Err(error),
+    }
+}
+
+pub(super) fn resolve_writable_input_path_in_base(
+    tool_name: &str,
+    label: &str,
+    base: &Path,
+    input_path: &str,
+    create_dirs: bool,
+) -> Result<ResolvedToolPath, RuntimeError> {
+    let input = Path::new(input_path);
+    if input.is_absolute() {
+        if let Some(path) = rebase_writable_absolute_path_by_suffix(tool_name, label, base, input)?
+        {
+            return Ok(ResolvedToolPath {
+                path,
+                rebased_from: Some(input_path.to_string()),
+            });
+        }
+    }
+    let candidate = if input.is_absolute() {
+        input.to_path_buf()
+    } else {
+        base.join(input)
+    };
+    let path = resolve_writable_candidate(tool_name, label, base, &candidate, create_dirs)?;
+    Ok(ResolvedToolPath {
+        path,
+        rebased_from: None,
+    })
+}
+
+fn rebase_existing_absolute_path_by_suffix(
+    tool_name: &str,
+    label: &str,
+    base: &Path,
+    input: &Path,
+) -> Result<Option<PathBuf>, RuntimeError> {
+    for suffix in absolute_path_suffixes(input, 3) {
+        let candidate = base.join(&suffix);
+        if !candidate.exists() {
+            continue;
+        }
+        let path = canonicalize_tool_path(tool_name, label, &candidate)?;
+        if path.starts_with(base) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn rebase_writable_absolute_path_by_suffix(
+    tool_name: &str,
+    label: &str,
+    base: &Path,
+    input: &Path,
+) -> Result<Option<PathBuf>, RuntimeError> {
+    for suffix in absolute_path_suffixes(input, 3) {
+        let candidate = base.join(&suffix);
+        if let Ok(path) = resolve_writable_candidate(tool_name, label, base, &candidate, false) {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
+}
+
+fn absolute_path_suffixes(path: &Path, min_components: usize) -> Vec<PathBuf> {
+    let components = path
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(value) => Some(value.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if components.len() < min_components {
+        return Vec::new();
+    }
+    (0..=components.len() - min_components)
+        .map(|start| components[start..].iter().collect())
+        .collect()
+}
+
+fn resolve_writable_candidate(
+    tool_name: &str,
+    label: &str,
+    base: &Path,
+    candidate: &Path,
+    create_dirs: bool,
+) -> Result<PathBuf, RuntimeError> {
+    let parent = candidate.parent().ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "tool {tool_name} {label} must have a parent directory"
+        ))
+    })?;
+    if create_dirs && can_create_parent_inside_base(tool_name, label, candidate, base)? {
+        fs::create_dir_all(parent).map_err(|error| {
+            RuntimeError::Provider(format!(
+                "tool {tool_name} create parent directories: {error}"
+            ))
+        })?;
+    }
+    let parent = canonicalize_tool_path(tool_name, &format!("{label} parent"), parent)?;
+    if !parent.starts_with(base) {
+        return Err(outside_base_error(tool_name));
+    }
+    let file_name = candidate.file_name().ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} {label} must include a file name"))
+    })?;
+    Ok(parent.join(file_name))
+}
+
+fn can_create_parent_inside_base(
+    tool_name: &str,
+    label: &str,
+    path: &Path,
+    base: &Path,
+) -> Result<bool, RuntimeError> {
+    if has_parent_dir_component(path) {
+        return Ok(false);
+    }
+    let Some(mut ancestor) = path.parent() else {
+        return Ok(false);
+    };
+    while !ancestor.exists() {
+        let Some(parent) = ancestor.parent() else {
+            return Ok(false);
+        };
+        ancestor = parent;
+    }
+    let ancestor = canonicalize_tool_path(tool_name, &format!("{label} ancestor"), ancestor)?;
+    Ok(ancestor.starts_with(base))
+}
+
+fn has_parent_dir_component(path: &Path) -> bool {
+    path.components()
+        .any(|component| matches!(component, std::path::Component::ParentDir))
+}
+
+fn outside_base_error(tool_name: &str) -> RuntimeError {
+    RuntimeError::Provider(format!(
+        "tool {tool_name} input.path is outside configured base_dir. Use a workspace-relative path or an exact path returned by Glob/Grep/Read."
+    ))
+}
+
 fn optional_path_input<'a>(
     tool_name: &str,
     input: &'a Value,
@@ -1231,30 +1401,15 @@ pub(super) fn call_file_write_tool(
         )));
     }
     let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
-    let candidate = if Path::new(input_path).is_absolute() {
-        PathBuf::from(input_path)
-    } else {
-        base.join(input_path)
-    };
-    let parent = candidate.parent().ok_or_else(|| {
-        RuntimeError::Provider(format!(
-            "tool {name} input.path must have a parent directory"
-        ))
-    })?;
-    if options.create_dirs {
-        fs::create_dir_all(parent).map_err(|error| {
-            RuntimeError::Provider(format!("tool {name} create parent directories: {error}"))
-        })?;
-    }
-    let parent = canonicalize_tool_path(name, "input.path parent", parent)?;
-    if !parent.starts_with(&base) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.path is outside configured base_dir"
-        )));
-    }
-    let mut path = parent.join(candidate.file_name().ok_or_else(|| {
-        RuntimeError::Provider(format!("tool {name} input.path must include a file name"))
-    })?);
+    let resolved = resolve_writable_input_path_in_base(
+        name,
+        "input.path",
+        &base,
+        input_path,
+        options.create_dirs,
+    )?;
+    let path_rebased_from = resolved.rebased_from.clone();
+    let mut path = resolved.path;
     let existed = path.exists();
     if existed {
         let existing = canonicalize_tool_path(name, "input.path", &path)?;
@@ -1278,6 +1433,7 @@ pub(super) fn call_file_write_tool(
         "created": !existed,
         "overwritten": existed,
         "workspace_changed": true,
+        "path_rebased_from": path_rebased_from,
         "artifacts": [{
             "id": format!("file-write:{}", path.display()),
             "kind": "file_write",
@@ -1293,7 +1449,8 @@ pub(super) fn call_file_write_tool(
                 "bytes": content_bytes.len(),
                 "created": !existed,
                 "overwritten": existed,
-                "workspace_changed": true
+                "workspace_changed": true,
+                "path_rebased_from": path_rebased_from
             }
         }]
     }))

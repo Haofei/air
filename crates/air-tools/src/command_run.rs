@@ -1,5 +1,8 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::fs;
+use std::hash::{Hash, Hasher};
 use std::io::Read;
 use std::path::Path;
 use std::process::Command;
@@ -17,6 +20,39 @@ use super::command_config::{CommandParameterAllow, CommandParameterRule, Command
 use super::command_diagnostics::extract_command_diagnostics;
 use super::text_utils::bytes_to_limited_text_with_direction;
 use super::{canonicalize_tool_path, validate_relative_path_filter};
+
+const COMMAND_SNAPSHOT_MAX_HASH_BYTES: u64 = 2 * 1024 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandWorkspaceFile {
+    bytes: u64,
+    modified_ms: u128,
+    content_hash: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct CommandWorkspaceSnapshot {
+    files: BTreeMap<String, CommandWorkspaceFile>,
+}
+
+impl CommandWorkspaceSnapshot {
+    fn capture(root: &Path) -> Self {
+        let mut snapshot = Self::default();
+        collect_workspace_files(root, root, &mut snapshot.files);
+        snapshot
+    }
+
+    fn changed_files(&self, after: &Self) -> Vec<String> {
+        self.files
+            .keys()
+            .chain(after.files.keys())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .filter(|path| self.files.get(*path) != after.files.get(*path))
+            .cloned()
+            .collect()
+    }
+}
 
 pub(super) fn call_command_run_tool(
     name: &str,
@@ -52,7 +88,7 @@ pub(super) fn call_command_run_tool(
     let mut argv = Vec::with_capacity(command.len());
     argv.push(program.clone());
     argv.extend(rendered_args.iter().cloned());
-    run_command_argv(name, command_name, &cwd, &argv, options)
+    run_command_argv_with_workspace_change(name, command_name, &cwd, &argv, options)
 }
 
 pub(super) fn call_bash_tool(
@@ -112,7 +148,7 @@ pub(super) fn call_bash_tool(
         "-lc".to_string(),
         format!("set -o pipefail; {command}"),
     ];
-    let mut output = run_command_argv(name, "bash", &cwd, &argv, options)?;
+    let mut output = run_command_argv_with_workspace_change(name, "bash", &cwd, &argv, options)?;
     if let Some(object) = output.as_object_mut() {
         let description = input.get("description").and_then(Value::as_str);
         let verification = is_verification_bash_command(command, description);
@@ -130,6 +166,30 @@ pub(super) fn call_bash_tool(
                 Value::String(description.to_string()),
             );
         }
+    }
+    Ok(output)
+}
+
+fn run_command_argv_with_workspace_change(
+    name: &str,
+    command_name: &str,
+    cwd: &Path,
+    argv: &[String],
+    options: CommandRunOptions,
+) -> Result<Value, RuntimeError> {
+    let before = CommandWorkspaceSnapshot::capture(cwd);
+    let mut output = run_command_argv(name, command_name, cwd, argv, options)?;
+    let after = CommandWorkspaceSnapshot::capture(cwd);
+    let changed_files = before.changed_files(&after);
+    if let Some(object) = output.as_object_mut() {
+        object.insert(
+            "workspace_changed".to_string(),
+            Value::Bool(!changed_files.is_empty()),
+        );
+        object.insert(
+            "workspace_changed_files".to_string(),
+            Value::Array(changed_files.into_iter().map(Value::String).collect()),
+        );
     }
     Ok(output)
 }
@@ -323,6 +383,66 @@ fn sanitize_command_output_filename(command_name: &str) -> String {
     } else {
         trimmed.to_string()
     }
+}
+
+fn collect_workspace_files(
+    root: &Path,
+    dir: &Path,
+    files: &mut BTreeMap<String, CommandWorkspaceFile>,
+) {
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(relative) = path.strip_prefix(root) else {
+            continue;
+        };
+        if ignored_workspace_snapshot_path(relative) {
+            continue;
+        }
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        if metadata.is_dir() {
+            collect_workspace_files(root, &path, files);
+            continue;
+        }
+        if !metadata.is_file() {
+            continue;
+        }
+        let relative = relative.to_string_lossy().replace('\\', "/");
+        files.insert(
+            relative,
+            CommandWorkspaceFile {
+                bytes: metadata.len(),
+                modified_ms: metadata
+                    .modified()
+                    .ok()
+                    .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+                    .map(|duration| duration.as_millis())
+                    .unwrap_or_default(),
+                content_hash: command_file_hash(&path, metadata.len()),
+            },
+        );
+    }
+}
+
+fn ignored_workspace_snapshot_path(path: &Path) -> bool {
+    path.components().next().is_some_and(|component| {
+        let value = component.as_os_str().to_string_lossy();
+        matches!(value.as_ref(), ".air" | ".git" | "target")
+    })
+}
+
+fn command_file_hash(path: &Path, bytes: u64) -> Option<u64> {
+    if bytes > COMMAND_SNAPSHOT_MAX_HASH_BYTES {
+        return None;
+    }
+    let content = fs::read(path).ok()?;
+    let mut hasher = DefaultHasher::new();
+    content.hash(&mut hasher);
+    Some(hasher.finish())
 }
 
 fn render_command_args(

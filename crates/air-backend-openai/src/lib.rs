@@ -25,9 +25,11 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Try to use apply_patch for single file edits when that tool is available, but it is fine to explore other options to make the edit if it does not work well. Do not use apply_patch for changes that are auto-generated (i.e. generating package.json or running a lint or format command like gofmt) or when scripting is more efficient (such as search and replacing a string across a codebase).
 
 ## Tool usage
-- Prefer specialized tools over shell for file operations:
-  - Use Read to view files, Edit to modify files, and Write only when needed.
-  - Use Glob to find files by name and Grep to search file contents.
+- Prefer locator tools before reading file bodies:
+  - Use Grep to search file contents, Glob to find files by name, and LSP to inspect known symbols/references.
+  - Use Glob first when you only know a file path or name; it reports line counts and byte sizes without reading file bodies.
+  - Only read a whole file when Glob shows it is small: 200 lines or fewer and 20KB or less. For larger files, use Grep, LSP, contains, or a narrow line range.
+  - Use Edit to modify files and Write only when needed.
 - Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and reading.
 - Use Bash for terminal operations (git, bun, builds, tests, running scripts).
 - Run tool calls in parallel when neither call needs the other's output; otherwise run sequentially.
@@ -935,10 +937,11 @@ fn opencode_tool_order(use_patch: bool) -> &'static [&'static str] {
         &[
             "question",
             "bash",
-            "read",
-            "glob",
             "grep",
+            "glob",
+            "lsp",
             "task",
+            "read",
             "webfetch",
             "todowrite",
             "todoread",
@@ -949,12 +952,13 @@ fn opencode_tool_order(use_patch: bool) -> &'static [&'static str] {
         &[
             "question",
             "bash",
-            "read",
-            "glob",
             "grep",
+            "glob",
+            "lsp",
+            "task",
+            "read",
             "edit",
             "write",
-            "task",
             "webfetch",
             "todowrite",
             "todoread",
@@ -1164,16 +1168,20 @@ Usage notes:
 }
 
 fn opencode_read_description() -> String {
-    r##"Reads a file from the local filesystem. You can access any file directly by using this tool.
-Assume this tool is able to read all files on the machine. If the User provides a path to a file assume that path is valid. It is okay to read a file that does not exist; an error will be returned.
+    r##"Read file content only after you have localized a small file, known symbol, or narrow line range.
+This is not the default tool for exploring a path. If you only know a file path or name, use Glob first to inspect line_count and source_bytes without reading the file body. If you need a symbol or phrase, use Grep or LSP before Read.
 
 Usage:
-- The filePath parameter must be an absolute path, not a relative path
-- By default, it reads up to 2000 lines starting from the beginning of the file
-- You can optionally specify a line offset and limit (especially handy for long files), but it's recommended to read the whole file by not providing these parameters
+- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read
+- Do not invent absolute paths from the model server or API bridge process; use the current working directory shown in the environment
+- If you only know a file path, use Glob first to inspect line_count and source_bytes before reading the file body
+- Do not whole-file Read files larger than 200 lines or 20KB
+- For unfamiliar or large files, use Grep, LSP, or contains first to locate the relevant symbols or line ranges
+- Whole-file Read is only reasonable after Glob shows the file is 200 lines or fewer and 20KB or less
+- Without offset/limit, large files may return only a bounded preview; continue with targeted line ranges around known matches
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
-- You have the capability to call multiple tools in a single response. It is always better to speculatively read multiple files as a batch that are potentially useful.
+- You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before reading content
 - If you read a file that exists but has empty contents you will receive a system reminder warning in place of file contents.
 - You can read image files using this tool.
 "##
@@ -1186,7 +1194,7 @@ fn opencode_grep_description() -> String {
 - Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
 - Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
 - Returns file paths and line numbers with at least one match sorted by modification time
-- Use this tool when you need to find files containing specific patterns
+- Use this tool before Read when you know a function, type, error text, config key, or other symbol-like phrase
 - If you need to identify/count the number of matches within files, use the Bash tool with `rg` (ripgrep) directly. Do NOT use `grep`.
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 "##
@@ -1196,8 +1204,9 @@ fn opencode_grep_description() -> String {
 fn opencode_glob_description() -> String {
     r##"- Fast file pattern matching tool that works with any codebase size
 - Supports glob patterns like "**/*.js" or "src/**/*.ts"
-- Returns matching file paths sorted by modification time
+- Returns matching file paths sorted by modification time, plus line_count and source_bytes metadata
 - Use this tool when you need to find files by name patterns
+- Use this tool before Read when you only know a file path or file name, so you can decide whether the file is small enough to read whole
 - When you are doing an open-ended search that may require multiple rounds of globbing and grepping, use the Task tool instead
 - You have the capability to call multiple tools in a single response. It is always better to speculatively perform multiple searches as a batch that are potentially useful.
 "##
@@ -1209,6 +1218,7 @@ fn opencode_edit_description() -> String {
 
 Usage:
 - You must use your `Read` tool at least once in the conversation before editing. This tool will error if you attempt an edit without reading the file.
+- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by Glob/Grep/Read.
 - When editing text from Read tool output, ensure you preserve the exact indentation (tabs/spaces) as it appears AFTER the line number prefix. The line number prefix format is: spaces + line number + tab. Everything after that tab is the actual file content to match. Never include any part of the line number prefix in the oldString or newString.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - Only use emojis if the user explicitly requests it. Avoid adding emojis to files unless asked.
@@ -1224,6 +1234,7 @@ fn opencode_write_description() -> String {
 
 Usage:
 - This tool will overwrite the existing file if there is one at the provided path.
+- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths under the current workspace.
 - If this is an existing file, you MUST use the Read tool first to read the file's contents. This tool will fail if you did not read the file first.
 - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless explicitly required.
 - NEVER proactively create documentation files (*.md) or README files. Only create documentation files if explicitly requested by the User.
@@ -1246,9 +1257,9 @@ When to use the Task tool:
 - When you are instructed to execute custom slash commands. Use the Task tool with the slash command invocation as the entire prompt. The slash command can take arguments. For example: Task(description="Check the file", prompt="/check-file path/to/file.py")
 
 When NOT to use the Task tool:
-- If you want to read a specific file path, use the Read or Glob tool instead of the Task tool, to find the match more quickly
+- If you only know a specific file path, use Glob first to inspect line_count/source_bytes instead of launching Task
 - If you are searching for a specific class definition like "class Foo", use the Glob tool instead, to find the match more quickly
-- If you are searching for code within a specific file or set of 2-3 files, use the Read tool instead of the Task tool, to find the match more quickly
+- If you are searching for code within a specific file or set of 2-3 files, use Grep/LSP first and then Read the narrow matching range
 - Other tasks that are not related to the agent descriptions above
 
 
@@ -1293,20 +1304,15 @@ fn opencode_lsp_description() -> String {
     r##"Interact with Language Server Protocol (LSP) servers to get code intelligence features.
 
 Supported operations:
-- goToDefinition: Find where a symbol is defined
-- findReferences: Find all references to a symbol
-- hover: Get hover information (documentation, type info) for a symbol
-- documentSymbol: Get all symbols (functions, classes, variables) in a document
-- workspaceSymbol: Search for symbols across the entire workspace
-- goToImplementation: Find implementations of an interface or abstract method
-- prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)
-- incomingCalls: Find all functions/methods that call the function at a position
-- outgoingCalls: Find all functions/methods called by the function at a position
+- diagnostics: Get workspace or file diagnostics
+- references/findReferences: Find all references for a known Rust symbol in a known file
 
-All operations require:
-- filePath: The file to operate on
-- line: The line number (1-based, as shown in editors)
-- character: The character offset (1-based, as shown in editors)
+Use LSP after Grep/Read has identified the relevant file or symbol. For initial symbol lookup across unknown files, use Grep first, then LSP references once you have a file path.
+
+References accepts:
+- filePath/path: file to operate on
+- symbol: optional Rust symbol name to locate in that file
+- line/character: optional 1-based editor position
 
 Note: LSP servers must be configured for the file type. If no server is available, an error will be returned."##
         .to_string()
@@ -1571,9 +1577,12 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "The path to the file to read"},
+                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path to a small file or already-localized line range. If you only know the path, call Glob first for line_count/source_bytes."},
                     "offset": {"type": "number", "description": "The line number to start reading from (0-based)"},
-                    "limit": {"type": "number", "description": "The number of lines to read (defaults to 2000)"}
+                    "limit": {"type": "number", "description": "The number of lines to read (defaults to 200)"},
+                    "contains": {"type": "string", "description": "Find the first matching line containing this text and return a narrow context window around it"},
+                    "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return"},
+                    "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"}
                 },
                 "required": ["filePath"],
                 "additionalProperties": false
@@ -1623,7 +1632,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "The absolute path to the file to modify"},
+                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path to the file to modify. Prefer workspace-relative paths or exact paths returned by Glob/Grep/Read."},
                     "oldString": {"type": "string", "description": "The text to replace"},
                     "newString": {"type": "string", "description": "The text to replace it with (must be different from oldString)"},
                     "replaceAll": {"type": "boolean", "description": "Replace all occurrences of oldString (default false)"}
@@ -1638,7 +1647,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "type": "object",
                 "properties": {
                     "content": {"description": "The content to write to the file", "type": "string"},
-                    "filePath": {"description": "The absolute path to the file to write (must be absolute, not relative)", "type": "string"}
+                    "filePath": {"description": "Workspace-relative or absolute path to the file to write. Prefer workspace-relative paths under the current workspace.", "type": "string"}
                 },
                 "required": ["content", "filePath"],
                 "additionalProperties": false
@@ -2212,13 +2221,22 @@ fn render_file_read_transcript(output: &Value, lines: &mut Vec<String>) {
             .and_then(Value::as_u64)
             .unwrap_or(NATIVE_FILE_READ_TRANSCRIPT_MAX_CHARS as u64);
         lines.push(format!(
-            "(Output truncated at {max_bytes} bytes. Use 'offset' or a line range to read beyond line {end_line})"
+            "(Output truncated at {max_bytes} bytes. Use Grep, LSP, contains, or a targeted line range around known matches.)"
         ));
     } else if let Some(total_lines) = output.get("total_lines").and_then(Value::as_u64) {
         if end_line > 0 && total_lines > end_line {
-            lines.push(format!(
-                "(File has more lines. Use 'offset' parameter to read beyond line {end_line})"
-            ));
+            let hint = if output
+                .get("range_limited_unscoped_read")
+                .and_then(Value::as_bool)
+                == Some(true)
+            {
+                "Large file preview only. Use Grep, LSP, or contains to locate symbols, then read a narrow line range around the matching lines.".to_string()
+            } else {
+                format!(
+                    "Selected range ended at line {end_line}. Use targeted search or a specific line range for the next relevant symbol."
+                )
+            };
+            lines.push(format!("({hint})"));
         } else {
             lines.push(format!("(End of file - total {total_lines} lines)"));
         }
@@ -2268,6 +2286,11 @@ fn render_file_search_transcript(output: &Value, lines: &mut Vec<String>) {
     for item in matches.iter().take(40) {
         render_file_search_match(item, None, base_path, &mut current_path, lines);
     }
+    if match_count > 0 {
+        lines.push(
+            "(Use Read with a small offset+limit around the relevant matching lines.)".to_string(),
+        );
+    }
 }
 
 fn render_glob_transcript(output: &Value, lines: &mut Vec<String>) {
@@ -2283,11 +2306,37 @@ fn render_glob_transcript(output: &Value, lines: &mut Vec<String>) {
         }
         return;
     }
+    let file_infos = output.get("file_infos").and_then(Value::as_array);
     for file in files.iter().take(200).filter_map(Value::as_str) {
-        lines.push(file.to_string());
+        lines.push(render_glob_file_line(file, file_infos));
     }
     if output.get("truncated").and_then(Value::as_bool) == Some(true) {
         lines.push("(Results truncated)".to_string());
+    }
+}
+
+fn render_glob_file_line(path: &str, file_infos: Option<&Vec<Value>>) -> String {
+    let Some(info) = file_infos
+        .into_iter()
+        .flatten()
+        .find(|info| info.get("path").and_then(Value::as_str) == Some(path))
+    else {
+        return path.to_string();
+    };
+    let line_count = info
+        .get("line_count")
+        .and_then(Value::as_u64)
+        .map(|lines| format!("{lines} lines"))
+        .unwrap_or_else(|| "unknown lines".to_string());
+    let source_bytes = info
+        .get("source_bytes")
+        .and_then(Value::as_u64)
+        .map(|bytes| format!("{bytes} bytes"))
+        .unwrap_or_else(|| "unknown bytes".to_string());
+    if info.get("large").and_then(Value::as_bool) == Some(true) {
+        format!("{path} ({line_count}, {source_bytes}; large, use Grep/contains/range before Read)")
+    } else {
+        format!("{path} ({line_count}, {source_bytes}; small, whole-file Read is reasonable)")
     }
 }
 
@@ -3418,7 +3467,20 @@ mod tests {
         )
         .unwrap();
 
-        let exposed = request.tool_name_map.values().cloned().collect::<Vec<_>>();
+        let exposed = request
+            .body
+            .get("tools")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .and_then(|name| request.tool_name_map.get(name))
+                    .cloned()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         assert!(exposed.contains(&"apply_patch".to_string()));
         assert!(!exposed.contains(&"edit".to_string()));
         assert!(!exposed.contains(&"write".to_string()));
@@ -3463,10 +3525,82 @@ mod tests {
         )
         .unwrap();
 
-        let exposed = request.tool_name_map.values().cloned().collect::<Vec<_>>();
+        let exposed = request
+            .body
+            .get("tools")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .and_then(|name| request.tool_name_map.get(name))
+                    .cloned()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
         assert!(exposed.contains(&"edit".to_string()));
         assert!(exposed.contains(&"write".to_string()));
         assert!(!exposed.contains(&"apply_patch".to_string()));
+    }
+
+    #[test]
+    fn opencode_style_prioritizes_locator_tools_before_read() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            opencode_tool_mode: None,
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "inspect code",
+                "allowed_tools": ["question", "bash", "read", "glob", "grep", "lsp", "edit", "write", "task"]
+            }),
+        )
+        .unwrap();
+
+        let exposed = request
+            .body
+            .get("tools")
+            .and_then(Value::as_array)
+            .unwrap()
+            .iter()
+            .map(|tool| {
+                tool["function"]["name"]
+                    .as_str()
+                    .and_then(|name| request.tool_name_map.get(name))
+                    .cloned()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let grep_index = exposed.iter().position(|tool| tool == "grep").unwrap();
+        let glob_index = exposed.iter().position(|tool| tool == "glob").unwrap();
+        let lsp_index = exposed.iter().position(|tool| tool == "lsp").unwrap();
+        let task_index = exposed.iter().position(|tool| tool == "task").unwrap();
+        let read_index = exposed.iter().position(|tool| tool == "read").unwrap();
+        assert!(grep_index < read_index, "{exposed:?}");
+        assert!(glob_index < read_index, "{exposed:?}");
+        assert!(lsp_index < read_index, "{exposed:?}");
+        assert!(task_index < read_index, "{exposed:?}");
+
+        let system = request.body["messages"][0]["content"].as_str().unwrap();
+        assert!(system.contains("Prefer locator tools before reading file bodies"));
+        assert!(system.contains("Use Glob first when you only know a file path"));
+        assert!(system.contains("200 lines or fewer and 20KB or less"));
+        assert!(!system.contains("Use Read after you have a target file"));
     }
 
     #[test]
@@ -3596,10 +3730,34 @@ mod tests {
             .iter()
             .find(|tool| tool["function"]["name"] == "read")
             .unwrap();
+        let description = read_tool["function"]["description"].as_str().unwrap();
+        assert!(description.starts_with("Read file content only after"));
+        assert!(description.contains("use Grep, LSP, or contains first"));
+        assert!(description.contains("use Glob first to inspect line_count"));
+        assert!(description.contains("larger than 200 lines or 20KB"));
+        assert!(description.contains("workspace-relative"));
+        assert!(description.contains("Do not invent absolute paths"));
+        assert!(description.contains("targeted line ranges"));
+        assert!(!description.contains("Reads a file from the local filesystem"));
+        assert!(!description.contains("speculatively read multiple files"));
+        assert!(!description.contains("recommended to read the whole file"));
+        assert!(!description.contains("If the User provides a path to a file assume"));
+        assert!(!description.contains("must be an absolute path"));
         let properties = &read_tool["function"]["parameters"]["properties"];
         assert!(properties.get("filePath").is_some());
+        assert!(properties["filePath"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("call Glob first"));
         assert!(properties.get("offset").is_some());
         assert!(properties.get("limit").is_some());
+        assert!(properties.get("contains").is_some());
+        assert!(properties.get("context_lines").is_some());
+        assert!(properties.get("occurrence").is_some());
+        assert_eq!(
+            properties["limit"]["description"],
+            json!("The number of lines to read (defaults to 200)")
+        );
         assert!(properties.get("start_line").is_none());
         assert!(properties.get("end_line").is_none());
         assert!(properties.get("repeat_reason").is_none());
@@ -3831,8 +3989,12 @@ mod tests {
         let content = messages[2]["content"].as_str().unwrap();
 
         assert!(content.contains("00101| fn helper() {}"), "{content}");
-        assert!(content.contains("File has more lines"), "{content}");
-        assert!(content.contains("beyond line 300"), "{content}");
+        assert!(
+            content.contains("Selected range ended at line 300"),
+            "{content}"
+        );
+        assert!(content.contains("targeted search"), "{content}");
+        assert!(!content.contains("Use 'offset' parameter"), "{content}");
         assert!(!content.contains("End of file"), "{content}");
     }
 
@@ -4206,7 +4368,60 @@ mod tests {
             content.contains("  Line 43: fn repo_glob_input() {}"),
             "{content}"
         );
+        assert!(
+            content.contains("small offset+limit around the relevant matching lines"),
+            "{content}"
+        );
         assert!(!content.contains(":0:"), "{content}");
+    }
+
+    #[test]
+    fn native_tool_messages_render_glob_file_size_metadata() {
+        let input = json!({
+            "task": "continue after glob",
+            "observations": [{
+                "action": "tool_result",
+                "result": [{
+                    "tool": "glob",
+                    "status": "ok",
+                    "input": {"pattern": "src/*.rs"},
+                    "output": {
+                        "files": ["src/small.rs", "src/large.rs"],
+                        "file_infos": [
+                            {
+                                "path": "src/small.rs",
+                                "line_count": 40,
+                                "source_bytes": 1200,
+                                "large": false
+                            },
+                            {
+                                "path": "src/large.rs",
+                                "line_count": 950,
+                                "source_bytes": 48000,
+                                "large": true
+                            }
+                        ]
+                    }
+                }]
+            }]
+        });
+
+        let messages =
+            input_to_native_tool_messages_with_names(&input, &BTreeMap::new(), false).unwrap();
+        let content = messages[2]["content"].as_str().unwrap();
+
+        assert!(
+            content.contains("src/small.rs (40 lines, 1200 bytes; small"),
+            "{content}"
+        );
+        assert!(
+            content.contains("src/large.rs (950 lines, 48000 bytes; large"),
+            "{content}"
+        );
+        assert!(
+            content.contains("use Grep/contains/range before Read"),
+            "{content}"
+        );
     }
 
     #[test]

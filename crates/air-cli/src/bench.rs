@@ -34,6 +34,8 @@ struct BenchSuite {
     name: String,
     #[serde(default)]
     description: Option<String>,
+    #[serde(default)]
+    subagents: bool,
     tasks: Vec<BenchTask>,
 }
 
@@ -116,6 +118,11 @@ struct TraceMetrics {
     verification_tool_calls: usize,
     verification_failures: usize,
     repair_iterations: usize,
+    subagent_calls: usize,
+    subagent_errors: usize,
+    subagent_model_calls: usize,
+    subagent_tool_calls: usize,
+    subagent_tool_errors: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +147,8 @@ struct BenchTaskContext<'a> {
     profile: &'a Path,
     model_config: &'a Path,
     artifact_cache_root: &'a Path,
+    repo_root: &'a Path,
+    subagents: bool,
     log: bool,
     keep_workdirs: bool,
     refresh: bool,
@@ -205,6 +214,8 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
         profile: &profile,
         model_config: &model_config,
         artifact_cache_root: &artifact_cache_root,
+        repo_root: &repo_root,
+        subagents: suite.subagents,
         log: options.log,
         keep_workdirs: options.keep_workdirs,
         refresh: options.refresh,
@@ -261,7 +272,20 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
 
     let tool_config = task_dir.join("tools.json");
     fs::create_dir_all(&task_dir)?;
-    fs::write(&tool_config, default_bench_tool_config())?;
+    let subagent_paths = if context.subagents {
+        let explore_tool_config = task_dir.join("tools.explore.json");
+        fs::write(&explore_tool_config, default_bench_explore_tool_config())?;
+        Some(BenchSubagentPaths {
+            repo_root: context.repo_root.to_path_buf(),
+            explore_tool_config,
+        })
+    } else {
+        None
+    };
+    fs::write(
+        &tool_config,
+        default_bench_tool_config(subagent_paths.as_ref()),
+    )?;
     let trace_path = task_dir.join("trace.jsonl");
     let output_path = task_dir.join("output.json");
     let before = WorkspaceSnapshot::capture(&workdir)?;
@@ -554,7 +578,15 @@ fn cache_key(fingerprint: &str) -> String {
 }
 
 fn trace_metrics(path: &Path) -> Result<TraceMetrics> {
+    trace_metrics_inner(path, &mut BTreeSet::new())
+}
+
+fn trace_metrics_inner(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<TraceMetrics> {
     if !path.exists() {
+        return Ok(TraceMetrics::default());
+    }
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
         return Ok(TraceMetrics::default());
     }
     let events = read_trace_jsonl(path)
@@ -596,6 +628,23 @@ fn trace_metrics(path: &Path) -> Result<TraceMetrics> {
                     .unwrap_or("unknown")
                     .to_string();
                 *metrics.tool_counts.entry(tool.clone()).or_insert(0) += 1;
+                if tool == "task" {
+                    metrics.subagent_calls += 1;
+                    if event.status != air_runtime::TraceStatus::Ok {
+                        metrics.subagent_errors += 1;
+                    }
+                    if let Some(child_trace) = event
+                        .output
+                        .as_ref()
+                        .and_then(|output| output.get("child_trace_path"))
+                        .and_then(Value::as_str)
+                    {
+                        let child = trace_metrics_inner(Path::new(child_trace), visited)?;
+                        metrics.subagent_model_calls += child.model_calls;
+                        metrics.subagent_tool_calls += child.tool_calls;
+                        metrics.subagent_tool_errors += child.tool_errors;
+                    }
+                }
                 if matches!(tool.as_str(), "edit" | "write" | "apply_patch")
                     && metrics.first_edit_tool_index.is_none()
                 {
@@ -694,7 +743,42 @@ fn ensure_bench_gitignore(workdir: &Path) -> Result<()> {
     fs::write(&gitignore, content).with_context(|| format!("write {}", gitignore.display()))
 }
 
-fn default_bench_tool_config() -> String {
+struct BenchSubagentPaths {
+    repo_root: PathBuf,
+    explore_tool_config: PathBuf,
+}
+
+fn default_bench_tool_config(subagent_paths: Option<&BenchSubagentPaths>) -> String {
+    let task_tool = if let Some(paths) = subagent_paths {
+        json!({
+            "kind": "subagent",
+            "capability": "code.read",
+            "subagents": {
+                "explore": {
+                    "cwd": ".",
+                    "command": [
+                        "{air_exe}",
+                        "run-plan",
+                        "--profile",
+                        paths.repo_root.join("examples/code-agent/explore.air-profile.yaml"),
+                        "--input",
+                        "{input_file}",
+                        "--model-config",
+                        "{env:AIR_CODE_MODEL_CONFIG}",
+                        "--tool-config",
+                        paths.explore_tool_config,
+                        "--trace-out",
+                        "{trace_file}"
+                    ],
+                    "timeout_seconds": 600,
+                    "max_bytes": 51200,
+                    "truncation_direction": "tail"
+                }
+            }
+        })
+    } else {
+        json!({"kind": "local_reflection", "capability": "code.read"})
+    };
     serde_json::to_string_pretty(&json!({
         "workspace_dir": ".",
         "tools": {
@@ -748,7 +832,7 @@ fn default_bench_tool_config() -> String {
                 "max_bytes": 51200,
                 "truncation_direction": "tail"
             },
-            "task": {"kind": "local_reflection", "capability": "code.read"},
+            "task": task_tool,
             "webfetch": {
                 "kind": "web_fetch",
                 "capability": "code.read",
@@ -768,6 +852,44 @@ fn default_bench_tool_config() -> String {
         }
     }))
     .expect("bench tool config is serializable")
+}
+
+fn default_bench_explore_tool_config() -> String {
+    serde_json::to_string_pretty(&json!({
+        "workspace_dir": ".",
+        "tools": {
+            "question": {"kind": "local_reflection", "capability": "code.read"},
+            "read": {
+                "kind": "file_read",
+                "capability": "file.read",
+                "base_dir": ".",
+                "max_bytes": 51200
+            },
+            "glob": {
+                "kind": "repo_files",
+                "capability": "code.read",
+                "repo_dir": ".",
+                "max_files": 100
+            },
+            "grep": {
+                "kind": "file_search",
+                "capability": "file.read",
+                "base_dir": ".",
+                "max_matches": 100,
+                "max_context_lines": 2,
+                "max_line_chars": 2000,
+                "max_bytes": 51200
+            },
+            "webfetch": {
+                "kind": "web_fetch",
+                "capability": "code.read",
+                "timeout_seconds": 120,
+                "max_bytes": 51200
+            },
+            "skill": {"kind": "local_reflection", "capability": "code.read"}
+        }
+    }))
+    .expect("bench explore tool config is serializable")
 }
 
 fn copy_dir(source: &Path, destination: &Path) -> Result<()> {
@@ -910,5 +1032,32 @@ mod tests {
             read_key(&json!({"filePath": "src/lib.rs", "offset": 10, "limit": 20})),
             "src/lib.rs:10:20"
         );
+    }
+
+    #[test]
+    fn subagent_smoke_suite_enables_subagents() {
+        let suite: BenchSuite = serde_json::from_str(include_str!(
+            "../../../benches/code-agent/rust-subagent-smoke/suite.json"
+        ))
+        .unwrap();
+
+        assert!(suite.subagents);
+        assert_eq!(suite.tasks.len(), 2);
+    }
+
+    #[test]
+    fn subagent_bench_tool_config_records_child_trace() {
+        let paths = BenchSubagentPaths {
+            repo_root: PathBuf::from("/repo"),
+            explore_tool_config: PathBuf::from("/run/tools.explore.json"),
+        };
+        let config: Value = serde_json::from_str(&default_bench_tool_config(Some(&paths))).unwrap();
+        let command = config
+            .pointer("/tools/task/subagents/explore/command")
+            .and_then(Value::as_array)
+            .unwrap();
+
+        assert!(command.iter().any(|value| value == "--trace-out"));
+        assert!(command.iter().any(|value| value == "{trace_file}"));
     }
 }

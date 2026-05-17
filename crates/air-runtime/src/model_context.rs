@@ -458,6 +458,18 @@ fn compact_file_collection_context(object: &Map<String, Value>) -> Value {
             ),
         );
     }
+    if let Some(file_infos) = object.get("file_infos").and_then(Value::as_array) {
+        compact.insert(
+            "file_infos".to_string(),
+            Value::Array(
+                file_infos
+                    .iter()
+                    .take(40)
+                    .map(compact_model_context_value)
+                    .collect(),
+            ),
+        );
+    }
     Value::Object(compact)
 }
 

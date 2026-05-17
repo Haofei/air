@@ -25,6 +25,14 @@
       "max_line_chars": 2000,
       "max_bytes": 51200
     },
+    "lsp": {
+      "kind": "rust_analyzer",
+      "capability": "code.read",
+      "root_dir": "../..",
+      "max_results": 120,
+      "max_diagnostics": 80,
+      "max_bytes": 51200
+    },
     "edit": {
       "kind": "file_edit",
       "capability": "file.write",
@@ -69,7 +77,9 @@
             "--model-config",
             "{env:AIR_CODE_MODEL_CONFIG}",
             "--tool-config",
-            "examples/code-agent/tools.explore.json"
+            "examples/code-agent/tools.explore.json",
+            "--trace-out",
+            "{trace_file}"
           ],
           "timeout_seconds": 600,
           "max_bytes": 51200,

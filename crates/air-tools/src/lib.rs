@@ -1142,7 +1142,13 @@ impl ToolProvider for ConfigTools {
                             .unwrap_or(TruncationDirection::Tail),
                     },
                 )?;
-                self.note_workspace_may_have_changed();
+                if output
+                    .get("workspace_changed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    self.note_workspace_may_have_changed();
+                }
                 Ok(output)
             }
             ToolConfig::CommandRun {
@@ -1167,7 +1173,13 @@ impl ToolProvider for ConfigTools {
                             .unwrap_or(TruncationDirection::Head),
                     },
                 )?;
-                self.note_workspace_may_have_changed();
+                if output
+                    .get("workspace_changed")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                {
+                    self.note_workspace_may_have_changed();
+                }
                 Ok(output)
             }
         }

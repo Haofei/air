@@ -49,6 +49,8 @@ pub(crate) struct CodeRunArtifactFiles {
     pub(crate) output: String,
     pub(crate) trace: String,
     pub(crate) diff: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) subagents: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -296,6 +298,7 @@ pub(crate) fn build_code_run_artifact(
             output: "output.json".to_string(),
             trace: "trace.jsonl".to_string(),
             diff: "diff.patch".to_string(),
+            subagents: Some("subagents".to_string()),
         },
         failure_reason,
     })
@@ -361,11 +364,170 @@ pub(crate) fn write_code_run_artifact(
     if let Some(trace_path) = trace_path {
         if trace_path.exists() {
             let destination = artifact_dir.join(&artifact.files.trace);
-            if same_file(trace_path, &destination) {
-                return Ok(());
+            let rewrites = if let Some(subagents) = &artifact.files.subagents {
+                copy_subagent_artifacts_from_trace(trace_path, &artifact_dir.join(subagents))?
+            } else {
+                BTreeMap::new()
+            };
+            if rewrites.is_empty() {
+                if !same_file(trace_path, &destination) {
+                    fs::copy(trace_path, &destination).with_context(|| {
+                        format!("copy {} to {}", trace_path.display(), destination.display())
+                    })?;
+                }
+            } else {
+                let mut events = read_trace_jsonl(trace_path)
+                    .map_err(|error| anyhow::anyhow!("read trace for artifact copy: {error}"))?;
+                for event in &mut events {
+                    if let Some(input) = &mut event.input {
+                        rewrite_subagent_paths(input, &rewrites);
+                    }
+                    if let Some(output) = &mut event.output {
+                        rewrite_subagent_paths(output, &rewrites);
+                    }
+                    if let Some(meta) = &mut event.meta {
+                        rewrite_subagent_paths(meta, &rewrites);
+                    }
+                }
+                write_trace(&destination, &events, false)?;
             }
-            fs::copy(trace_path, &destination).with_context(|| {
-                format!("copy {} to {}", trace_path.display(), destination.display())
+        }
+    }
+    Ok(())
+}
+
+fn copy_subagent_artifacts_from_trace(
+    trace_path: &Path,
+    destination_root: &Path,
+) -> Result<BTreeMap<String, String>> {
+    let events = read_trace_jsonl(trace_path)
+        .map_err(|error| anyhow::anyhow!("read trace for subagent artifact copy: {error}"))?;
+    let mut path_sets = Vec::new();
+    for event in events {
+        if let Some(output) = event.output {
+            collect_subagent_path_sets(&output, &mut path_sets);
+        }
+    }
+
+    let mut rewrites = BTreeMap::new();
+    for (index, paths) in path_sets.into_iter().enumerate() {
+        let subagent_dir = destination_root.join(index.to_string());
+        fs::create_dir_all(&subagent_dir)
+            .with_context(|| format!("create {}", subagent_dir.display()))?;
+        if let Some(trace) = paths.child_trace_path {
+            let destination = subagent_dir.join("trace.jsonl");
+            if copy_file_if_exists(Path::new(&trace), &destination)? {
+                rewrites.insert(trace, destination.display().to_string());
+            }
+        }
+        if let Some(output) = paths.child_output_path {
+            let destination = subagent_dir.join("output.json");
+            if copy_file_if_exists(Path::new(&output), &destination)? {
+                rewrites.insert(output, destination.display().to_string());
+            }
+        }
+        if let Some(artifact) = paths.child_artifact_path {
+            let destination = subagent_dir.join("artifact");
+            if Path::new(&artifact).exists() {
+                copy_dir_all(Path::new(&artifact), &destination)?;
+                rewrites.insert(artifact, destination.display().to_string());
+            }
+        }
+    }
+    Ok(rewrites)
+}
+
+#[derive(Debug, Default)]
+struct SubagentPathSet {
+    child_trace_path: Option<String>,
+    child_output_path: Option<String>,
+    child_artifact_path: Option<String>,
+}
+
+fn collect_subagent_path_sets(value: &Value, sets: &mut Vec<SubagentPathSet>) {
+    match value {
+        Value::Object(object) => {
+            let paths = SubagentPathSet {
+                child_trace_path: object
+                    .get("child_trace_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                child_output_path: object
+                    .get("child_output_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                child_artifact_path: object
+                    .get("child_artifact_path")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+            };
+            if paths.child_trace_path.is_some()
+                || paths.child_output_path.is_some()
+                || paths.child_artifact_path.is_some()
+            {
+                sets.push(paths);
+            }
+            for value in object.values() {
+                collect_subagent_path_sets(value, sets);
+            }
+        }
+        Value::Array(array) => {
+            for value in array {
+                collect_subagent_path_sets(value, sets);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rewrite_subagent_paths(value: &mut Value, rewrites: &BTreeMap<String, String>) {
+    match value {
+        Value::String(text) => {
+            if let Some(replacement) = rewrites.get(text) {
+                *text = replacement.clone();
+            }
+        }
+        Value::Object(object) => {
+            for value in object.values_mut() {
+                rewrite_subagent_paths(value, rewrites);
+            }
+        }
+        Value::Array(array) => {
+            for value in array {
+                rewrite_subagent_paths(value, rewrites);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn copy_file_if_exists(source: &Path, destination: &Path) -> Result<bool> {
+    if !source.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::copy(source, destination)
+        .with_context(|| format!("copy {} to {}", source.display(), destination.display()))?;
+    Ok(true)
+}
+
+fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).with_context(|| format!("create {}", destination.display()))?;
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if entry.file_type()?.is_dir() {
+            copy_dir_all(&source_path, &destination_path)?;
+        } else {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "copy {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
             })?;
         }
     }
@@ -612,6 +774,70 @@ mod tests {
             fs::read_to_string(&source_path).unwrap(),
             "pub fn value() -> i32 {\n    2\n}\n"
         );
+
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn code_run_artifact_copies_subagent_trace_and_rewrites_parent_trace() {
+        let temp_dir = unique_temp_dir("air-code-artifact-subagent");
+        let workdir = temp_dir.join("work");
+        let artifact_dir = temp_dir.join("artifact");
+        let source_path = workdir.join("src/lib.rs");
+        fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        fs::write(&source_path, "pub fn value() -> i32 { 1 }\n").unwrap();
+
+        let child_dir = workdir.join(".air/subagents/task-1");
+        fs::create_dir_all(&child_dir).unwrap();
+        let child_trace = child_dir.join("trace.jsonl");
+        let child_output = child_dir.join("output.json");
+        fs::write(
+            &child_trace,
+            "{\"agent\":\"child\",\"step\":1,\"rule\":\"choose\",\"action\":\"model_call\",\"status\":\"ok\"}\n",
+        )
+        .unwrap();
+        fs::write(&child_output, "{\"result\":\"handoff\"}\n").unwrap();
+
+        let parent_trace = temp_dir.join("trace.jsonl");
+        fs::write(
+            &parent_trace,
+            format!(
+                "{{\"agent\":\"parent\",\"step\":1,\"rule\":\"act\",\"action\":\"tool_batch_dispatch_item\",\"status\":\"ok\",\"output\":{{\"child_trace_path\":\"{}\",\"child_output_path\":\"{}\"}}}}\n",
+                child_trace.display(),
+                child_output.display()
+            ),
+        )
+        .unwrap();
+
+        let before = WorkspaceSnapshot::capture(&workdir).unwrap();
+        let after = WorkspaceSnapshot::capture(&workdir).unwrap();
+        let delta = before.delta(&after).unwrap();
+        let descriptor = CodeRunDescriptor {
+            task: "inspect".to_string(),
+            profile: "profile@sha256:test".to_string(),
+            model_config: None,
+            tool_config: None,
+            extra: BTreeMap::new(),
+        };
+        let artifact =
+            build_code_run_artifact(descriptor, &before, &after, delta, Vec::new(), None).unwrap();
+
+        write_code_run_artifact(
+            &artifact_dir,
+            &artifact,
+            &json!({"edit": {}}),
+            Some(&parent_trace),
+        )
+        .unwrap();
+
+        let copied_child_trace = artifact_dir.join("subagents/0/trace.jsonl");
+        let copied_child_output = artifact_dir.join("subagents/0/output.json");
+        assert!(copied_child_trace.exists());
+        assert!(copied_child_output.exists());
+        let copied_parent_trace = fs::read_to_string(artifact_dir.join("trace.jsonl")).unwrap();
+        assert!(copied_parent_trace.contains(&copied_child_trace.display().to_string()));
+        assert!(copied_parent_trace.contains(&copied_child_output.display().to_string()));
+        assert!(!copied_parent_trace.contains(&child_trace.display().to_string()));
 
         let _ = fs::remove_dir_all(temp_dir);
     }

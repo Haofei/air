@@ -1543,14 +1543,18 @@ fn tool_batch_summary(results: &[Value]) -> Value {
             .unwrap_or(false)
         {
             verification_tools.push(Value::String(tool.to_string()));
-            if output
+            let verification_success = output
                 .get("success")
                 .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
+                .unwrap_or(false);
+            let workspace_changed = output
+                .get("workspace_changed")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            if verification_success && !workspace_changed {
                 any_verification_passed = true;
                 verification_status_update = "passed";
-            } else {
+            } else if !verification_success {
                 any_verification_failed = true;
                 verification_status_update = "failed";
             }
@@ -3894,6 +3898,35 @@ mod tests {
     }
 
     #[test]
+    fn model_context_compaction_preserves_repo_file_infos() {
+        let evidence = json!([{
+            "action": "tool_result",
+            "result": [{
+                "tool": "glob",
+                "status": "ok",
+                "output": {
+                    "files": ["src/large.rs"],
+                    "file_infos": [{
+                        "path": "src/large.rs",
+                        "line_count": 950,
+                        "source_bytes": 48000,
+                        "large": true,
+                        "whole_read_ok": false
+                    }]
+                }
+            }]
+        }]);
+
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(rendered.contains("\"file_infos\""), "{rendered}");
+        assert!(rendered.contains("\"line_count\":950"), "{rendered}");
+        assert!(rendered.contains("\"source_bytes\":48000"), "{rendered}");
+        assert!(rendered.contains("\"whole_read_ok\":false"), "{rendered}");
+    }
+
+    #[test]
     fn model_context_compaction_preserves_artifact_refs_not_bodies() {
         let evidence = json!([{
             "action": "tool_result",
@@ -4015,6 +4048,24 @@ mod tests {
         assert_eq!(summary["any_workspace_change"], json!(true));
         assert_eq!(summary["any_verification_passed"], json!(true));
         assert_eq!(summary["verification_status_update"], json!("passed"));
+    }
+
+    #[test]
+    fn tool_batch_summary_does_not_pass_verification_that_changed_workspace() {
+        let summary = tool_batch_summary(&[json!({
+            "tool": "bash",
+            "status": "ok",
+            "output": {
+                "workspace_changed": true,
+                "verification": true,
+                "success": true
+            }
+        })]);
+
+        assert_eq!(summary["any_workspace_change"], json!(true));
+        assert_eq!(summary["any_verification_passed"], json!(false));
+        assert_eq!(summary["any_verification_failed"], json!(false));
+        assert_eq!(summary["verification_status_update"], json!("unknown"));
     }
 
     #[test]

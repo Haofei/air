@@ -1,6 +1,7 @@
 use super::file_tools::{
     numbered_content, optional_bool_alias_input, optional_labeled_bool_alias_input,
     required_input_string_alias, required_labeled_string_alias, required_path_input,
+    resolve_existing_input_path_in_base,
 };
 use super::text_utils::{bytes_to_limited_text, merge_line_ranges, select_line_range};
 use super::{
@@ -10,7 +11,7 @@ use super::{
 use air_runtime::RuntimeError;
 use serde_json::{json, Value};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 macro_rules! define_edit_match_strategies {
     ($($variant:ident => $name:literal),* $(,)?) => {
@@ -927,17 +928,9 @@ pub(super) fn call_file_edit_tool(
     let max_changed_lines = effective_max_changed_lines(name, input, options.max_changed_lines)?;
 
     let base = canonicalize_tool_path(name, "base_dir", options.base_dir)?;
-    let candidate = if Path::new(input_path).is_absolute() {
-        PathBuf::from(input_path)
-    } else {
-        base.join(input_path)
-    };
-    let path = canonicalize_tool_path(name, "input.path", &candidate)?;
-    if !path.starts_with(&base) {
-        return Err(RuntimeError::Provider(format!(
-            "tool {name} input.path is outside configured base_dir"
-        )));
-    }
+    let resolved = resolve_existing_input_path_in_base(name, "input.path", &base, input_path)?;
+    let path_rebased_from = resolved.rebased_from.clone();
+    let path = resolved.path;
     let operations = match parse_file_edit_operations(name, input) {
         Ok(operations) => operations,
         Err(error) => {
@@ -1067,7 +1060,7 @@ pub(super) fn call_file_edit_tool(
             .map_err(|error| RuntimeError::Provider(format!("tool {name} write file: {error}")))?;
     }
 
-    Ok(json!({
+    let mut output = json!({
         "repo": base.display().to_string(),
         "path": path.display().to_string(),
         "success": true,
@@ -1120,5 +1113,10 @@ pub(super) fn call_file_edit_tool(
                 )
             }
         }]
-    }))
+    });
+    if let Some(path_rebased_from) = path_rebased_from {
+        output["path_rebased_from"] = json!(path_rebased_from.clone());
+        output["artifacts"][0]["metadata"]["path_rebased_from"] = json!(path_rebased_from);
+    }
+    Ok(output)
 }

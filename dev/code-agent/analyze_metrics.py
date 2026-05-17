@@ -20,6 +20,11 @@ METRIC_KEYS = [
     "verification_tool_calls",
     "verification_failures",
     "repair_iterations",
+    "subagent_calls",
+    "subagent_errors",
+    "subagent_model_calls",
+    "subagent_tool_calls",
+    "subagent_tool_errors",
 ]
 
 

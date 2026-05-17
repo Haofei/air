@@ -1,0 +1,39 @@
+{
+  "name": "rust-subagent-smoke",
+  "description": "Small Rust tasks that should benefit from one read-only explore subagent handoff before editing.",
+  "subagents": true,
+  "tasks": [
+    {
+      "id": "subagent_extract_feature_helper",
+      "fixture": "../rust-small/fixture",
+      "prompt": "Use the explore subagent first to inspect src/features.rs, then refactor feature_enabled by extracting the team-tier feature predicate into a small private helper named team_feature_enabled. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/features.rs"],
+        "required_changed_files": ["src/features.rs"],
+        "required_diff_contains": ["team_feature_enabled"]
+      }
+    },
+    {
+      "id": "subagent_extract_report_helper",
+      "fixture": "../rust-small/fixture",
+      "prompt": "Use the explore subagent first to inspect src/report.rs, then refactor report_status by extracting the score bucket decision into a small private helper named score_bucket. Preserve behavior and run cargo test.",
+      "verification": [
+        {
+          "command": "cargo test -q",
+          "description": "Run the fixture Rust tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/report.rs"],
+        "required_changed_files": ["src/report.rs"],
+        "required_diff_contains": ["score_bucket"]
+      }
+    }
+  ]
+}

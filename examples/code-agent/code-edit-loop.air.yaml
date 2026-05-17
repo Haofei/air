@@ -106,13 +106,19 @@ tools:
   - name: bash
     capability: code.test
     timeout_ms: 120000
-  - name: read
+  - name: grep
     capability: file.read
     timeout_ms: 10000
   - name: glob
     capability: code.read
     timeout_ms: 10000
-  - name: grep
+  - name: lsp
+    capability: code.read
+    timeout_ms: 30000
+  - name: task
+    capability: code.read
+    timeout_ms: 600000
+  - name: read
     capability: file.read
     timeout_ms: 10000
   - name: edit
@@ -123,9 +129,6 @@ tools:
     timeout_ms: 10000
   - name: apply_patch
     capability: file.write
-    timeout_ms: 10000
-  - name: task
-    capability: code.read
     timeout_ms: 10000
   - name: webfetch
     capability: code.read
@@ -194,7 +197,7 @@ workflow:
                   ref: observations
                 max_bytes: 600000
               allowed_tools:
-                literal: [question, bash, read, glob, grep, edit, write, apply_patch, task, webfetch, todowrite, todoread, skill]
+                literal: [question, bash, grep, glob, lsp, task, read, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
           output: decision
           timeout_seconds: 180
           retry:
@@ -211,7 +214,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 64
-          timeout_seconds: 120
+          timeout_seconds: 600
           on_error: observe
         - kind: append
           target: observations

@@ -45,7 +45,9 @@ tool output.
 
 `task` launches a separate read-only AIR exploration loop through
 `explore.air-profile.yaml`. Use it for broad investigation that would otherwise
-fill the main edit loop context.
+fill the main edit loop context. Each subagent call writes its own child
+trace/output under `.air/subagents/` and returns those paths in the parent trace
+so the handoff stays concise without losing auditability.
 
 `tools.json` uses the same OpenCode-style tool names against the current repository.
 

@@ -1,7 +1,10 @@
 use super::*;
+use std::io::{BufRead, BufReader};
 
 const GLOB_ALIASES: &[&str] = &["glob", "file_glob"];
 const QUERY_ALIASES: &[&str] = &["query", "pattern"];
+const SMALL_READ_LINE_THRESHOLD: usize = 200;
+const SMALL_READ_BYTE_THRESHOLD: u64 = 20 * 1024;
 
 struct RepoFilesQueryInput<'a> {
     raw_query: &'a str,
@@ -235,6 +238,10 @@ pub(crate) fn call_repo_files_tool(
         .take(effective_max_files)
         .map(|(_, path)| path)
         .collect::<Vec<_>>();
+    let file_infos = files
+        .iter()
+        .map(|path| repo_file_info(&repo, path))
+        .collect::<Vec<_>>();
     let content = files.join("\n");
     let file_count = files.len();
     let no_matches = file_count == 0;
@@ -256,6 +263,7 @@ pub(crate) fn call_repo_files_tool(
         "glob_source": glob_input.glob_source,
         "mode": mode,
         "files": files,
+        "file_infos": file_infos.clone(),
         "file_count": file_count,
         "no_matches": no_matches,
         "search_hint": search_hint,
@@ -280,10 +288,56 @@ pub(crate) fn call_repo_files_tool(
                 "include_all": include_all,
                 "file_count": file_count,
                 "no_matches": no_matches,
-                "search_hint": search_hint
+                "search_hint": search_hint,
+                "file_infos": file_infos
             }
         }]
     }))
+}
+
+fn repo_file_info(repo: &Path, relative_path: &str) -> Value {
+    let path = repo.join(relative_path);
+    let source_bytes = fs::metadata(&path).ok().map(|metadata| metadata.len());
+    let line_count = count_file_lines(&path).ok();
+    let large = source_bytes
+        .map(|bytes| bytes > SMALL_READ_BYTE_THRESHOLD)
+        .unwrap_or(false)
+        || line_count
+            .map(|lines| lines > SMALL_READ_LINE_THRESHOLD)
+            .unwrap_or(false);
+    json!({
+        "path": relative_path,
+        "source_bytes": source_bytes,
+        "line_count": line_count,
+        "large": large,
+        "whole_read_ok": !large,
+        "read_guidance": if large {
+            "large file: use grep, contains+context_lines, LSP, or a narrow line range before Read"
+        } else {
+            "small file: whole-file Read is reasonable"
+        }
+    })
+}
+
+fn count_file_lines(path: &Path) -> Result<usize, RuntimeError> {
+    let file = fs::File::open(path)
+        .map_err(|error| RuntimeError::Provider(format!("count file lines: {error}")))?;
+    let mut reader = BufReader::new(file);
+    let mut buf = Vec::new();
+    let mut lines = 0usize;
+    let mut saw_bytes = false;
+    loop {
+        buf.clear();
+        let bytes = reader
+            .read_until(b'\n', &mut buf)
+            .map_err(|error| RuntimeError::Provider(format!("count file lines: {error}")))?;
+        if bytes == 0 {
+            break;
+        }
+        saw_bytes = true;
+        lines += 1;
+    }
+    Ok(if saw_bytes { lines } else { 0 })
 }
 
 fn repo_search_query_input<'a>(

@@ -27,6 +27,15 @@ Run the full small Rust suite:
 cargo run -p air-cli -- bench code-agent --refresh
 ```
 
+Run the subagent smoke suite:
+
+```bash
+cargo run -p air-cli -- bench code-agent \
+  --suite benches/code-agent/rust-subagent-smoke/suite.json \
+  --refresh \
+  --keep-workdirs
+```
+
 The runner writes `run.json`, per-task `trace.jsonl`, per-task `output.json`,
 an `artifact/` copy, and failed task workdirs under
 `target/generated/code-agent-bench/<run-id>/`.
@@ -42,3 +51,8 @@ The first baseline suite is `rust-small`: a small set of classic Rust refactor
 tasks that should preserve behavior, pass `cargo test -q`, and touch only the
 requested source file. Keep this suite compact; add new cases when they capture
 a real failure mode rather than another copy of the same refactor.
+
+`rust-subagent-smoke` enables the `task` subagent tool and writes nested child
+trace/output paths into the parent trace. Use it to compare whether isolated
+read-only exploration reduces repeated reads and parent model calls without
+turning subagents into an opaque cost sink.

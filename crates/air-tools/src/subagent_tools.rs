@@ -49,6 +49,15 @@ pub(super) struct SubagentToolOptions {
     pub(super) truncation_direction: TruncationDirection,
 }
 
+#[derive(Debug, Clone)]
+struct SubagentRunPaths {
+    dir: PathBuf,
+    input_file: PathBuf,
+    trace_file: PathBuf,
+    output_file: PathBuf,
+    artifact_dir: PathBuf,
+}
+
 pub(super) fn call_subagent_tool(
     name: &str,
     input: &Value,
@@ -78,11 +87,18 @@ pub(super) fn call_subagent_tool(
     let cwd = canonicalize_tool_path(name, "cwd", &workspace_dir.join(&profile.cwd))?;
     let options = profile_options(profile);
     let task_prompt = subagent_task_prompt(prompt, profile.output_contract.as_deref());
-    let input_file = write_subagent_input(name, &cwd, &task_prompt, description, subagent_type)?;
+    let run_paths = create_subagent_run_paths(name, &cwd)?;
+    write_subagent_input(
+        name,
+        &run_paths.input_file,
+        &task_prompt,
+        description,
+        subagent_type,
+    )?;
     let argv = profile
         .command
         .iter()
-        .map(|part| render_subagent_arg(name, part, input, &input_file))
+        .map(|part| render_subagent_arg(name, part, input, &run_paths))
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = run_command_argv(
         name,
@@ -95,6 +111,7 @@ pub(super) fn call_subagent_tool(
             truncation_direction: options.truncation_direction,
         },
     )?;
+    persist_subagent_output(name, &run_paths.output_file, &output)?;
     if let Some(object) = output.as_object_mut() {
         normalize_subagent_command_output(object);
         object.insert("title".to_string(), Value::String(description.to_string()));
@@ -104,10 +121,31 @@ pub(super) fn call_subagent_tool(
         );
         object.insert(
             "input_file".to_string(),
-            Value::String(input_file.display().to_string()),
+            Value::String(run_paths.input_file.display().to_string()),
         );
-        if let Some(log) = object.get("log").and_then(Value::as_str) {
-            object.insert("output".to_string(), Value::String(log.to_string()));
+        object.insert(
+            "subagent_dir".to_string(),
+            Value::String(run_paths.dir.display().to_string()),
+        );
+        object.insert(
+            "child_output_path".to_string(),
+            Value::String(run_paths.output_file.display().to_string()),
+        );
+        if run_paths.trace_file.exists() {
+            object.insert(
+                "child_trace_path".to_string(),
+                Value::String(run_paths.trace_file.display().to_string()),
+            );
+            object.insert(
+                "metrics".to_string(),
+                subagent_trace_metrics(&run_paths.trace_file),
+            );
+        }
+        if directory_has_entries(&run_paths.artifact_dir) {
+            object.insert(
+                "child_artifact_path".to_string(),
+                Value::String(run_paths.artifact_dir.display().to_string()),
+            );
         }
     }
     Ok(output)
@@ -205,25 +243,37 @@ fn subagent_input_payload(prompt: &str, description: &str, subagent_type: &str) 
     })
 }
 
-fn write_subagent_input(
-    name: &str,
-    cwd: &Path,
-    prompt: &str,
-    description: &str,
-    subagent_type: &str,
-) -> Result<std::path::PathBuf, RuntimeError> {
-    let dir = cwd.join(".air").join("subagents");
-    fs::create_dir_all(&dir).map_err(|error| {
-        RuntimeError::Provider(format!("tool {name} create subagent input dir: {error}"))
-    })?;
+fn create_subagent_run_paths(name: &str, cwd: &Path) -> Result<SubagentRunPaths, RuntimeError> {
     let timestamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|error| RuntimeError::Provider(format!("tool {name} timestamp: {error}")))?
         .as_millis();
-    let path = dir.join(format!("task-{timestamp}.input.json"));
+    let dir = cwd
+        .join(".air")
+        .join("subagents")
+        .join(format!("task-{timestamp}"));
+    fs::create_dir_all(&dir).map_err(|error| {
+        RuntimeError::Provider(format!("tool {name} create subagent dir: {error}"))
+    })?;
+    Ok(SubagentRunPaths {
+        input_file: dir.join("input.json"),
+        trace_file: dir.join("trace.jsonl"),
+        output_file: dir.join("output.json"),
+        artifact_dir: dir.join("artifact"),
+        dir,
+    })
+}
+
+fn write_subagent_input(
+    name: &str,
+    path: &Path,
+    prompt: &str,
+    description: &str,
+    subagent_type: &str,
+) -> Result<(), RuntimeError> {
     let payload = subagent_input_payload(prompt, description, subagent_type);
     fs::write(
-        &path,
+        path,
         serde_json::to_vec_pretty(&payload).map_err(|error| {
             RuntimeError::Provider(format!("tool {name} serialize subagent input: {error}"))
         })?,
@@ -231,7 +281,63 @@ fn write_subagent_input(
     .map_err(|error| {
         RuntimeError::Provider(format!("tool {name} write subagent input: {error}"))
     })?;
-    Ok(path)
+    Ok(())
+}
+
+fn persist_subagent_output(name: &str, path: &Path, output: &Value) -> Result<(), RuntimeError> {
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(output).map_err(|error| {
+            RuntimeError::Provider(format!("tool {name} serialize subagent output: {error}"))
+        })?,
+    )
+    .map_err(|error| RuntimeError::Provider(format!("tool {name} write subagent output: {error}")))
+}
+
+fn directory_has_entries(path: &Path) -> bool {
+    path.read_dir()
+        .map(|mut entries| entries.next().is_some())
+        .unwrap_or(false)
+}
+
+fn subagent_trace_metrics(path: &Path) -> Value {
+    let Ok(source) = fs::read_to_string(path) else {
+        return json!({});
+    };
+    let mut model_calls = 0usize;
+    let mut model_errors = 0usize;
+    let mut tool_calls = 0usize;
+    let mut tool_errors = 0usize;
+    for line in source.lines() {
+        let Ok(event) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        let action = event.get("action").and_then(Value::as_str).unwrap_or("");
+        let status = event.get("status").and_then(Value::as_str).unwrap_or("");
+        match action {
+            "model_call" => {
+                if status == "ok" {
+                    model_calls += 1;
+                } else {
+                    model_errors += 1;
+                }
+            }
+            "tool_batch_dispatch_item" => {
+                if status == "ok" {
+                    tool_calls += 1;
+                } else {
+                    tool_errors += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    json!({
+        "model_calls": model_calls,
+        "model_errors": model_errors,
+        "tool_calls": tool_calls,
+        "tool_errors": tool_errors
+    })
 }
 
 fn subagent_raw_log(object: &serde_json::Map<String, Value>) -> &str {
@@ -292,7 +398,8 @@ fn parse_subagent_handoff(output: &str) -> Option<Value> {
 
     for line in output.lines() {
         let trimmed = line.trim();
-        match trimmed {
+        let heading = trimmed.trim_matches('*').trim();
+        match heading {
             "Findings:" => {
                 current = "findings";
                 continue;
@@ -357,11 +464,21 @@ fn render_subagent_arg(
     name: &str,
     template: &str,
     input: &Value,
-    input_file: &Path,
+    run_paths: &SubagentRunPaths,
 ) -> Result<String, RuntimeError> {
     let mut rendered = template
         .replace("{air_exe}", &current_exe(name)?)
-        .replace("{input_file}", &input_file.display().to_string());
+        .replace("{input_file}", &run_paths.input_file.display().to_string())
+        .replace("{trace_file}", &run_paths.trace_file.display().to_string())
+        .replace(
+            "{output_file}",
+            &run_paths.output_file.display().to_string(),
+        )
+        .replace(
+            "{artifact_dir}",
+            &run_paths.artifact_dir.display().to_string(),
+        )
+        .replace("{subagent_dir}", &run_paths.dir.display().to_string());
     for field in [
         "description",
         "prompt",

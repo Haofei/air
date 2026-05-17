@@ -530,10 +530,11 @@ fn file_read_offset_without_limit_uses_bounded_window() {
         .unwrap();
 
     assert_eq!(output["start_line"], json!(101));
-    assert_eq!(output["end_line"], json!(350));
+    assert_eq!(output["end_line"], json!(300));
     let content = output["content"].as_str().unwrap();
     assert!(content.contains("00101| line 101"));
-    assert!(content.contains("00350| line 350"));
+    assert!(content.contains("00300| line 300"));
+    assert!(!content.contains("00350| line 350"));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -564,17 +565,18 @@ fn file_read_start_line_without_limit_uses_bounded_window() {
         .unwrap();
 
     assert_eq!(output["start_line"], json!(100));
-    assert_eq!(output["end_line"], json!(350));
+    assert_eq!(output["end_line"], json!(299));
     let content = output["content"].as_str().unwrap();
     assert!(content.contains("00100| line 100"));
-    assert!(content.contains("00350| line 350"));
+    assert!(content.contains("00299| line 299"));
+    assert!(!content.contains("00350| line 350"));
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
 fn file_read_limits_large_unscoped_reads_to_a_bounded_prefix() {
     let dir = temp_dir("air-tools-file-read-large-unscoped");
-    let content = (1..=2200)
+    let content = (1..=500)
         .map(|line| format!("line {line}"))
         .collect::<Vec<_>>()
         .join("\n");
@@ -599,13 +601,52 @@ fn file_read_limits_large_unscoped_reads_to_a_bounded_prefix() {
         .unwrap();
 
     assert_eq!(output["start_line"], json!(1));
-    assert_eq!(output["end_line"], json!(2000));
-    assert_eq!(output["total_lines"], json!(2200));
+    assert_eq!(output["end_line"], json!(200));
+    assert_eq!(output["total_lines"], json!(500));
     assert_eq!(output["range_limited_unscoped_read"], json!(true));
-    assert!(output["truncation_hint"]
+    assert_eq!(output["content_skipped"], json!(true));
+    assert_eq!(output["content"], Value::Null);
+    assert!(output["message"]
         .as_str()
-        .is_some_and(|hint| hint.contains("offset+limit")));
-    assert!(!output["content"].as_str().unwrap().contains("line 2200"));
+        .is_some_and(|hint| hint.contains("contains+context_lines")));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_read_limits_byte_large_unscoped_reads_even_when_line_count_is_small() {
+    let dir = temp_dir("air-tools-file-read-byte-large-unscoped");
+    let content = (1..=120)
+        .map(|line| format!("line {line:03} {}", "x".repeat(300)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(dir.join("large.txt"), content).unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": ".",
+                  "max_bytes": 65536
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("read", &json!({"filePath": "large.txt"}))
+        .unwrap();
+
+    assert_eq!(output["start_line"], json!(1));
+    assert_eq!(output["total_lines"], json!(120));
+    assert_eq!(output["range_limited_unscoped_read"], json!(true));
+    assert_eq!(output["content_skipped"], json!(true));
+    assert_eq!(output["content"], Value::Null);
+    assert!(output["message"]
+        .as_str()
+        .is_some_and(|hint| hint.contains("contains+context_lines")));
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -1252,6 +1293,84 @@ fn file_read_rejects_path_outside_base_dir() {
         .unwrap_err();
 
     assert!(error.to_string().contains("outside configured base_dir"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn file_tools_rebase_external_absolute_paths_by_workspace_suffix() {
+    let dir = temp_dir("air-tools-file-path-rebase");
+    let src = dir.join("crates/air-tools/src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(src.join("file_tools.rs"), "pub fn old() {}\n").unwrap();
+    let fake_bridge_file = "/Users/hwang/work/CodexBridge/crates/air-tools/src/file_tools.rs";
+    let fake_bridge_new = "/Users/hwang/work/CodexBridge/crates/air-tools/src/new_tool.rs";
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "grep": {
+                  "kind": "file_search",
+                  "capability": "file.read",
+                  "base_dir": "."
+                },
+                "edit": {
+                  "kind": "file_edit",
+                  "capability": "file.write",
+                  "base_dir": "."
+                },
+                "write": {
+                  "kind": "file_write",
+                  "capability": "file.write",
+                  "base_dir": ".",
+                  "create_dirs": true,
+                  "allow_overwrite": true
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let read = tools
+        .call_tool("read", &json!({"filePath": fake_bridge_file}))
+        .unwrap();
+    assert_eq!(read["path_rebased_from"], json!(fake_bridge_file));
+    assert!(read["path"]
+        .as_str()
+        .unwrap()
+        .ends_with("crates/air-tools/src/file_tools.rs"));
+
+    let grep = tools
+        .call_tool(
+            "grep",
+            &json!({"path": "/Users/hwang/work/CodexBridge/crates/air-tools/src", "pattern": "old"}),
+        )
+        .unwrap();
+    assert_eq!(grep["match_count"], json!(1));
+
+    let edit = tools
+        .call_tool(
+            "edit",
+            &json!({"filePath": fake_bridge_file, "oldString": "old", "newString": "new"}),
+        )
+        .unwrap();
+    assert_eq!(edit["path_rebased_from"], json!(fake_bridge_file));
+    assert!(fs::read_to_string(src.join("file_tools.rs"))
+        .unwrap()
+        .contains("new"));
+
+    let write = tools
+        .call_tool(
+            "write",
+            &json!({"filePath": fake_bridge_new, "content": "pub fn created() {}\n"}),
+        )
+        .unwrap();
+    assert_eq!(write["path_rebased_from"], json!(fake_bridge_new));
+    assert!(src.join("new_tool.rs").exists());
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -2769,6 +2888,14 @@ fn repo_files_accepts_pattern_alias_for_glob() {
         .unwrap();
 
     assert_eq!(output["files"], json!(["examples/code-agent/README.md"]));
+    assert_eq!(
+        output["file_infos"][0]["path"],
+        json!("examples/code-agent/README.md")
+    );
+    assert_eq!(output["file_infos"][0]["line_count"], json!(1));
+    assert_eq!(output["file_infos"][0]["source_bytes"], json!(5));
+    assert_eq!(output["file_infos"][0]["large"], json!(false));
+    assert_eq!(output["file_infos"][0]["whole_read_ok"], json!(true));
     assert_eq!(output["query"], json!(""));
     assert_eq!(output["query_source"], json!("none"));
     assert_eq!(output["glob"], json!("examples/code-agent/**"));
@@ -3221,7 +3348,7 @@ fn subagent_tool_extracts_air_final_answer_from_run_plan_json() {
 #[test]
 fn subagent_tool_returns_structured_handoff_when_contract_sections_are_present() {
     let dir = temp_dir("air-tools-subagent-handoff");
-    let handoff = "Findings:\n- src/lib.rs:10-20 `target` - useful context\nEvidence:\n- test points here\nNext action:\n- read src/lib.rs lines 10-20\nParent read again:\n- yes, src/lib.rs:10-20";
+    let handoff = "**Findings:**\n- src/lib.rs:10-20 `target` - useful context\n**Evidence:**\n- test points here\n**Next action:**\n- read src/lib.rs lines 10-20\n**Parent read again:**\n- yes, src/lib.rs:10-20";
     let config_path = write_config(
         &dir,
         &json!({
@@ -3262,6 +3389,59 @@ fn subagent_tool_returns_structured_handoff_when_contract_sections_are_present()
     assert_eq!(
         output["handoff"]["next_action"][0],
         json!("read src/lib.rs lines 10-20")
+    );
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn subagent_tool_records_child_trace_and_output_paths() {
+    let dir = temp_dir("air-tools-subagent-trace");
+    let handoff = "Findings:\n- src/lib.rs:1-2 `target` - useful context\nEvidence:\n- ok\nNext action:\n- read src/lib.rs lines 1-2\nParent read again:\n- yes, src/lib.rs:1-2";
+    let script = format!(
+        "printf '{{\"action\":\"model_call\",\"status\":\"ok\"}}\\n' > \"$1\"; printf '%s' '{}'",
+        handoff.replace('\'', "'\"'\"'")
+    );
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "task": {
+                    "kind": "subagent",
+                    "capability": "code.read",
+                    "subagents": {
+                        "explore": {
+                            "cwd": ".",
+                            "command": ["bash", "-lc", script, "subagent", "{trace_file}"],
+                            "timeout_seconds": 10,
+                            "max_bytes": 4096
+                        }
+                    }
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "task",
+            &json!({
+                "description": "Inspect helper",
+                "prompt": "find target",
+                "subagent_type": "explore"
+            }),
+        )
+        .unwrap();
+
+    let child_trace_path = output["child_trace_path"].as_str().unwrap();
+    let child_output_path = output["child_output_path"].as_str().unwrap();
+    assert!(Path::new(child_trace_path).exists());
+    assert!(Path::new(child_output_path).exists());
+    assert_eq!(output["metrics"]["model_calls"], json!(1));
+    assert_eq!(
+        output["handoff"]["parent_read_again"][0],
+        json!("yes, src/lib.rs:1-2")
     );
     let _ = fs::remove_dir_all(dir);
 }
@@ -4605,6 +4785,73 @@ fn bash_runs_shell_command() {
         .unwrap();
     assert_eq!(output["verification"], json!(true));
     assert_eq!(tools.tool_capability("bash"), Some("code.test"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn bash_reports_workspace_changed_only_when_files_change() {
+    let dir = temp_dir("air-tools-bash-workspace-changed");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "bash": {
+                  "kind": "bash",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let read_only = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "printf 'hello\\n'", "description": "inspect"}),
+        )
+        .unwrap();
+    assert_eq!(read_only["workspace_changed"], json!(false));
+    assert_eq!(read_only["workspace_changed_files"], json!([]));
+
+    let changed = tools
+        .call_tool(
+            "bash",
+            &json!({"command": "printf 'hello\\n' > generated.txt", "description": "write file"}),
+        )
+        .unwrap();
+    assert_eq!(changed["workspace_changed"], json!(true));
+    assert_eq!(changed["workspace_changed_files"], json!(["generated.txt"]));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn command_run_reports_workspace_changed_for_configured_commands() {
+    let dir = temp_dir("air-tools-command-workspace-changed");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "cmd": {
+                  "kind": "command_run",
+                  "capability": "code.test",
+                  "cwd": ".",
+                  "commands": {
+                    "write_note": ["bash", "-lc", "printf note > note.txt"]
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("cmd", &json!({"command": "write_note"}))
+        .unwrap();
+    assert_eq!(output["workspace_changed"], json!(true));
+    assert_eq!(output["workspace_changed_files"], json!(["note.txt"]));
     let _ = fs::remove_dir_all(dir);
 }
 
