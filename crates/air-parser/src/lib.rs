@@ -23,6 +23,10 @@ pub enum ParseError {
 }
 
 pub fn parse_air_file(path: impl AsRef<Path>) -> Result<AirModule, ParseError> {
+    parse_air_document_file(path)
+}
+
+fn parse_air_document_file(path: impl AsRef<Path>) -> Result<AirModule, ParseError> {
     let path = path.as_ref();
     let source = fs::read_to_string(path).map_err(|source| ParseError::Read {
         path: path.display().to_string(),

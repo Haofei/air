@@ -338,6 +338,7 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
             .with_context(|| format!("enter workdir {}", workdir.display()))?;
         let agent_result = run_code_agent(CodeOptions {
             task: task.prompt.clone(),
+            artifact_task: None,
             skill,
             profile: Some(context.profile.to_path_buf()),
             model_config: Some(context.model_config.to_path_buf()),
@@ -653,7 +654,7 @@ fn trace_metrics_inner(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<T
                 {
                     metrics.first_edit_tool_index = Some(metrics.tool_calls);
                 }
-                if tool == "read" {
+                if matches!(tool.as_str(), "read" | "read_range" | "read_contains") {
                     let key = event
                         .input
                         .as_ref()
@@ -786,7 +787,13 @@ fn default_bench_tool_config(subagent_paths: Option<&BenchSubagentPaths>) -> Str
         "workspace_dir": ".",
         "tools": {
             "question": {"kind": "local_reflection", "capability": "code.read"},
-            "read": {
+            "read_range": {
+                "kind": "file_read",
+                "capability": "file.read",
+                "base_dir": ".",
+                "max_bytes": 51200
+            },
+            "read_contains": {
                 "kind": "file_read",
                 "capability": "file.read",
                 "base_dir": ".",
@@ -862,7 +869,13 @@ fn default_bench_explore_tool_config() -> String {
         "workspace_dir": ".",
         "tools": {
             "question": {"kind": "local_reflection", "capability": "code.read"},
-            "read": {
+            "read_range": {
+                "kind": "file_read",
+                "capability": "file.read",
+                "base_dir": ".",
+                "max_bytes": 51200
+            },
+            "read_contains": {
                 "kind": "file_read",
                 "capability": "file.read",
                 "base_dir": ".",

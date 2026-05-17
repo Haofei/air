@@ -9,7 +9,6 @@ use crate::skill::resolve_skill_run_metadata;
 use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
@@ -17,19 +16,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const PROJECT_SCHEMA: &str = "air.project.v1";
-const PROJECT_STATE_SCHEMA: &str = "air.project_state.v1";
-const DEFAULT_PROJECT_FILE: &str = "air-project.yaml";
-const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
-const DEFAULT_PROJECT_SCOUT_PROFILE: &str = "skills/code-agent/project-scout.air-profile.yaml";
-const DEFAULT_MODEL_CONFIG: &str = "examples/bigmodel-openai-compatible.json";
-const DEFAULT_TOOL_CONFIG: &str = "skills/code-agent/tools.json";
-const DEFAULT_ARTIFACT_DIR: &str = ".air/project";
-const DEFAULT_PROJECT_BENCH_SUITE: &str = "benches/project/orchestrator-smoke/suite.json";
-
-pub(crate) fn default_project_file() -> PathBuf {
-    PathBuf::from(DEFAULT_PROJECT_FILE)
-}
+mod manifest;
+use manifest::*;
+pub(crate) use manifest::{
+    default_project_file, BenchProjectOptions, ProjectPlanOptions, ProjectRunOptions,
+    ProjectStatusOptions, ProjectVerifyOptions,
+};
 
 fn project_manifest_dir(cwd: &Path, output: Option<&Path>) -> Result<PathBuf> {
     let manifest_path = output
@@ -55,251 +47,6 @@ fn project_defaults_for_manifest(
         tool_config: path_for_manifest(manifest_dir, &cwd.join(DEFAULT_TOOL_CONFIG))?,
         artifact_dir: PathBuf::from(DEFAULT_ARTIFACT_DIR),
     })
-}
-
-#[derive(Debug)]
-pub(crate) struct ProjectPlanOptions {
-    pub(crate) goal: String,
-    pub(crate) output: Option<PathBuf>,
-    pub(crate) model_config: Option<PathBuf>,
-    pub(crate) planner_model: String,
-    pub(crate) template: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct ProjectRunOptions {
-    pub(crate) file: PathBuf,
-    pub(crate) task: Option<String>,
-    pub(crate) log: bool,
-}
-
-#[derive(Debug)]
-pub(crate) struct ProjectStatusOptions {
-    pub(crate) file: PathBuf,
-}
-
-#[derive(Debug)]
-pub(crate) struct ProjectVerifyOptions {
-    pub(crate) file: PathBuf,
-    pub(crate) task: Option<String>,
-}
-
-pub(crate) struct BenchProjectOptions {
-    pub(crate) suite: Option<PathBuf>,
-    pub(crate) out_dir: Option<PathBuf>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectManifest {
-    schema: String,
-    project: ProjectMetadata,
-    #[serde(default)]
-    defaults: ProjectDefaults,
-    tasks: Vec<ProjectTask>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectMetadata {
-    name: String,
-    goal: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectDefaults {
-    #[serde(default = "default_profile")]
-    profile: PathBuf,
-    #[serde(default = "default_model_config")]
-    model_config: PathBuf,
-    #[serde(default = "default_tool_config")]
-    tool_config: PathBuf,
-    #[serde(default = "default_artifact_dir")]
-    artifact_dir: PathBuf,
-}
-
-impl Default for ProjectDefaults {
-    fn default() -> Self {
-        Self {
-            profile: default_profile(),
-            model_config: default_model_config(),
-            tool_config: default_tool_config(),
-            artifact_dir: default_artifact_dir(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectTask {
-    id: String,
-    goal: String,
-    #[serde(default)]
-    depends_on: Vec<String>,
-    #[serde(default)]
-    allowed_files: Vec<String>,
-    #[serde(default)]
-    forbidden_files: Vec<String>,
-    #[serde(default)]
-    verification: Vec<ProjectVerificationCommand>,
-    #[serde(default)]
-    success_conditions: ProjectSuccessConditions,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_changed_files: Option<usize>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    max_diff_lines: Option<usize>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectVerificationCommand {
-    command: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ProjectSuccessConditions {
-    #[serde(default)]
-    required_changed_files: Vec<String>,
-    #[serde(default)]
-    required_diff_contains: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectState {
-    schema: String,
-    project: String,
-    tasks: BTreeMap<String, ProjectTaskState>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum ProjectTaskStatus {
-    Passed,
-    Failed,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectTaskState {
-    status: ProjectTaskStatus,
-    artifact_path: String,
-    changed_files: Vec<String>,
-    #[serde(default)]
-    artifact_snapshot_matches_current: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    worktree_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    patch_path: Option<String>,
-    verification: Vec<ProjectVerificationResult>,
-    constraints: ProjectConstraintResult,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failure_reason: Option<FailureReason>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ProjectVerificationResult {
-    command: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    success: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    status: Option<i32>,
-    stdout_preview: String,
-    stderr_preview: String,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-struct ProjectConstraintResult {
-    passed: bool,
-    violations: Vec<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ProjectRunOutput {
-    project: String,
-    state_path: String,
-    tasks: Vec<ProjectTaskRunOutput>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ProjectBenchSuite {
-    name: String,
-    #[serde(default)]
-    description: Option<String>,
-    cases: Vec<ProjectBenchCase>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ProjectBenchCase {
-    DagOrder {
-        id: String,
-        manifest: ProjectManifest,
-        expected_order: Vec<String>,
-    },
-    DependencyFailure {
-        id: String,
-        manifest: ProjectManifest,
-        failed_task: String,
-        target_task: String,
-    },
-    ConstraintCheck {
-        id: String,
-        task: ProjectTask,
-        changed_files: Vec<String>,
-        diff: String,
-        expected_pass: bool,
-        #[serde(default)]
-        expected_violation_contains: Option<String>,
-    },
-    MissingArtifact {
-        id: String,
-        task: ProjectTask,
-    },
-    StaleArtifact {
-        id: String,
-        task: ProjectTask,
-    },
-}
-
-#[derive(Debug, Serialize)]
-struct ProjectBenchRun {
-    suite: String,
-    description: Option<String>,
-    run_dir: String,
-    summary: ProjectBenchSummary,
-    cases: Vec<ProjectBenchCaseRun>,
-}
-
-#[derive(Debug, Default, Serialize)]
-struct ProjectBenchSummary {
-    total: usize,
-    passed: usize,
-    failed: usize,
-}
-
-#[derive(Debug, Serialize)]
-struct ProjectBenchCaseRun {
-    id: String,
-    kind: String,
-    pass: bool,
-    details: Value,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct ProjectTaskRunOutput {
-    id: String,
-    status: ProjectTaskStatus,
-    artifact_path: String,
-    changed_files: Vec<String>,
-    artifact_snapshot_matches_current: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    worktree_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    patch_path: Option<String>,
-    verification_passed: bool,
-    constraints_passed: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    failure_reason: Option<FailureReason>,
 }
 
 pub(crate) fn project_plan(options: ProjectPlanOptions) -> Result<()> {
@@ -1141,6 +888,7 @@ fn run_project_task(
         .with_context(|| format!("enter project task worktree {}", worktree_dir.display()))?;
     let output = run_code_agent(CodeOptions {
         task: project_task_prompt(&context.manifest, task),
+        artifact_task: None,
         skill: resolve_skill_run_metadata("code-agent").ok(),
         profile: Some(profile),
         model_config: Some(model_config),
@@ -1761,22 +1509,6 @@ fn with_current_dir<T>(dir: &Path, operation: impl FnOnce() -> Result<T>) -> Res
             Err(error).with_context(|| format!("also failed to restore cwd: {restore_error}"))
         }
     }
-}
-
-fn default_profile() -> PathBuf {
-    PathBuf::from(DEFAULT_CODE_PROFILE)
-}
-
-fn default_model_config() -> PathBuf {
-    PathBuf::from(DEFAULT_MODEL_CONFIG)
-}
-
-fn default_tool_config() -> PathBuf {
-    PathBuf::from(DEFAULT_TOOL_CONFIG)
-}
-
-fn default_artifact_dir() -> PathBuf {
-    PathBuf::from(DEFAULT_ARTIFACT_DIR)
 }
 
 fn preview_bytes(bytes: &[u8], max_chars: usize) -> String {

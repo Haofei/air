@@ -1,5 +1,5 @@
-use super::text_utils::bytes_to_limited_text;
 use super::*;
+use air_tools_core::text::bytes_to_limited_text;
 
 pub(super) struct HttpJsonToolConfig<'a> {
     pub url: &'a str,

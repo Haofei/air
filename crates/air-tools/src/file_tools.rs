@@ -1,7 +1,7 @@
 use super::file_search_render::{render_search_matches, stable_pattern_id};
 
-use super::text_utils::{bytes_to_limited_text, select_line_range};
 use super::*;
+use air_tools_core::text::{bytes_to_limited_text, select_line_range};
 
 const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 200;
 const DEFAULT_OPEN_ENDED_RANGE_LINE_LIMIT: usize = DEFAULT_UNSCOPED_READ_LINE_LIMIT;
@@ -824,7 +824,25 @@ pub(super) fn required_path_input<'a>(
     tool_name: &str,
     input: &'a Value,
 ) -> Result<&'a str, RuntimeError> {
-    required_input_string_alias(tool_name, input, "path", "filePath")
+    let fields = ["file", "path", "filePath"];
+    let present = fields
+        .iter()
+        .copied()
+        .filter(|field| input.get(*field).is_some())
+        .collect::<Vec<_>>();
+    if present.len() > 1 {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} must provide only one of input.file, input.path, or input.filePath"
+        )));
+    }
+    let Some(field) = present.first() else {
+        return Err(RuntimeError::Provider(format!(
+            "tool {tool_name} input.path must be a string"
+        )));
+    };
+    input.get(*field).and_then(Value::as_str).ok_or_else(|| {
+        RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
+    })
 }
 
 #[derive(Debug, Clone)]

@@ -1,4 +1,7 @@
 use air_runtime::{ApprovalDecision, RuntimeError, ToolProvider};
+use air_tools_core::json_template::{render_json_template, render_json_template_value};
+use air_tools_core::text::{bytes_to_limited_text, merge_line_ranges, numbered_line_range};
+use air_tools_core::TruncationDirection;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -24,8 +27,6 @@ use file_tools::{
     call_file_read_many_tool, call_file_read_tool, call_file_search_tool, call_file_write_tool,
     read_snapshot, FileWriteOptions, ReadSnapshot,
 };
-mod helpdesk;
-use helpdesk::helpdesk_docs;
 mod provider;
 pub use provider::{EchoTools, ToolProviderChoice};
 mod provider_error;
@@ -35,11 +36,7 @@ use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
 mod rust_lsp_tools;
 use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
 mod command_run;
-mod workspace_snapshot;
-use command_config::{
-    workspace_snapshot_ignore_patterns, CommandParameterRule, CommandRunOptions,
-    TruncationDirection,
-};
+use command_config::{workspace_snapshot_ignore_patterns, CommandParameterRule, CommandRunOptions};
 use command_run::{call_bash_tool, call_command_run_tool};
 mod subagent_tools;
 use subagent_tools::{call_subagent_tool, SubagentProfileConfig};
@@ -55,8 +52,6 @@ use tool_config_validation::validate_tool_config;
 mod todo_tools;
 use todo_tools::call_todowrite_tool;
 
-mod json_template;
-use json_template::{render_json_template, render_json_template_value};
 mod http_tools;
 use http_tools::{
     call_http_json_tool, call_web_fetch_tool, HttpJsonToolConfig, WebFetchToolConfig,
@@ -75,8 +70,6 @@ mod local_docs;
 pub use local_docs::{search_docs, LocalDoc};
 mod repo_reference_tools;
 use repo_reference_tools::call_repo_references_tool;
-mod text_utils;
-use text_utils::{bytes_to_limited_text, merge_line_ranges, numbered_line_range};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
@@ -607,24 +600,14 @@ impl ConfigTools {
     }
 
     fn example() -> Self {
-        let docs = helpdesk_docs()
-            .into_iter()
-            .map(|doc| LocalDoc {
-                id: doc.id.to_string(),
-                title: doc.title.to_string(),
-                content: doc.content.to_string(),
-            })
-            .collect();
+        let config: ToolConfigFile = serde_json::from_str(include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/simple-helpdesk/tools.json"
+        )))
+        .expect("examples/simple-helpdesk/tools.json must be a valid AIR tool config");
         Self {
-            tools: BTreeMap::from([(
-                "docs.search".to_string(),
-                ToolConfig::LocalDocsSearch {
-                    capability: Some("retrieval.local".to_string()),
-                    documents: docs,
-                    max_results: None,
-                },
-            )]),
-            approvals: BTreeMap::new(),
+            tools: config.tools,
+            approvals: config.approvals,
             config_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
             read_snapshots: BTreeMap::new(),

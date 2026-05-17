@@ -64,6 +64,10 @@ pub struct ToolSpec {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Workflow {
+    /// Declarative DAG shape used by linker/system validation.
+    ///
+    /// The native VM currently executes `state_machine` modules. Compose
+    /// multiple modules with RunPlan/AirSystem when you need DAG execution.
     Dag(DagWorkflow),
     StateMachine(StateMachineWorkflow),
 }

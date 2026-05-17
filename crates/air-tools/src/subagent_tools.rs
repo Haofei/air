@@ -9,8 +9,9 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use super::canonicalize_tool_path;
-use super::command_config::{CommandRunOptions, TruncationDirection};
+use super::command_config::CommandRunOptions;
 use super::command_run::run_command_argv;
+use air_tools_core::TruncationDirection;
 
 const SUBAGENT_OUTPUT_MAX_CHARS: usize = 12_000;
 const SUBAGENT_OUTPUT_CONTRACT: &str = r#"Subagent output contract:

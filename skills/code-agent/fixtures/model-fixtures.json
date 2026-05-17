@@ -66,11 +66,11 @@
           "complete": false,
           "tool_calls": [
             {
-              "tool": "read",
+              "tool": "read_range",
               "input": {
-                "path": "skills/code-agent/edit-fixture/math.js",
-                "line_numbers": true,
-                "max_bytes": 20000
+                "file": "skills/code-agent/edit-fixture/math.js",
+                "offset": 0,
+                "limit": 40
               }
             }
           ]

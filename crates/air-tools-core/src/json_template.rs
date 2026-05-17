@@ -1,6 +1,6 @@
 use serde_json::Value;
 
-pub(crate) fn render_json_template_value(template: &Value, input: &Value) -> Value {
+pub fn render_json_template_value(template: &Value, input: &Value) -> Value {
     match template {
         Value::String(text) => Value::String(render_json_template(text, input)),
         Value::Array(values) => Value::Array(
@@ -19,7 +19,7 @@ pub(crate) fn render_json_template_value(template: &Value, input: &Value) -> Val
     }
 }
 
-pub(crate) fn render_json_template(template: &str, input: &Value) -> String {
+pub fn render_json_template(template: &str, input: &Value) -> String {
     let mut rendered = String::new();
     let mut rest = template;
     while let Some(start) = rest.find("{{") {

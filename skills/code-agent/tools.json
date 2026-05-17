@@ -10,7 +10,13 @@
       "kind": "local_reflection",
       "capability": "code.read"
     },
-    "read": {
+    "read_range": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 51200
+    },
+    "read_contains": {
       "kind": "file_read",
       "capability": "file.read",
       "base_dir": "../..",

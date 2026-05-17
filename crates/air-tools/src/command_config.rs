@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use air_tools_core::TruncationDirection;
 use serde::Deserialize;
 
 const DEFAULT_WORKSPACE_SNAPSHOT_IGNORE: &[&str] = &[
@@ -28,13 +29,6 @@ const DEFAULT_WORKSPACE_SNAPSHOT_IGNORE: &[&str] = &[
     "venv",
     "venv/**",
 ];
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum TruncationDirection {
-    Head,
-    Tail,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct CommandRunOptions {

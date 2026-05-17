@@ -1,5 +1,5 @@
-use crate::text_utils::bytes_to_limited_text;
 use air_runtime::RuntimeError;
+use air_tools_core::text::bytes_to_limited_text;
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
@@ -56,10 +56,11 @@ fn list_skills(root_dir: &Path) -> Result<Value, RuntimeError> {
                 .map(|manifest| (manifest_path, manifest))
         })
         .map(|(manifest_path, manifest)| {
+            let skill_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
             json!({
                 "id": manifest.id,
                 "version": manifest.version,
-                "description": manifest.description,
+                "description": skill_description(skill_dir, &manifest),
                 "manifest": display_path(&manifest_path),
                 "audit_risk": read_audit_risk(&manifest_path),
             })
@@ -83,6 +84,13 @@ fn load_skill(
         ))
     })?;
     let manifest = read_manifest(&manifest_path)?;
+    if let Some(risk) = read_audit_risk(&manifest_path) {
+        if matches!(risk.as_str(), "high" | "critical") {
+            return Err(RuntimeError::Provider(format!(
+                "tool {tool_name} refused to load AIR skill `{skill_name}` because audit risk is {risk}"
+            )));
+        }
+    }
     let skill_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
     let instruction_paths = instruction_paths(skill_dir, &manifest);
     let mut remaining = max_bytes;
@@ -249,6 +257,39 @@ fn instruction_paths(skill_dir: &Path, manifest: &SkillManifest) -> Vec<PathBuf>
         .map(|name| skill_dir.join(name))
         .filter(|path| path.exists())
         .collect()
+}
+
+fn skill_description(skill_dir: &Path, manifest: &SkillManifest) -> Option<String> {
+    for path in instruction_paths(skill_dir, manifest) {
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(description) = frontmatter_description(&content) {
+            return Some(description);
+        }
+    }
+    manifest.description.clone()
+}
+
+fn frontmatter_description(content: &str) -> Option<String> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    for line in lines {
+        let line = line.trim();
+        if line == "---" {
+            break;
+        }
+        let Some(value) = line.strip_prefix("description:") else {
+            continue;
+        };
+        let value = value.trim().trim_matches('"').trim_matches('\'');
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
 }
 
 fn read_audit_risk(manifest_path: &Path) -> Option<String> {

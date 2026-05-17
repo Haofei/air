@@ -742,7 +742,10 @@ fn is_opencode_code_input(input: &Value) -> bool {
         .flatten()
         .filter_map(Value::as_str)
         .collect::<Vec<_>>();
-    tools.contains(&"read") && tools.contains(&"edit") && tools.contains(&"bash")
+    tools.contains(&"read_range")
+        && tools.contains(&"read_contains")
+        && tools.contains(&"edit")
+        && tools.contains(&"bash")
 }
 
 fn opencode_environment_prompt(model_name: &str) -> String {
@@ -894,7 +897,7 @@ fn attach_native_tool_calls(
         let schema = tool_schemas.and_then(|schemas| schemas.get(&original_name));
         let mut function = json!({
             "name": safe_name,
-            "description": native_tool_description(&original_name, schema),
+            "description": native_tool_description(&original_name, schema, input),
             "parameters": native_tool_parameters(&original_name, schema)
         });
         if !opencode_style {
@@ -943,7 +946,8 @@ fn opencode_tool_order(use_patch: bool) -> &'static [&'static str] {
             "glob",
             "lsp",
             "task",
-            "read",
+            "read_contains",
+            "read_range",
             "webfetch",
             "todowrite",
             "todoread",
@@ -958,7 +962,8 @@ fn opencode_tool_order(use_patch: bool) -> &'static [&'static str] {
             "glob",
             "lsp",
             "task",
-            "read",
+            "read_contains",
+            "read_range",
             "edit",
             "write",
             "webfetch",
@@ -999,11 +1004,12 @@ fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize
     name
 }
 
-fn native_tool_description(original_name: &str, schema: Option<&Value>) -> String {
+fn native_tool_description(original_name: &str, schema: Option<&Value>, input: &Value) -> String {
     match original_name {
         "question" => return opencode_question_description(),
         "glob" => return opencode_glob_description(),
-        "read" => return opencode_read_description(),
+        "read_range" => return opencode_read_range_description(),
+        "read_contains" => return opencode_read_contains_description(),
         "grep" => return opencode_grep_description(),
         "edit" => return opencode_edit_description(),
         "write" => return opencode_write_description(),
@@ -1014,7 +1020,7 @@ fn native_tool_description(original_name: &str, schema: Option<&Value>) -> Strin
         "bash" => return opencode_bash_description(),
         "todowrite" => return opencode_todowrite_description(),
         "todoread" => return "Use this tool to read your todo list".to_string(),
-        "skill" => return opencode_skill_description(),
+        "skill" => return opencode_skill_description(input.get("available_skills")),
         _ => {}
     }
     let Some(schema) = schema else {
@@ -1169,21 +1175,32 @@ Usage notes:
         .to_string()
 }
 
-fn opencode_read_description() -> String {
-    r##"Inspect a bounded, line-numbered file span after you have localized a known symbol, phrase, or line range.
-Use Glob, Grep, or LSP first when you need to find the relevant file or symbol.
+fn opencode_read_range_description() -> String {
+    r##"Inspect a bounded, line-numbered span by explicit line range.
+Use Glob, Grep, or LSP first to identify the relevant file and line numbers.
 
 Usage:
-- The filePath parameter may be workspace-relative or absolute; prefer workspace-relative paths or exact paths returned by locator tools
-- Do not invent absolute paths from the model server or API bridge process; use the current working directory shown in the environment
-- To inspect text content, provide offset+limit or contains+context_lines.
-- For unfamiliar or large files, use Grep, LSP, or contains first to locate the relevant symbols or line ranges
-- Any lines longer than 2000 characters will be truncated
-- Results are returned using cat -n format, with line numbers starting at 1
-- You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before span inspection
-- If the target file exists but has empty contents you will receive a system reminder warning in place of file contents.
+- Provide file, offset, and limit.
+- offset is a 0-based line number; limit is the number of lines to inspect.
+- Use this after search/LSP output has identified a narrow target region.
+- Do not use this to scan from the top of a file when you do not know the target line range; use Glob/Grep/LSP first.
+- Results are returned using cat -n format, with line numbers starting at 1.
 "##
         .to_string()
+}
+
+fn opencode_read_contains_description() -> String {
+    r##"Inspect a bounded, line-numbered span around the first matching text occurrence.
+Use this when you know an exact symbol, function name, error text, or distinctive phrase.
+
+Usage:
+- Provide file, contains, and context_lines.
+- contains should be a concrete text fragment, not a broad regex.
+- context_lines controls the number of surrounding lines returned around the match.
+- Use occurrence when the same text appears more than once.
+- Results are returned using cat -n format, with line numbers starting at 1.
+"##
+    .to_string()
 }
 
 fn opencode_grep_description() -> String {
@@ -1316,9 +1333,74 @@ Note: LSP servers must be configured for the file type. If no server is availabl
         .to_string()
 }
 
-fn opencode_skill_description() -> String {
-    "Load an installed AIR skill by name to get task-specific instructions. Use this when a task asks for a known workflow, methodology, or imported skill such as TDD."
-        .to_string()
+fn opencode_skill_description(available_skills: Option<&Value>) -> String {
+    let skills = available_skill_cards(available_skills);
+    if skills.is_empty() {
+        return "Load a skill to get detailed instructions for a specific task. No skills are currently available."
+            .to_string();
+    }
+
+    let mut lines = vec![
+        "Load a skill to get detailed instructions for a specific task.".to_string(),
+        "Skills provide specialized knowledge and step-by-step guidance.".to_string(),
+        "Use this when a task matches an available skill's description.".to_string(),
+        "Only the skills listed here are available:".to_string(),
+        "<available_skills>".to_string(),
+    ];
+    for (name, description) in skills {
+        lines.push("  <skill>".to_string());
+        lines.push(format!("    <name>{}</name>", escape_xml_text(&name)));
+        lines.push(format!(
+            "    <description>{}</description>",
+            escape_xml_text(&description)
+        ));
+        lines.push("  </skill>".to_string());
+    }
+    lines.push("</available_skills>".to_string());
+    lines.join(" ")
+}
+
+fn available_skill_cards(available_skills: Option<&Value>) -> Vec<(String, String)> {
+    let Some(skills) = available_skills
+        .and_then(|value| value.get("skills").or(Some(value)))
+        .and_then(Value::as_array)
+    else {
+        return Vec::new();
+    };
+    let mut cards = skills
+        .iter()
+        .filter(|skill| {
+            !skill
+                .get("audit_risk")
+                .and_then(Value::as_str)
+                .is_some_and(|risk| matches!(risk, "high" | "critical"))
+        })
+        .filter_map(|skill| {
+            let name = skill
+                .get("id")
+                .or_else(|| skill.get("name"))
+                .and_then(Value::as_str)?
+                .trim();
+            if name.is_empty() {
+                return None;
+            }
+            let description = skill
+                .get("description")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or("No description provided.");
+            Some((name.to_string(), description.to_string()))
+        })
+        .collect::<Vec<_>>();
+    cards.sort_by(|left, right| left.0.cmp(&right.0));
+    cards
+}
+
+fn escape_xml_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn opencode_todowrite_description() -> String {
@@ -1570,23 +1652,30 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "additionalProperties": false
             });
         }
-        "read" => {
+        "read_range" => {
             return json!({
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "filePath": {"type": "string", "description": "Workspace-relative or absolute path returned by Glob/Grep/LSP."},
-                    "offset": {"type": "number", "description": "The 0-based line number where range inspection starts. Required with limit."},
-                    "limit": {"type": "number", "description": "The number of lines to inspect. Required with offset for range inspection."},
+                    "file": {"type": "string", "description": "Workspace-relative or absolute file returned by Glob/Grep/LSP."},
+                    "offset": {"type": "number", "description": "The 0-based line number where span inspection starts."},
+                    "limit": {"type": "number", "description": "The number of lines to inspect."}
+                },
+                "required": ["file", "offset", "limit"],
+                "additionalProperties": false
+            });
+        }
+        "read_contains" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "file": {"type": "string", "description": "Workspace-relative or absolute file returned by Glob/Grep/LSP."},
                     "contains": {"type": "string", "description": "Find the first matching line containing this text and return a narrow context window around it"},
                     "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return. Required with contains for span inspection."},
                     "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"}
                 },
-                "required": ["filePath"],
-                "oneOf": [
-                    {"required": ["offset", "limit"]},
-                    {"required": ["contains", "context_lines"]}
-                ],
+                "required": ["file", "contains", "context_lines"],
                 "additionalProperties": false
             });
         }
@@ -1761,8 +1850,9 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "$schema": "https://json-schema.org/draft/2020-12/schema",
                 "type": "object",
                 "properties": {
-                    "name": {"description": "The AIR skill id to load. Omit this field to list available skills.", "type": "string"}
+                    "name": {"description": "The AIR skill id to load from available_skills.", "type": "string"}
                 },
+                "required": ["name"],
                 "additionalProperties": false
             });
         }
@@ -2143,7 +2233,14 @@ fn render_native_tool_message_content(value: &Value, exposed_tool_name: Option<&
     let transcript = lines.join("\n");
     if matches!(
         tool,
-        "file.read" | "file_read" | "read" | "file.read_many" | "file_read_many" | "read_many"
+        "file.read"
+            | "file_read"
+            | "read"
+            | "read_range"
+            | "read_contains"
+            | "file.read_many"
+            | "file_read_many"
+            | "read_many"
     ) {
         truncate_tail_text(&transcript, NATIVE_FILE_READ_MESSAGE_MAX_CHARS)
     } else {
@@ -2153,7 +2250,9 @@ fn render_native_tool_message_content(value: &Value, exposed_tool_name: Option<&
 
 fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<String>) {
     match tool {
-        "file.read" | "file_read" | "read" => render_file_read_transcript(output, lines),
+        "file.read" | "file_read" | "read" | "read_range" | "read_contains" => {
+            render_file_read_transcript(output, lines)
+        }
         "file.read_many" | "file_read_many" | "read_many" => {
             render_file_read_many_transcript(output, lines)
         }
@@ -3380,6 +3479,50 @@ mod tests {
     }
 
     #[test]
+    fn skill_tool_description_lists_available_skill_cards() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: None,
+            json_mode: Some(true),
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            opencode_tool_mode: None,
+            trace_provider_io: None,
+        };
+        let request = build_chat_completion_body(
+            &config,
+            "glm-5.1".to_string(),
+            &json!({
+                "task": "fix with TDD",
+                "allowed_tools": ["skill"],
+                "available_skills": {
+                    "kind": "skill_list",
+                    "skills": [
+                        {"id": "tdd-workflow", "description": "Use this skill for test-driven development.", "audit_risk": "low"},
+                        {"id": "unsafe", "description": "Do unsafe things.", "audit_risk": "high"}
+                    ]
+                }
+            }),
+        )
+        .unwrap();
+
+        let skill_tool = &request.body["tools"][0]["function"];
+        let description = skill_tool["description"].as_str().unwrap();
+        assert!(description.contains("<available_skills>"));
+        assert!(description.contains("<name>tdd-workflow</name>"));
+        assert!(description.contains("test-driven development"));
+        assert!(!description.contains("<name>unsafe</name>"));
+        assert_eq!(skill_tool["parameters"]["required"], json!(["name"]));
+    }
+
+    #[test]
     fn opencode_style_native_tool_calls_use_streaming_like_opencode() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
@@ -3402,9 +3545,10 @@ mod tests {
             "glm-5.1".to_string(),
             &json!({
                 "task": "edit the code",
-                "allowed_tools": ["read", "edit", "bash"],
+                "allowed_tools": ["read_range", "read_contains", "edit", "bash"],
                 "tool_schemas": {
-                    "read": {"required": {"filePath": "repo-relative file path"}},
+                    "read_range": {"required": {"file": "repo-relative file", "offset": 0, "limit": 20}},
+                    "read_contains": {"required": {"file": "repo-relative file", "contains": "needle", "context_lines": 3}},
                     "edit": {
                         "required": {
                             "filePath": "repo-relative file path",
@@ -3448,7 +3592,7 @@ mod tests {
             "GLM-5.1".to_string(),
             &json!({
                 "task": "edit the code",
-                "allowed_tools": ["read", "edit", "bash"]
+                "allowed_tools": ["read_range", "read_contains", "edit", "bash"]
             }),
         )
         .unwrap();
@@ -3479,7 +3623,7 @@ mod tests {
             "gpt-5.3-codex:high".to_string(),
             &json!({
                 "task": "edit the code",
-                "allowed_tools": ["read", "edit", "write", "apply_patch", "bash"]
+                "allowed_tools": ["read_range", "read_contains", "edit", "write", "apply_patch", "bash"]
             }),
         )
         .unwrap();
@@ -3537,7 +3681,7 @@ mod tests {
             "glm-5.1".to_string(),
             &json!({
                 "task": "edit the code",
-                "allowed_tools": ["read", "edit", "write", "apply_patch", "bash"]
+                "allowed_tools": ["read_range", "read_contains", "edit", "write", "apply_patch", "bash"]
             }),
         )
         .unwrap();
@@ -3584,7 +3728,7 @@ mod tests {
             "glm-5.1".to_string(),
             &json!({
                 "task": "inspect code",
-                "allowed_tools": ["question", "bash", "read", "glob", "grep", "lsp", "edit", "write", "task"]
+                "allowed_tools": ["question", "bash", "read_range", "read_contains", "glob", "grep", "lsp", "edit", "write", "task"]
             }),
         )
         .unwrap();
@@ -3607,11 +3751,18 @@ mod tests {
         let glob_index = exposed.iter().position(|tool| tool == "glob").unwrap();
         let lsp_index = exposed.iter().position(|tool| tool == "lsp").unwrap();
         let task_index = exposed.iter().position(|tool| tool == "task").unwrap();
-        let read_index = exposed.iter().position(|tool| tool == "read").unwrap();
-        assert!(grep_index < read_index, "{exposed:?}");
-        assert!(glob_index < read_index, "{exposed:?}");
-        assert!(lsp_index < read_index, "{exposed:?}");
-        assert!(task_index < read_index, "{exposed:?}");
+        let read_contains_index = exposed
+            .iter()
+            .position(|tool| tool == "read_contains")
+            .unwrap();
+        let read_range_index = exposed
+            .iter()
+            .position(|tool| tool == "read_range")
+            .unwrap();
+        assert!(grep_index < read_contains_index, "{exposed:?}");
+        assert!(glob_index < read_contains_index, "{exposed:?}");
+        assert!(lsp_index < read_range_index, "{exposed:?}");
+        assert!(task_index < read_range_index, "{exposed:?}");
 
         let system = request.body["messages"][0]["content"].as_str().unwrap();
         assert!(system.contains("Prefer locator tools before inspecting file spans"));
@@ -3643,7 +3794,7 @@ mod tests {
             "GLM-5.1".to_string(),
             &json!({
                 "task": "edit the code",
-                "allowed_tools": ["read", "edit", "write", "apply_patch", "bash"]
+                "allowed_tools": ["read_range", "read_contains", "edit", "write", "apply_patch", "bash"]
             }),
         )
         .unwrap();
@@ -3713,7 +3864,7 @@ mod tests {
     }
 
     #[test]
-    fn native_read_tool_schema_matches_opencode_style_ranges() {
+    fn native_span_tool_schemas_do_not_expose_path_only_read() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
             base_url_env: None,
@@ -3736,80 +3887,79 @@ mod tests {
             "glm-5.1".to_string(),
             &json!({
                 "task": "inspect file span",
-                "allowed_tools": ["read"]
+                "allowed_tools": ["read_range", "read_contains"]
             }),
         )
         .unwrap();
 
-        let read_tool = request.body["tools"]
-            .as_array()
-            .unwrap()
+        let tools = request.body["tools"].as_array().unwrap();
+        assert!(tools.iter().all(|tool| tool["function"]["name"] != "read"));
+        let read_range = tools
             .iter()
-            .find(|tool| tool["function"]["name"] == "read")
+            .find(|tool| tool["function"]["name"] == "read_range")
             .unwrap();
-        let description = read_tool["function"]["description"].as_str().unwrap();
-        assert!(description.starts_with("Inspect a bounded, line-numbered file span"));
-        assert!(description.contains("use Grep, LSP, or contains first"));
-        assert!(description.contains("provide offset+limit or contains+context_lines"));
-        assert!(description.contains("workspace-relative"));
-        assert!(description.contains("Do not invent absolute paths"));
-        assert!(!description.contains("Loads a file from the local filesystem"));
-        assert!(!description.contains("speculatively read multiple files"));
-        assert!(!description.contains("If the User provides a path to a file assume"));
-        assert!(!description.contains("must be an absolute path"));
-        let properties = &read_tool["function"]["parameters"]["properties"];
-        let property_names = properties
+        let read_contains = tools
+            .iter()
+            .find(|tool| tool["function"]["name"] == "read_contains")
+            .unwrap();
+
+        let range_description = read_range["function"]["description"].as_str().unwrap();
+        assert!(range_description.starts_with("Inspect a bounded, line-numbered span"));
+        assert!(range_description.contains("Provide file, offset, and limit"));
+        assert!(!range_description.contains("filePath"));
+
+        let contains_description = read_contains["function"]["description"].as_str().unwrap();
+        assert!(contains_description.contains("first matching text occurrence"));
+        assert!(contains_description.contains("Provide file, contains, and context_lines"));
+        assert!(!contains_description.contains("filePath"));
+
+        let range_properties = &read_range["function"]["parameters"]["properties"];
+        let range_property_names = range_properties
             .as_object()
             .unwrap()
             .keys()
             .cloned()
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            property_names,
-            [
-                "contains",
-                "context_lines",
-                "filePath",
-                "limit",
-                "occurrence",
-                "offset"
-            ]
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+            range_property_names,
+            ["file", "limit", "offset"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
         );
-        assert!(properties["filePath"]["description"]
-            .as_str()
+        assert_eq!(
+            read_range["function"]["parameters"]["required"],
+            json!(["file", "offset", "limit"])
+        );
+
+        let contains_properties = &read_contains["function"]["parameters"]["properties"];
+        let contains_property_names = contains_properties
+            .as_object()
             .unwrap()
-            .contains("returned by Glob/Grep/LSP"));
-        assert!(properties.get("offset").is_some());
-        assert!(properties.get("limit").is_some());
-        assert!(properties.get("contains").is_some());
-        assert!(properties.get("context_lines").is_some());
-        assert!(properties.get("occurrence").is_some());
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
-            properties["limit"]["description"],
-            json!("The number of lines to inspect. Required with offset for range inspection.")
+            contains_property_names,
+            ["contains", "context_lines", "file", "occurrence"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
         );
-        let one_of = read_tool["function"]["parameters"]["oneOf"]
-            .as_array()
-            .unwrap();
         assert_eq!(
-            one_of,
-            &vec![
-                json!({"required": ["offset", "limit"]}),
-                json!({"required": ["contains", "context_lines"]})
-            ]
+            read_contains["function"]["parameters"]["required"],
+            json!(["file", "contains", "context_lines"])
         );
-        assert!(properties.get("start_line").is_none());
-        assert!(properties.get("end_line").is_none());
-        assert!(properties.get("repeat_reason").is_none());
         assert_eq!(
-            read_tool["function"]["parameters"]["additionalProperties"],
+            read_range["function"]["parameters"]["additionalProperties"],
+            json!(false)
+        );
+        assert_eq!(
+            read_contains["function"]["parameters"]["additionalProperties"],
             json!(false)
         );
         assert!(
-            read_tool["function"].get("strict").is_none(),
+            read_range["function"].get("strict").is_none(),
             "OpenCode-style tool schemas should not include the OpenAI strict extension"
         );
     }

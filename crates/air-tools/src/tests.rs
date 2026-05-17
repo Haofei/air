@@ -520,6 +520,35 @@ fn file_read_accepts_opencode_file_path_offset_limit() {
 }
 
 #[test]
+fn file_read_rejects_ambiguous_path_aliases() {
+    let dir = temp_dir("air-tools-file-read-ambiguous-path");
+    fs::write(dir.join("note.txt"), "zero\none\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "read": {
+                  "kind": "file_read",
+                  "capability": "file.read",
+                  "base_dir": "."
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let error = tools
+        .call_tool(
+            "read",
+            &json!({"file": "note.txt", "filePath": "note.txt", "offset": 0, "limit": 1}),
+        )
+        .unwrap_err();
+
+    assert!(error.to_string().contains("must provide only one"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn file_read_offset_without_limit_uses_bounded_window() {
     let dir = temp_dir("air-tools-file-read-offset-default-window");
     let content = (1..=350)
@@ -3291,7 +3320,8 @@ fn code_agent_self_tools_validate_project_paths() {
 
     assert_eq!(tools.tool_capability("question"), Some("code.read"));
     assert_eq!(tools.tool_capability("bash"), Some("code.test"));
-    assert_eq!(tools.tool_capability("read"), Some("file.read"));
+    assert_eq!(tools.tool_capability("read_range"), Some("file.read"));
+    assert_eq!(tools.tool_capability("read_contains"), Some("file.read"));
     assert_eq!(tools.tool_capability("glob"), Some("code.read"));
     assert_eq!(tools.tool_capability("grep"), Some("file.read"));
     assert_eq!(tools.tool_capability("edit"), Some("file.write"));
@@ -3330,7 +3360,7 @@ workflow:
     .unwrap();
     fs::write(
         skill_dir.join("SKILL.md"),
-        "# TDD\nWrite failing tests before production code.\n",
+        "---\nname: tdd-workflow\ndescription: Use this skill for test-driven development.\n---\n# TDD\nWrite failing tests before production code.\n",
     )
     .unwrap();
     fs::write(
@@ -3356,6 +3386,10 @@ workflow:
 
     let list = tools.call_tool("skill", &json!({})).unwrap();
     assert_eq!(list["skills"][0]["id"], json!("tdd-workflow"));
+    assert_eq!(
+        list["skills"][0]["description"],
+        json!("Use this skill for test-driven development.")
+    );
 
     let loaded = tools
         .call_tool("skill", &json!({"name": "tdd-workflow"}))
@@ -3367,6 +3401,17 @@ workflow:
         .unwrap()
         .contains("Write failing tests"));
     assert_eq!(loaded["artifacts"][0]["kind"], json!("skill_instruction"));
+
+    fs::write(
+        skill_dir.join("audit.json"),
+        r#"{"schema":"air.skill_audit.v1","skill_id":"tdd-workflow","risk":"high","allowed_to_run":false,"findings":[]}"#,
+    )
+    .unwrap();
+    let error = tools
+        .call_tool("skill", &json!({"name": "tdd-workflow"}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("refused to load AIR skill"));
 
     let _ = fs::remove_dir_all(dir);
 }

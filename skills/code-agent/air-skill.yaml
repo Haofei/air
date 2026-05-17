@@ -1,5 +1,6 @@
 schema: air.skill.v1
 id: code-agent
+mode: executor
 version: 0.1.0
 description: General AIR coding agent skill with bounded span inspection, edits, verification, trace, and replay.
 

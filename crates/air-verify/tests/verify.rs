@@ -262,6 +262,29 @@ fn rejects_model_or_tool_actions_that_write_phase() {
 }
 
 #[test]
+fn rejects_actions_that_write_reserved_air_runtime_field() {
+    let mut module = parse_air_file("../../tests/agents/model-smoke.air.yaml").unwrap();
+    let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let air_core::StateAction::Set { values } = &mut workflow.rules[0].actions[0] else {
+        panic!("expected set");
+    };
+    values.insert("_air".to_string(), serde_json::json!({}));
+
+    let report = verify(&module);
+
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR100"),
+        "expected AIR100, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn rejects_unsupported_state_machine_conditions() {
     let mut module = parse_air_file("../../tests/agents/conditional-loop.air.yaml").unwrap();
     let air_core::Workflow::StateMachine(workflow) = &mut module.workflow else {

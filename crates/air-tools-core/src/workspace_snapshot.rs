@@ -9,28 +9,28 @@ use std::time::UNIX_EPOCH;
 use air_runtime::RuntimeError;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
-pub(super) const COMMAND_SNAPSHOT_MAX_HASH_BYTES: u64 = 2 * 1024 * 1024;
+pub const COMMAND_SNAPSHOT_MAX_HASH_BYTES: u64 = 2 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct CommandWorkspaceFile {
+pub struct CommandWorkspaceFile {
     pub bytes: u64,
     pub modified_ms: u128,
     pub content_hash: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub(super) struct CommandWorkspaceSnapshot {
+pub struct CommandWorkspaceSnapshot {
     files: BTreeMap<String, CommandWorkspaceFile>,
 }
 
 impl CommandWorkspaceSnapshot {
-    pub(super) fn capture(root: &Path, ignore: &GlobSet) -> Self {
+    pub fn capture(root: &Path, ignore: &GlobSet) -> Self {
         let mut snapshot = Self::default();
         collect_workspace_files(root, root, ignore, &mut snapshot.files);
         snapshot
     }
 
-    pub(super) fn changed_files(&self, after: &Self) -> Vec<String> {
+    pub fn changed_files(&self, after: &Self) -> Vec<String> {
         self.files
             .keys()
             .chain(after.files.keys())
@@ -42,7 +42,7 @@ impl CommandWorkspaceSnapshot {
     }
 }
 
-pub(super) fn collect_workspace_files(
+pub fn collect_workspace_files(
     root: &Path,
     dir: &Path,
     ignore: &GlobSet,
@@ -86,7 +86,7 @@ pub(super) fn collect_workspace_files(
     }
 }
 
-pub(super) fn workspace_snapshot_ignore_set(patterns: &[String]) -> Result<GlobSet, RuntimeError> {
+pub fn workspace_snapshot_ignore_set(patterns: &[String]) -> Result<GlobSet, RuntimeError> {
     let mut builder = GlobSetBuilder::new();
     for pattern in patterns {
         builder.add(Glob::new(pattern).map_err(|error| {
@@ -102,7 +102,7 @@ pub(super) fn workspace_snapshot_ignore_set(patterns: &[String]) -> Result<GlobS
     })
 }
 
-pub(super) fn command_file_hash(path: &Path, bytes: u64) -> Option<u64> {
+pub fn command_file_hash(path: &Path, bytes: u64) -> Option<u64> {
     if bytes > COMMAND_SNAPSHOT_MAX_HASH_BYTES {
         return None;
     }

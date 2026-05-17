@@ -17,6 +17,7 @@ pub(crate) const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profil
 
 pub(crate) struct CodeOptions {
     pub(crate) task: String,
+    pub(crate) artifact_task: Option<String>,
     pub(crate) skill: Option<CodeRunSkill>,
     pub(crate) profile: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
@@ -34,6 +35,7 @@ pub(crate) struct CodeOptions {
 pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     let CodeOptions {
         task,
+        artifact_task,
         skill,
         profile,
         model_config,
@@ -54,6 +56,13 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
 
     let profile = profile.unwrap_or_else(|| PathBuf::from(DEFAULT_CODE_PROFILE));
     let input = build_input(task);
+    let descriptor_task = artifact_task.unwrap_or_else(|| {
+        input
+            .get("task")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    });
 
     let cwd = std::env::current_dir().context("resolve current directory")?;
     if let Some(artifact_dir) = replay_artifact.as_ref().filter(|_| replay_from.is_none()) {
@@ -62,11 +71,7 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     let before = WorkspaceSnapshot::capture(&cwd)?;
     let preexisting_changed_files = git_changed_files(&cwd).unwrap_or_default();
     let descriptor = CodeRunDescriptor {
-        task: input
-            .get("task")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
+        task: descriptor_task,
         skill,
         profile: path_content_identity(&profile)?,
         model_config: model_config
@@ -313,7 +318,8 @@ mod tests {
                 "glob",
                 "lsp",
                 "task",
-                "read",
+                "read_range",
+                "read_contains",
                 "edit",
                 "write",
                 "apply_patch",
@@ -336,9 +342,10 @@ mod tests {
             .unwrap();
         let input = &choose["actions"][0]["input"]["object"];
         let keys = input.as_mapping().unwrap().keys().collect::<Vec<_>>();
-        assert_eq!(keys.len(), 3);
+        assert_eq!(keys.len(), 4);
         assert!(input.get("task").is_some());
         assert!(input.get("observations").is_some());
+        assert!(input.get("available_skills").is_some());
         assert!(input.get("allowed_tools").is_some());
         assert!(input.get("tool_schemas").is_none());
     }

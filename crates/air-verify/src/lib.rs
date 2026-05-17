@@ -479,6 +479,9 @@ impl Verifier {
                         format!("set action in rule {rule_id} must declare values"),
                     );
                 }
+                for field in values.keys() {
+                    self.verify_runtime_namespace_write(rule_id, "set value", field);
+                }
             }
             StateAction::Append { target, value } => {
                 self.verify_control_field_write(rule_id, "append target", target);
@@ -628,6 +631,16 @@ impl Verifier {
                 format!(
                     "{label} in rule {rule_id} cannot write state.phase; use an explicit set action for state_machine transitions"
                 ),
+            );
+        }
+        self.verify_runtime_namespace_write(rule_id, label, field);
+    }
+
+    fn verify_runtime_namespace_write(&mut self, rule_id: &str, label: &str, field: &str) {
+        if normalize_path(field) == "_air" {
+            self.error(
+                "AIR100",
+                format!("{label} in rule {rule_id} cannot write reserved AIR runtime field _air"),
             );
         }
     }

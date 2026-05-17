@@ -93,6 +93,7 @@ version = "0.1.0"
 dependencies = [
  "air-core",
  "air-runtime",
+ "air-tools-core",
  "anyhow",
  "globset",
  "regex",
@@ -100,6 +101,16 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+]
+
+[[package]]
+name = "air-tools-core"
+version = "0.1.0"
+dependencies = [
+ "air-runtime",
+ "globset",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

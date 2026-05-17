@@ -1429,6 +1429,38 @@ fn rejects_model_call_writing_phase_at_runtime() {
 }
 
 #[test]
+fn rejects_actions_writing_reserved_air_runtime_namespace() {
+    let mut module = load_agent("tests/agents/model-smoke.air.yaml");
+    let Workflow::StateMachine(workflow) = &mut module.workflow else {
+        panic!("expected state machine");
+    };
+    let StateAction::Set { values } = &mut workflow.rules[0].actions[0] else {
+        panic!("expected set");
+    };
+    values.insert("_air".to_string(), json!({ "model_calls": 0 }));
+    let mut vm = Vm {
+        tools: SchemaTools,
+        models: SchemaModels {
+            extract: json!({}),
+            score: json!({}),
+            report: json!({}),
+        },
+    };
+
+    let error = vm
+        .run(
+            &module,
+            State::from_iter([("prompt".to_string(), json!("route"))]),
+        )
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        RuntimeError::ControlFieldWrite { action } if action == "set"
+    ));
+}
+
+#[test]
 fn enforces_tool_call_timeout_seconds() {
     let mut module = load_agent("tests/agents/tool-limit.air.yaml");
     set_first_call_timeout(&mut module, "tool_call", 0);

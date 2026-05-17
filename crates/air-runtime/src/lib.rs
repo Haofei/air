@@ -5,16 +5,22 @@ use air_core::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
-use std::fs::File;
-use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
 use std::time::{Duration, Instant};
-use thiserror::Error;
 
+mod errors;
 mod model_context;
+mod trace;
+pub use errors::RuntimeError;
 pub use model_context::{
     compact_model_context_string, compact_model_context_value, take_last_within_bytes_value,
     truncate_middle_context_string,
+};
+#[cfg(test)]
+use trace::compact_trace_event;
+pub use trace::{
+    read_trace_jsonl, replay_outputs, sanitize_trace_event, sanitize_trace_text,
+    system_return_event, write_trace_jsonl, write_trace_jsonl_with_options, TraceEvent,
+    TraceStatus, TraceWriteOptions,
 };
 
 pub type State = Map<String, Value>;
@@ -25,66 +31,6 @@ type ResolvedToolBatchItem = (Value, ResolvedToolSelection);
 pub struct RunResult {
     pub outputs: State,
     pub trace: Vec<TraceEvent>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct TraceEvent {
-    pub agent: String,
-    pub step: u32,
-    pub rule: String,
-    pub action: String,
-
-    #[serde(default)]
-    pub input: Option<Value>,
-
-    #[serde(default)]
-    pub output: Option<Value>,
-
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub meta: Option<Value>,
-
-    pub status: TraceStatus,
-
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraceWriteOptions {
-    pub redact_sensitive: bool,
-    pub max_string_chars: Option<usize>,
-    pub max_event_bytes: Option<usize>,
-}
-
-impl Default for TraceWriteOptions {
-    fn default() -> Self {
-        Self::redacted()
-    }
-}
-
-impl TraceWriteOptions {
-    pub fn raw() -> Self {
-        Self {
-            redact_sensitive: false,
-            max_string_chars: None,
-            max_event_bytes: None,
-        }
-    }
-
-    pub fn redacted() -> Self {
-        Self {
-            redact_sensitive: true,
-            max_string_chars: Some(4096),
-            max_event_bytes: Some(64 * 1024),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TraceStatus {
-    Ok,
-    Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -119,125 +65,6 @@ impl ApprovalDecision {
             metadata: None,
         }
     }
-}
-
-#[derive(Debug, Error)]
-pub enum RuntimeError {
-    #[error("air-runtime only supports state_machine workflow execution")]
-    UnsupportedWorkflow,
-
-    #[error("no state_machine rule matched at step {step} with phase {phase}")]
-    NoMatchingRule { step: u32, phase: String },
-
-    #[error("state_machine exceeded max_steps={0}")]
-    StepLimitExceeded(u32),
-
-    #[error("missing input or state field {0}")]
-    MissingField(String),
-
-    #[error("unsupported condition {0}")]
-    UnsupportedCondition(String),
-
-    #[error("unsupported expression {0}")]
-    UnsupportedExpression(String),
-
-    #[error("provider error: {0}")]
-    Provider(String),
-
-    #[error("policy.max_tool_calls exceeded: limit={limit} attempted={attempted}")]
-    ToolCallLimitExceeded { limit: u32, attempted: u32 },
-
-    #[error("tool_batch_dispatch max_calls exceeded: limit={limit} attempted={attempted}")]
-    ToolBatchDispatchLimitExceeded { limit: u32, attempted: u32 },
-
-    #[error("tool_batch_dispatch tool {tool} is not in allowed_tools {allowed_tools:?}")]
-    ToolNotAllowedByAction {
-        tool: String,
-        allowed_tools: Vec<String>,
-    },
-
-    #[error("policy.max_model_calls exceeded: limit={limit} attempted={attempted}")]
-    ModelCallLimitExceeded { limit: u32, attempted: u32 },
-
-    #[error("policy.max_repeated_tool_calls exceeded for tool {tool}: limit={limit} attempted={attempted}")]
-    RepeatedToolCallLimitExceeded {
-        tool: String,
-        limit: u32,
-        attempted: u32,
-    },
-
-    #[error(
-        "repeated context tool call requires repeat_reason for tool {tool}: attempted={attempted}"
-    )]
-    RepeatedContextToolCallRequiresReason { tool: String, attempted: u32 },
-
-    #[error("{action} action exceeded timeout_seconds={timeout_seconds} elapsed_ms={elapsed_ms}")]
-    ActionTimeoutExceeded {
-        action: String,
-        timeout_seconds: u64,
-        elapsed_ms: u128,
-    },
-
-    #[error("policy.timeout_seconds exceeded: limit={limit} elapsed_ms={elapsed_ms}")]
-    ModuleTimeoutExceeded { limit: u64, elapsed_ms: u128 },
-
-    #[error("schema violation: {0}")]
-    SchemaViolation(String),
-
-    #[error("append target {0} is not an array")]
-    AppendTargetNotArray(String),
-
-    #[error("{action} action cannot write state.phase; use an explicit set action for state_machine transitions")]
-    ControlFieldWrite { action: String },
-
-    #[error("tool {tool} is not declared by module {module}")]
-    UndeclaredTool { module: String, tool: String },
-
-    #[error("tool {tool} provider capability {provider_capability} does not match module-declared capability {module_capability}")]
-    ToolCapabilityMismatch {
-        tool: String,
-        provider_capability: String,
-        module_capability: String,
-    },
-
-    #[error("tool {tool} requires capability {capability}, but module {module} does not declare it in requires.capabilities")]
-    ToolCapabilityNotRequired {
-        module: String,
-        tool: String,
-        capability: String,
-    },
-
-    #[error("approval required for module {module} capabilities {capabilities:?}, but no approval provider approved it")]
-    ApprovalRequired {
-        module: String,
-        capabilities: Vec<String>,
-    },
-
-    #[error("approval denied for module {module} capabilities {capabilities:?}: {reason}")]
-    ApprovalDenied {
-        module: String,
-        capabilities: Vec<String>,
-        reason: String,
-    },
-
-    #[error("approval action in module {module} references capability {capability}, but policy.require_approval does not require it")]
-    ApprovalCapabilityNotRequired { module: String, capability: String },
-
-    #[error("trace IO error: {0}")]
-    TraceIo(String),
-
-    #[error("trace JSON error: {0}")]
-    TraceJson(String),
-
-    #[error("trace does not contain replayable output")]
-    TraceMissingOutput,
-
-    #[error("unknown citation id {citation} at {path}; known artifact ids: {known:?}")]
-    UnknownCitation {
-        path: String,
-        citation: String,
-        known: Vec<String>,
-    },
 }
 
 pub trait ToolProvider {
@@ -297,266 +124,6 @@ pub struct ModelRequestStats {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_response: Option<Value>,
-}
-
-pub fn system_return_event(outputs: State) -> TraceEvent {
-    TraceEvent {
-        agent: "$system".to_string(),
-        step: 0,
-        rule: "system".to_string(),
-        action: "return".to_string(),
-        input: None,
-        output: Some(Value::Object(outputs)),
-        meta: None,
-        status: TraceStatus::Ok,
-        error: None,
-    }
-}
-
-pub fn write_trace_jsonl(
-    path: impl AsRef<Path>,
-    events: &[TraceEvent],
-) -> Result<(), RuntimeError> {
-    write_trace_jsonl_with_options(path, events, &TraceWriteOptions::default())
-}
-
-pub fn write_trace_jsonl_with_options(
-    path: impl AsRef<Path>,
-    events: &[TraceEvent],
-    options: &TraceWriteOptions,
-) -> Result<(), RuntimeError> {
-    let mut file = File::create(path).map_err(|error| RuntimeError::TraceIo(error.to_string()))?;
-    for event in events {
-        let event = sanitize_trace_event(event, options);
-        let mut line = serde_json::to_string(&event)
-            .map_err(|error| RuntimeError::TraceJson(error.to_string()))?;
-        if let Some(max_bytes) = options.max_event_bytes {
-            if line.len() > max_bytes {
-                line = serde_json::to_string(&compact_trace_event(&event))
-                    .map_err(|error| RuntimeError::TraceJson(error.to_string()))?;
-            }
-        }
-        writeln!(file, "{line}").map_err(|error| RuntimeError::TraceIo(error.to_string()))?;
-    }
-    Ok(())
-}
-
-pub fn read_trace_jsonl(path: impl AsRef<Path>) -> Result<Vec<TraceEvent>, RuntimeError> {
-    let file = File::open(path).map_err(|error| RuntimeError::TraceIo(error.to_string()))?;
-    let reader = BufReader::new(file);
-    let mut events = Vec::new();
-
-    for line in reader.lines() {
-        let line = line.map_err(|error| RuntimeError::TraceIo(error.to_string()))?;
-        if line.trim().is_empty() {
-            continue;
-        }
-        let event = serde_json::from_str(&line)
-            .map_err(|error| RuntimeError::TraceJson(error.to_string()))?;
-        events.push(event);
-    }
-
-    Ok(events)
-}
-
-pub fn replay_outputs(events: &[TraceEvent]) -> Result<Value, RuntimeError> {
-    events
-        .iter()
-        .rev()
-        .find(|event| {
-            event.status == TraceStatus::Ok
-                && event.action == "return"
-                && (event.agent == "$system" || event.output.is_some())
-        })
-        .and_then(|event| event.output.clone())
-        .ok_or(RuntimeError::TraceMissingOutput)
-}
-
-pub fn sanitize_trace_event(event: &TraceEvent, options: &TraceWriteOptions) -> TraceEvent {
-    let mut sanitized = event.clone();
-    sanitized.input = sanitized
-        .input
-        .as_ref()
-        .map(|value| sanitize_trace_value(value, options));
-    sanitized.output = sanitized
-        .output
-        .as_ref()
-        .map(|value| sanitize_trace_value(value, options));
-    sanitized.meta = sanitized
-        .meta
-        .as_ref()
-        .map(|value| sanitize_trace_value(value, options));
-    if let Some(error) = &sanitized.error {
-        sanitized.error = Some(sanitize_trace_text(error, options));
-    }
-    sanitized
-}
-
-fn sanitize_trace_value(value: &Value, options: &TraceWriteOptions) -> Value {
-    match value {
-        Value::Object(object) => Value::Object(
-            object
-                .iter()
-                .map(|(key, value)| {
-                    let value = if options.redact_sensitive && is_sensitive_key(key) {
-                        Value::String("[AIR_REDACTED]".to_string())
-                    } else {
-                        sanitize_trace_value(value, options)
-                    };
-                    (key.clone(), value)
-                })
-                .collect(),
-        ),
-        Value::Array(values) => Value::Array(
-            values
-                .iter()
-                .map(|value| sanitize_trace_value(value, options))
-                .collect(),
-        ),
-        Value::String(text) => Value::String(sanitize_trace_text(text, options)),
-        _ => value.clone(),
-    }
-}
-
-pub fn sanitize_trace_text(text: &str, options: &TraceWriteOptions) -> String {
-    let mut text = if options.redact_sensitive {
-        mask_sensitive_text(text)
-    } else {
-        text.to_string()
-    };
-    if let Some(max_chars) = options.max_string_chars {
-        if text.chars().count() > max_chars {
-            let truncated = truncate_middle_context_string(&text, max_chars, "AIR_TRUNCATED");
-            text = if truncated.contains("[AIR_TRUNCATED]") {
-                truncated
-            } else {
-                "[AIR_TRUNCATED]".to_string()
-            };
-        }
-    }
-    text
-}
-
-fn is_sensitive_key(key: &str) -> bool {
-    let normalized = key
-        .chars()
-        .filter(|ch| ch.is_ascii_alphanumeric())
-        .flat_map(char::to_lowercase)
-        .collect::<String>();
-    matches!(
-        normalized.as_str(),
-        "apikey"
-            | "apiaccesskey"
-            | "authorization"
-            | "cookie"
-            | "setcookie"
-            | "password"
-            | "passwd"
-            | "pwd"
-            | "secret"
-            | "token"
-            | "accesstoken"
-            | "refreshtoken"
-            | "clientsecret"
-    )
-}
-
-fn mask_sensitive_text(text: &str) -> String {
-    let mut output = text.to_string();
-    for marker in [
-        "Bearer ",
-        "authorization: ",
-        "Authorization: ",
-        "api_key=",
-        "api-key=",
-        "apikey=",
-        "password=",
-        "secret=",
-        "token=",
-    ] {
-        output = mask_after_marker(&output, marker);
-    }
-    output
-}
-
-fn mask_after_marker(text: &str, marker: &str) -> String {
-    let mut output = String::with_capacity(text.len());
-    let mut rest = text;
-    while let Some(index) = rest.find(marker) {
-        output.push_str(&rest[..index + marker.len()]);
-        output.push_str("[AIR_REDACTED]");
-        let value_start = index + marker.len();
-        let value = &rest[value_start..];
-        let value_end = value
-            .find(|ch: char| ch.is_whitespace() || ch == '&' || ch == '"' || ch == '\'')
-            .unwrap_or(value.len());
-        rest = &value[value_end..];
-    }
-    output.push_str(rest);
-    output
-}
-
-fn compact_trace_event(event: &TraceEvent) -> TraceEvent {
-    let mut compact = event.clone();
-    compact.input = compact.input.as_ref().map(compact_trace_payload);
-    compact.output = compact.output.as_ref().map(compact_trace_payload);
-    compact.meta = compact.meta.as_ref().map(compact_trace_meta);
-    compact.error = compact
-        .error
-        .as_ref()
-        .map(|_| "[AIR_TRUNCATED]".to_string());
-    compact
-}
-
-fn compact_trace_payload(payload: &Value) -> Value {
-    let Value::Object(object) = payload else {
-        return json!({"_air_truncated": true});
-    };
-    let mut compact = Map::new();
-    compact.insert("_air_truncated".to_string(), Value::Bool(true));
-    for (key, value) in object {
-        let Some(value) = compact_trace_meta_value(value) else {
-            compact.insert(key.clone(), json!({"_air_truncated": true}));
-            continue;
-        };
-        compact.insert(key.clone(), value);
-    }
-    Value::Object(compact)
-}
-
-fn compact_trace_meta(meta: &Value) -> Value {
-    let Value::Object(object) = meta else {
-        return json!({"_air_truncated": true});
-    };
-    let mut compact = Map::new();
-    compact.insert("_air_truncated".to_string(), Value::Bool(true));
-    for (key, value) in object {
-        let Some(value) = compact_trace_meta_value(value) else {
-            continue;
-        };
-        compact.insert(key.clone(), value);
-    }
-    Value::Object(compact)
-}
-
-fn compact_trace_meta_value(value: &Value) -> Option<Value> {
-    match value {
-        Value::Null | Value::Bool(_) | Value::Number(_) | Value::String(_) => Some(value.clone()),
-        Value::Array(values) => {
-            let mut compact = Vec::new();
-            for value in values.iter().take(32) {
-                let Some(value) = compact_trace_meta_value(value) else {
-                    return Some(json!({"_air_truncated": true}));
-                };
-                compact.push(value);
-            }
-            if values.len() > compact.len() {
-                compact.push(json!({"_air_truncated": true}));
-            }
-            Some(Value::Array(compact))
-        }
-        Value::Object(_) => None,
-    }
 }
 
 pub struct Vm<T, M> {
@@ -690,6 +257,7 @@ where
             StateAction::Set { values } => {
                 let mut resolved_values = Map::new();
                 for (key, value) in values {
+                    reject_runtime_namespace_write("set", key)?;
                     let resolved = resolve_set_value(context.state, context.outputs, value)?;
                     if let Err(error) = validate_state_value(context.module, key, &resolved) {
                         context.push_event(
@@ -1765,7 +1333,16 @@ fn strip_model_content_code_fence(content: &str) -> Option<&str> {
 }
 
 fn reject_control_field_write(action: &str, field: &str) -> Result<(), RuntimeError> {
-    if field == "phase" {
+    if field == "phase" || field == "_air" {
+        return Err(RuntimeError::ControlFieldWrite {
+            action: action.to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn reject_runtime_namespace_write(action: &str, field: &str) -> Result<(), RuntimeError> {
+    if field == "_air" {
         return Err(RuntimeError::ControlFieldWrite {
             action: action.to_string(),
         });

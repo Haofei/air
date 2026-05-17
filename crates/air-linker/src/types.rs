@@ -373,11 +373,8 @@ pub enum LinkerError {
         base_dir: String,
     },
 
-    #[error("failed to parse AIR system YAML: {0}")]
-    Parse(#[from] serde_yaml::Error),
-
-    #[error("failed to parse AIR module: {0}")]
-    ModuleParse(#[from] air_parser::ParseError),
+    #[error("failed to parse AIR file: {0}")]
+    Parse(#[from] air_parser::ParseError),
 
     #[error("module {module} failed verification: {diagnostics:?}")]
     ModuleVerify {

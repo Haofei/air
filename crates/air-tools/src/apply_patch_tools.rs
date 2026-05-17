@@ -1,7 +1,7 @@
 use super::canonicalize_tool_path;
 use super::file_tools::required_input_string_alias;
-use super::text_utils::bytes_to_limited_text;
 use air_runtime::RuntimeError;
+use air_tools_core::text::bytes_to_limited_text;
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Component, Path, PathBuf};

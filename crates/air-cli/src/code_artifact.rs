@@ -61,6 +61,8 @@ pub(crate) struct CodeRunSkill {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) manifest: Option<String>,
@@ -68,6 +70,8 @@ pub(crate) struct CodeRunSkill {
     pub(crate) manifest_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) audit_risk: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) effective_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

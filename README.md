@@ -223,6 +223,10 @@ workflow:
 
 A RunPlan links modules into an application:
 
+The native VM executes `state_machine` modules. DAG-shaped execution is modeled
+at the RunPlan/AirSystem linker layer, where multiple bounded modules are wired
+together and executed in dependency order.
+
 ```yaml
 plan:
   name: simple-helpdesk

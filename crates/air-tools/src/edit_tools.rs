@@ -3,12 +3,12 @@ use super::file_tools::{
     required_input_string_alias, required_labeled_string_alias, required_path_input,
     resolve_existing_input_path_in_base,
 };
-use super::text_utils::{bytes_to_limited_text, merge_line_ranges, select_line_range};
 use super::{
     canonicalize_tool_path, optional_bool_input, optional_bounded_usize_input,
     optional_labeled_string_input, optional_positive_usize_input,
 };
 use air_runtime::RuntimeError;
+use air_tools_core::text::{bytes_to_limited_text, merge_line_ranges, select_line_range};
 use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;

@@ -1,15 +1,11 @@
 use crate::{AirSystem, LinkerError, ModuleStore, RunPlan};
+use serde::de::DeserializeOwned;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub fn parse_system_file(path: impl AsRef<Path>) -> Result<AirSystem, LinkerError> {
-    let path = path.as_ref();
-    let source = fs::read_to_string(path).map_err(|source| LinkerError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-    Ok(serde_yaml::from_str(&source)?)
+    parse_yaml_file(path)
 }
 
 pub fn parse_module_store_file(path: impl AsRef<Path>) -> Result<ModuleStore, LinkerError> {
@@ -33,11 +29,7 @@ fn parse_module_store_file_inner(
         ));
     }
 
-    let source = fs::read_to_string(path).map_err(|source| LinkerError::Read {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let mut store: ModuleStore = serde_yaml::from_str(&source)?;
+    let mut store: ModuleStore = parse_yaml_file(path)?;
     let store_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let imports = store.imports.clone();
 
@@ -116,12 +108,19 @@ fn merge_store_import(
 }
 
 pub fn parse_run_plan_file(path: impl AsRef<Path>) -> Result<RunPlan, LinkerError> {
+    parse_yaml_file(path)
+}
+
+fn parse_yaml_file<T>(path: impl AsRef<Path>) -> Result<T, LinkerError>
+where
+    T: DeserializeOwned,
+{
     let path = path.as_ref();
     let source = fs::read_to_string(path).map_err(|source| LinkerError::Read {
         path: path.display().to_string(),
         source,
     })?;
-    Ok(serde_yaml::from_str(&source)?)
+    serde_yaml::from_str(&source).map_err(|error| air_parser::ParseError::Yaml(error).into())
 }
 
 pub fn resolve_module_path(

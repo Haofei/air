@@ -1,0 +1,12 @@
+[package]
+name = "air-tools-core"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+air-runtime = { path = "../air-runtime" }
+globset.workspace = true
+serde.workspace = true
+serde_json.workspace = true

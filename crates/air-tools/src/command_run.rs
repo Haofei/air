@@ -15,9 +15,9 @@ use super::bash_classify::{
 };
 use super::command_config::{CommandParameterAllow, CommandParameterRule, CommandRunOptions};
 use super::command_diagnostics::extract_command_diagnostics;
-use super::text_utils::bytes_to_limited_text_with_direction;
-use super::workspace_snapshot::{workspace_snapshot_ignore_set, CommandWorkspaceSnapshot};
 use super::{canonicalize_tool_path, validate_relative_path_filter};
+use air_tools_core::text::bytes_to_limited_text_with_direction;
+use air_tools_core::workspace_snapshot::{workspace_snapshot_ignore_set, CommandWorkspaceSnapshot};
 
 pub(super) fn call_command_run_tool(
     name: &str,

@@ -73,6 +73,13 @@ state:
       verification_status_update:
         type: enum
         enum: [unchanged, unknown, passed, failed]
+  available_skills:
+    type: object
+    properties:
+      kind: string
+      skills:
+        type: array
+        items: object
   final_diff_result:
     type: array
     items: object
@@ -118,7 +125,10 @@ tools:
   - name: task
     capability: code.read
     timeout_ms: 600000
-  - name: read
+  - name: read_range
+    capability: file.read
+    timeout_ms: 10000
+  - name: read_contains
     capability: file.read
     timeout_ms: 10000
   - name: edit
@@ -153,6 +163,12 @@ workflow:
       actions:
         - kind: approval
           approval_for: [file.write]
+        - kind: tool_call
+          tool: skill
+          input:
+            literal: {}
+          output: available_skills
+          timeout_seconds: 10
         - kind: set
           values:
             observations: []
@@ -196,8 +212,10 @@ workflow:
                 take_last_within_bytes:
                   ref: observations
                 max_bytes: 600000
+              available_skills:
+                ref: available_skills
               allowed_tools:
-                literal: [question, bash, grep, glob, lsp, task, read, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
+                literal: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
           output: decision
           timeout_seconds: 180
           retry:

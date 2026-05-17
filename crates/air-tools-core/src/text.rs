@@ -1,6 +1,6 @@
-use super::command_config::TruncationDirection;
+use crate::TruncationDirection;
 
-pub(crate) fn select_line_range(
+pub fn select_line_range(
     content: &str,
     start_line: Option<usize>,
     end_line: Option<usize>,
@@ -21,7 +21,7 @@ pub(crate) fn select_line_range(
         .join("\n")
 }
 
-pub(crate) fn merge_line_ranges(
+pub fn merge_line_ranges(
     match_lines: &[usize],
     total_lines: usize,
     context_lines: usize,
@@ -43,7 +43,7 @@ pub(crate) fn merge_line_ranges(
     ranges
 }
 
-pub(crate) fn numbered_line_range(content: &str, start_line: usize, end_line: usize) -> String {
+pub fn numbered_line_range(content: &str, start_line: usize, end_line: usize) -> String {
     content
         .lines()
         .enumerate()
@@ -56,11 +56,11 @@ pub(crate) fn numbered_line_range(content: &str, start_line: usize, end_line: us
         .join("\n")
 }
 
-pub(crate) fn bytes_to_limited_text(bytes: &[u8], max_bytes: usize) -> (String, bool, usize) {
+pub fn bytes_to_limited_text(bytes: &[u8], max_bytes: usize) -> (String, bool, usize) {
     bytes_to_limited_text_with_direction(bytes, max_bytes, TruncationDirection::Head)
 }
 
-pub(crate) fn bytes_to_limited_text_with_direction(
+pub fn bytes_to_limited_text_with_direction(
     bytes: &[u8],
     max_bytes: usize,
     direction: TruncationDirection,

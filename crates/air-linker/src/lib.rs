@@ -81,6 +81,27 @@ pub fn validate_run_plan(
     }
 }
 
+pub struct RunPlanExecutionOptions<F, C> {
+    pub observer: F,
+    pub checkpoint: C,
+    pub resume: ResumeState,
+}
+
+impl<F, C> RunPlanExecutionOptions<F, C> {
+    pub fn new(observer: F, checkpoint: C) -> Self {
+        Self {
+            observer,
+            checkpoint,
+            resume: ResumeState::default(),
+        }
+    }
+
+    pub fn with_resume(mut self, resume: ResumeState) -> Self {
+        self.resume = resume;
+        self
+    }
+}
+
 pub fn run_system<T, M>(
     system: &AirSystem,
     base_dir: impl AsRef<Path>,
@@ -143,8 +164,8 @@ pub fn run_run_plan_with_observer_and_checkpoint<T, M, F, C>(
     inputs: State,
     tools: T,
     models: M,
-    mut observer: F,
-    mut checkpoint: C,
+    observer: F,
+    checkpoint: C,
 ) -> Result<SystemRunResult, LinkerError>
 where
     T: ToolProvider,
@@ -152,6 +173,37 @@ where
     F: FnMut(&TraceEvent),
     C: FnMut(&SystemCheckpoint) -> Result<(), String>,
 {
+    execute_run_plan(
+        plan,
+        store,
+        base_dir,
+        inputs,
+        tools,
+        models,
+        RunPlanExecutionOptions::new(observer, checkpoint),
+    )
+}
+
+pub fn execute_run_plan<T, M, F, C>(
+    plan: &RunPlan,
+    store: &ModuleStore,
+    base_dir: impl AsRef<Path>,
+    inputs: State,
+    tools: T,
+    models: M,
+    options: RunPlanExecutionOptions<F, C>,
+) -> Result<SystemRunResult, LinkerError>
+where
+    T: ToolProvider,
+    M: ModelProvider,
+    F: FnMut(&TraceEvent),
+    C: FnMut(&SystemCheckpoint) -> Result<(), String>,
+{
+    let RunPlanExecutionOptions {
+        mut observer,
+        mut checkpoint,
+        resume,
+    } = options;
     let base_dir = base_dir.as_ref();
     let verification = validate_run_plan(plan, store, base_dir);
     if !verification.is_success() {
@@ -161,13 +213,34 @@ where
     }
 
     if has_dynamic_fanouts(plan) {
-        return run_dynamic_run_plan_with_observer_and_checkpoint(
-            plan, store, base_dir, inputs, tools, models, observer, checkpoint,
+        if resume.module_outputs.is_empty() && resume.output_overrides.is_empty() {
+            return run_dynamic_run_plan_with_observer_and_checkpoint(
+                plan, store, base_dir, inputs, tools, models, observer, checkpoint,
+            );
+        }
+        return resume_dynamic_run_plan_with_observer_and_checkpoint(
+            plan, store, base_dir, inputs, resume, tools, models, observer, checkpoint,
         );
     }
 
     let system = resolve_run_plan(plan, store)?;
     let mut trace = plan_trace_events(plan);
+    if !resume.module_outputs.is_empty() || !resume.output_overrides.is_empty() {
+        trace.push(TraceEvent {
+            agent: "$planner".to_string(),
+            step: trace.len() as u32,
+            rule: "run_plan".to_string(),
+            action: "resume".to_string(),
+            input: Some(json!({
+                "completed_modules": resume.module_outputs.keys().collect::<Vec<_>>(),
+                "overrides": resume.output_overrides.keys().collect::<Vec<_>>(),
+            })),
+            output: None,
+            meta: None,
+            status: TraceStatus::Ok,
+            error: None,
+        });
+    }
     for event in &trace {
         observer(event);
     }
@@ -176,7 +249,7 @@ where
         &system,
         base_dir,
         inputs,
-        ResumeState::default(),
+        resume,
         tools,
         models,
         |event| observer(event),
@@ -194,8 +267,36 @@ pub fn run_run_plan_parallel_with_observer_and_checkpoint<T, M, TF, MF, F, C>(
     inputs: State,
     tools_factory: TF,
     models_factory: MF,
-    mut observer: F,
-    mut checkpoint: C,
+    observer: F,
+    checkpoint: C,
+) -> Result<SystemRunResult, LinkerError>
+where
+    T: ToolProvider + Send,
+    M: ModelProvider + Send,
+    TF: Fn() -> T + Sync,
+    MF: Fn() -> M + Sync,
+    F: FnMut(&TraceEvent),
+    C: FnMut(&SystemCheckpoint) -> Result<(), String>,
+{
+    execute_run_plan_parallel(
+        plan,
+        store,
+        base_dir,
+        inputs,
+        tools_factory,
+        models_factory,
+        RunPlanExecutionOptions::new(observer, checkpoint),
+    )
+}
+
+pub fn execute_run_plan_parallel<T, M, TF, MF, F, C>(
+    plan: &RunPlan,
+    store: &ModuleStore,
+    base_dir: impl AsRef<Path>,
+    inputs: State,
+    tools_factory: TF,
+    models_factory: MF,
+    options: RunPlanExecutionOptions<F, C>,
 ) -> Result<SystemRunResult, LinkerError>
 where
     T: ToolProvider + Send,
@@ -214,6 +315,22 @@ where
     }
 
     if has_dynamic_fanouts(plan) {
+        if options.resume != ResumeState::default() {
+            return execute_run_plan(
+                plan,
+                store,
+                base_dir,
+                inputs,
+                tools_factory(),
+                models_factory(),
+                options,
+            );
+        }
+        let RunPlanExecutionOptions {
+            observer,
+            checkpoint,
+            resume: _,
+        } = options;
         return run_dynamic_run_plan_parallel_with_observer_and_checkpoint(
             plan,
             store,
@@ -226,6 +343,11 @@ where
         );
     }
 
+    let RunPlanExecutionOptions {
+        mut observer,
+        mut checkpoint,
+        resume,
+    } = options;
     let system = resolve_run_plan(plan, store)?;
     let mut trace = plan_trace_events(plan);
     for event in &trace {
@@ -236,7 +358,7 @@ where
         &system,
         base_dir,
         inputs,
-        ResumeState::default(),
+        resume,
         tools_factory,
         models_factory,
         |event| observer(event),
@@ -299,8 +421,8 @@ pub fn resume_run_plan_with_observer_and_checkpoint<T, M, F, C>(
     resume: ResumeState,
     tools: T,
     models: M,
-    mut observer: F,
-    mut checkpoint: C,
+    observer: F,
+    checkpoint: C,
 ) -> Result<SystemRunResult, LinkerError>
 where
     T: ToolProvider,
@@ -308,53 +430,15 @@ where
     F: FnMut(&TraceEvent),
     C: FnMut(&SystemCheckpoint) -> Result<(), String>,
 {
-    let base_dir = base_dir.as_ref();
-    let verification = validate_run_plan(plan, store, base_dir);
-    if !verification.is_success() {
-        return Err(LinkerError::RunPlanVerify {
-            diagnostics: verification.diagnostics,
-        });
-    }
-
-    if has_dynamic_fanouts(plan) {
-        return resume_dynamic_run_plan_with_observer_and_checkpoint(
-            plan, store, base_dir, inputs, resume, tools, models, observer, checkpoint,
-        );
-    }
-
-    let system = resolve_run_plan(plan, store)?;
-    let mut trace = plan_trace_events(plan);
-    trace.push(TraceEvent {
-        agent: "$planner".to_string(),
-        step: trace.len() as u32,
-        rule: "run_plan".to_string(),
-        action: "resume".to_string(),
-        input: Some(json!({
-            "completed_modules": resume.module_outputs.keys().collect::<Vec<_>>(),
-            "overrides": resume.output_overrides.keys().collect::<Vec<_>>(),
-        })),
-        output: None,
-        meta: None,
-        status: TraceStatus::Ok,
-        error: None,
-    });
-    for event in &trace {
-        observer(event);
-    }
-
-    let mut result = run_system_with_resume_with_observer_and_checkpoint(
-        &system,
+    execute_run_plan(
+        plan,
+        store,
         base_dir,
         inputs,
-        resume,
         tools,
         models,
-        |event| observer(event),
-        |checkpoint_state| checkpoint(checkpoint_state),
-    )?;
-    trace.append(&mut result.trace);
-    result.trace = trace;
-    Ok(result)
+        RunPlanExecutionOptions::new(observer, checkpoint).with_resume(resume),
+    )
 }
 
 pub fn specialize_run_plan_trace(

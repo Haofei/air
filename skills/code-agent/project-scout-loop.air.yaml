@@ -64,7 +64,10 @@ tools:
   - name: lsp
     capability: code.read
     timeout_ms: 30000
-  - name: read
+  - name: read_range
+    capability: file.read
+    timeout_ms: 10000
+  - name: read_contains
     capability: file.read
     timeout_ms: 10000
   - name: webfetch
@@ -122,7 +125,7 @@ workflow:
                   ref: observations
                 max_bytes: 200000
               allowed_tools:
-                literal: [question, grep, glob, lsp, read, webfetch, skill]
+                literal: [question, grep, glob, lsp, read_contains, read_range, webfetch, skill]
           output: decision
           timeout_seconds: 180
           retry:
