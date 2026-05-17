@@ -168,7 +168,6 @@ mod tests {
                 "init",
                 "summarize-at-step-limit",
                 "choose",
-                "choose-verification",
                 "act",
                 "edit-applied",
                 "write-applied",
@@ -237,16 +236,17 @@ mod tests {
     fn edit_loop_keeps_opencode_sized_observation_window() {
         let module = code_edit_loop_module();
         let rules = module["workflow"]["rules"].as_sequence().unwrap();
-        for id in ["choose", "choose-verification"] {
-            let rule = rules
-                .iter()
-                .find(|rule| rule["id"].as_str() == Some(id))
-                .unwrap();
-            assert_eq!(
-                rule["actions"][0]["input"]["object"]["observations"]["max_bytes"],
-                serde_yaml::Value::Number(600000.into())
-            );
-        }
+        let choose = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("choose"))
+            .unwrap();
+        assert_eq!(
+            choose["actions"][0]["input"]["object"]["observations"]["max_bytes"],
+            serde_yaml::Value::Number(600000.into())
+        );
+        assert!(rules
+            .iter()
+            .all(|rule| rule["id"].as_str() != Some("choose-verification")));
     }
 
     #[test]
@@ -327,6 +327,10 @@ mod tests {
         assert_eq!(
             after_patch["actions"][0]["values"]["patch_applied"],
             serde_yaml::Value::Bool(true)
+        );
+        assert_eq!(
+            after_patch["actions"][0]["values"]["phase"],
+            serde_yaml::Value::String("choose".to_string())
         );
     }
 

@@ -51,6 +51,10 @@
               }
             }
           ]
+        },
+        {
+          "complete": true,
+          "tool_calls": []
         }
       ]
     }
