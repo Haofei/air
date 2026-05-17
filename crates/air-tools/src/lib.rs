@@ -56,6 +56,8 @@ mod repo_discovery;
 use repo_discovery::{call_repo_context_tool, call_repo_files_tool, call_repo_search_tool};
 mod repo_reference_tools;
 use repo_reference_tools::call_repo_references_tool;
+mod text_utils;
+use text_utils::{bytes_to_limited_text, merge_line_ranges, numbered_line_range};
 
 const DEFAULT_CONTEXT_MAX_CHARS: usize = 200_000;
 const DEFAULT_CONTEXT_THRESHOLD_PERCENT: u64 = 80;
@@ -1758,58 +1760,6 @@ fn optional_labeled_bool_input(
     })
 }
 
-fn select_line_range(content: &str, start_line: Option<usize>, end_line: Option<usize>) -> String {
-    if start_line.is_none() && end_line.is_none() {
-        return content.to_string();
-    }
-    let start = start_line.unwrap_or(1);
-    let end = end_line.unwrap_or(usize::MAX);
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let line_number = index + 1;
-            (line_number >= start && line_number <= end).then_some(line)
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-fn merge_line_ranges(
-    match_lines: &[usize],
-    total_lines: usize,
-    context_lines: usize,
-) -> Vec<(usize, usize)> {
-    let mut lines = match_lines.to_vec();
-    lines.sort_unstable();
-    lines.dedup();
-    let mut ranges: Vec<(usize, usize)> = Vec::new();
-    for line in lines {
-        let start = line.saturating_sub(context_lines).max(1);
-        let end = line.saturating_add(context_lines).min(total_lines.max(1));
-        match ranges.last_mut() {
-            Some((_, previous_end)) if start <= previous_end.saturating_add(1) => {
-                *previous_end = (*previous_end).max(end);
-            }
-            _ => ranges.push((start, end)),
-        }
-    }
-    ranges
-}
-
-fn numbered_line_range(content: &str, start_line: usize, end_line: usize) -> String {
-    content
-        .lines()
-        .enumerate()
-        .filter_map(|(index, line)| {
-            let line_number = index + 1;
-            (line_number >= start_line && line_number <= end_line)
-                .then(|| format!("{line_number}: {line}"))
-        })
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 fn canonicalize_tool_path(
     tool_name: &str,
     label: &str,
@@ -1821,30 +1771,6 @@ fn canonicalize_tool_path(
             path.display()
         ))
     })
-}
-
-fn bytes_to_limited_text(bytes: &[u8], max_bytes: usize) -> (String, bool, usize) {
-    bytes_to_limited_text_with_direction(bytes, max_bytes, TruncationDirection::Head)
-}
-
-fn bytes_to_limited_text_with_direction(
-    bytes: &[u8],
-    max_bytes: usize,
-    direction: TruncationDirection,
-) -> (String, bool, usize) {
-    let truncated = bytes.len() > max_bytes;
-    let limited = if !truncated {
-        bytes
-    } else if matches!(direction, TruncationDirection::Tail) {
-        &bytes[bytes.len() - max_bytes..]
-    } else {
-        &bytes[..max_bytes]
-    };
-    (
-        String::from_utf8_lossy(limited).to_string(),
-        truncated,
-        limited.len(),
-    )
 }
 
 fn resolve_config_path(config_dir: &Path, path: &Path) -> PathBuf {

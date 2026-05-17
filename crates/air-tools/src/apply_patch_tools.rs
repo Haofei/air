@@ -1,5 +1,6 @@
+use super::canonicalize_tool_path;
 use super::file_tools::required_input_string_alias;
-use super::{bytes_to_limited_text, canonicalize_tool_path};
+use super::text_utils::bytes_to_limited_text;
 use air_runtime::RuntimeError;
 use serde_json::{json, Value};
 use std::fs;

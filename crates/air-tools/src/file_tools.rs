@@ -1,5 +1,6 @@
 use super::file_search_render::{render_search_matches, stable_pattern_id};
 
+use super::text_utils::{bytes_to_limited_text, select_line_range};
 use super::*;
 
 const DEFAULT_UNSCOPED_READ_LINE_LIMIT: usize = 2000;

@@ -2,10 +2,10 @@ use super::file_tools::{
     numbered_content, optional_bool_alias_input, optional_labeled_bool_alias_input,
     required_input_string_alias, required_labeled_string_alias, required_path_input,
 };
+use super::text_utils::{bytes_to_limited_text, merge_line_ranges, select_line_range};
 use super::{
-    bytes_to_limited_text, canonicalize_tool_path, merge_line_ranges, optional_bool_input,
-    optional_bounded_usize_input, optional_labeled_string_input, optional_positive_usize_input,
-    select_line_range,
+    canonicalize_tool_path, optional_bool_input, optional_bounded_usize_input,
+    optional_labeled_string_input, optional_positive_usize_input,
 };
 use air_runtime::RuntimeError;
 use serde_json::{json, Value};
