@@ -8,9 +8,8 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
 use std::fs;
-use std::path::{Component, Path, PathBuf};
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -38,7 +37,10 @@ pub(crate) struct AirSkillManifest {
     pub(crate) tools: SkillTools,
     #[serde(default)]
     pub(crate) host: Option<SkillHost>,
-    pub(crate) workflow: SkillWorkflow,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) workflow: Option<SkillWorkflow>,
+    #[serde(default)]
+    pub(crate) routing: SkillRouting,
     #[serde(default)]
     pub(crate) verification: Value,
 }
@@ -90,6 +92,18 @@ pub(crate) struct SkillWorkflow {
     pub(crate) profile: PathBuf,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub(crate) struct SkillRouting {
+    #[serde(default)]
+    pub(crate) summary: Option<String>,
+    #[serde(default)]
+    pub(crate) triggers: Vec<String>,
+    #[serde(default)]
+    pub(crate) repo_markers: Vec<PathBuf>,
+    #[serde(default)]
+    pub(crate) exclude: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct ResolvedSkill {
     pub(crate) manifest_path: PathBuf,
@@ -112,6 +126,35 @@ pub(crate) struct SkillRunOptions {
     pub(crate) replay_from: Option<usize>,
 }
 
+pub(crate) struct SkillAutoRunOptions {
+    pub(crate) task: String,
+    pub(crate) top_k: usize,
+    pub(crate) profile_override: Option<PathBuf>,
+    pub(crate) model_config: Option<PathBuf>,
+    pub(crate) trace_out: Option<PathBuf>,
+    pub(crate) trace_redact: bool,
+    pub(crate) trace_raw: bool,
+    pub(crate) log: bool,
+    pub(crate) tool_config_override: Option<PathBuf>,
+    pub(crate) artifact_out: Option<PathBuf>,
+    pub(crate) replay_artifact: Option<PathBuf>,
+    pub(crate) replay_from: Option<usize>,
+}
+
+pub(crate) struct SkillRouteOptions {
+    pub(crate) task: String,
+    pub(crate) top_k: usize,
+    pub(crate) explain: bool,
+}
+
+pub(crate) struct PreparedSkillRun {
+    pub(crate) metadata: CodeRunSkill,
+    pub(crate) profile: PathBuf,
+    pub(crate) tool_config: Option<PathBuf>,
+    pub(crate) task_prefix: Option<String>,
+    pub(crate) artifact_extra: BTreeMap<String, Value>,
+}
+
 #[derive(Debug, Serialize)]
 struct SkillListItem {
     id: String,
@@ -124,6 +167,32 @@ struct SkillListItem {
     host: Option<String>,
     run: String,
     explain: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillRouteResult {
+    selected: Vec<SkillRouteCard>,
+    rejected: Vec<SkillRouteRejection>,
+    candidates: Vec<SkillRouteCard>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillRouteCard {
+    id: String,
+    mode: String,
+    version: Option<String>,
+    description: Option<String>,
+    manifest: String,
+    audit_risk: String,
+    score: i32,
+    reasons: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillRouteRejection {
+    id: String,
+    manifest: String,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +219,138 @@ pub(crate) fn list_skills() -> Result<()> {
     print_json(&json!({ "skills": skills }))
 }
 
+pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
+    let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
+    if options.explain {
+        print_json(&json!({
+            "task": options.task,
+            "selected": route.selected,
+            "rejected": route.rejected,
+            "candidates": route.candidates,
+        }))
+    } else {
+        print_json(&json!({
+            "task": options.task,
+            "selected": route.selected,
+        }))
+    }
+}
+
+fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
+    let task_lower = task.to_ascii_lowercase();
+    let mut selected = Vec::new();
+    let mut rejected = Vec::new();
+    let mut candidates = Vec::new();
+    for skill in discover_skills()? {
+        if skill.manifest.mode != SkillMode::Instruction {
+            continue;
+        }
+        let audit = audit_resolved_skill(&skill)?;
+        if !audit.allowed_to_run {
+            rejected.push(SkillRouteRejection {
+                id: skill.manifest.id.clone(),
+                manifest: path_ref(&skill.manifest_path),
+                reason: format!("audit risk {}", audit.risk),
+            });
+            continue;
+        }
+        let (score, reasons) = score_skill_for_task(&skill, &task_lower);
+        let card = SkillRouteCard {
+            id: skill.manifest.id.clone(),
+            mode: skill.manifest.mode.as_str().to_string(),
+            version: skill.manifest.version.clone(),
+            description: skill_description_for_route(&skill),
+            manifest: path_ref(&skill.manifest_path),
+            audit_risk: audit.risk,
+            score,
+            reasons,
+        };
+        candidates.push(card.clone());
+        if score > 0 {
+            selected.push(card);
+        }
+    }
+    candidates.sort_by(skill_route_order);
+    selected.sort_by(skill_route_order);
+    selected.truncate(top_k);
+    Ok(SkillRouteResult {
+        selected,
+        rejected,
+        candidates,
+    })
+}
+
+fn skill_route_order(left: &SkillRouteCard, right: &SkillRouteCard) -> std::cmp::Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn score_skill_for_task(skill: &ResolvedSkill, task_lower: &str) -> (i32, Vec<String>) {
+    let mut score = 0;
+    let mut reasons = Vec::new();
+    let routing = &skill.manifest.routing;
+    for trigger in &routing.triggers {
+        let trigger_lower = trigger.to_ascii_lowercase();
+        if !trigger_lower.is_empty() && task_lower.contains(&trigger_lower) {
+            score += 25;
+            reasons.push(format!("task matches trigger `{trigger}`"));
+        }
+    }
+    for excluded in &routing.exclude {
+        let excluded_lower = excluded.to_ascii_lowercase();
+        if !excluded_lower.is_empty() && task_lower.contains(&excluded_lower) {
+            score -= 50;
+            reasons.push(format!("task matches exclusion `{excluded}`"));
+        }
+    }
+    if let Some(description) = &skill.manifest.description {
+        for token in route_tokens(description) {
+            if task_lower.contains(&token) {
+                score += 3;
+            }
+        }
+    }
+    if let Some(summary) = &routing.summary {
+        for token in route_tokens(summary) {
+            if task_lower.contains(&token) {
+                score += 5;
+            }
+        }
+    }
+    let matching_markers = routing
+        .repo_markers
+        .iter()
+        .filter(|marker| marker.exists())
+        .count();
+    if matching_markers > 0 {
+        score += (matching_markers as i32) * 8;
+        reasons.push(format!("{matching_markers} repo marker(s) exist"));
+    }
+    if reasons.is_empty() && score > 0 {
+        reasons.push("description matched task".to_string());
+    }
+    (score, reasons)
+}
+
+fn route_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 4)
+        .map(str::to_ascii_lowercase)
+        .collect()
+}
+
+fn skill_description_for_route(skill: &ResolvedSkill) -> Option<String> {
+    skill
+        .manifest
+        .routing
+        .summary
+        .clone()
+        .or_else(|| skill.manifest.description.clone())
+}
+
 pub(crate) fn validate_skill(reference: &str) -> Result<()> {
     let skill = resolve_skill(reference)?;
     let checks = validate_resolved_skill(&skill)?;
@@ -165,7 +366,7 @@ pub(crate) fn explain_skill(reference: &str, profile_override: Option<PathBuf>) 
     let skill = resolve_skill(reference)?;
     validate_resolved_skill(&skill)?;
     let effective = effective_execution(&skill)?;
-    let profile = profile_override.unwrap_or_else(|| skill.profile_path());
+    let profile = profile_override.unwrap_or_else(|| effective.profile.clone());
     let input = build_input("<task>".to_string());
     let mut explanation = code_profile_explain(&skill.manifest.id, &profile, &input)?;
     if let Some(object) = explanation.as_object_mut() {
@@ -251,7 +452,87 @@ pub(crate) fn compile_skill(reference: &str, output: Option<PathBuf>) -> Result<
 }
 
 pub(crate) fn run_skill(options: SkillRunOptions) -> Result<()> {
-    let skill = resolve_skill(&options.reference)?;
+    let prepared = prepare_skill_run_context(&options.reference)?;
+    let task = if let Some(prefix) = &prepared.task_prefix {
+        format!("{prefix}\n\nTask: {}", options.task)
+    } else {
+        options.task.clone()
+    };
+    let outputs = run_code_agent(CodeOptions {
+        task,
+        artifact_task: Some(options.task.clone()),
+        skill: Some(prepared.metadata.clone()),
+        profile: Some(
+            options
+                .profile_override
+                .unwrap_or_else(|| prepared.profile.clone()),
+        ),
+        model_config: options.model_config,
+        trace_out: options.trace_out,
+        trace_redact: options.trace_redact,
+        trace_raw: options.trace_raw,
+        log: options.log,
+        tool_config: options
+            .tool_config_override
+            .or_else(|| prepared.tool_config.clone()),
+        artifact_out: options.artifact_out,
+        artifact_extra: prepared.artifact_extra,
+        replay_artifact: options.replay_artifact,
+        replay_from: options.replay_from,
+    })?;
+    print_json(&outputs)
+}
+
+pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
+    let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
+    let selected = route
+        .selected
+        .first()
+        .map(|card| card.id.clone())
+        .unwrap_or_else(|| "code-agent".to_string());
+    let prepared = prepare_skill_run_context(&selected)?;
+    let task = if let Some(prefix) = &prepared.task_prefix {
+        format!("{prefix}\n\nTask: {}", options.task)
+    } else {
+        options.task.clone()
+    };
+    let mut artifact_extra = prepared.artifact_extra.clone();
+    artifact_extra.insert(
+        "skill_route".to_string(),
+        json!({
+            "task": options.task,
+            "selected_skill": selected,
+            "selected": route.selected,
+            "rejected": route.rejected,
+        }),
+    );
+    let outputs = run_code_agent(CodeOptions {
+        task,
+        artifact_task: Some(options.task.clone()),
+        skill: Some(prepared.metadata.clone()),
+        profile: Some(
+            options
+                .profile_override
+                .unwrap_or_else(|| prepared.profile.clone()),
+        ),
+        model_config: options.model_config,
+        trace_out: options.trace_out,
+        trace_redact: options.trace_redact,
+        trace_raw: options.trace_raw,
+        log: options.log,
+        tool_config: options
+            .tool_config_override
+            .or_else(|| prepared.tool_config.clone()),
+        artifact_out: options.artifact_out,
+        artifact_extra,
+        replay_artifact: options.replay_artifact,
+        replay_from: options.replay_from,
+    })?;
+    print_json(&outputs)
+}
+
+pub(crate) fn prepare_skill_run_context(reference: &str) -> Result<PreparedSkillRun> {
+    let skill = resolve_skill(reference)?;
     validate_resolved_skill(&skill)?;
     let audit = audit_resolved_skill(&skill)?;
     if !audit.allowed_to_run {
@@ -264,53 +545,32 @@ pub(crate) fn run_skill(options: SkillRunOptions) -> Result<()> {
     let effective = effective_execution(&skill)?;
     let metadata = skill_metadata_with_context(&skill, Some(&audit), &effective)?;
     let preloaded_skills = preload_skill_for_run(&skill, &audit)?;
-    let task = skill_run_task(&options.task, &preloaded_skills);
-    let outputs = run_code_agent(CodeOptions {
-        task,
-        artifact_task: Some(options.task.clone()),
-        skill: Some(metadata.clone()),
-        profile: Some(
-            options
-                .profile_override
-                .unwrap_or_else(|| effective.profile.clone()),
+    let task_prefix = if preloaded_skills.is_empty() {
+        None
+    } else {
+        Some(render_preloaded_skill_instructions(&preloaded_skills))
+    };
+    let artifact_extra = BTreeMap::from([
+        ("skill".to_string(), json!(metadata.clone())),
+        (
+            "skill_effective_execution".to_string(),
+            json!({
+                "mode": skill.manifest.mode.as_str(),
+                "host": effective.host_skill,
+                "profile": path_ref(&effective.profile),
+                "tool_config": effective.tool_config.as_ref().map(|path| path_ref(path)),
+                "capabilities": effective.capabilities,
+                "preloaded_instruction_files": preloaded_instruction_files(&preloaded_skills),
+            }),
         ),
-        model_config: options.model_config,
-        trace_out: options.trace_out,
-        trace_redact: options.trace_redact,
-        trace_raw: options.trace_raw,
-        log: options.log,
-        tool_config: options
-            .tool_config_override
-            .or_else(|| effective.tool_config.clone()),
-        artifact_out: options.artifact_out,
-        artifact_extra: BTreeMap::from([
-            ("skill".to_string(), json!(metadata)),
-            (
-                "skill_effective_execution".to_string(),
-                json!({
-                    "mode": skill.manifest.mode.as_str(),
-                    "host": effective.host_skill,
-                    "profile": path_ref(&effective.profile),
-                    "tool_config": effective.tool_config.as_ref().map(|path| path_ref(path)),
-                    "capabilities": effective.capabilities,
-                    "preloaded_instruction_files": preloaded_instruction_files(&preloaded_skills),
-                }),
-            ),
-        ]),
-        replay_artifact: options.replay_artifact,
-        replay_from: options.replay_from,
-    })?;
-    print_json(&outputs)
-}
-
-fn skill_run_task(task: &str, preloaded_skills: &[Value]) -> String {
-    if preloaded_skills.is_empty() {
-        return task.to_string();
-    }
-    format!(
-        "{}\n\nTask: {task}",
-        render_preloaded_skill_instructions(preloaded_skills)
-    )
+    ]);
+    Ok(PreparedSkillRun {
+        metadata,
+        profile: effective.profile,
+        tool_config: effective.tool_config,
+        task_prefix,
+        artifact_extra,
+    })
 }
 
 pub(crate) fn audit_skill(reference: &str, write: bool) -> Result<()> {
@@ -481,17 +741,17 @@ fn validate_resolved_skill(skill: &ResolvedSkill) -> Result<Value> {
     if skill.manifest.id.trim().is_empty() {
         bail!("skill id must not be empty");
     }
-    let profile = skill.profile_path();
-    if !profile.exists() {
+    let effective = effective_execution(skill)?;
+    if !effective.profile.exists() {
         bail!(
-            "skill workflow profile does not exist: {}",
-            profile.display()
+            "skill effective workflow profile does not exist: {}",
+            effective.profile.display()
         );
     }
-    if let Some(tool_config) = skill.tool_config_path() {
+    if let Some(tool_config) = &effective.tool_config {
         if !tool_config.exists() {
             bail!(
-                "skill tool config does not exist: {}",
+                "skill effective tool config does not exist: {}",
                 tool_config.display()
             );
         }
@@ -519,7 +779,6 @@ fn validate_resolved_skill(skill: &ResolvedSkill) -> Result<Value> {
     if !conflicts.is_empty() {
         bail!("skill capability appears in both allow and deny: {conflicts:?}");
     }
-    let effective = effective_execution(skill)?;
     if skill.manifest.mode == SkillMode::Instruction {
         if !skill.manifest.capabilities.allow.is_empty()
             || !skill.manifest.capabilities.deny.is_empty()
@@ -529,6 +788,13 @@ fn validate_resolved_skill(skill: &ResolvedSkill) -> Result<Value> {
                 skill.manifest.id
             );
         }
+        if skill.manifest.tools.config.is_some() || skill.manifest.workflow.is_some() {
+            bail!(
+                "instruction skill `{}` must not declare workflow/tools execution settings; execution comes from host `{}`",
+                skill.manifest.id,
+                effective.host_skill.as_deref().unwrap_or("code-agent")
+            );
+        }
     } else {
         validate_executor_capabilities(skill, &effective.capabilities)?;
     }
@@ -536,7 +802,7 @@ fn validate_resolved_skill(skill: &ResolvedSkill) -> Result<Value> {
         "mode": skill.manifest.mode.as_str(),
         "host": effective.host_skill,
         "profile_exists": true,
-        "tool_config_exists": skill.tool_config_path().is_some(),
+        "tool_config_exists": effective.tool_config.is_some(),
         "instruction_files": skill.manifest.instructions.files.len(),
         "capability_allow": skill.manifest.capabilities.allow,
         "capability_deny": skill.manifest.capabilities.deny,
@@ -853,16 +1119,6 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
         .unwrap_or("imported-skill")
         .to_string();
     let description = format!("Imported AIR skill wrapper for {source}");
-    let default_profile = resolve_skill("code-agent")
-        .map(|skill| {
-            let profile = skill.profile_path();
-            relative_path_from(out, &profile).unwrap_or_else(|| absolutize_path(&profile))
-        })
-        .unwrap_or_else(|_| {
-            std::env::current_dir()
-                .unwrap_or_else(|_| PathBuf::from("."))
-                .join("skills/code-agent/edit.air-profile.yaml")
-        });
     let manifest = AirSkillManifest {
         schema: Some(SKILL_SCHEMA.to_string()),
         id,
@@ -881,9 +1137,8 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
         host: Some(SkillHost {
             skill: "code-agent".to_string(),
         }),
-        workflow: SkillWorkflow {
-            profile: default_profile,
-        },
+        workflow: None,
+        routing: SkillRouting::default(),
         verification: json!({
             "mode": "instruction_only",
             "scripts": "disabled",
@@ -958,14 +1213,13 @@ struct EffectiveSkillExecution {
 }
 
 fn effective_execution(skill: &ResolvedSkill) -> Result<EffectiveSkillExecution> {
-    let profile = skill.profile_path();
     if skill.manifest.mode == SkillMode::Instruction {
         let host_skill = skill.host_skill_id().unwrap_or("code-agent").to_string();
         let executor = resolve_skill(&host_skill)?;
         if executor.manifest.mode != SkillMode::Executor {
             bail!("instruction skill host `{host_skill}` must be an executor skill");
         }
-        let host_profile = executor.profile_path();
+        let host_profile = executor.executor_profile_path()?;
         let host_tool_config = effective_tool_config_path(&executor, &host_profile)?;
         let mut host_capabilities = profile_capabilities(&host_profile)?;
         if let Some(tool_config) = &host_tool_config {
@@ -975,11 +1229,12 @@ fn effective_execution(skill: &ResolvedSkill) -> Result<EffectiveSkillExecution>
         host_capabilities.dedup();
         return Ok(EffectiveSkillExecution {
             host_skill: Some(host_skill),
-            profile: profile.clone(),
-            tool_config: effective_tool_config_path(skill, &profile)?,
+            profile: host_profile,
+            tool_config: host_tool_config,
             capabilities: host_capabilities,
         });
     }
+    let profile = skill.executor_profile_path()?;
     let tool_config = effective_tool_config_path(skill, &profile)?;
     let mut capabilities = profile_capabilities(&profile)?;
     if let Some(tool_config) = &tool_config {
@@ -1147,10 +1402,6 @@ fn read_audit_risk(path: &Path) -> Option<String> {
 }
 
 impl ResolvedSkill {
-    fn profile_path(&self) -> PathBuf {
-        resolve_skill_path(&self.manifest_dir, &self.manifest.workflow.profile)
-    }
-
     fn tool_config_path(&self) -> Option<PathBuf> {
         self.manifest
             .tools
@@ -1170,14 +1421,15 @@ impl ResolvedSkill {
     }
 
     fn list_item(&self) -> Result<SkillListItem> {
+        let effective = effective_execution(self)?;
         Ok(SkillListItem {
             id: self.manifest.id.clone(),
             mode: self.manifest.mode.as_str().to_string(),
             version: self.manifest.version.clone(),
             description: self.manifest.description.clone(),
             manifest: path_ref(&self.manifest_path),
-            profile: path_ref(&self.profile_path()),
-            tool_config: self.tool_config_path().map(|path| path_ref(&path)),
+            profile: path_ref(&effective.profile),
+            tool_config: effective.tool_config.map(|path| path_ref(&path)),
             host: self.host_skill_id().map(str::to_string),
             run: format!("air skill run {} \"<task>\"", self.manifest.id),
             explain: format!("air skill explain {}", self.manifest.id),
@@ -1187,6 +1439,16 @@ impl ResolvedSkill {
     fn host_skill_id(&self) -> Option<&str> {
         self.manifest.host.as_ref().map(|host| host.skill.as_str())
     }
+
+    fn executor_profile_path(&self) -> Result<PathBuf> {
+        let Some(workflow) = &self.manifest.workflow else {
+            bail!(
+                "executor skill `{}` must declare workflow.profile",
+                self.manifest.id
+            );
+        };
+        Ok(resolve_skill_path(&self.manifest_dir, &workflow.profile))
+    }
 }
 
 fn resolve_skill_path(base: &Path, path: &Path) -> PathBuf {
@@ -1195,57 +1457,6 @@ fn resolve_skill_path(base: &Path, path: &Path) -> PathBuf {
     } else {
         base.join(path)
     }
-}
-
-fn absolutize_path(path: &Path) -> PathBuf {
-    if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| PathBuf::from("."))
-            .join(path)
-    }
-}
-
-fn relative_path_from(base_dir: &Path, target: &Path) -> Option<PathBuf> {
-    let base = absolutize_path(base_dir).canonicalize().ok()?;
-    let target = absolutize_path(target).canonicalize().ok()?;
-    let base_components = path_components(&base)?;
-    let target_components = path_components(&target)?;
-    let common = base_components
-        .iter()
-        .zip(target_components.iter())
-        .take_while(|(left, right)| left == right)
-        .count();
-    if common == 0 {
-        return None;
-    }
-    let mut relative = PathBuf::new();
-    for _ in common..base_components.len() {
-        relative.push("..");
-    }
-    for component in target_components.iter().skip(common) {
-        relative.push(component);
-    }
-    if relative.as_os_str().is_empty() {
-        Some(PathBuf::from("."))
-    } else {
-        Some(relative)
-    }
-}
-
-fn path_components(path: &Path) -> Option<Vec<OsString>> {
-    let mut components = Vec::new();
-    for component in path.components() {
-        match component {
-            Component::Prefix(prefix) => components.push(prefix.as_os_str().to_os_string()),
-            Component::RootDir => components.push(OsString::from(std::path::MAIN_SEPARATOR_STR)),
-            Component::Normal(part) => components.push(part.to_os_string()),
-            Component::CurDir => {}
-            Component::ParentDir => return None,
-        }
-    }
-    Some(components)
 }
 
 fn path_ref(path: &Path) -> String {
@@ -1266,7 +1477,10 @@ mod tests {
     fn resolves_builtin_code_agent_skill_manifest() {
         let skill = resolve_skill("code-agent").unwrap();
         assert_eq!(skill.manifest.id, "code-agent");
-        assert!(skill.profile_path().ends_with("edit.air-profile.yaml"));
+        assert!(skill
+            .executor_profile_path()
+            .unwrap()
+            .ends_with("edit.air-profile.yaml"));
         validate_resolved_skill(&skill).unwrap();
     }
 
@@ -1316,18 +1530,13 @@ instructions:
         fs::create_dir_all(&temp).unwrap();
         fs::write(temp.join("SKILL.md"), "Use tests before implementation.").unwrap();
         fs::write(
-            temp.join("profile.air-profile.yaml"),
-            "plan: plan\nstore: store\n",
-        )
-        .unwrap();
-        fs::write(
             temp.join(SKILL_MANIFEST),
             r#"
 schema: air.skill.v1
 id: tdd
 mode: instruction
-workflow:
-  profile: profile.air-profile.yaml
+host:
+  skill: code-agent
 instructions:
   files: [SKILL.md]
 "#,
@@ -1340,7 +1549,8 @@ instructions:
         assert!(preloaded[0]
             .to_string()
             .contains("tests before implementation"));
-        let task = skill_run_task("fix bug", &preloaded);
+        let task_prefix = render_preloaded_skill_instructions(&preloaded);
+        let task = format!("{task_prefix}\n\nTask: fix bug");
         assert!(task.contains("<skill_instructions>"));
         assert!(task.contains("tests before implementation"));
         assert!(task.ends_with("Task: fix bug"));
@@ -1359,18 +1569,13 @@ instructions:
         fs::create_dir_all(&temp).unwrap();
         fs::write(temp.join("SKILL.md"), "Read only").unwrap();
         fs::write(
-            temp.join("profile.air-profile.yaml"),
-            "plan: plan\nstore: store\n",
-        )
-        .unwrap();
-        fs::write(
             temp.join(SKILL_MANIFEST),
             r#"
 schema: air.skill.v1
 id: misleading
 mode: instruction
-workflow:
-  profile: profile.air-profile.yaml
+host:
+  skill: code-agent
 instructions:
   files: [SKILL.md]
 capabilities:
@@ -1382,6 +1587,61 @@ capabilities:
         let error = validate_resolved_skill(&skill).unwrap_err().to_string();
         assert!(error.contains("must not declare enforceable capability"));
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn instruction_skill_uses_host_execution_profile() {
+        let skill = resolve_skill("tdd-workflow").unwrap();
+        assert_eq!(skill.manifest.mode, SkillMode::Instruction);
+        validate_resolved_skill(&skill).unwrap();
+
+        let effective = effective_execution(&skill).unwrap();
+        assert_eq!(effective.host_skill.as_deref(), Some("code-agent"));
+        assert!(effective.profile.ends_with("edit.air-profile.yaml"));
+        assert!(effective
+            .tool_config
+            .as_ref()
+            .is_some_and(|path| path.ends_with("tools.json")));
+    }
+
+    #[test]
+    fn instruction_skill_cannot_declare_workflow_or_tools() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-instruction-exec-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(temp.join("SKILL.md"), "Use this as guidance only.").unwrap();
+        fs::write(
+            temp.join(SKILL_MANIFEST),
+            r#"
+schema: air.skill.v1
+id: misleading-workflow
+mode: instruction
+host:
+  skill: code-agent
+instructions:
+  files: [SKILL.md]
+tools:
+  config: tools.json
+workflow:
+  profile: profile.air-profile.yaml
+"#,
+        )
+        .unwrap();
+        let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
+        let error = validate_resolved_skill(&skill).unwrap_err().to_string();
+        assert!(error.contains("must not declare workflow/tools"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn routes_tdd_tasks_to_tdd_workflow() {
+        let route = route_skills_for_task("use TDD to refactor a small helper", 3).unwrap();
+        assert!(route.selected.iter().any(|card| card.id == "tdd-workflow"));
     }
 
     #[test]

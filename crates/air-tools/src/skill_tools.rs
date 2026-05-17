@@ -12,17 +12,33 @@ const SKILL_MANIFEST: &str = "air-skill.yaml";
 struct SkillManifest {
     id: String,
     #[serde(default)]
+    mode: Option<String>,
+    #[serde(default)]
     version: Option<String>,
     #[serde(default)]
     description: Option<String>,
     #[serde(default)]
     instructions: SkillInstructions,
+    #[serde(default)]
+    routing: SkillRouting,
 }
 
 #[derive(Debug, Default, Deserialize)]
 struct SkillInstructions {
     #[serde(default)]
     files: Vec<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SkillRouting {
+    #[serde(default)]
+    summary: Option<String>,
+    #[serde(default)]
+    triggers: Vec<String>,
+    #[serde(default)]
+    repo_markers: Vec<PathBuf>,
+    #[serde(default)]
+    exclude: Vec<String>,
 }
 
 pub(crate) fn call_skill_tool(
@@ -34,6 +50,21 @@ pub(crate) fn call_skill_tool(
     let root_dir = root_dir
         .canonicalize()
         .unwrap_or_else(|_| root_dir.to_path_buf());
+    if let Some(task) = input
+        .get("route_task")
+        .or_else(|| input.get("task"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let top_k = input
+            .get("top_k")
+            .or_else(|| input.get("topK"))
+            .and_then(Value::as_u64)
+            .unwrap_or(3)
+            .max(1) as usize;
+        return route_skills(&root_dir, task, top_k);
+    }
     let skill_name = input
         .get("name")
         .or_else(|| input.get("skill"))
@@ -45,6 +76,130 @@ pub(crate) fn call_skill_tool(
         Some(skill_name) => load_skill(name, &root_dir, skill_name, max_bytes),
         None => list_skills(&root_dir),
     }
+}
+
+fn route_skills(root_dir: &Path, task: &str, top_k: usize) -> Result<Value, RuntimeError> {
+    let task_lower = task.to_ascii_lowercase();
+    let mut selected = Vec::new();
+    let mut rejected = Vec::new();
+    let mut candidates = Vec::new();
+    for manifest_path in discover_skill_manifests(root_dir)? {
+        let manifest = match read_manifest(&manifest_path) {
+            Ok(manifest) => manifest,
+            Err(_) => continue,
+        };
+        if manifest.mode.as_deref().unwrap_or("executor") != "instruction" {
+            continue;
+        }
+        let risk = read_audit_risk(&manifest_path).unwrap_or_else(|| "unknown".to_string());
+        if matches!(risk.as_str(), "high" | "critical") {
+            rejected.push(json!({
+                "id": manifest.id,
+                "manifest": display_path(&manifest_path),
+                "reason": format!("audit risk {risk}"),
+            }));
+            continue;
+        }
+        let skill_dir = manifest_path.parent().unwrap_or_else(|| Path::new("."));
+        let (score, reasons) = score_skill_for_task(root_dir, &manifest, &task_lower);
+        let card = json!({
+            "id": manifest.id.clone(),
+            "mode": manifest.mode.clone().unwrap_or_else(|| "executor".to_string()),
+            "version": manifest.version.clone(),
+            "description": skill_description(skill_dir, &manifest),
+            "manifest": display_path(&manifest_path),
+            "audit_risk": risk,
+            "score": score,
+            "reasons": reasons,
+        });
+        candidates.push(card.clone());
+        if score > 0 {
+            selected.push(card);
+        }
+    }
+    sort_route_cards(&mut selected);
+    sort_route_cards(&mut candidates);
+    selected.truncate(top_k);
+    Ok(json!({
+        "kind": "skill_route",
+        "task": task,
+        "skills": selected,
+        "rejected": rejected,
+        "candidates": candidates,
+    }))
+}
+
+fn sort_route_cards(cards: &mut [Value]) {
+    cards.sort_by(|left, right| {
+        let left_score = left.get("score").and_then(Value::as_i64).unwrap_or(0);
+        let right_score = right.get("score").and_then(Value::as_i64).unwrap_or(0);
+        let left_id = left.get("id").and_then(Value::as_str).unwrap_or("");
+        let right_id = right.get("id").and_then(Value::as_str).unwrap_or("");
+        right_score
+            .cmp(&left_score)
+            .then_with(|| left_id.cmp(right_id))
+    });
+}
+
+fn score_skill_for_task(
+    root_dir: &Path,
+    manifest: &SkillManifest,
+    task_lower: &str,
+) -> (i32, Vec<String>) {
+    let mut score = 0;
+    let mut reasons = Vec::new();
+    for trigger in &manifest.routing.triggers {
+        let trigger_lower = trigger.to_ascii_lowercase();
+        if !trigger_lower.is_empty() && task_lower.contains(&trigger_lower) {
+            score += 25;
+            reasons.push(format!("task matches trigger `{trigger}`"));
+        }
+    }
+    for excluded in &manifest.routing.exclude {
+        let excluded_lower = excluded.to_ascii_lowercase();
+        if !excluded_lower.is_empty() && task_lower.contains(&excluded_lower) {
+            score -= 50;
+            reasons.push(format!("task matches exclusion `{excluded}`"));
+        }
+    }
+    for token in manifest
+        .description
+        .iter()
+        .flat_map(|description| route_tokens(description))
+    {
+        if task_lower.contains(&token) {
+            score += 3;
+        }
+    }
+    for token in manifest
+        .routing
+        .summary
+        .iter()
+        .flat_map(|summary| route_tokens(summary))
+    {
+        if task_lower.contains(&token) {
+            score += 5;
+        }
+    }
+    let markers = manifest
+        .routing
+        .repo_markers
+        .iter()
+        .filter(|marker| root_dir.join(marker).exists() || marker.exists())
+        .count();
+    if markers > 0 {
+        score += (markers as i32) * 8;
+        reasons.push(format!("{markers} repo marker(s) exist"));
+    }
+    (score, reasons)
+}
+
+fn route_tokens(text: &str) -> Vec<String> {
+    text.split(|character: char| !character.is_ascii_alphanumeric())
+        .map(str::trim)
+        .filter(|token| token.len() >= 4)
+        .map(str::to_ascii_lowercase)
+        .collect()
 }
 
 fn list_skills(root_dir: &Path) -> Result<Value, RuntimeError> {

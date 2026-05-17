@@ -1,9 +1,9 @@
 use crate::code_agent::{run_code_agent, CodeOptions};
 use crate::code_artifact::{
     path_content_identity, read_code_run_artifact, replay_code_run_artifact, CodeRunDescriptor,
-    CodeRunMode, FailureCategory, FailureReason, WorkspaceSnapshot,
+    CodeRunMode, CodeRunSkill, FailureCategory, FailureReason, WorkspaceSnapshot,
 };
-use crate::skill::resolve_skill_run_metadata;
+use crate::skill::{prepare_skill_run_context, resolve_skill_run_metadata};
 use air_runtime::read_trace_jsonl;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -25,6 +25,19 @@ pub(crate) struct BenchCodeAgentOptions {
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) task: Option<String>,
     pub(crate) limit: Option<usize>,
+    pub(crate) log: bool,
+    pub(crate) keep_workdirs: bool,
+    pub(crate) refresh: bool,
+}
+
+pub(crate) struct BenchSkillOptions {
+    pub(crate) skill: String,
+    pub(crate) suite: Option<PathBuf>,
+    pub(crate) out_dir: Option<PathBuf>,
+    pub(crate) model_config: Option<PathBuf>,
+    pub(crate) task: Option<String>,
+    pub(crate) limit: Option<usize>,
+    pub(crate) compare_no_skill: bool,
     pub(crate) log: bool,
     pub(crate) keep_workdirs: bool,
     pub(crate) refresh: bool,
@@ -75,6 +88,10 @@ struct BenchRun {
     run_dir: String,
     profile: String,
     model_config: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    skill: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    runs: Option<Vec<BenchRun>>,
     summary: BenchSummary,
     tasks: Vec<TaskRun>,
 }
@@ -150,6 +167,9 @@ struct BenchTaskContext<'a> {
     artifact_cache_root: &'a Path,
     repo_root: &'a Path,
     subagents: bool,
+    skill: Option<CodeRunSkill>,
+    task_prefix: Option<&'a str>,
+    artifact_extra: BTreeMap<String, Value>,
     log: bool,
     keep_workdirs: bool,
     refresh: bool,
@@ -217,6 +237,9 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
         artifact_cache_root: &artifact_cache_root,
         repo_root: &repo_root,
         subagents: suite.subagents,
+        skill: resolve_skill_run_metadata("code-agent").ok(),
+        task_prefix: None,
+        artifact_extra: BTreeMap::new(),
         log: options.log,
         keep_workdirs: options.keep_workdirs,
         refresh: options.refresh,
@@ -249,6 +272,8 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
         run_dir: run_dir.display().to_string(),
         profile: profile.display().to_string(),
         model_config: model_config.display().to_string(),
+        skill: None,
+        runs: None,
         summary,
         tasks: task_runs,
     };
@@ -258,6 +283,203 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&run.summary)?);
     println!("run_json: {}", run_json.display());
     Ok(())
+}
+
+pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
+    let repo_root = std::env::current_dir().context("resolve current directory")?;
+    let suite_path = options
+        .suite
+        .unwrap_or_else(|| repo_root.join(DEFAULT_CODE_BENCH_SUITE));
+    let suite_path = absolutize(&repo_root, suite_path);
+    let suite_dir = suite_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("suite path has no parent: {}", suite_path.display()))?
+        .to_path_buf();
+    let suite: BenchSuite = serde_json::from_str(
+        &fs::read_to_string(&suite_path)
+            .with_context(|| format!("read bench suite {}", suite_path.display()))?,
+    )
+    .with_context(|| format!("parse bench suite {}", suite_path.display()))?;
+    if suite.tasks.is_empty() {
+        bail!("bench suite {} has no tasks", suite_path.display());
+    }
+    let selected = suite
+        .tasks
+        .iter()
+        .filter(|task| options.task.as_ref().is_none_or(|id| id == &task.id))
+        .take(options.limit.unwrap_or(usize::MAX))
+        .collect::<Vec<_>>();
+    if selected.is_empty() {
+        bail!("no benchmark tasks selected");
+    }
+
+    let run_dir = options.out_dir.unwrap_or_else(|| {
+        repo_root
+            .join("target/generated/skill-bench")
+            .join(timestamp_id())
+    });
+    let run_dir = absolutize(&repo_root, run_dir);
+    fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
+    let artifact_cache_root = repo_root.join("target/generated/code-run-artifacts");
+    fs::create_dir_all(&artifact_cache_root)
+        .with_context(|| format!("create {}", artifact_cache_root.display()))?;
+    let model_config = absolutize(
+        &repo_root,
+        options
+            .model_config
+            .unwrap_or_else(|| repo_root.join(DEFAULT_MODEL_CONFIG)),
+    );
+    let prepared = prepare_skill_run_context(&options.skill)?;
+
+    let mut groups = Vec::new();
+    if options.compare_no_skill {
+        let profile = repo_root.join(DEFAULT_CODE_PROFILE);
+        let group_dir = run_dir.join("no-skill");
+        groups.push(run_bench_group(BenchGroupOptions {
+            label: "no-skill",
+            suite: &suite,
+            selected: &selected,
+            suite_dir: &suite_dir,
+            run_dir: &group_dir,
+            profile: &profile,
+            model_config: &model_config,
+            artifact_cache_root: &artifact_cache_root,
+            repo_root: &repo_root,
+            subagents: suite.subagents,
+            skill: resolve_skill_run_metadata("code-agent").ok(),
+            task_prefix: None,
+            artifact_extra: BTreeMap::from([("bench_skill_group".to_string(), json!("no-skill"))]),
+            log: options.log,
+            keep_workdirs: options.keep_workdirs,
+            refresh: options.refresh,
+        })?);
+    }
+    let skill_group_dir = run_dir.join("skill");
+    let mut skill_extra = prepared.artifact_extra.clone();
+    skill_extra.insert("bench_skill_group".to_string(), json!("skill"));
+    skill_extra.insert("bench_skill".to_string(), json!(options.skill));
+    groups.push(run_bench_group(BenchGroupOptions {
+        label: "skill",
+        suite: &suite,
+        selected: &selected,
+        suite_dir: &suite_dir,
+        run_dir: &skill_group_dir,
+        profile: &prepared.profile,
+        model_config: &model_config,
+        artifact_cache_root: &artifact_cache_root,
+        repo_root: &repo_root,
+        subagents: suite.subagents,
+        skill: Some(prepared.metadata),
+        task_prefix: prepared.task_prefix.as_deref(),
+        artifact_extra: skill_extra,
+        log: options.log,
+        keep_workdirs: options.keep_workdirs,
+        refresh: options.refresh,
+    })?);
+
+    let summary = BenchSummary {
+        total: groups.iter().map(|run| run.summary.total).sum(),
+        passed: groups.iter().map(|run| run.summary.passed).sum(),
+        failed: groups.iter().map(|run| run.summary.failed).sum(),
+        executed: groups.iter().map(|run| run.summary.executed).sum(),
+        replayed: groups.iter().map(|run| run.summary.replayed).sum(),
+    };
+    let run = BenchRun {
+        suite: suite.name,
+        description: suite.description,
+        run_dir: run_dir.display().to_string(),
+        profile: prepared.profile.display().to_string(),
+        model_config: model_config.display().to_string(),
+        skill: Some(options.skill),
+        runs: Some(groups),
+        summary,
+        tasks: Vec::new(),
+    };
+    let run_json = run_dir.join("run.json");
+    fs::write(&run_json, serde_json::to_vec_pretty(&run)?)
+        .with_context(|| format!("write {}", run_json.display()))?;
+    println!("{}", serde_json::to_string_pretty(&run.summary)?);
+    println!("run_json: {}", run_json.display());
+    Ok(())
+}
+
+struct BenchGroupOptions<'a> {
+    label: &'a str,
+    suite: &'a BenchSuite,
+    selected: &'a [&'a BenchTask],
+    suite_dir: &'a Path,
+    run_dir: &'a Path,
+    profile: &'a Path,
+    model_config: &'a Path,
+    artifact_cache_root: &'a Path,
+    repo_root: &'a Path,
+    subagents: bool,
+    skill: Option<CodeRunSkill>,
+    task_prefix: Option<&'a str>,
+    artifact_extra: BTreeMap<String, Value>,
+    log: bool,
+    keep_workdirs: bool,
+    refresh: bool,
+}
+
+fn run_bench_group(options: BenchGroupOptions<'_>) -> Result<BenchRun> {
+    fs::create_dir_all(options.run_dir)
+        .with_context(|| format!("create {}", options.run_dir.display()))?;
+    let context = BenchTaskContext {
+        suite_dir: options.suite_dir,
+        run_dir: options.run_dir,
+        profile: options.profile,
+        model_config: options.model_config,
+        artifact_cache_root: options.artifact_cache_root,
+        repo_root: options.repo_root,
+        subagents: options.subagents,
+        skill: options.skill,
+        task_prefix: options.task_prefix,
+        artifact_extra: options.artifact_extra,
+        log: options.log,
+        keep_workdirs: options.keep_workdirs,
+        refresh: options.refresh,
+    };
+    let mut task_runs = Vec::new();
+    for task in options.selected {
+        eprintln!(
+            "[air bench:{label}] running {}",
+            task.id,
+            label = options.label
+        );
+        task_runs.push(run_bench_task(&context, task)?);
+    }
+    let summary = bench_summary(&task_runs);
+    Ok(BenchRun {
+        suite: format!("{}:{}", options.suite.name, options.label),
+        description: options.suite.description.clone(),
+        run_dir: options.run_dir.display().to_string(),
+        profile: options.profile.display().to_string(),
+        model_config: options.model_config.display().to_string(),
+        skill: context.skill.as_ref().map(|skill| skill.id.clone()),
+        runs: None,
+        summary,
+        tasks: task_runs,
+    })
+}
+
+fn bench_summary(task_runs: &[TaskRun]) -> BenchSummary {
+    let passed = task_runs.iter().filter(|task| task.pass).count();
+    let executed = task_runs
+        .iter()
+        .filter(|task| matches!(task.mode, CodeRunMode::Executed))
+        .count();
+    let replayed = task_runs
+        .iter()
+        .filter(|task| matches!(task.mode, CodeRunMode::Replayed))
+        .count();
+    BenchSummary {
+        total: task_runs.len(),
+        passed,
+        failed: task_runs.len().saturating_sub(passed),
+        executed,
+        replayed,
+    }
 }
 
 fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<TaskRun> {
@@ -285,13 +507,12 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
     };
     fs::write(
         &tool_config,
-        default_bench_tool_config(subagent_paths.as_ref()),
+        default_bench_tool_config(context.repo_root, subagent_paths.as_ref()),
     )?;
     let trace_path = task_dir.join("trace.jsonl");
     let output_path = task_dir.join("output.json");
     let before = WorkspaceSnapshot::capture(&workdir)?;
-    let skill = resolve_skill_run_metadata("code-agent").ok();
-    let artifact_extra = BTreeMap::from([
+    let mut artifact_extra = BTreeMap::from([
         ("suite_task_id".to_string(), json!(task.id)),
         (
             "verification".to_string(),
@@ -299,9 +520,15 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
         ),
         ("diff".to_string(), serde_json::to_value(&task.diff)?),
     ]);
+    artifact_extra.extend(context.artifact_extra.clone());
+    let agent_task = if let Some(prefix) = context.task_prefix {
+        format!("{prefix}\n\nTask: {}", task.prompt)
+    } else {
+        task.prompt.clone()
+    };
     let descriptor = CodeRunDescriptor {
         task: task.prompt.clone(),
-        skill: skill.clone(),
+        skill: context.skill.clone(),
         profile: path_content_identity(context.profile)?,
         model_config: Some(path_content_identity(context.model_config)?),
         tool_config: Some(path_content_identity(&tool_config)?),
@@ -337,9 +564,9 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
         std::env::set_current_dir(&workdir)
             .with_context(|| format!("enter workdir {}", workdir.display()))?;
         let agent_result = run_code_agent(CodeOptions {
-            task: task.prompt.clone(),
-            artifact_task: None,
-            skill,
+            task: agent_task,
+            artifact_task: Some(task.prompt.clone()),
+            skill: context.skill.clone(),
             profile: Some(context.profile.to_path_buf()),
             model_config: Some(context.model_config.to_path_buf()),
             trace_out: Some(trace_path.clone()),
@@ -752,7 +979,10 @@ struct BenchSubagentPaths {
     explore_tool_config: PathBuf,
 }
 
-fn default_bench_tool_config(subagent_paths: Option<&BenchSubagentPaths>) -> String {
+fn default_bench_tool_config(
+    repo_root: &Path,
+    subagent_paths: Option<&BenchSubagentPaths>,
+) -> String {
     let task_tool = if let Some(paths) = subagent_paths {
         json!({
             "kind": "subagent",
@@ -851,7 +1081,12 @@ fn default_bench_tool_config(subagent_paths: Option<&BenchSubagentPaths>) -> Str
             },
             "todowrite": {"kind": "todo_write", "capability": "code.read"},
             "todoread": {"kind": "local_reflection", "capability": "code.read"},
-            "skill": {"kind": "local_reflection", "capability": "code.read"}
+            "skill": {
+                "kind": "skill",
+                "capability": "code.read",
+                "root_dir": repo_root,
+                "max_bytes": 65536
+            }
         },
         "approvals": {
             "file.write": {
@@ -1067,7 +1302,9 @@ mod tests {
             repo_root: PathBuf::from("/repo"),
             explore_tool_config: PathBuf::from("/run/tools.explore.json"),
         };
-        let config: Value = serde_json::from_str(&default_bench_tool_config(Some(&paths))).unwrap();
+        let config: Value =
+            serde_json::from_str(&default_bench_tool_config(Path::new("/repo"), Some(&paths)))
+                .unwrap();
         let command = config
             .pointer("/tools/task/subagents/explore/command")
             .and_then(Value::as_array)

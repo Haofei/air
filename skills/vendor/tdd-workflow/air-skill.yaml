@@ -10,12 +10,17 @@ instructions:
   files:
   - SKILL.md
 capabilities: {}
-tools:
-  config: null
 host:
   skill: code-agent
-workflow:
-  profile: ../../code-agent/edit.air-profile.yaml
+routing:
+  summary: Use test-driven development for code changes, bug fixes, features, and refactors.
+  triggers:
+  - tdd
+  - test-driven
+  - write tests
+  - failing test
+  - bug fix
+  - refactor
 verification:
   mode: instruction_only
   scripts: disabled

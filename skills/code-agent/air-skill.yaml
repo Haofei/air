@@ -28,6 +28,19 @@ tools:
 workflow:
   profile: edit.air-profile.yaml
 
+routing:
+  summary: General-purpose coding agent for editing, refactoring, testing, and reviewing code.
+  triggers:
+    - code
+    - edit
+    - refactor
+    - fix
+    - test
+    - implement
+  repo_markers:
+    - Cargo.toml
+    - package.json
+
 verification:
   require_after_write: true
   require_patch: true

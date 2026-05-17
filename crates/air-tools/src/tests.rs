@@ -3349,10 +3349,13 @@ fn skill_tool_lists_and_loads_installed_skills() {
         r#"
 schema: air.skill.v1
 id: tdd-workflow
+mode: instruction
 version: 0.1.0
 description: TDD workflow
 instructions:
   files: [SKILL.md]
+routing:
+  triggers: [tdd, refactor]
 workflow:
   profile: /tmp/unused-profile.yaml
 "#,
@@ -3390,6 +3393,15 @@ workflow:
         list["skills"][0]["description"],
         json!("Use this skill for test-driven development.")
     );
+
+    let routed = tools
+        .call_tool(
+            "skill",
+            &json!({"route_task": "use TDD to refactor the parser", "top_k": 1}),
+        )
+        .unwrap();
+    assert_eq!(routed["kind"], json!("skill_route"));
+    assert_eq!(routed["skills"][0]["id"], json!("tdd-workflow"));
 
     let loaded = tools
         .call_tool("skill", &json!({"name": "tdd-workflow"}))

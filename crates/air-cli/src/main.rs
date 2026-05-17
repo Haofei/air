@@ -11,7 +11,7 @@ mod project;
 mod run_plan;
 mod skill;
 mod tools;
-use crate::bench::{bench_code_agent, BenchCodeAgentOptions};
+use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSkillOptions};
 use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
@@ -30,8 +30,8 @@ use crate::run_plan::{
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
 };
 use crate::skill::{
-    audit_skill, compile_skill, explain_skill, import_skill, list_skills, run_skill,
-    validate_skill, SkillRunOptions,
+    audit_skill, compile_skill, explain_skill, import_skill, list_skills, route_skill, run_skill,
+    run_skill_auto, validate_skill, SkillAutoRunOptions, SkillRouteOptions, SkillRunOptions,
 };
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
@@ -434,13 +434,39 @@ enum SkillCommand {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Run an AIR skill from a task prompt.
-    Run {
-        /// Skill id, manifest path, or skill directory.
-        skill: String,
-
+    /// Route a task to the most relevant local AIR skills.
+    Route {
         /// Natural-language task.
         task: String,
+
+        /// Number of selected skill cards to return.
+        #[arg(long, default_value_t = 3)]
+        top_k: usize,
+    },
+    /// Explain how AIR routes a task across local skills.
+    ExplainRoute {
+        /// Natural-language task.
+        task: String,
+
+        /// Number of selected skill cards to return.
+        #[arg(long, default_value_t = 3)]
+        top_k: usize,
+    },
+    /// Run an AIR skill from a task prompt.
+    Run {
+        /// Skill id when running explicitly, or task text when --auto is set.
+        target: String,
+
+        /// Natural-language task for explicit skill runs.
+        task: Option<String>,
+
+        /// Route the task automatically and run the best matching skill.
+        #[arg(long)]
+        auto: bool,
+
+        /// Number of skills to consider when --auto is set.
+        #[arg(long, default_value_t = 3)]
+        top_k: usize,
 
         /// Skill run profile override.
         #[arg(long)]
@@ -533,6 +559,47 @@ enum BenchCommand {
         #[arg(long)]
         refresh: bool,
     },
+    /// Run a code-agent suite with a skill preloaded, optionally comparing no-skill.
+    Skill {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+
+        /// Benchmark suite JSON file.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Output directory for run.json, traces, and workdirs.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Run only one task id.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Run at most N selected tasks.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Compare against a no-skill baseline in the same benchmark run.
+        #[arg(long)]
+        compare_no_skill: bool,
+
+        /// Print AIR execution logs while the benchmark runs.
+        #[arg(long)]
+        log: bool,
+
+        /// Keep successful task workdirs. Failed task workdirs are always kept.
+        #[arg(long)]
+        keep_workdirs: bool,
+
+        /// Ignore cached code-run artifacts and spend model calls again.
+        #[arg(long)]
+        refresh: bool,
+    },
     /// Run deterministic project-orchestrator benchmark cases.
     Project {
         /// Project benchmark suite JSON file.
@@ -611,9 +678,21 @@ fn main() -> Result<()> {
             SkillCommand::Audit { skill, write } => audit_skill(&skill, write),
             SkillCommand::Import { source, out } => import_skill(&source, &out),
             SkillCommand::Compile { skill, output } => compile_skill(&skill, output),
-            SkillCommand::Run {
-                skill,
+            SkillCommand::Route { task, top_k } => route_skill(SkillRouteOptions {
                 task,
+                top_k,
+                explain: false,
+            }),
+            SkillCommand::ExplainRoute { task, top_k } => route_skill(SkillRouteOptions {
+                task,
+                top_k,
+                explain: true,
+            }),
+            SkillCommand::Run {
+                target,
+                task,
+                auto,
+                top_k,
                 profile,
                 model_config,
                 trace_out,
@@ -624,20 +703,42 @@ fn main() -> Result<()> {
                 artifact_out,
                 replay_artifact,
                 replay_from,
-            } => run_skill(SkillRunOptions {
-                reference: skill,
-                task,
-                profile_override: profile,
-                model_config,
-                trace_out,
-                trace_redact,
-                trace_raw,
-                log,
-                tool_config_override: tool_config,
-                artifact_out,
-                replay_artifact,
-                replay_from,
-            }),
+            } => {
+                if auto {
+                    run_skill_auto(SkillAutoRunOptions {
+                        task: target,
+                        top_k,
+                        profile_override: profile,
+                        model_config,
+                        trace_out,
+                        trace_redact,
+                        trace_raw,
+                        log,
+                        tool_config_override: tool_config,
+                        artifact_out,
+                        replay_artifact,
+                        replay_from,
+                    })
+                } else {
+                    let Some(task) = task else {
+                        anyhow::bail!("air skill run <skill> requires a task unless --auto is set")
+                    };
+                    run_skill(SkillRunOptions {
+                        reference: target,
+                        task,
+                        profile_override: profile,
+                        model_config,
+                        trace_out,
+                        trace_redact,
+                        trace_raw,
+                        log,
+                        tool_config_override: tool_config,
+                        artifact_out,
+                        replay_artifact,
+                        replay_from,
+                    })
+                }
+            }
             SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
         },
         Command::Bench { command } => match command {
@@ -658,6 +759,29 @@ fn main() -> Result<()> {
                 model_config,
                 task,
                 limit,
+                log,
+                keep_workdirs,
+                refresh,
+            }),
+            BenchCommand::Skill {
+                skill,
+                suite,
+                out_dir,
+                model_config,
+                task,
+                limit,
+                compare_no_skill,
+                log,
+                keep_workdirs,
+                refresh,
+            } => bench_skill(BenchSkillOptions {
+                skill,
+                suite,
+                out_dir,
+                model_config,
+                task,
+                limit,
+                compare_no_skill,
                 log,
                 keep_workdirs,
                 refresh,
@@ -1809,8 +1933,9 @@ mod tests {
         let Command::Skill {
             command:
                 SkillCommand::Run {
-                    skill,
+                    target,
                     task,
+                    auto,
                     profile,
                     ..
                 },
@@ -1819,9 +1944,44 @@ mod tests {
             panic!("expected skill run command");
         };
 
-        assert_eq!(skill, "code-agent");
-        assert_eq!(task, "fix the failing add function and retest");
+        assert_eq!(target, "code-agent");
+        assert_eq!(
+            task.as_deref(),
+            Some("fix the failing add function and retest")
+        );
+        assert!(!auto);
         assert_eq!(profile, None);
+    }
+
+    #[test]
+    fn skill_run_auto_accepts_task_without_skill_name() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "skill",
+            "run",
+            "--auto",
+            "use TDD to fix the failing add function",
+        ])
+        .unwrap();
+
+        let Command::Skill {
+            command:
+                SkillCommand::Run {
+                    target,
+                    task,
+                    auto,
+                    top_k,
+                    ..
+                },
+        } = cli.command
+        else {
+            panic!("expected skill run command");
+        };
+
+        assert_eq!(target, "use TDD to fix the failing add function");
+        assert_eq!(task, None);
+        assert!(auto);
+        assert_eq!(top_k, 3);
     }
 
     #[test]

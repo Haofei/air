@@ -166,7 +166,11 @@ workflow:
         - kind: tool_call
           tool: skill
           input:
-            literal: {}
+            object:
+              route_task:
+                ref: task
+              top_k:
+                literal: 3
           output: available_skills
           timeout_seconds: 10
         - kind: set
