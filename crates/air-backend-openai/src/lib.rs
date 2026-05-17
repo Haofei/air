@@ -841,26 +841,28 @@ fn attach_native_tool_calls(
     model_name: &str,
 ) -> Result<BTreeMap<String, String>, RuntimeError> {
     let tool_schemas = input.get("tool_schemas").and_then(Value::as_object);
-    let mut tool_names =
-        if let Some(allowed_tools) = input.get("allowed_tools").and_then(Value::as_array) {
-            allowed_tools
-                .iter()
-                .filter_map(Value::as_str)
-                .filter(|name| !name.trim().is_empty())
-                .map(str::to_string)
-                .collect::<Vec<_>>()
-        } else {
-            tool_schemas
-                .into_iter()
-                .flat_map(|schemas| schemas.keys())
-                .cloned()
-                .collect::<Vec<_>>()
-        };
+    let explicit_allowed_tools = input.get("allowed_tools").and_then(Value::as_array);
+    let mut tool_names = if let Some(allowed_tools) = explicit_allowed_tools {
+        allowed_tools
+            .iter()
+            .filter_map(Value::as_str)
+            .filter(|name| !name.trim().is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    } else {
+        tool_schemas
+            .into_iter()
+            .flat_map(|schemas| schemas.keys())
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     if opencode_style {
         let use_patch = opencode_uses_apply_patch(model_config.opencode_tool_mode, model_name);
-        for name in opencode_tool_order(use_patch) {
-            if !tool_names.iter().any(|existing| existing == name) {
-                tool_names.push((*name).to_string());
+        if explicit_allowed_tools.is_none() {
+            for name in opencode_tool_order(use_patch) {
+                if !tool_names.iter().any(|existing| existing == name) {
+                    tool_names.push((*name).to_string());
+                }
             }
         }
         if use_patch {
@@ -1887,6 +1889,12 @@ fn input_to_native_tool_messages_with_names(
 
     for (observation_index, observation) in items.iter().enumerate() {
         let Some(results) = observation.get("result").and_then(Value::as_array) else {
+            if let Some(message) = render_native_runtime_observation(observation) {
+                messages.push(json!({
+                    "role": "user",
+                    "content": message
+                }));
+            }
             continue;
         };
         let mut tool_calls = Vec::new();
@@ -1948,6 +1956,22 @@ fn input_to_native_tool_messages_with_names(
     }
 
     Ok(messages)
+}
+
+fn render_native_runtime_observation(observation: &Value) -> Option<String> {
+    let action = observation.get("action").and_then(Value::as_str)?;
+    let message = observation
+        .get("result")
+        .and_then(Value::as_str)
+        .or_else(|| observation.get("message").and_then(Value::as_str))?
+        .trim();
+    if message.is_empty() {
+        return None;
+    }
+    match action {
+        "verification_required" => Some(message.to_string()),
+        _ => Some(format!("{action}: {message}")),
+    }
 }
 
 fn assistant_message_content(observation: &Value, opencode_style: bool) -> Value {
@@ -3842,6 +3866,54 @@ mod tests {
             assistant["reasoning_content"],
             json!("I found the exact helper and can patch it now.")
         );
+    }
+
+    #[test]
+    fn native_tool_messages_render_runtime_reminders_without_tool_results() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            opencode_tool_mode: None,
+            trace_provider_io: None,
+        };
+        let input = json!({
+            "task": "finish the edit",
+            "allowed_tools": ["bash"],
+            "observations": [{
+                "action": "verification_required",
+                "result": "Run an appropriate bash verification command before finishing."
+            }]
+        });
+
+        let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+
+        assert!(
+            messages.iter().any(|message| {
+                message.get("role").and_then(Value::as_str) == Some("user")
+                    && message
+                        .get("content")
+                        .and_then(Value::as_str)
+                        .is_some_and(|content| {
+                            content
+                                == "Run an appropriate bash verification command before finishing."
+                        })
+            }),
+            "{messages:?}"
+        );
+        let tools = request.body["tools"].as_array().unwrap();
+        assert_eq!(tools.len(), 1);
+        assert_eq!(tools[0]["function"]["name"], json!("bash"));
     }
 
     #[test]

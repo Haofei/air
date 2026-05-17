@@ -1,0 +1,94 @@
+{
+  "name": "project-orchestrator-smoke",
+  "description": "Deterministic project-layer checks for DAG ordering, dependency gates, constraints, and artifact freshness.",
+  "cases": [
+    {
+      "id": "dag_order",
+      "kind": "dag_order",
+      "manifest": {
+        "schema": "air.project.v1",
+        "project": {
+          "name": "dag-order",
+          "goal": "verify task ordering"
+        },
+        "tasks": [
+          {
+            "id": "update_callers",
+            "goal": "update callers",
+            "depends_on": ["split_tools"]
+          },
+          {
+            "id": "split_tools",
+            "goal": "split tools"
+          }
+        ]
+      },
+      "expected_order": ["split_tools", "update_callers"]
+    },
+    {
+      "id": "dependency_failure",
+      "kind": "dependency_failure",
+      "manifest": {
+        "schema": "air.project.v1",
+        "project": {
+          "name": "dependency-failure",
+          "goal": "verify dependency gate"
+        },
+        "tasks": [
+          {
+            "id": "split_tools",
+            "goal": "split tools"
+          },
+          {
+            "id": "update_callers",
+            "goal": "update callers",
+            "depends_on": ["split_tools"]
+          }
+        ]
+      },
+      "failed_task": "split_tools",
+      "target_task": "update_callers"
+    },
+    {
+      "id": "constraint_failure",
+      "kind": "constraint_check",
+      "task": {
+        "id": "split_tools",
+        "goal": "split tools",
+        "allowed_files": ["crates/**/src/**/*.rs"],
+        "forbidden_files": ["crates/**/src/generated/**"],
+        "success_conditions": {
+          "required_changed_files": ["crates/air-tools/src/file_tools.rs"],
+          "required_diff_contains": ["split_file_tools"]
+        },
+        "max_changed_files": 2,
+        "max_diff_lines": 20
+      },
+      "changed_files": ["crates/air-tools/src/generated/out.rs"],
+      "diff": "+pub fn generated() {}\n",
+      "expected_pass": false,
+      "expected_violation_contains": "forbidden"
+    },
+    {
+      "id": "missing_artifact",
+      "kind": "missing_artifact",
+      "task": {
+        "id": "missing_artifact",
+        "goal": "verify missing artifact handling"
+      }
+    },
+    {
+      "id": "stale_artifact",
+      "kind": "stale_artifact",
+      "task": {
+        "id": "stale_artifact",
+        "goal": "verify stale artifact detection",
+        "allowed_files": ["src/**/*.rs"],
+        "success_conditions": {
+          "required_changed_files": ["src/lib.rs"],
+          "required_diff_contains": ["value"]
+        }
+      }
+    }
+  ]
+}

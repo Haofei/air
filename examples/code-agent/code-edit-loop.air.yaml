@@ -41,7 +41,7 @@ policy:
 state:
   phase:
     type: enum
-    enum: [init, choose, act, post_act, summarize, done]
+    enum: [init, choose, verify, act, post_act, summarize, done]
   observations:
     type: array
     items: object
@@ -206,6 +206,29 @@ workflow:
           values:
             phase: act
 
+    - id: verify
+      when: phase == "verify"
+      actions:
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_bytes: 600000
+              allowed_tools:
+                literal: [bash]
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: act
+
     - id: act
       when: phase == "act" && decision.complete == false
       actions:
@@ -269,7 +292,7 @@ workflow:
                 literal: Run an appropriate bash verification command before finishing.
         - kind: set
           values:
-            phase: choose
+            phase: verify
 
     - id: complete-verified
       when: phase == "act" && decision.complete == true && verification_status == "passed"
@@ -317,8 +340,13 @@ workflow:
                   literal: false
                 final_success:
                   equals:
-                    - ref: verification_status
-                    - literal: passed
+                    - array:
+                        - ref: verification_status
+                        - not:
+                            is_empty:
+                              split_lines:
+                                ref: final_diff_result[1].output.log
+                    - literal: [passed, true]
                 patch_applied:
                   not:
                     is_empty:

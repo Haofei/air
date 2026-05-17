@@ -289,6 +289,7 @@ mod tests {
                 "init",
                 "summarize-at-step-limit",
                 "choose",
+                "verify",
                 "act",
                 "verification-passed",
                 "verification-failed",
@@ -469,6 +470,8 @@ mod tests {
     fn edit_loop_requires_verification_before_completion() {
         let module = code_edit_loop_module();
         let rules = module["workflow"]["rules"].as_sequence().unwrap();
+        let phase_enum = module["state"]["phase"]["enum"].as_sequence().unwrap();
+        assert!(phase_enum.contains(&serde_yaml::Value::String("verify".to_string())));
 
         let needs_verification = rules
             .iter()
@@ -477,6 +480,19 @@ mod tests {
         let needs_verification_condition = needs_verification["when"].as_str().unwrap();
         assert!(needs_verification_condition.contains("verification_status != \"passed\""));
         assert!(!needs_verification_condition.contains("patch_applied != true"));
+        assert_eq!(
+            needs_verification["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("verify".to_string())
+        );
+
+        let verify = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("verify"))
+            .unwrap();
+        assert_eq!(
+            verify["actions"][0]["input"]["object"]["allowed_tools"]["literal"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("bash".to_string())])
+        );
 
         let complete_verified = rules
             .iter()
@@ -505,6 +521,14 @@ mod tests {
         assert_eq!(
             patch_applied["not"]["is_empty"]["split_lines"]["ref"],
             serde_yaml::Value::String("final_diff_result[1].output.log".to_string())
+        );
+        let final_success = &summarize["actions"][1]["values"]["edit"]["object"]["final_success"];
+        assert_eq!(
+            final_success["equals"][1]["literal"],
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("passed".to_string()),
+                serde_yaml::Value::Bool(true),
+            ])
         );
     }
 

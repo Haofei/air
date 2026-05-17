@@ -26,3 +26,4 @@ thiserror = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 regex = "1.10"
 dotenvy = "0.15"
+globset = "0.4"

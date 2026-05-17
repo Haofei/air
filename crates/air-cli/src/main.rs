@@ -21,8 +21,9 @@ use crate::planner::{
 };
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use crate::project::{
-    default_project_file, project_plan, project_run, project_status, project_verify,
-    ProjectPlanOptions, ProjectRunOptions, ProjectStatusOptions, ProjectVerifyOptions,
+    bench_project, default_project_file, project_plan, project_run, project_status, project_verify,
+    BenchProjectOptions, ProjectPlanOptions, ProjectRunOptions, ProjectStatusOptions,
+    ProjectVerifyOptions,
 };
 use crate::run_plan::{
     observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
@@ -477,6 +478,16 @@ enum BenchCommand {
         #[arg(long)]
         refresh: bool,
     },
+    /// Run deterministic project-orchestrator benchmark cases.
+    Project {
+        /// Project benchmark suite JSON file.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Output directory for run.json.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -589,6 +600,9 @@ fn main() -> Result<()> {
                 keep_workdirs,
                 refresh,
             }),
+            BenchCommand::Project { suite, out_dir } => {
+                bench_project(BenchProjectOptions { suite, out_dir })
+            }
         },
         Command::Project { command } => match command {
             ProjectCommand::Plan {

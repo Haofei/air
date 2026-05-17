@@ -143,22 +143,73 @@ pub(super) fn is_verification_bash_command(command: &str, description: Option<&s
         return false;
     }
 
+    if is_command_verification(&command) {
+        return true;
+    }
+
+    is_ambiguous_verification_command(&command)
+        && [
+            "verification",
+            "verify",
+            "retest",
+            "test",
+            "tests",
+            "check",
+            "compile",
+            "typecheck",
+            "type check",
+            "lint",
+        ]
+        .iter()
+        .any(|needle| description.contains(needle))
+}
+
+fn is_command_verification(command: &str) -> bool {
+    if command.contains("cargo fmt") {
+        return command.contains("--check");
+    }
+    if command.contains("prettier") && command.contains("--write") {
+        return false;
+    }
+    if command.contains("eslint") && command.contains("--fix") {
+        return false;
+    }
+    if command.trim_start().starts_with("node ") && command.contains("test") {
+        return true;
+    }
+
     [
-        "verification",
-        "verify",
-        "retest",
-        "test",
-        "tests",
-        "check",
-        "compile",
-        "typecheck",
-        "type check",
-        "lint",
-        "format",
-        "fmt",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "go test",
+        "make check",
+        "make test",
+        "npm test",
+        "npm run check",
+        "npm run lint",
+        "npm run test",
+        "npm run typecheck",
+        "pnpm check",
+        "pnpm lint",
+        "pnpm test",
+        "pnpm typecheck",
+        "python -m py_compile",
+        "python3 -m py_compile",
+        "pytest",
+        "yarn check",
+        "yarn lint",
+        "yarn test",
+        "yarn typecheck",
     ]
     .iter()
-    .any(|needle| description.contains(needle))
+    .any(|needle| command.contains(needle))
+}
+
+fn is_ambiguous_verification_command(command: &str) -> bool {
+    ["verification", "verify"]
+        .iter()
+        .any(|needle| command.contains(needle))
 }
 
 fn is_inspection_bash_command(command: &str) -> bool {
@@ -183,4 +234,45 @@ fn is_inspection_bash_command(command: &str) -> bool {
     ]
     .iter()
     .any(|prefix| command.starts_with(prefix))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_verification_bash_command;
+
+    #[test]
+    fn verification_classification_is_command_first() {
+        assert!(is_verification_bash_command(
+            "cargo test -q",
+            Some("Run command")
+        ));
+        assert!(is_verification_bash_command(
+            "python3 -m py_compile check.py",
+            Some("Run command")
+        ));
+        assert!(is_verification_bash_command(
+            "node examples/code-agent/edit-fixture/test.js",
+            Some("Run command")
+        ));
+        assert!(!is_verification_bash_command(
+            "true",
+            Some("Run verification")
+        ));
+    }
+
+    #[test]
+    fn mutating_format_commands_are_not_verification() {
+        assert!(!is_verification_bash_command(
+            "cargo fmt",
+            Some("format code")
+        ));
+        assert!(is_verification_bash_command(
+            "cargo fmt --check",
+            Some("format check")
+        ));
+        assert!(!is_verification_bash_command(
+            "prettier --write src/app.ts",
+            Some("verify formatting")
+        ));
+    }
 }

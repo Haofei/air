@@ -1,15 +1,20 @@
 use crate::code_agent::{run_code_agent, CodeOptions};
-use crate::code_artifact::{read_code_run_artifact, FailureCategory, FailureReason};
+use crate::code_artifact::{
+    build_code_run_artifact, read_code_run_artifact, write_code_run_artifact, CodeRunDescriptor,
+    FailureCategory, FailureReason, WorkspaceSnapshot,
+};
 use crate::models::ModelProviderChoice;
 use crate::run_plan::{run_plan_capture, RunPlanOptions};
 use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
+use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const PROJECT_SCHEMA: &str = "air.project.v1";
 const PROJECT_STATE_SCHEMA: &str = "air.project_state.v1";
@@ -19,9 +24,36 @@ const DEFAULT_PROJECT_SCOUT_PROFILE: &str = "examples/code-agent/project-scout.a
 const DEFAULT_MODEL_CONFIG: &str = "examples/bigmodel-openai-compatible.json";
 const DEFAULT_TOOL_CONFIG: &str = "examples/code-agent/tools.json";
 const DEFAULT_ARTIFACT_DIR: &str = ".air/project";
+const DEFAULT_PROJECT_BENCH_SUITE: &str = "benches/project/orchestrator-smoke/suite.json";
 
 pub(crate) fn default_project_file() -> PathBuf {
     PathBuf::from(DEFAULT_PROJECT_FILE)
+}
+
+fn project_manifest_dir(cwd: &Path, output: Option<&Path>) -> Result<PathBuf> {
+    let manifest_path = output
+        .map(|path| absolutize(cwd, path.to_path_buf()))
+        .unwrap_or_else(|| cwd.join(DEFAULT_PROJECT_FILE));
+    Ok(manifest_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("project manifest path has no parent"))?
+        .to_path_buf())
+}
+
+fn project_defaults_for_manifest(
+    cwd: &Path,
+    manifest_dir: &Path,
+    model_config: Option<&Path>,
+) -> Result<ProjectDefaults> {
+    let model_config = model_config
+        .map(|path| absolutize(cwd, path.to_path_buf()))
+        .unwrap_or_else(|| cwd.join(DEFAULT_MODEL_CONFIG));
+    Ok(ProjectDefaults {
+        profile: path_for_manifest(manifest_dir, &cwd.join(DEFAULT_CODE_PROFILE))?,
+        model_config: path_for_manifest(manifest_dir, &model_config)?,
+        tool_config: path_for_manifest(manifest_dir, &cwd.join(DEFAULT_TOOL_CONFIG))?,
+        artifact_dir: PathBuf::from(DEFAULT_ARTIFACT_DIR),
+    })
 }
 
 #[derive(Debug)]
@@ -49,6 +81,11 @@ pub(crate) struct ProjectStatusOptions {
 pub(crate) struct ProjectVerifyOptions {
     pub(crate) file: PathBuf,
     pub(crate) task: Option<String>,
+}
+
+pub(crate) struct BenchProjectOptions {
+    pub(crate) suite: Option<PathBuf>,
+    pub(crate) out_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -143,6 +180,12 @@ struct ProjectTaskState {
     status: ProjectTaskStatus,
     artifact_path: String,
     changed_files: Vec<String>,
+    #[serde(default)]
+    artifact_snapshot_matches_current: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    patch_path: Option<String>,
     verification: Vec<ProjectVerificationResult>,
     constraints: ProjectConstraintResult,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -174,12 +217,84 @@ struct ProjectRunOutput {
     tasks: Vec<ProjectTaskRunOutput>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ProjectBenchSuite {
+    name: String,
+    #[serde(default)]
+    description: Option<String>,
+    cases: Vec<ProjectBenchCase>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ProjectBenchCase {
+    DagOrder {
+        id: String,
+        manifest: ProjectManifest,
+        expected_order: Vec<String>,
+    },
+    DependencyFailure {
+        id: String,
+        manifest: ProjectManifest,
+        failed_task: String,
+        target_task: String,
+    },
+    ConstraintCheck {
+        id: String,
+        task: ProjectTask,
+        changed_files: Vec<String>,
+        diff: String,
+        expected_pass: bool,
+        #[serde(default)]
+        expected_violation_contains: Option<String>,
+    },
+    MissingArtifact {
+        id: String,
+        task: ProjectTask,
+    },
+    StaleArtifact {
+        id: String,
+        task: ProjectTask,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectBenchRun {
+    suite: String,
+    description: Option<String>,
+    run_dir: String,
+    summary: ProjectBenchSummary,
+    cases: Vec<ProjectBenchCaseRun>,
+}
+
+#[derive(Debug, Default, Serialize)]
+struct ProjectBenchSummary {
+    total: usize,
+    passed: usize,
+    failed: usize,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectBenchCaseRun {
+    id: String,
+    kind: String,
+    pass: bool,
+    details: Value,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 struct ProjectTaskRunOutput {
     id: String,
     status: ProjectTaskStatus,
     artifact_path: String,
     changed_files: Vec<String>,
+    artifact_snapshot_matches_current: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    worktree_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    patch_path: Option<String>,
     verification_passed: bool,
     constraints_passed: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -190,12 +305,17 @@ pub(crate) fn project_plan(options: ProjectPlanOptions) -> Result<()> {
     if options.goal.trim().is_empty() {
         bail!("air project plan goal must not be empty");
     }
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let manifest_dir = project_manifest_dir(&cwd, options.output.as_deref())?;
+    let defaults =
+        project_defaults_for_manifest(&cwd, &manifest_dir, options.model_config.as_deref())?;
     let manifest = if options.template {
-        project_template_manifest(options.goal)
+        project_template_manifest(options.goal, defaults)
     } else {
-        let cwd = std::env::current_dir().context("resolve current directory")?;
         let model_config = options
             .model_config
+            .as_ref()
+            .map(|path| absolutize(&cwd, path.clone()))
             .unwrap_or_else(|| cwd.join(DEFAULT_MODEL_CONFIG));
         eprintln!("[air project] exploring repository for project plan");
         let exploration = project_explorer_handoff(&options.goal, &cwd, &model_config)?;
@@ -206,7 +326,7 @@ pub(crate) fn project_plan(options: ProjectPlanOptions) -> Result<()> {
                 .with_context(|| format!("call project planner model {}", options.planner_model))?;
         let mut manifest = parse_project_planner_response(response)
             .context("parse project planner response as AIR project manifest")?;
-        normalize_project_manifest(&mut manifest, &options.goal);
+        normalize_project_manifest(&mut manifest, &options.goal, defaults);
         validate_manifest(&manifest)?;
         manifest
     };
@@ -287,14 +407,14 @@ fn call_project_planner_model(
     Ok(provider.call_model(planner_model, request)?)
 }
 
-fn project_template_manifest(goal: String) -> ProjectManifest {
+fn project_template_manifest(goal: String, defaults: ProjectDefaults) -> ProjectManifest {
     ProjectManifest {
         schema: PROJECT_SCHEMA.to_string(),
         project: ProjectMetadata {
             name: "air-project".to_string(),
             goal: goal.clone(),
         },
-        defaults: ProjectDefaults::default(),
+        defaults,
         tasks: vec![ProjectTask {
             id: "task_001".to_string(),
             goal,
@@ -378,9 +498,8 @@ pub(crate) fn project_status(options: ProjectStatusOptions) -> Result<()> {
         .tasks
         .iter()
         .map(|task| {
-            let status = state
-                .tasks
-                .get(&task.id)
+            let task_state = state.tasks.get(&task.id);
+            let status = task_state
                 .map(|state| match state.status {
                     ProjectTaskStatus::Passed => "passed",
                     ProjectTaskStatus::Failed => "failed",
@@ -390,7 +509,10 @@ pub(crate) fn project_status(options: ProjectStatusOptions) -> Result<()> {
                 "id": task.id,
                 "status": status,
                 "depends_on": task.depends_on,
-                "artifact_path": state.tasks.get(&task.id).map(|state| state.artifact_path.clone()),
+                "artifact_path": task_state.map(|state| state.artifact_path.clone()),
+                "artifact_snapshot_matches_current": task_state.map(|state| state.artifact_snapshot_matches_current),
+                "worktree_path": task_state.and_then(|state| state.worktree_path.clone()),
+                "patch_path": task_state.and_then(|state| state.patch_path.clone()),
             })
         })
         .collect::<Vec<_>>();
@@ -430,6 +552,235 @@ pub(crate) fn project_verify(options: ProjectVerifyOptions) -> Result<()> {
         })?
     );
     Ok(())
+}
+
+pub(crate) fn bench_project(options: BenchProjectOptions) -> Result<()> {
+    let repo_root = std::env::current_dir().context("resolve current directory")?;
+    let suite_path = options
+        .suite
+        .unwrap_or_else(|| repo_root.join(DEFAULT_PROJECT_BENCH_SUITE));
+    let suite_path = absolutize(&repo_root, suite_path);
+    let suite_dir = suite_path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("project bench suite has no parent"))?
+        .to_path_buf();
+    let suite: ProjectBenchSuite = serde_json::from_slice(
+        &fs::read(&suite_path)
+            .with_context(|| format!("read project bench suite {}", suite_path.display()))?,
+    )
+    .with_context(|| format!("parse project bench suite {}", suite_path.display()))?;
+    if suite.cases.is_empty() {
+        bail!("project bench suite {} has no cases", suite_path.display());
+    }
+    let run_dir = options.out_dir.unwrap_or_else(|| {
+        repo_root
+            .join("target/generated/project-bench")
+            .join(timestamp_id())
+    });
+    let run_dir = absolutize(&repo_root, run_dir);
+    fs::create_dir_all(&run_dir).with_context(|| format!("create {}", run_dir.display()))?;
+
+    let cases = suite
+        .cases
+        .iter()
+        .map(|case| run_project_bench_case(&suite_dir, &run_dir, case))
+        .collect::<Vec<_>>();
+    let mut case_runs = Vec::new();
+    for case in cases {
+        case_runs.push(case?);
+    }
+    let passed = case_runs.iter().filter(|case| case.pass).count();
+    let run = ProjectBenchRun {
+        suite: suite.name,
+        description: suite.description,
+        run_dir: run_dir.display().to_string(),
+        summary: ProjectBenchSummary {
+            total: case_runs.len(),
+            passed,
+            failed: case_runs.len().saturating_sub(passed),
+        },
+        cases: case_runs,
+    };
+    let run_json = run_dir.join("run.json");
+    fs::write(&run_json, serde_json::to_vec_pretty(&run)?)
+        .with_context(|| format!("write {}", run_json.display()))?;
+    println!("{}", serde_json::to_string_pretty(&run.summary)?);
+    println!("run_json: {}", run_json.display());
+    Ok(())
+}
+
+fn run_project_bench_case(
+    _suite_dir: &Path,
+    run_dir: &Path,
+    case: &ProjectBenchCase,
+) -> Result<ProjectBenchCaseRun> {
+    match case {
+        ProjectBenchCase::DagOrder {
+            id,
+            manifest,
+            expected_order,
+        } => {
+            let actual = topological_task_ids(manifest)?;
+            Ok(ProjectBenchCaseRun {
+                id: id.clone(),
+                kind: "dag_order".to_string(),
+                pass: &actual == expected_order,
+                details: json!({
+                    "expected_order": expected_order,
+                    "actual_order": actual,
+                }),
+                error: None,
+            })
+        }
+        ProjectBenchCase::DependencyFailure {
+            id,
+            manifest,
+            failed_task,
+            target_task,
+        } => {
+            let task = manifest
+                .tasks
+                .iter()
+                .find(|task| task.id == *target_task)
+                .ok_or_else(|| anyhow::anyhow!("unknown target_task {target_task}"))?;
+            let state = ProjectState {
+                schema: PROJECT_STATE_SCHEMA.to_string(),
+                project: manifest.project.name.clone(),
+                tasks: BTreeMap::from([(
+                    failed_task.clone(),
+                    failed_project_bench_task_state(failed_task),
+                )]),
+            };
+            let error = ensure_dependencies_passed(&state, task)
+                .expect_err("dependency failure bench case should fail")
+                .to_string();
+            Ok(ProjectBenchCaseRun {
+                id: id.clone(),
+                kind: "dependency_failure".to_string(),
+                pass: error.contains(failed_task),
+                details: json!({ "error": error }),
+                error: None,
+            })
+        }
+        ProjectBenchCase::ConstraintCheck {
+            id,
+            task,
+            changed_files,
+            diff,
+            expected_pass,
+            expected_violation_contains,
+        } => {
+            let result = check_task_constraints(task, changed_files, diff);
+            let violation_matches = expected_violation_contains.as_ref().is_none_or(|needle| {
+                result
+                    .violations
+                    .iter()
+                    .any(|violation| violation.contains(needle))
+            });
+            Ok(ProjectBenchCaseRun {
+                id: id.clone(),
+                kind: "constraint_check".to_string(),
+                pass: result.passed == *expected_pass && violation_matches,
+                details: json!({
+                    "expected_pass": expected_pass,
+                    "actual_pass": result.passed,
+                    "violations": result.violations,
+                }),
+                error: None,
+            })
+        }
+        ProjectBenchCase::MissingArtifact { id, task } => {
+            let case_dir = run_dir.join(id);
+            let workspace = case_dir.join("workspace");
+            let artifact = case_dir.join("artifact");
+            fs::create_dir_all(&workspace)
+                .with_context(|| format!("create {}", workspace.display()))?;
+            let state = evaluate_project_task(&workspace, &artifact, task)?;
+            let replay_mismatch = state
+                .failure_reason
+                .as_ref()
+                .is_some_and(|reason| reason.category == FailureCategory::ReplayMismatch);
+            Ok(ProjectBenchCaseRun {
+                id: id.clone(),
+                kind: "missing_artifact".to_string(),
+                pass: matches!(state.status, ProjectTaskStatus::Failed) && replay_mismatch,
+                details: json!({
+                    "status": state.status,
+                    "failure_reason": state.failure_reason,
+                }),
+                error: None,
+            })
+        }
+        ProjectBenchCase::StaleArtifact { id, task } => {
+            let case_dir = run_dir.join(id);
+            let workspace = case_dir.join("workspace");
+            let artifact_dir = case_dir.join("artifact");
+            fs::create_dir_all(workspace.join("src"))
+                .with_context(|| format!("create {}", workspace.display()))?;
+            fs::write(
+                workspace.join("src/lib.rs"),
+                "pub fn value() -> i32 { 1 }\n",
+            )?;
+            let before = WorkspaceSnapshot::capture(&workspace)?;
+            fs::write(
+                workspace.join("src/lib.rs"),
+                "pub fn value() -> i32 { 2 }\n",
+            )?;
+            let after = WorkspaceSnapshot::capture(&workspace)?;
+            let delta = before.delta(&after)?;
+            let artifact = build_code_run_artifact(
+                CodeRunDescriptor {
+                    task: task.goal.clone(),
+                    profile: "project-bench".to_string(),
+                    model_config: None,
+                    tool_config: None,
+                    extra: BTreeMap::new(),
+                },
+                &before,
+                &after,
+                delta,
+                Vec::new(),
+                None,
+            )?;
+            write_code_run_artifact(&artifact_dir, &artifact, &json!({}), None)?;
+            fs::write(
+                workspace.join("src/lib.rs"),
+                "pub fn value() -> i32 { 3 }\n",
+            )?;
+            let state = evaluate_project_task(&workspace, &artifact_dir, task)?;
+            Ok(ProjectBenchCaseRun {
+                id: id.clone(),
+                kind: "stale_artifact".to_string(),
+                pass: !state.artifact_snapshot_matches_current,
+                details: json!({
+                    "artifact_snapshot_matches_current": state.artifact_snapshot_matches_current,
+                    "status": state.status,
+                }),
+                error: None,
+            })
+        }
+    }
+}
+
+fn failed_project_bench_task_state(id: &str) -> ProjectTaskState {
+    ProjectTaskState {
+        status: ProjectTaskStatus::Failed,
+        artifact_path: format!("bench/{id}/artifact"),
+        changed_files: Vec::new(),
+        artifact_snapshot_matches_current: false,
+        worktree_path: None,
+        patch_path: None,
+        verification: Vec::new(),
+        constraints: ProjectConstraintResult {
+            passed: false,
+            violations: vec!["bench failure".to_string()],
+        },
+        failure_reason: Some(FailureReason {
+            category: FailureCategory::AgentError,
+            message: "bench dependency failed".to_string(),
+            details: BTreeMap::new(),
+        }),
+    }
 }
 
 struct ProjectContext {
@@ -477,6 +828,10 @@ impl ProjectContext {
         self.artifact_dir.join("tasks").join(id).join("artifact")
     }
 
+    fn task_worktree_dir(&self, id: &str) -> PathBuf {
+        self.artifact_dir.join("tasks").join(id).join("worktree")
+    }
+
     fn read_state(&self) -> Result<ProjectState> {
         if !self.state_path.exists() {
             return Ok(ProjectState {
@@ -485,11 +840,26 @@ impl ProjectContext {
                 tasks: BTreeMap::new(),
             });
         }
-        serde_json::from_slice(
+        let state: ProjectState = serde_json::from_slice(
             &fs::read(&self.state_path)
                 .with_context(|| format!("read {}", self.state_path.display()))?,
         )
-        .with_context(|| format!("parse {}", self.state_path.display()))
+        .with_context(|| format!("parse {}", self.state_path.display()))?;
+        if state.schema != PROJECT_STATE_SCHEMA {
+            bail!(
+                "project state schema mismatch: expected {}, got {}",
+                PROJECT_STATE_SCHEMA,
+                state.schema
+            );
+        }
+        if state.project != self.manifest.project.name {
+            bail!(
+                "project state belongs to {}, but manifest project is {}",
+                state.project,
+                self.manifest.project.name
+            );
+        }
+        Ok(state)
     }
 
     fn write_state(&self, state: &ProjectState) -> Result<()> {
@@ -512,6 +882,9 @@ impl ProjectTaskRunOutput {
             status: state.status.clone(),
             artifact_path: state.artifact_path.clone(),
             changed_files: state.changed_files.clone(),
+            artifact_snapshot_matches_current: state.artifact_snapshot_matches_current,
+            worktree_path: state.worktree_path.clone(),
+            patch_path: state.patch_path.clone(),
             verification_passed: !missing_artifact
                 && state.verification.iter().all(|result| result.success),
             constraints_passed: state.constraints.passed,
@@ -637,20 +1010,46 @@ fn fenced_or_raw_text_candidates(text: &str) -> Vec<String> {
     candidates
 }
 
-fn normalize_project_manifest(manifest: &mut ProjectManifest, goal: &str) {
+fn normalize_project_manifest(
+    manifest: &mut ProjectManifest,
+    goal: &str,
+    defaults: ProjectDefaults,
+) {
     manifest.schema = PROJECT_SCHEMA.to_string();
-    manifest.defaults = ProjectDefaults::default();
+    manifest.defaults = defaults;
     if manifest.project.goal.trim().is_empty() {
         manifest.project.goal = goal.trim().to_string();
     }
     if manifest.project.name.trim().is_empty() {
         manifest.project.name = "air-project".to_string();
     }
+    let mut old_to_new_ids = BTreeMap::new();
     for (index, task) in manifest.tasks.iter_mut().enumerate() {
+        let old_id = task.id.trim().to_string();
         if task.id.trim().is_empty() {
             task.id = format!("task_{:03}", index + 1);
         }
         task.id = normalize_task_id(&task.id, index + 1);
+        if !old_id.is_empty() {
+            old_to_new_ids.insert(old_id, task.id.clone());
+        }
+    }
+    let normalized_ids = manifest
+        .tasks
+        .iter()
+        .map(|task| task.id.clone())
+        .collect::<BTreeSet<_>>();
+    for task in &mut manifest.tasks {
+        for dep in &mut task.depends_on {
+            if let Some(new_id) = old_to_new_ids.get(dep) {
+                *dep = new_id.clone();
+                continue;
+            }
+            let normalized = normalize_task_id(dep, 0);
+            if normalized_ids.contains(&normalized) {
+                *dep = normalized;
+            }
+        }
         task.forbidden_files.extend(
             ["target/**", ".git/**", ".air/**"]
                 .into_iter()
@@ -701,16 +1100,23 @@ fn run_project_task(
 ) -> Result<ProjectTaskState> {
     fs::create_dir_all(&context.artifact_dir)
         .with_context(|| format!("create {}", context.artifact_dir.display()))?;
-    let profile = resolve_manifest_path(&context.manifest_dir, &context.manifest.defaults.profile);
-    let model_config = resolve_manifest_path(
+    let artifact_dir = context.task_artifact_dir(&task.id);
+    let worktree_dir = prepare_project_task_worktree(context, task)?;
+    let profile = project_task_config_path(
         &context.manifest_dir,
+        &worktree_dir,
+        &context.manifest.defaults.profile,
+    );
+    let model_config = project_task_config_path(
+        &context.manifest_dir,
+        &worktree_dir,
         &context.manifest.defaults.model_config,
     );
-    let tool_config = resolve_manifest_path(
+    let tool_config = project_task_config_path(
         &context.manifest_dir,
+        &worktree_dir,
         &context.manifest.defaults.tool_config,
     );
-    let artifact_dir = context.task_artifact_dir(&task.id);
     let trace_path = artifact_dir.join("trace.jsonl");
     let artifact_extra = BTreeMap::from([
         (
@@ -719,13 +1125,17 @@ fn run_project_task(
         ),
         ("project_task_id".to_string(), json!(task.id)),
         (
+            "project_task_worktree".to_string(),
+            json!(worktree_dir.display().to_string()),
+        ),
+        (
             "project_constraints".to_string(),
             serde_json::to_value(task)?,
         ),
     ]);
     let previous_dir = std::env::current_dir().context("resolve current directory")?;
-    std::env::set_current_dir(&context.manifest_dir)
-        .with_context(|| format!("enter project workspace {}", context.manifest_dir.display()))?;
+    std::env::set_current_dir(&worktree_dir)
+        .with_context(|| format!("enter project task worktree {}", worktree_dir.display()))?;
     let output = run_code_agent(CodeOptions {
         task: project_task_prompt(&context.manifest, task),
         profile: Some(profile),
@@ -748,6 +1158,9 @@ fn run_project_task(
             status: ProjectTaskStatus::Failed,
             artifact_path: artifact_dir.display().to_string(),
             changed_files: Vec::new(),
+            artifact_snapshot_matches_current: false,
+            worktree_path: Some(worktree_dir.display().to_string()),
+            patch_path: None,
             verification: Vec::new(),
             constraints: ProjectConstraintResult {
                 passed: false,
@@ -760,7 +1173,175 @@ fn run_project_task(
             }),
         });
     }
-    evaluate_project_task(&context.manifest_dir, &artifact_dir, task)
+    let mut isolated_state = evaluate_project_task(&worktree_dir, &artifact_dir, task)?;
+    attach_project_task_paths(&mut isolated_state, &worktree_dir, &artifact_dir);
+    if matches!(isolated_state.status, ProjectTaskStatus::Failed) {
+        return Ok(isolated_state);
+    }
+    if let Err(error) =
+        apply_project_task_changes(&context.manifest_dir, &worktree_dir, &artifact_dir)
+    {
+        isolated_state.status = ProjectTaskStatus::Failed;
+        isolated_state.artifact_snapshot_matches_current = false;
+        isolated_state.constraints.passed = false;
+        isolated_state
+            .constraints
+            .violations
+            .push(error.to_string());
+        isolated_state.failure_reason = Some(FailureReason {
+            category: FailureCategory::ReplayMismatch,
+            message: "project task patch could not be applied to main workspace".to_string(),
+            details: BTreeMap::from([("error".to_string(), json!(error.to_string()))]),
+        });
+        return Ok(isolated_state);
+    }
+    let mut state = evaluate_project_task(&context.manifest_dir, &artifact_dir, task)?;
+    attach_project_task_paths(&mut state, &worktree_dir, &artifact_dir);
+    Ok(state)
+}
+
+fn prepare_project_task_worktree(context: &ProjectContext, task: &ProjectTask) -> Result<PathBuf> {
+    let worktree_dir = context.task_worktree_dir(&task.id);
+    if worktree_dir.exists() {
+        fs::remove_dir_all(&worktree_dir)
+            .with_context(|| format!("remove old task worktree {}", worktree_dir.display()))?;
+    }
+    copy_project_workspace(&context.manifest_dir, &worktree_dir)?;
+    init_project_task_git_baseline(&worktree_dir)?;
+    Ok(worktree_dir)
+}
+
+fn project_task_config_path(manifest_dir: &Path, worktree_dir: &Path, path: &Path) -> PathBuf {
+    let resolved = resolve_manifest_path(manifest_dir, path);
+    if let Ok(relative) = resolved.strip_prefix(manifest_dir) {
+        let candidate = worktree_dir.join(relative);
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    resolved
+}
+
+fn attach_project_task_paths(
+    state: &mut ProjectTaskState,
+    worktree_dir: &Path,
+    artifact_dir: &Path,
+) {
+    state.worktree_path = Some(worktree_dir.display().to_string());
+    state.patch_path = Some(artifact_dir.join("diff.patch").display().to_string());
+}
+
+fn apply_project_task_changes(
+    workspace: &Path,
+    worktree: &Path,
+    artifact_dir: &Path,
+) -> Result<()> {
+    let artifact = read_code_run_artifact(artifact_dir)
+        .with_context(|| format!("read task artifact {}", artifact_dir.display()))?;
+    let current = WorkspaceSnapshot::capture(workspace)
+        .with_context(|| format!("snapshot workspace {}", workspace.display()))?;
+    if !artifact.snapshot.before.matches_snapshot(&current) {
+        bail!("main workspace no longer matches task base snapshot");
+    }
+    for path in &artifact.delta.changed_files {
+        let source = worktree.join(path);
+        let destination = workspace.join(path);
+        if source.exists() {
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("create {}", parent.display()))?;
+            }
+            fs::copy(&source, &destination).with_context(|| {
+                format!("copy {} to {}", source.display(), destination.display())
+            })?;
+        } else if destination.exists() {
+            fs::remove_file(&destination)
+                .with_context(|| format!("remove {}", destination.display()))?;
+        }
+    }
+    Ok(())
+}
+
+fn copy_project_workspace(source: &Path, destination: &Path) -> Result<()> {
+    fs::create_dir_all(destination).with_context(|| format!("create {}", destination.display()))?;
+    copy_project_workspace_dir(source, source, destination)
+}
+
+fn copy_project_workspace_dir(root: &Path, source: &Path, destination: &Path) -> Result<()> {
+    for entry in fs::read_dir(source).with_context(|| format!("read {}", source.display()))? {
+        let entry = entry?;
+        let source_path = entry.path();
+        let relative = source_path
+            .strip_prefix(root)
+            .unwrap_or(&source_path)
+            .to_string_lossy()
+            .replace('\\', "/");
+        if project_workspace_copy_ignored(&relative) {
+            continue;
+        }
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)
+                .with_context(|| format!("create {}", destination_path.display()))?;
+            copy_project_workspace_dir(root, &source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            fs::copy(&source_path, &destination_path).with_context(|| {
+                format!(
+                    "copy {} to {}",
+                    source_path.display(),
+                    destination_path.display()
+                )
+            })?;
+        }
+    }
+    Ok(())
+}
+
+fn project_workspace_copy_ignored(path: &str) -> bool {
+    path == ".git"
+        || path == ".air"
+        || path == "target"
+        || path == "node_modules"
+        || path == "__pycache__"
+        || path.starts_with(".git/")
+        || path.starts_with(".air/")
+        || path.starts_with("target/")
+        || path.starts_with("node_modules/")
+        || path.starts_with("__pycache__/")
+        || path.ends_with(".pyc")
+        || path.contains("/__pycache__/")
+}
+
+fn init_project_task_git_baseline(worktree: &Path) -> Result<()> {
+    run_project_task_command(worktree, "git init -q")?;
+    run_project_task_command(
+        worktree,
+        "git config user.email air-project@example.invalid",
+    )?;
+    run_project_task_command(worktree, "git config user.name 'AIR Project'")?;
+    run_project_task_command(worktree, "git add -A")?;
+    run_project_task_command(
+        worktree,
+        "git -c commit.gpgsign=false commit --allow-empty --no-verify -m baseline >/dev/null",
+    )
+}
+
+fn run_project_task_command(workdir: &Path, command: &str) -> Result<()> {
+    let output = Command::new("sh")
+        .args(["-lc", command])
+        .current_dir(workdir)
+        .output()
+        .with_context(|| format!("run `{command}` in {}", workdir.display()))?;
+    if !output.status.success() {
+        bail!(
+            "command `{}` failed: {}{}",
+            command,
+            preview_bytes(&output.stdout, 2000),
+            preview_bytes(&output.stderr, 2000)
+        );
+    }
+    Ok(())
 }
 
 fn evaluate_project_task(
@@ -774,6 +1355,9 @@ fn evaluate_project_task(
             status: ProjectTaskStatus::Failed,
             artifact_path: artifact_dir.display().to_string(),
             changed_files: Vec::new(),
+            artifact_snapshot_matches_current: false,
+            worktree_path: None,
+            patch_path: None,
             verification: Vec::new(),
             constraints: ProjectConstraintResult {
                 passed: false,
@@ -794,6 +1378,10 @@ fn evaluate_project_task(
     }
     let artifact = read_code_run_artifact(artifact_dir)
         .with_context(|| format!("read task artifact {}", artifact_dir.display()))?;
+    let current_workspace = WorkspaceSnapshot::capture(workspace)
+        .with_context(|| format!("snapshot workspace {}", workspace.display()))?;
+    let artifact_snapshot_matches_current =
+        artifact.snapshot.after.matches_snapshot(&current_workspace);
     let verification = task
         .verification
         .iter()
@@ -812,6 +1400,9 @@ fn evaluate_project_task(
         },
         artifact_path: artifact_dir.display().to_string(),
         changed_files: artifact.delta.changed_files,
+        artifact_snapshot_matches_current,
+        worktree_path: None,
+        patch_path: Some(artifact_dir.join("diff.patch").display().to_string()),
         verification,
         constraints,
         failure_reason,
@@ -863,24 +1454,32 @@ fn check_task_constraints(
         }
     }
     if !task.allowed_files.is_empty() {
+        let allowed = match project_glob_set(&task.allowed_files) {
+            Ok(allowed) => allowed,
+            Err(error) => {
+                result.violations.push(error);
+                result.passed = false;
+                return result;
+            }
+        };
         for path in changed_files {
-            if !task
-                .allowed_files
-                .iter()
-                .any(|pattern| globish_match(pattern, path))
-            {
+            if !allowed.is_match(normalized_project_path(path)) {
                 result
                     .violations
                     .push(format!("changed file outside allowed_files: {path}"));
             }
         }
     }
+    let forbidden = match project_glob_set(&task.forbidden_files) {
+        Ok(forbidden) => forbidden,
+        Err(error) => {
+            result.violations.push(error);
+            result.passed = false;
+            return result;
+        }
+    };
     for path in changed_files {
-        if task
-            .forbidden_files
-            .iter()
-            .any(|pattern| globish_match(pattern, path))
-        {
+        if forbidden.is_match(normalized_project_path(path)) {
             result
                 .violations
                 .push(format!("changed forbidden file: {path}"));
@@ -903,6 +1502,23 @@ fn check_task_constraints(
     }
     result.passed = result.violations.is_empty();
     result
+}
+
+fn project_glob_set(patterns: &[String]) -> std::result::Result<GlobSet, String> {
+    let mut builder = GlobSetBuilder::new();
+    for pattern in patterns {
+        let pattern = normalized_project_path(pattern);
+        let glob = Glob::new(&pattern)
+            .map_err(|error| format!("invalid project file glob `{}`: {error}", pattern))?;
+        builder.add(glob);
+    }
+    builder
+        .build()
+        .map_err(|error| format!("invalid project file glob set: {error}"))
+}
+
+fn normalized_project_path(path: &str) -> String {
+    path.trim().replace('\\', "/")
 }
 
 fn project_failure_reason(
@@ -942,6 +1558,14 @@ fn project_task_prompt(manifest: &ProjectManifest, task: &ProjectTask) -> String
         "Project goal: {}\n\nTask {}: {}\n",
         manifest.project.goal, task.id, task.goal
     );
+    if !task.allowed_files.is_empty() || !task.forbidden_files.is_empty() {
+        prompt.push_str("\nFile contract:\n");
+        prompt.push_str("- Only modify files allowed by this task.\n");
+        prompt.push_str(
+            "- If the task requires a file outside allowed_files, stop and report why.\n",
+        );
+        prompt.push_str("- Do not edit forbidden files.\n");
+    }
     if !task.allowed_files.is_empty() {
         prompt.push_str("\nAllowed files:\n");
         for path in &task.allowed_files {
@@ -1066,38 +1690,50 @@ fn compact_response_preview(value: &Value) -> String {
     compact_text(&value.to_string(), 2000)
 }
 
-fn globish_match(pattern: &str, path: &str) -> bool {
-    let pattern = pattern.replace('\\', "/");
-    let path = path.replace('\\', "/");
-    if !pattern.contains('*') {
-        return pattern == path;
-    }
-    let mut remainder = path.as_str();
-    let mut first = true;
-    for part in pattern.split('*') {
-        if part.is_empty() {
-            continue;
-        }
-        if first && !pattern.starts_with('*') {
-            let Some(next) = remainder.strip_prefix(part) else {
-                return false;
-            };
-            remainder = next;
-        } else if let Some(index) = remainder.find(part) {
-            remainder = &remainder[index + part.len()..];
-        } else {
-            return false;
-        }
-        first = false;
-    }
-    pattern.ends_with('*') || remainder.is_empty()
-}
-
 fn resolve_manifest_path(base: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_path_buf()
     } else {
         base.join(path)
+    }
+}
+
+fn path_for_manifest(manifest_dir: &Path, target: &Path) -> Result<PathBuf> {
+    fs::create_dir_all(manifest_dir)
+        .with_context(|| format!("create {}", manifest_dir.display()))?;
+    let manifest_dir = manifest_dir
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", manifest_dir.display()))?;
+    let target = target
+        .canonicalize()
+        .with_context(|| format!("canonicalize {}", target.display()))?;
+    Ok(relative_path(&manifest_dir, &target).unwrap_or(target))
+}
+
+fn relative_path(from_dir: &Path, target: &Path) -> Option<PathBuf> {
+    let from_components = from_dir.components().collect::<Vec<_>>();
+    let target_components = target.components().collect::<Vec<_>>();
+    let common = from_components
+        .iter()
+        .zip(target_components.iter())
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common == 0 {
+        return None;
+    }
+    let mut relative = PathBuf::new();
+    for component in from_components.iter().skip(common) {
+        if matches!(component, std::path::Component::Normal(_)) {
+            relative.push("..");
+        }
+    }
+    for component in target_components.iter().skip(common) {
+        relative.push(component.as_os_str());
+    }
+    if relative.as_os_str().is_empty() {
+        Some(PathBuf::from("."))
+    } else {
+        Some(relative)
     }
 }
 
@@ -1107,6 +1743,14 @@ fn absolutize(base: &Path, path: PathBuf) -> PathBuf {
     } else {
         base.join(path)
     }
+}
+
+fn timestamp_id() -> String {
+    let millis = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or_default();
+    format!("{millis}")
 }
 
 fn with_current_dir<T>(dir: &Path, operation: impl FnOnce() -> Result<T>) -> Result<T> {
@@ -1238,6 +1882,109 @@ mod tests {
     }
 
     #[test]
+    fn project_constraints_use_standard_glob_patterns() {
+        let task = ProjectTask {
+            id: "task".to_string(),
+            goal: "goal".to_string(),
+            depends_on: Vec::new(),
+            allowed_files: vec!["crates/**/src/*.rs".to_string()],
+            forbidden_files: Vec::new(),
+            verification: Vec::new(),
+            success_conditions: ProjectSuccessConditions::default(),
+            max_changed_files: None,
+            max_diff_lines: None,
+        };
+
+        let result = check_task_constraints(
+            &task,
+            &["crates/air-tools/src/lib.rs".to_string()],
+            "+pub fn helper() {}\n",
+        );
+        assert!(result.passed, "{:?}", result.violations);
+
+        let result = check_task_constraints(
+            &task,
+            &["crates/air-tools/tests/lib.rs".to_string()],
+            "+pub fn helper() {}\n",
+        );
+        assert!(!result.passed);
+        assert!(result
+            .violations
+            .iter()
+            .any(|violation| violation.contains("outside allowed_files")));
+    }
+
+    #[test]
+    fn project_task_config_path_rebases_repo_local_configs_to_worktree() {
+        let dir = std::env::temp_dir().join(format!(
+            "air-project-config-path-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let root = dir.join("repo");
+        let worktree = dir.join("worktree");
+        fs::create_dir_all(worktree.join("examples/code-agent")).unwrap();
+        fs::write(worktree.join("examples/code-agent/tools.json"), "{}").unwrap();
+        let config = PathBuf::from("examples/code-agent/tools.json");
+
+        assert_eq!(
+            project_task_config_path(&root, &worktree, &config),
+            worktree.join("examples/code-agent/tools.json")
+        );
+    }
+
+    #[test]
+    fn apply_project_task_changes_syncs_isolated_worktree_delta() {
+        let dir = std::env::temp_dir().join(format!(
+            "air-project-apply-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let workspace = dir.join("workspace");
+        let worktree = dir.join("worktree");
+        let artifact_dir = dir.join("artifact");
+        fs::create_dir_all(workspace.join("src")).unwrap();
+        fs::create_dir_all(worktree.join("src")).unwrap();
+        fs::write(
+            workspace.join("src/lib.rs"),
+            "pub fn value() -> i32 { 1 }\n",
+        )
+        .unwrap();
+        fs::write(worktree.join("src/lib.rs"), "pub fn value() -> i32 { 1 }\n").unwrap();
+        let before = WorkspaceSnapshot::capture(&workspace).unwrap();
+        fs::write(worktree.join("src/lib.rs"), "pub fn value() -> i32 { 2 }\n").unwrap();
+        let after = WorkspaceSnapshot::capture(&worktree).unwrap();
+        let delta = before.delta(&after).unwrap();
+        let artifact = build_code_run_artifact(
+            CodeRunDescriptor {
+                task: "change value".to_string(),
+                profile: "test".to_string(),
+                model_config: None,
+                tool_config: None,
+                extra: BTreeMap::new(),
+            },
+            &before,
+            &after,
+            delta,
+            Vec::new(),
+            None,
+        )
+        .unwrap();
+        write_code_run_artifact(&artifact_dir, &artifact, &json!({}), None).unwrap();
+
+        apply_project_task_changes(&workspace, &worktree, &artifact_dir).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(workspace.join("src/lib.rs")).unwrap(),
+            "pub fn value() -> i32 { 2 }\n"
+        );
+    }
+
+    #[test]
     fn project_task_prompt_includes_verification_and_constraints() {
         let manifest = ProjectManifest {
             schema: PROJECT_SCHEMA.to_string(),
@@ -1268,6 +2015,7 @@ mod tests {
 
         let prompt = project_task_prompt(&manifest, &task);
         assert!(prompt.contains("Project goal: ship feature"));
+        assert!(prompt.contains("Only modify files allowed by this task"));
         assert!(prompt.contains("crates/air-parser/**"));
         assert!(prompt.contains("cargo test -p air-parser"));
         assert!(prompt.contains("parse_helper"));
@@ -1280,7 +2028,7 @@ mod tests {
         });
 
         let mut manifest = parse_project_planner_response(response).unwrap();
-        normalize_project_manifest(&mut manifest, "refactor tools");
+        normalize_project_manifest(&mut manifest, "refactor tools", ProjectDefaults::default());
         validate_manifest(&manifest).unwrap();
 
         assert_eq!(manifest.tasks.len(), 1);
@@ -1288,6 +2036,126 @@ mod tests {
         assert!(manifest.tasks[0]
             .forbidden_files
             .contains(&"target/**".to_string()));
+    }
+
+    #[test]
+    fn normalize_project_manifest_rewrites_dependency_ids() {
+        let mut manifest = ProjectManifest {
+            schema: PROJECT_SCHEMA.to_string(),
+            project: ProjectMetadata {
+                name: "demo".to_string(),
+                goal: "demo".to_string(),
+            },
+            defaults: ProjectDefaults::default(),
+            tasks: vec![
+                ProjectTask {
+                    id: "split-file-tools".to_string(),
+                    goal: "split file tools".to_string(),
+                    depends_on: Vec::new(),
+                    allowed_files: Vec::new(),
+                    forbidden_files: Vec::new(),
+                    verification: Vec::new(),
+                    success_conditions: ProjectSuccessConditions::default(),
+                    max_changed_files: None,
+                    max_diff_lines: None,
+                },
+                ProjectTask {
+                    id: "update-callers".to_string(),
+                    goal: "update callers".to_string(),
+                    depends_on: vec!["split-file-tools".to_string()],
+                    allowed_files: Vec::new(),
+                    forbidden_files: Vec::new(),
+                    verification: Vec::new(),
+                    success_conditions: ProjectSuccessConditions::default(),
+                    max_changed_files: None,
+                    max_diff_lines: None,
+                },
+            ],
+        };
+
+        normalize_project_manifest(&mut manifest, "demo", ProjectDefaults::default());
+        validate_manifest(&manifest).unwrap();
+
+        assert_eq!(manifest.tasks[0].id, "split_file_tools");
+        assert_eq!(manifest.tasks[1].id, "update_callers");
+        assert_eq!(manifest.tasks[1].depends_on, vec!["split_file_tools"]);
+    }
+
+    #[test]
+    fn normalize_project_manifest_preserves_supplied_defaults() {
+        let defaults = ProjectDefaults {
+            profile: PathBuf::from("profiles/custom.air-profile.yaml"),
+            model_config: PathBuf::from("models/custom.json"),
+            tool_config: PathBuf::from("tools/custom.json"),
+            artifact_dir: PathBuf::from(".air/custom-project"),
+        };
+        let mut manifest = ProjectManifest {
+            schema: PROJECT_SCHEMA.to_string(),
+            project: ProjectMetadata {
+                name: "demo".to_string(),
+                goal: String::new(),
+            },
+            defaults: ProjectDefaults::default(),
+            tasks: vec![ProjectTask {
+                id: "task".to_string(),
+                goal: "task".to_string(),
+                depends_on: Vec::new(),
+                allowed_files: Vec::new(),
+                forbidden_files: Vec::new(),
+                verification: Vec::new(),
+                success_conditions: ProjectSuccessConditions::default(),
+                max_changed_files: None,
+                max_diff_lines: None,
+            }],
+        };
+
+        normalize_project_manifest(&mut manifest, "demo", defaults.clone());
+
+        assert_eq!(manifest.defaults.profile, defaults.profile);
+        assert_eq!(manifest.defaults.model_config, defaults.model_config);
+        assert_eq!(manifest.defaults.tool_config, defaults.tool_config);
+        assert_eq!(manifest.defaults.artifact_dir, defaults.artifact_dir);
+    }
+
+    #[test]
+    fn project_state_must_match_manifest_project() {
+        let dir = std::env::temp_dir().join(format!(
+            "air-project-state-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let artifact_dir = dir.join(".air/project");
+        fs::create_dir_all(&artifact_dir).unwrap();
+        fs::write(
+            artifact_dir.join("state.json"),
+            serde_json::to_vec_pretty(&ProjectState {
+                schema: PROJECT_STATE_SCHEMA.to_string(),
+                project: "other".to_string(),
+                tasks: BTreeMap::new(),
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let context = ProjectContext {
+            manifest_path: dir.join("air-project.yaml"),
+            manifest_dir: dir.clone(),
+            manifest: ProjectManifest {
+                schema: PROJECT_SCHEMA.to_string(),
+                project: ProjectMetadata {
+                    name: "demo".to_string(),
+                    goal: "demo".to_string(),
+                },
+                defaults: ProjectDefaults::default(),
+                tasks: Vec::new(),
+            },
+            artifact_dir: artifact_dir.clone(),
+            state_path: artifact_dir.join("state.json"),
+        };
+
+        let error = context.read_state().unwrap_err().to_string();
+        assert!(error.contains("project state belongs to other"));
     }
 
     #[test]

@@ -4777,10 +4777,11 @@ fn bash_runs_shell_command() {
     assert_eq!(output["verification"], json!(false));
     assert!(output["log"].as_str().unwrap().contains("hello from bash"));
 
+    fs::write(dir.join("ok.py"), "print('ok')\n").unwrap();
     let output = tools
         .call_tool(
             "bash",
-            &json!({"command": "true", "description": "Run verification"}),
+            &json!({"command": "python3 -m py_compile ok.py", "description": "Run verification"}),
         )
         .unwrap();
     assert_eq!(output["verification"], json!(true));
@@ -4900,12 +4901,32 @@ fn bash_search_containing_format_is_not_verification() {
     assert_eq!(output["success"], json!(false));
     assert_eq!(output["verification"], json!(false));
 
+    fs::write(
+        dir.join("Cargo.toml"),
+        "[package]\nname = \"fmt_probe\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+    )
+    .unwrap();
+    fs::create_dir_all(dir.join("src")).unwrap();
+    fs::write(dir.join("src/main.rs"), "fn main(){}\n").unwrap();
     let output = tools
         .call_tool(
             "bash",
             &json!({
-                "command": "true",
-                "description": "Run the fixture test after the edit"
+                "command": "cargo fmt",
+                "description": "format code"
+            }),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["verification"], json!(false));
+
+    let output = tools
+        .call_tool(
+            "bash",
+            &json!({
+                "command": "cargo fmt --check",
+                "description": "format check"
             }),
         )
         .unwrap();
@@ -4950,7 +4971,7 @@ fn bash_uses_pipefail_for_pipelines() {
     let output = tools
         .call_tool(
             "bash",
-            &json!({"command": "false | cat", "description": "Run verification"}),
+            &json!({"command": "python3 -m py_compile missing.py | cat", "description": "Run verification"}),
         )
         .unwrap();
 
@@ -4982,7 +5003,7 @@ fn bash_verification_honors_reported_exit_status() {
         .call_tool(
             "bash",
             &json!({
-                "command": "false; echo \"EXIT: $?\"",
+                "command": "python3 -m py_compile missing.py; echo \"EXIT: $?\"",
                 "description": "Run verification"
             }),
         )
@@ -5021,7 +5042,7 @@ fn bash_verification_honors_decorated_reported_exit_status() {
         .call_tool(
             "bash",
             &json!({
-                "command": "false; echo \"---EXIT:$?---\"",
+                "command": "python3 -m py_compile missing.py; echo \"---EXIT:$?---\"",
                 "description": "Run verification"
             }),
         )
