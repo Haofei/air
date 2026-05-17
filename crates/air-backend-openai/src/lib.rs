@@ -28,7 +28,7 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Prefer locator tools before reading file bodies:
   - Use Grep to search file contents, Glob to find files by name, and LSP to inspect known symbols/references.
   - Use Glob first when you only know a file path or name; it reports line counts and byte sizes without reading file bodies.
-  - Read file content with Grep/LSP plus a narrow range, contains+context_lines, or offset+limit. Use allow_whole_file only when Glob shows the file is small: 200 lines or fewer and 20KB or less.
+  - Read file content with Grep/LSP plus a narrow range, contains+context_lines, or offset+limit.
   - Use Edit to modify files and Write only when needed.
 - Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and reading.
 - Use Bash for terminal operations (git, bun, builds, tests, running scripts).
@@ -1178,10 +1178,9 @@ Usage:
 - Do not invent absolute paths from the model server or API bridge process; use the current working directory shown in the environment
 - If you only know a file path, use Glob first to inspect line_count and source_bytes before reading the file body
 - A Read call with only filePath returns metadata and a guidance notice, not file content
-- To read file content, provide offset+limit, contains+context_lines, or set allow_whole_file=true only after locating or confirming the file is small
+- To read file content, provide offset+limit or contains+context_lines
 - For unfamiliar or large files, use Grep, LSP, or contains first to locate the relevant symbols or line ranges
-- Whole-file Read is only reasonable after Glob shows the file is 200 lines or fewer and 20KB or less
-- Without offset/limit/contains/allow_whole_file, no file body is returned; continue with targeted line ranges around known matches
+- Without offset/limit/contains, no file body is returned; continue with targeted line ranges around known matches
 - Any lines longer than 2000 characters will be truncated
 - Results are returned using cat -n format, with line numbers starting at 1
 - You can call multiple tools in one response; prefer batching Glob/Grep/LSP locator calls before reading content
@@ -1585,8 +1584,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                     "limit": {"type": "number", "description": "The number of lines to read (defaults to 200)"},
                     "contains": {"type": "string", "description": "Find the first matching line containing this text and return a narrow context window around it"},
                     "context_lines": {"type": "number", "description": "Number of lines before and after a contains match to return"},
-                    "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"},
-                    "allow_whole_file": {"type": "boolean", "description": "Set true only when the whole file is intentionally needed, ideally after Glob confirms it is 200 lines or fewer and 20KB or less. Without this or a range/contains locator, Read returns metadata and guidance but no file body."}
+                    "occurrence": {"type": "number", "description": "1-based contains match occurrence to return"}
                 },
                 "required": ["filePath"],
                 "additionalProperties": false
@@ -2362,7 +2360,7 @@ fn render_glob_file_line(path: &str, file_infos: Option<&Vec<Value>>) -> String 
     if info.get("large").and_then(Value::as_bool) == Some(true) {
         format!("{path} ({line_count}, {source_bytes}; large, use Grep/contains/range before Read)")
     } else {
-        format!("{path} ({line_count}, {source_bytes}; small, use allow_whole_file=true only if the whole file is needed)")
+        format!("{path} ({line_count}, {source_bytes}; small, use offset+limit or contains for the relevant region)")
     }
 }
 
@@ -3625,7 +3623,7 @@ mod tests {
         let system = request.body["messages"][0]["content"].as_str().unwrap();
         assert!(system.contains("Prefer locator tools before reading file bodies"));
         assert!(system.contains("Use Glob first when you only know a file path"));
-        assert!(system.contains("200 lines or fewer and 20KB or less"));
+        assert!(system.contains("offset+limit"));
         assert!(!system.contains("Use Read after you have a target file"));
     }
 
@@ -3761,17 +3759,35 @@ mod tests {
         assert!(description.contains("use Grep, LSP, or contains first"));
         assert!(description.contains("use Glob first to inspect line_count"));
         assert!(description.contains("only filePath returns metadata"));
-        assert!(description.contains("allow_whole_file=true"));
+        assert!(description.contains("provide offset+limit or contains+context_lines"));
         assert!(description.contains("workspace-relative"));
         assert!(description.contains("Do not invent absolute paths"));
         assert!(description.contains("targeted line ranges"));
         assert!(!description.contains("Reads a file from the local filesystem"));
         assert!(!description.contains("speculatively read multiple files"));
-        assert!(!description.contains("recommended to read the whole file"));
         assert!(!description.contains("If the User provides a path to a file assume"));
         assert!(!description.contains("must be an absolute path"));
         let properties = &read_tool["function"]["parameters"]["properties"];
-        assert!(properties.get("filePath").is_some());
+        let property_names = properties
+            .as_object()
+            .unwrap()
+            .keys()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            property_names,
+            [
+                "contains",
+                "context_lines",
+                "filePath",
+                "limit",
+                "occurrence",
+                "offset"
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        );
         assert!(properties["filePath"]["description"]
             .as_str()
             .unwrap()
@@ -3781,11 +3797,6 @@ mod tests {
         assert!(properties.get("contains").is_some());
         assert!(properties.get("context_lines").is_some());
         assert!(properties.get("occurrence").is_some());
-        assert!(properties.get("allow_whole_file").is_some());
-        assert!(properties["allow_whole_file"]["description"]
-            .as_str()
-            .unwrap()
-            .contains("no file body"));
         assert_eq!(
             properties["limit"]["description"],
             json!("The number of lines to read (defaults to 200)")
