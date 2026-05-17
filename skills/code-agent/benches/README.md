@@ -31,7 +31,7 @@ Run the subagent smoke suite:
 
 ```bash
 cargo run -p air-cli -- bench code-agent \
-  --suite benches/code-agent/rust-subagent-smoke/suite.json \
+  --suite skills/code-agent/benches/rust-subagent-smoke/suite.json \
   --refresh \
   --keep-workdirs
 ```

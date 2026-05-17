@@ -39,7 +39,32 @@ The profile points to:
 
 Profiles are the preferred user-facing entrypoint because they hide repeated flags.
 
-## 2. Module Anatomy
+## 2. Run A Skill
+
+Skills are packaged AIR workflows with instructions, tools, capabilities, and
+verification metadata. The built-in general coding skill is `code-agent`:
+
+```bash
+cargo run -p air-cli -- skill list
+cargo run -p air-cli -- skill validate code-agent
+cargo run -p air-cli -- skill explain code-agent
+```
+
+To run it:
+
+```bash
+cargo run -p air-cli -- skill run code-agent "refactor a helper and run tests"
+```
+
+Imported skills are copied and audited before use. AIR does not execute install
+scripts during import:
+
+```bash
+cargo run -p air-cli -- skill import ./some-skill --out skills/vendor/some-skill
+cargo run -p air-cli -- skill audit skills/vendor/some-skill
+```
+
+## 3. Module Anatomy
 
 A module is a bounded state machine:
 
@@ -106,7 +131,7 @@ Object schemas allow undeclared fields by default for compatibility with provide
 
 Conditions use AIR's small equality-only condition DSL. `&&` binds tighter than `||`; parentheses and numeric comparisons are not supported. See [condition_dsl.md](condition_dsl.md) for the formal grammar and limits.
 
-## 3. RunPlan Anatomy
+## 4. RunPlan Anatomy
 
 A RunPlan connects modules into an app:
 
@@ -149,7 +174,7 @@ conversion an explicit adapter module with a `model_call`, then connect source o
 input and adapter output to the target module. This keeps model cost, timeout, retry, schema
 validation, and trace events visible instead of hiding model execution inside wiring.
 
-## 4. Module Store And Recipes
+## 5. Module Store And Recipes
 
 A module store publishes modules and optional recipes:
 
@@ -187,7 +212,7 @@ Planner behavior:
   without calling a model. Use it to confirm the planner will see the right large component before
   spending a model call or running a bench.
 
-## 5. Dynamic Fan-Out
+## 6. Dynamic Fan-Out
 
 Use `dynamic.fanouts` when a module emits a typed array at runtime:
 
@@ -214,7 +239,7 @@ dynamic:
 
 This is AIR's replacement for arbitrary runtime graph mutation. The array source, module, bounds, inputs, and fan-in are declared and validated.
 
-## 6. Model Config
+## 7. Model Config
 
 AIR uses OpenAI-compatible model config for real model calls:
 
@@ -280,7 +305,7 @@ cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-
 
 Every AIR profile can point at the same shared model config, so examples and local apps do not need to repeat provider settings.
 
-## 7. Tool Config And Capabilities
+## 8. Tool Config And Capabilities
 
 Tools are declared in the module and configured at runtime.
 
@@ -390,7 +415,7 @@ passed through semantic compaction or adapter layers and wants to validate again
 `source_ids`. Existing modules without artifact-producing tools continue to run without citation
 enforcement.
 
-The `examples/code-agent` workflow exposes one OpenCode-style loop over declared tools such as
+The `skills/code-agent` workflow exposes one OpenCode-style loop over declared tools such as
 `question`, `bash`, `read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`,
 `todowrite`, `todoread`, and `skill`.
 The same loop handles exploration, review, editing,
@@ -515,7 +540,7 @@ values are resolved from that workspace. `workspace_dir: "."` resolves to the cu
 workspace root when one is available, so the same config works from subdirectories. Without
 it, relative tool paths remain relative to the tool config file for small colocated examples.
 
-## 8. Approvals
+## 9. Approvals
 
 Dangerous capabilities can require explicit approval:
 
@@ -548,7 +573,7 @@ Runtime approval config:
 
 Default behavior is fail-closed. If approval is missing or denied, execution stops and the trace records the failure.
 
-## 9. Traces, Checkpoints, Resume
+## 10. Traces, Checkpoints, Resume
 
 Use logs for humans:
 
@@ -591,7 +616,7 @@ cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-pr
 
 AIR specializes the resolved topology, validates it, and reuses the static hot path for matching inputs. It does not cache model outputs.
 
-## 10. Verification
+## 11. Verification
 
 Run the workspace checks:
 

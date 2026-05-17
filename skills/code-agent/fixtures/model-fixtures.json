@@ -4,11 +4,11 @@
       "complete": true,
       "tool_calls": [],
       "_air_assistant": {
-        "content": "Scout handoff: relevant files are examples/code-agent/edit-fixture/math.js and examples/code-agent/edit-fixture/test.js. Proposed task: fix math helper, then run node examples/code-agent/edit-fixture/test.js."
+        "content": "Scout handoff: relevant files are skills/code-agent/edit-fixture/math.js and skills/code-agent/edit-fixture/test.js. Proposed task: fix math helper, then run node skills/code-agent/edit-fixture/test.js."
       }
     },
     "project_scout_summarizer": {
-      "answer": "Scout handoff: relevant files are examples/code-agent/edit-fixture/math.js and examples/code-agent/edit-fixture/test.js. Proposed task: fix math helper, then run node examples/code-agent/edit-fixture/test.js."
+      "answer": "Scout handoff: relevant files are skills/code-agent/edit-fixture/math.js and skills/code-agent/edit-fixture/test.js. Proposed task: fix math helper, then run node skills/code-agent/edit-fixture/test.js."
     },
     "project_planner": {
       "schema": "air.project.v1",
@@ -23,21 +23,21 @@
           "goal": "Fix the fixture math helper and verify the node test.",
           "depends_on": [],
           "allowed_files": [
-            "examples/code-agent/edit-fixture/math.js",
-            "examples/code-agent/edit-fixture/test.js"
+            "skills/code-agent/edit-fixture/math.js",
+            "skills/code-agent/edit-fixture/test.js"
           ],
           "forbidden_files": [
             "target/**"
           ],
           "verification": [
             {
-              "command": "node examples/code-agent/edit-fixture/test.js",
+              "command": "node skills/code-agent/edit-fixture/test.js",
               "description": "Run fixture test"
             }
           ],
           "success_conditions": {
             "required_changed_files": [
-              "examples/code-agent/edit-fixture/math.js"
+              "skills/code-agent/edit-fixture/math.js"
             ],
             "required_diff_contains": [
               "return a + b"
@@ -56,7 +56,7 @@
             {
               "tool": "bash",
               "input": {
-                "command": "node examples/code-agent/edit-fixture/test.js",
+                "command": "node skills/code-agent/edit-fixture/test.js",
                 "description": "Run the fixture test"
               }
             }
@@ -68,7 +68,7 @@
             {
               "tool": "read",
               "input": {
-                "path": "examples/code-agent/edit-fixture/math.js",
+                "path": "skills/code-agent/edit-fixture/math.js",
                 "line_numbers": true,
                 "max_bytes": 20000
               }
@@ -81,7 +81,7 @@
             {
               "tool": "edit",
               "input": {
-                "filePath": "examples/code-agent/edit-fixture/math.js",
+                "filePath": "skills/code-agent/edit-fixture/math.js",
                 "oldString": "  return a - b;",
                 "newString": "  return a + b;"
               }
@@ -94,7 +94,7 @@
             {
               "tool": "bash",
               "input": {
-                "command": "node examples/code-agent/edit-fixture/test.js",
+                "command": "node skills/code-agent/edit-fixture/test.js",
                 "description": "Run the fixture test after the edit"
               }
             }

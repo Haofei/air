@@ -1,0 +1,32 @@
+schema: air.skill.v1
+id: code-agent
+version: 0.1.0
+description: General AIR coding agent skill with bounded span inspection, edits, verification, trace, and replay.
+
+source:
+  type: local
+
+instructions:
+  files:
+    - SKILL.md
+    - README.md
+
+capabilities:
+  allow:
+    - file.read
+    - file.write
+    - code.read
+    - code.test
+  deny:
+    - secrets.read
+    - shell.unrestricted
+
+tools:
+  config: tools.json
+
+workflow:
+  profile: edit.air-profile.yaml
+
+verification:
+  require_after_write: true
+  require_patch: true

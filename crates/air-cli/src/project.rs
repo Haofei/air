@@ -5,6 +5,7 @@ use crate::code_artifact::{
 };
 use crate::models::ModelProviderChoice;
 use crate::run_plan::{run_plan_capture, RunPlanOptions};
+use crate::skill::resolve_skill_run_metadata;
 use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -19,10 +20,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const PROJECT_SCHEMA: &str = "air.project.v1";
 const PROJECT_STATE_SCHEMA: &str = "air.project_state.v1";
 const DEFAULT_PROJECT_FILE: &str = "air-project.yaml";
-const DEFAULT_CODE_PROFILE: &str = "examples/code-agent/edit.air-profile.yaml";
-const DEFAULT_PROJECT_SCOUT_PROFILE: &str = "examples/code-agent/project-scout.air-profile.yaml";
+const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
+const DEFAULT_PROJECT_SCOUT_PROFILE: &str = "skills/code-agent/project-scout.air-profile.yaml";
 const DEFAULT_MODEL_CONFIG: &str = "examples/bigmodel-openai-compatible.json";
-const DEFAULT_TOOL_CONFIG: &str = "examples/code-agent/tools.json";
+const DEFAULT_TOOL_CONFIG: &str = "skills/code-agent/tools.json";
 const DEFAULT_ARTIFACT_DIR: &str = ".air/project";
 const DEFAULT_PROJECT_BENCH_SUITE: &str = "benches/project/orchestrator-smoke/suite.json";
 
@@ -731,6 +732,7 @@ fn run_project_bench_case(
             let artifact = build_code_run_artifact(
                 CodeRunDescriptor {
                     task: task.goal.clone(),
+                    skill: None,
                     profile: "project-bench".to_string(),
                     model_config: None,
                     tool_config: None,
@@ -1139,6 +1141,7 @@ fn run_project_task(
         .with_context(|| format!("enter project task worktree {}", worktree_dir.display()))?;
     let output = run_code_agent(CodeOptions {
         task: project_task_prompt(&context.manifest, task),
+        skill: resolve_skill_run_metadata("code-agent").ok(),
         profile: Some(profile),
         model_config: Some(model_config),
         trace_out: Some(trace_path),
@@ -1916,13 +1919,13 @@ mod tests {
         ));
         let root = dir.join("repo");
         let worktree = dir.join("worktree");
-        fs::create_dir_all(worktree.join("examples/code-agent")).unwrap();
-        fs::write(worktree.join("examples/code-agent/tools.json"), "{}").unwrap();
-        let config = PathBuf::from("examples/code-agent/tools.json");
+        fs::create_dir_all(worktree.join("skills/code-agent")).unwrap();
+        fs::write(worktree.join("skills/code-agent/tools.json"), "{}").unwrap();
+        let config = PathBuf::from("skills/code-agent/tools.json");
 
         assert_eq!(
             project_task_config_path(&root, &worktree, &config),
-            worktree.join("examples/code-agent/tools.json")
+            worktree.join("skills/code-agent/tools.json")
         );
     }
 
@@ -1953,6 +1956,7 @@ mod tests {
         let artifact = build_code_run_artifact(
             CodeRunDescriptor {
                 task: "change value".to_string(),
+                skill: None,
                 profile: "test".to_string(),
                 model_config: None,
                 tool_config: None,

@@ -67,7 +67,7 @@ workflow:
                 max_bytes: 16
               changed_files:
                 split_lines:
-                  literal: "crates/air-tools/src/lib.rs\nexamples/code-agent/code-edit-loop.air.yaml\n\n"
+                  literal: "crates/air-tools/src/lib.rs\nskills/code-agent/code-edit-loop.air.yaml\n\n"
           output: response
           timeout_seconds: 30
           retry:

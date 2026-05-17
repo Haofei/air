@@ -80,6 +80,31 @@ Switch providers by changing only `AIR_MODEL_PROFILE` to `glm` or `local`. If yo
 
 The profile packages a RunPlan, module store, input, model config, and tool config. It is the recommended shape for user-facing AIR apps.
 
+## Skills
+
+AIR skills package instructions, workflow profile, tool config, capabilities,
+and verification expectations behind one auditable entrypoint. The built-in
+general coding skill lives at `skills/code-agent/`.
+
+```bash
+cargo run -p air-cli -- skill list
+cargo run -p air-cli -- skill validate code-agent
+cargo run -p air-cli -- skill explain code-agent
+cargo run -p air-cli -- skill audit code-agent
+cargo run -p air-cli -- skill run code-agent "refactor a helper and run tests"
+```
+
+External skills should be imported before use:
+
+```bash
+cargo run -p air-cli -- skill import ./some-skill --out skills/vendor/some-skill
+cargo run -p air-cli -- skill audit skills/vendor/some-skill
+```
+
+Import copies files and writes `source.json` / `audit.json`; it does not run
+installer scripts. `skill compile` emits the resolved AIR descriptor that will be
+used for trace and artifact metadata.
+
 ## Project Workflows
 
 For coding work that is larger than one edit loop, AIR has a thin project
@@ -111,9 +136,9 @@ project:
   name: air-project
   goal: refactor the tools crate into smaller modules
 defaults:
-  profile: examples/code-agent/edit.air-profile.yaml
+  profile: skills/code-agent/edit.air-profile.yaml
   model_config: examples/bigmodel-openai-compatible.json
-  tool_config: examples/code-agent/tools.json
+  tool_config: skills/code-agent/tools.json
   artifact_dir: .air/project
 tasks:
   - id: split_file_tools
@@ -142,7 +167,7 @@ The repository intentionally keeps examples focused:
 | --- | --- |
 | `examples/simple-helpdesk/` | One-agent RAG workflow with local document search, model call, typed output, and provider capability check |
 | `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, and parallel execution |
-| `examples/code-agent/` | Bounded coding workflow with exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
+| `skills/code-agent/` | Bounded coding workflow with exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
 
 The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json` and defaults to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. `AIR_MODEL_PROFILE` fills those variables from the selected profile at startup.
 

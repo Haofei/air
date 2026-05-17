@@ -30,15 +30,18 @@ cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.a
 cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --log
 ```
 
-## `code-agent`
+## `skills/code-agent`
 
-A bounded coding-agent proof case. It exposes one OpenCode-style edit loop: the model chooses bounded read/search/edit/format/test tools under AIR policy and trace capture. Deterministic fixtures and alternate tool configs live under `examples/code-agent/fixtures/`.
+A bounded coding-agent skill proof case. It exposes one OpenCode-style edit loop:
+the model chooses bounded search/context/edit/verify tools under AIR policy and
+trace capture. Deterministic fixtures and alternate tool configs live under
+`skills/code-agent/fixtures/`.
 
 Run:
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/code-agent/edit.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/code-agent/edit.air-profile.yaml --log
+cargo run -p air-cli -- skill validate code-agent
+cargo run -p air-cli -- skill explain code-agent
 ```
 
 ## `context-compact`

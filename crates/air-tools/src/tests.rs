@@ -2933,9 +2933,9 @@ fn repo_files_accepts_pattern_alias_for_query() {
 #[test]
 fn repo_files_accepts_pattern_alias_for_glob() {
     let dir = temp_dir("air-tools-repo-files-pattern-glob");
-    fs::create_dir_all(dir.join("examples/code-agent")).unwrap();
+    fs::create_dir_all(dir.join("skills/code-agent")).unwrap();
     fs::create_dir_all(dir.join("src")).unwrap();
-    fs::write(dir.join("examples/code-agent/README.md"), "docs\n").unwrap();
+    fs::write(dir.join("skills/code-agent/README.md"), "docs\n").unwrap();
     fs::write(dir.join("src/lib.rs"), "pub fn alpha() {}\n").unwrap();
     let config_path = write_config(
         &dir,
@@ -2953,13 +2953,13 @@ fn repo_files_accepts_pattern_alias_for_glob() {
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     let output = tools
-        .call_tool("repo.files", &json!({"pattern": "examples/code-agent/**"}))
+        .call_tool("repo.files", &json!({"pattern": "skills/code-agent/**"}))
         .unwrap();
 
-    assert_eq!(output["files"], json!(["examples/code-agent/README.md"]));
+    assert_eq!(output["files"], json!(["skills/code-agent/README.md"]));
     assert_eq!(
         output["file_infos"][0]["path"],
-        json!("examples/code-agent/README.md")
+        json!("skills/code-agent/README.md")
     );
     assert_eq!(output["file_infos"][0]["line_count"], json!(1));
     assert_eq!(output["file_infos"][0]["source_bytes"], json!(5));
@@ -2967,7 +2967,7 @@ fn repo_files_accepts_pattern_alias_for_glob() {
     assert_eq!(output["file_infos"][0]["whole_read_ok"], json!(true));
     assert_eq!(output["query"], json!(""));
     assert_eq!(output["query_source"], json!("none"));
-    assert_eq!(output["glob"], json!("examples/code-agent/**"));
+    assert_eq!(output["glob"], json!("skills/code-agent/**"));
     assert_eq!(output["glob_source"], json!("pattern"));
     assert_eq!(
         output["artifacts"][0]["metadata"]["glob_source"],
@@ -3286,7 +3286,7 @@ fn repo_files_rejects_unknown_mode() {
 #[test]
 fn code_agent_self_tools_validate_project_paths() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let config_path = root.join("examples/code-agent/tools.json");
+    let config_path = root.join("skills/code-agent/tools.json");
     let mut tools = ConfigTools::from_file(config_path).unwrap();
 
     assert_eq!(tools.tool_capability("question"), Some("code.read"));

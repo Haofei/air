@@ -17,6 +17,8 @@ pub(crate) struct CodeRunArtifact {
     pub(crate) schema: String,
     pub(crate) fingerprint: String,
     pub(crate) task: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) skill: Option<CodeRunSkill>,
     pub(crate) profile: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) model_config: Option<String>,
@@ -51,6 +53,21 @@ pub(crate) struct CodeRunArtifactFiles {
     pub(crate) diff: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) subagents: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodeRunSkill {
+    pub(crate) id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) source: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) manifest: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) manifest_sha256: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) audit_risk: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -284,6 +301,7 @@ pub(crate) fn build_code_run_artifact(
         schema: CODE_RUN_ARTIFACT_SCHEMA.to_string(),
         fingerprint,
         task: descriptor.task,
+        skill: descriptor.skill,
         profile: descriptor.profile,
         model_config: descriptor.model_config,
         tool_config: descriptor.tool_config,
@@ -307,6 +325,7 @@ pub(crate) fn build_code_run_artifact(
 #[derive(Debug, Clone)]
 pub(crate) struct CodeRunDescriptor {
     pub(crate) task: String,
+    pub(crate) skill: Option<CodeRunSkill>,
     pub(crate) profile: String,
     pub(crate) model_config: Option<String>,
     pub(crate) tool_config: Option<String>,
@@ -318,6 +337,7 @@ impl CodeRunDescriptor {
         let value = json!({
             "schema": "air.code_run_fingerprint.v1",
             "task": self.task,
+            "skill": self.skill,
             "profile": self.profile,
             "model_config": self.model_config,
             "tool_config": self.tool_config,
@@ -756,6 +776,7 @@ mod tests {
         let delta = before.delta(&after).unwrap();
         let descriptor = CodeRunDescriptor {
             task: "change value".to_string(),
+            skill: None,
             profile: "profile@sha256:test".to_string(),
             model_config: None,
             tool_config: None,
@@ -814,6 +835,7 @@ mod tests {
         let delta = before.delta(&after).unwrap();
         let descriptor = CodeRunDescriptor {
             task: "inspect".to_string(),
+            skill: None,
             profile: "profile@sha256:test".to_string(),
             model_config: None,
             tool_config: None,

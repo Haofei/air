@@ -7,7 +7,7 @@ imports:
 
 modules:
   code.edit@0.1.0:
-    path: examples/code-agent/code-edit-loop.air.yaml
+    path: skills/code-agent/code-edit-loop.air.yaml
     kind: composite
     visibility: public
     description: "Minimal opencode-style code-agent skill using question/bash/search/context/edit/write/task/webfetch/todo/skill tools."
@@ -15,7 +15,7 @@ modules:
     covers: [code_exploration, code_edit, bounded_tool_loop, retest]
     priority: 80
   code.explore@0.1.0:
-    path: examples/code-agent/code-explore-loop.air.yaml
+    path: skills/code-agent/code-explore-loop.air.yaml
     kind: primitive
     visibility: internal
     description: "Non-mutating opencode-style subagent loop for isolated codebase exploration."
@@ -23,7 +23,7 @@ modules:
     covers: [code_exploration, bounded_tool_loop]
     priority: 60
   project.scout@0.1.0:
-    path: examples/code-agent/project-scout-loop.air.yaml
+    path: skills/code-agent/project-scout-loop.air.yaml
     kind: primitive
     visibility: internal
     description: "Internal manifest scout."

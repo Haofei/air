@@ -13,6 +13,14 @@ cargo run -p air-cli -- skill run code-agent "fix the failing add function and r
 There is one built-in skill, one loop, and one default tool set. The default path
 is a direct search/context/edit/verify loop.
 
+The skill manifest is `air-skill.yaml`. Use these commands to inspect it:
+
+```bash
+cargo run -p air-cli -- skill validate code-agent
+cargo run -p air-cli -- skill explain code-agent
+cargo run -p air-cli -- skill audit code-agent
+```
+
 ## Loop
 
 `code-edit-loop.air.yaml` is wired by `code-edit.air-plan.yaml` and
@@ -56,7 +64,7 @@ so the handoff stays concise without losing auditability.
 ```bash
 cargo run -p air-cli -- skill run code-agent "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
-  --tool-config examples/code-agent/tools.json \
+  --tool-config skills/code-agent/tools.json \
   --trace-out target/generated/code-agent.trace.jsonl \
   --log
 ```
@@ -70,6 +78,12 @@ cargo test --workspace code_agent
 The workspace tests validate the minimal profile, check the OpenCode-style
 default tool surface, and run a deterministic edit fixture.
 
+The skill also carries its own benchmark suites under `benches/`:
+
+```bash
+cargo run -p air-cli -- bench code-agent --suite skills/code-agent/benches/rust-small/suite.json --limit 1
+```
+
 ## Code-Run Artifacts
 
 Use `--artifact-out` when you want an auditable, replayable record of one code
@@ -78,7 +92,7 @@ agent run:
 ```bash
 cargo run -p air-cli -- skill run code-agent "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
-  --tool-config examples/code-agent/tools.json \
+  --tool-config skills/code-agent/tools.json \
   --artifact-out target/generated/code-run-artifacts/manual-run
 ```
 

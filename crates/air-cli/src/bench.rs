@@ -3,6 +3,7 @@ use crate::code_artifact::{
     path_content_identity, read_code_run_artifact, replay_code_run_artifact, CodeRunDescriptor,
     CodeRunMode, FailureCategory, FailureReason, WorkspaceSnapshot,
 };
+use crate::skill::resolve_skill_run_metadata;
 use air_runtime::read_trace_jsonl;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -13,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const DEFAULT_CODE_BENCH_SUITE: &str = "benches/code-agent/rust-small/suite.json";
-const DEFAULT_CODE_PROFILE: &str = "examples/code-agent/edit.air-profile.yaml";
+const DEFAULT_CODE_BENCH_SUITE: &str = "skills/code-agent/benches/rust-small/suite.json";
+const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
 const DEFAULT_MODEL_CONFIG: &str = "examples/bigmodel-openai-compatible.json";
 
 pub(crate) struct BenchCodeAgentOptions {
@@ -289,6 +290,7 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
     let trace_path = task_dir.join("trace.jsonl");
     let output_path = task_dir.join("output.json");
     let before = WorkspaceSnapshot::capture(&workdir)?;
+    let skill = resolve_skill_run_metadata("code-agent").ok();
     let artifact_extra = BTreeMap::from([
         ("suite_task_id".to_string(), json!(task.id)),
         (
@@ -299,6 +301,7 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
     ]);
     let descriptor = CodeRunDescriptor {
         task: task.prompt.clone(),
+        skill: skill.clone(),
         profile: path_content_identity(context.profile)?,
         model_config: Some(path_content_identity(context.model_config)?),
         tool_config: Some(path_content_identity(&tool_config)?),
@@ -335,6 +338,7 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
             .with_context(|| format!("enter workdir {}", workdir.display()))?;
         let agent_result = run_code_agent(CodeOptions {
             task: task.prompt.clone(),
+            skill,
             profile: Some(context.profile.to_path_buf()),
             model_config: Some(context.model_config.to_path_buf()),
             trace_out: Some(trace_path.clone()),
@@ -759,7 +763,7 @@ fn default_bench_tool_config(subagent_paths: Option<&BenchSubagentPaths>) -> Str
                         "{air_exe}",
                         "run-plan",
                         "--profile",
-                        paths.repo_root.join("examples/code-agent/explore.air-profile.yaml"),
+                        paths.repo_root.join("skills/code-agent/explore.air-profile.yaml"),
                         "--input",
                         "{input_file}",
                         "--model-config",
@@ -1036,7 +1040,7 @@ mod tests {
     #[test]
     fn subagent_smoke_suite_enables_subagents() {
         let suite: BenchSuite = serde_json::from_str(include_str!(
-            "../../../benches/code-agent/rust-subagent-smoke/suite.json"
+            "../../../skills/code-agent/benches/rust-subagent-smoke/suite.json"
         ))
         .unwrap();
 

@@ -9,9 +9,9 @@ mod planner;
 mod profile;
 mod project;
 mod run_plan;
+mod skill;
 mod tools;
 use crate::bench::{bench_code_agent, BenchCodeAgentOptions};
-use crate::code_agent::{explain_code_skill, list_code_skills, run_code_skill, CodeOptions};
 use crate::diagnostics::emit_diagnostics;
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
@@ -28,6 +28,10 @@ use crate::project::{
 use crate::run_plan::{
     observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
+};
+use crate::skill::{
+    audit_skill, compile_skill, explain_skill, import_skill, list_skills, run_skill,
+    validate_skill, SkillRunOptions,
 };
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
@@ -396,11 +400,43 @@ enum Command {
 
 #[derive(Debug, Subcommand)]
 enum SkillCommand {
-    /// List built-in AIR skills.
+    /// List local AIR skills.
     List,
+    /// Validate an AIR skill manifest.
+    Validate {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+    },
+    /// Audit an AIR skill package without executing it.
+    Audit {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+
+        /// Write audit.json next to the skill manifest.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Import a local folder, git repository, or zip as an AIR skill package.
+    Import {
+        /// Local directory/path, git URL, or zip URL/path.
+        source: String,
+
+        /// Destination skill directory.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Compile a skill manifest into a resolved AIR skill descriptor.
+    Compile {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+
+        /// Optional JSON descriptor output path. Prints JSON when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
+    },
     /// Run an AIR skill from a task prompt.
     Run {
-        /// Skill id, for example code-agent.
+        /// Skill id, manifest path, or skill directory.
         skill: String,
 
         /// Natural-language task.
@@ -448,7 +484,7 @@ enum SkillCommand {
     },
     /// Explain what a skill is allowed to do without running it.
     Explain {
-        /// Skill id, for example code-agent.
+        /// Skill id, manifest path, or skill directory.
         skill: String,
 
         /// Skill run profile override.
@@ -570,7 +606,11 @@ fn main() -> Result<()> {
 
     match cli.command {
         Command::Skill { command } => match command {
-            SkillCommand::List => list_code_skills(),
+            SkillCommand::List => list_skills(),
+            SkillCommand::Validate { skill } => validate_skill(&skill),
+            SkillCommand::Audit { skill, write } => audit_skill(&skill, write),
+            SkillCommand::Import { source, out } => import_skill(&source, &out),
+            SkillCommand::Compile { skill, output } => compile_skill(&skill, output),
             SkillCommand::Run {
                 skill,
                 task,
@@ -584,24 +624,21 @@ fn main() -> Result<()> {
                 artifact_out,
                 replay_artifact,
                 replay_from,
-            } => run_code_skill(
-                &skill,
-                CodeOptions {
-                    task,
-                    profile,
-                    model_config,
-                    trace_out,
-                    trace_redact,
-                    trace_raw,
-                    log,
-                    tool_config,
-                    artifact_out,
-                    artifact_extra: std::collections::BTreeMap::new(),
-                    replay_artifact,
-                    replay_from,
-                },
-            ),
-            SkillCommand::Explain { skill, profile } => explain_code_skill(&skill, profile),
+            } => run_skill(SkillRunOptions {
+                reference: skill,
+                task,
+                profile_override: profile,
+                model_config,
+                trace_out,
+                trace_redact,
+                trace_raw,
+                log,
+                tool_config_override: tool_config,
+                artifact_out,
+                replay_artifact,
+                replay_from,
+            }),
+            SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
         },
         Command::Bench { command } => match command {
             BenchCommand::CodeAgent {
@@ -1275,7 +1312,7 @@ mod tests {
     fn planner_request_does_not_force_code_edit_loop_for_open_ended_questions() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
-            root.join("examples/code-agent/module-store.air-store.yaml"),
+            root.join("skills/code-agent/module-store.air-store.yaml"),
         )
         .unwrap();
         let catalog = module_catalog(&store, &root, true).unwrap();
@@ -1303,7 +1340,7 @@ mod tests {
     fn planner_request_ranks_code_edit_loop_for_plan_act_observe_tasks() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
-            root.join("examples/code-agent/module-store.air-store.yaml"),
+            root.join("skills/code-agent/module-store.air-store.yaml"),
         )
         .unwrap();
         let catalog = module_catalog(&store, &root, true).unwrap();
@@ -1331,7 +1368,7 @@ mod tests {
     fn planner_request_routes_code_agent_task_shapes_to_matching_components() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
-            root.join("examples/code-agent/module-store.air-store.yaml"),
+            root.join("skills/code-agent/module-store.air-store.yaml"),
         )
         .unwrap();
 
@@ -1374,7 +1411,7 @@ mod tests {
     fn planner_request_hides_unmatched_code_agent_components_from_recommendations() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
         let store = air_linker::parse_module_store_file(
-            root.join("examples/code-agent/module-store.air-store.yaml"),
+            root.join("skills/code-agent/module-store.air-store.yaml"),
         )
         .unwrap();
         let catalog = module_catalog(&store, &root, true).unwrap();
@@ -1572,8 +1609,8 @@ mod tests {
         fs::create_dir_all(fixture_root.join("examples")).unwrap();
         fs::create_dir_all(fixture_root.join("modules")).unwrap();
         copy_dir_recursive(
-            &root.join("examples/code-agent"),
-            &fixture_root.join("examples/code-agent"),
+            &root.join("skills/code-agent"),
+            &fixture_root.join("skills/code-agent"),
         );
         copy_dir_recursive(&root.join("modules/std"), &fixture_root.join("modules/std"));
 
@@ -1596,15 +1633,15 @@ mod tests {
         assert!(git_add.success());
 
         let result = run_plan_with_inputs_capture(
-            fixture_root.join("examples/code-agent/code-edit.air-plan.yaml"),
-            fixture_root.join("examples/code-agent/module-store.air-store.yaml"),
+            fixture_root.join("skills/code-agent/code-edit.air-plan.yaml"),
+            fixture_root.join("skills/code-agent/module-store.air-store.yaml"),
             serde_json::Map::from_iter([(
                 "task".to_string(),
                 json!("fix the failing add function and retest"),
             )]),
             RunPlanExecutionOptions {
                 model_config: Some(
-                    fixture_root.join("examples/code-agent/fixtures/model-fixtures.json"),
+                    fixture_root.join("skills/code-agent/fixtures/model-fixtures.json"),
                 ),
                 trace_out: Some(trace_path.clone()),
                 trace_redact: false,
@@ -1614,7 +1651,7 @@ mod tests {
                 parallel: false,
                 log: false,
                 example_tools: false,
-                tool_config: Some(fixture_root.join("examples/code-agent/tools.json")),
+                tool_config: Some(fixture_root.join("skills/code-agent/tools.json")),
                 model_replay: None,
             },
         )
@@ -1626,7 +1663,7 @@ mod tests {
         assert!(edit["workspace_diff"]["diff"]
             .as_str()
             .unwrap()
-            .contains("examples/code-agent/edit-fixture/math.js"));
+            .contains("skills/code-agent/edit-fixture/math.js"));
 
         let trace = read_trace_jsonl(&trace_path).unwrap();
         let first_decider = trace
@@ -1799,6 +1836,20 @@ mod tests {
 
         assert_eq!(skill, "code-agent");
         assert_eq!(profile, None);
+    }
+
+    #[test]
+    fn skill_validate_audit_compile_parse() {
+        for args in [
+            ["air", "skill", "validate", "code-agent"].as_slice(),
+            ["air", "skill", "audit", "code-agent"].as_slice(),
+            ["air", "skill", "compile", "code-agent"].as_slice(),
+        ] {
+            let cli = Cli::try_parse_from(args).unwrap();
+            let Command::Skill { .. } = cli.command else {
+                panic!("expected skill command");
+            };
+        }
     }
 
     #[test]
@@ -2275,7 +2326,7 @@ modules:
             "plan",
             "--explain",
             "--store",
-            "examples/code-agent/module-store.air-store.yaml",
+            "skills/code-agent/module-store.air-store.yaml",
             "--task",
             "Explore the command_run implementation",
         ])
@@ -2300,7 +2351,7 @@ modules:
             "air",
             "plan",
             "--store",
-            "examples/code-agent/module-store.air-store.yaml",
+            "skills/code-agent/module-store.air-store.yaml",
             "--task",
             "Explore the command_run implementation",
         ])

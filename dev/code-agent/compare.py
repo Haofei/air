@@ -40,7 +40,7 @@ DEFAULT_TASK = (
     "air-tools tests."
 )
 DEFAULT_MODEL_CONFIG = "examples/bigmodel-openai-compatible.json"
-DEFAULT_TOOL_CONFIG = "examples/code-agent/tools.json"
+DEFAULT_TOOL_CONFIG = "skills/code-agent/tools.json"
 DEFAULT_MODIFIED_OPENCODE = Path("/Users/hwang/work/opencode/packages/opencode/src/index.ts")
 DEFAULT_BUN = Path("/Users/hwang/.bun/bin/bun")
 ACTION_TOOLS = {"apply_patch", "edit", "write"}

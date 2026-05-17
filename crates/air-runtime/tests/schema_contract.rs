@@ -495,7 +495,7 @@ fn evaluates_composable_input_expressions() {
             "recent_notes_budgeted": ["second", "third"],
             "changed_files": [
                 "crates/air-tools/src/lib.rs",
-                "examples/code-agent/code-edit-loop.air.yaml"
+                "skills/code-agent/code-edit-loop.air.yaml"
             ]
         })
     );

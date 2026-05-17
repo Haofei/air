@@ -673,7 +673,7 @@ mod tests {
 
     fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
         let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
-        for relative in ["examples/code-agent/code-edit-loop.air.yaml"] {
+        for relative in ["skills/code-agent/code-edit-loop.air.yaml"] {
             let module = air_parser::parse_air_file(root.join(relative)).unwrap();
             for (alias, required) in model_output_required_keys_by_alias(&module) {
                 requirements.entry(alias).or_default().extend(required);

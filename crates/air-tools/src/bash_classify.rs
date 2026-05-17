@@ -296,7 +296,7 @@ mod tests {
             Some("Run command")
         ));
         assert!(is_verification_bash_command(
-            "node examples/code-agent/edit-fixture/test.js",
+            "node skills/code-agent/edit-fixture/test.js",
             Some("Run command")
         ));
         assert!(!is_verification_bash_command(
