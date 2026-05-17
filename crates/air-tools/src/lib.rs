@@ -11,6 +11,7 @@ use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod apply_patch_tools;
+mod command_config;
 mod command_diagnostics;
 mod context_tools;
 mod edit_tools;
@@ -32,6 +33,7 @@ use repo_symbols::{call_repo_symbols_tool, parse_symbol_declaration};
 mod rust_lsp_tools;
 use rust_lsp_tools::{call_lsp_diagnostics_tool, call_lsp_references_tool, RustAnalyzerSession};
 mod command_run;
+use command_config::{CommandParameterRule, CommandRunOptions, TruncationDirection};
 use command_run::{call_bash_tool, call_command_run_tool};
 mod playwright;
 use playwright::{
@@ -473,41 +475,6 @@ enum ToolConfig {
         #[serde(default)]
         truncation_direction: Option<TruncationDirection>,
     },
-}
-
-#[derive(Debug, Clone, Copy, Deserialize)]
-#[serde(rename_all = "snake_case")]
-enum TruncationDirection {
-    Head,
-    Tail,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct CommandRunOptions {
-    timeout_seconds: u64,
-    max_bytes: usize,
-    truncation_direction: TruncationDirection,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct CommandParameterRule {
-    #[serde(default)]
-    values: Option<Vec<String>>,
-
-    #[serde(default)]
-    max_chars: Option<usize>,
-
-    #[serde(default)]
-    allow: CommandParameterAllow,
-}
-
-#[derive(Debug, Clone, Copy, Deserialize, Default)]
-#[serde(rename_all = "snake_case")]
-enum CommandParameterAllow {
-    Identifier,
-    Path,
-    #[default]
-    SafeArg,
 }
 
 impl ToolConfig {

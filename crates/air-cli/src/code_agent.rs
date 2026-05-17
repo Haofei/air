@@ -329,4 +329,26 @@ mod tests {
             serde_yaml::Value::Bool(true)
         );
     }
+
+    #[test]
+    fn edit_loop_requires_verification_before_completion_after_patch() {
+        let module = code_edit_loop_module();
+        let rules = module["workflow"]["rules"].as_sequence().unwrap();
+
+        let needs_verification = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("complete-needs-verification"))
+            .unwrap();
+        let needs_verification_condition = needs_verification["when"].as_str().unwrap();
+        assert!(needs_verification_condition.contains("verification_status != \"passed\""));
+        assert!(!needs_verification_condition.contains("patch_applied != true"));
+
+        let complete_verified = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("complete-verified"))
+            .unwrap();
+        let complete_verified_condition = complete_verified["when"].as_str().unwrap();
+        assert!(complete_verified_condition.contains("verification_status == \"passed\""));
+        assert!(!complete_verified_condition.contains("patch_applied == true"));
+    }
 }

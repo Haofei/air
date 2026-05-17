@@ -13,10 +13,10 @@ use super::bash_classify::{
     forbidden_git_workspace_command, is_verification_bash_command,
     normalize_bash_verification_result,
 };
+use super::command_config::{CommandParameterAllow, CommandParameterRule, CommandRunOptions};
 use super::command_diagnostics::extract_command_diagnostics;
 use super::{
     bytes_to_limited_text_with_direction, canonicalize_tool_path, validate_relative_path_filter,
-    CommandParameterAllow, CommandParameterRule, CommandRunOptions,
 };
 
 pub(super) fn call_command_run_tool(

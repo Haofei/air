@@ -291,7 +291,7 @@ workflow:
             phase: choose
 
     - id: complete-needs-verification
-      when: phase == "act" && decision.complete == true && verification_status != "passed" && patch_applied != true
+      when: phase == "act" && decision.complete == true && verification_status != "passed"
       actions:
         - kind: append
           target: observations
@@ -306,7 +306,7 @@ workflow:
             phase: verify
 
     - id: complete-verified
-      when: phase == "act" && decision.complete == true && verification_status == "passed" || phase == "act" && decision.complete == true && patch_applied == true
+      when: phase == "act" && decision.complete == true && verification_status == "passed"
       actions:
         - kind: set
           values:
