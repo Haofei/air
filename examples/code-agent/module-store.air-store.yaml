@@ -22,3 +22,11 @@ modules:
     tags: [coding, explore, subagent, read_only]
     covers: [code_exploration, bounded_tool_loop]
     priority: 60
+  project.scout@0.1.0:
+    path: examples/code-agent/project-scout-loop.air.yaml
+    kind: primitive
+    visibility: internal
+    description: "Internal manifest scout."
+    tags: [project_manifest]
+    covers: [project_manifest]
+    priority: 0

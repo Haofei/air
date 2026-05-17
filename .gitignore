@@ -1,6 +1,7 @@
 /target/
 .air/tool-output/
 .air/subagents/
+.air/project/
 traces/
 .venv/
 node_modules/

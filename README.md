@@ -80,6 +80,60 @@ Switch providers by changing only `AIR_MODEL_PROFILE` to `glm` or `local`. If yo
 
 The profile packages a RunPlan, module store, input, model config, and tool config. It is the recommended shape for user-facing AIR apps.
 
+## Project Workflows
+
+For coding work that is larger than one edit loop, AIR has a thin project
+orchestrator. The project layer does not replace `air code`; it gives a larger
+task an explicit manifest, task DAG, per-task verification, diff constraints,
+status, and artifact-backed replay surface.
+
+```bash
+cargo run -p air-cli -- project plan "refactor the tools crate into smaller modules" \
+  --output air-project.yaml
+
+cargo run -p air-cli -- project run --log
+cargo run -p air-cli -- project status
+cargo run -p air-cli -- project verify
+```
+
+`air-project.yaml` is intentionally editable:
+
+`project plan` first runs a bounded read-only project scout that can freely use
+glob, grep, LSP, and narrow reads for the specific goal, then passes that
+handoff to the `project_planner` model from
+`examples/bigmodel-openai-compatible.json`. The output should be a task DAG, not
+a single static scaffold. Use `--template` only when you explicitly want an
+offline one-task starter file.
+
+```yaml
+schema: air.project.v1
+project:
+  name: air-project
+  goal: refactor the tools crate into smaller modules
+defaults:
+  profile: examples/code-agent/edit.air-profile.yaml
+  model_config: examples/bigmodel-openai-compatible.json
+  tool_config: examples/code-agent/tools.json
+  artifact_dir: .air/project
+tasks:
+  - id: split_file_tools
+    goal: split file read/write/edit helpers into focused modules
+    depends_on: []
+    allowed_files: ["crates/air-tools/src/**"]
+    forbidden_files: ["target/**"]
+    verification:
+      - command: cargo test -p air-tools
+    success_conditions:
+      required_changed_files: ["crates/air-tools/src/lib.rs"]
+      required_diff_contains: ["mod file"]
+    max_changed_files: 8
+    max_diff_lines: 400
+```
+
+Each task runs through the normal code agent and writes a code-run artifact under
+`.air/project/tasks/<task-id>/artifact`. `status` and `verify` read those
+artifacts and do not call a model.
+
 ## Examples
 
 The repository intentionally keeps examples focused:

@@ -7,6 +7,7 @@ mod explain;
 mod models;
 mod planner;
 mod profile;
+mod project;
 mod run_plan;
 mod tools;
 use crate::bench::{bench_code_agent, BenchCodeAgentOptions};
@@ -19,6 +20,10 @@ use crate::planner::{
     ValidatePlanOptions,
 };
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
+use crate::project::{
+    default_project_file, project_plan, project_run, project_status, project_verify,
+    ProjectPlanOptions, ProjectRunOptions, ProjectStatusOptions, ProjectVerifyOptions,
+};
 use crate::run_plan::{
     observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
@@ -137,6 +142,11 @@ enum Command {
     Bench {
         #[command(subcommand)]
         command: BenchCommand,
+    },
+    /// Run bounded multi-task coding projects.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
     },
     /// Parse and statically verify an AIR module.
     #[command(hide = true)]
@@ -469,6 +479,61 @@ enum BenchCommand {
     },
 }
 
+#[derive(Debug, Subcommand)]
+enum ProjectCommand {
+    /// Create an editable AIR project manifest draft.
+    Plan {
+        /// Project goal to turn into an editable task manifest.
+        goal: String,
+
+        /// Output project manifest path. Prints YAML to stdout when omitted.
+        #[arg(long)]
+        output: Option<PathBuf>,
+
+        /// OpenAI-compatible model config JSON for project task decomposition.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Planner model alias from --model-config.
+        #[arg(long, default_value = "project_planner")]
+        planner_model: String,
+
+        /// Only write a one-task manifest template without calling a model.
+        #[arg(long)]
+        template: bool,
+    },
+    /// Run pending project tasks in dependency order, or one selected task.
+    Run {
+        /// Project manifest path.
+        #[arg(long, default_value_os_t = default_project_file())]
+        file: PathBuf,
+
+        /// Run one task id instead of all pending tasks.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Print AIR execution logs while tasks run.
+        #[arg(long)]
+        log: bool,
+    },
+    /// Show project task state without calling a model.
+    Status {
+        /// Project manifest path.
+        #[arg(long, default_value_os_t = default_project_file())]
+        file: PathBuf,
+    },
+    /// Re-run deterministic verification and diff constraints without calling a model.
+    Verify {
+        /// Project manifest path.
+        #[arg(long, default_value_os_t = default_project_file())]
+        file: PathBuf,
+
+        /// Verify one task id instead of all tasks.
+        #[arg(long)]
+        task: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
     load_dotenv();
     let cli = Cli::parse();
@@ -524,6 +589,28 @@ fn main() -> Result<()> {
                 keep_workdirs,
                 refresh,
             }),
+        },
+        Command::Project { command } => match command {
+            ProjectCommand::Plan {
+                goal,
+                output,
+                model_config,
+                planner_model,
+                template,
+            } => project_plan(ProjectPlanOptions {
+                goal,
+                output,
+                model_config,
+                planner_model,
+                template,
+            }),
+            ProjectCommand::Run { file, task, log } => {
+                project_run(ProjectRunOptions { file, task, log })
+            }
+            ProjectCommand::Status { file } => project_status(ProjectStatusOptions { file }),
+            ProjectCommand::Verify { file, task } => {
+                project_verify(ProjectVerifyOptions { file, task })
+            }
         },
         Command::Validate { file } => validate(file),
         Command::ValidateSystem { file } => validate_system(file),

@@ -1,0 +1,177 @@
+agent:
+  name: project-scout-agent
+  version: 0.1.0
+  description: "Internal manifest scout."
+
+inputs:
+  task: string
+
+outputs:
+  result:
+    type: object
+    required: [answer]
+    properties:
+      answer: string
+      decision: object
+
+requires:
+  capabilities: [file.read, code.read]
+
+policy:
+  max_model_calls: 60
+  max_tool_calls: 600
+
+state:
+  phase:
+    type: enum
+    enum: [init, choose, act, done]
+  observations:
+    type: array
+    items: object
+  decision:
+    type: object
+    required: [complete, tool_calls]
+    properties:
+      complete: boolean
+      tool_calls:
+        type: array
+        items:
+          type: object
+          required: [tool, input]
+          properties:
+            tool: string
+            input: object
+  observation:
+    type: array
+    items: object
+  result:
+    type: object
+    required: [answer]
+    properties:
+      answer: string
+      decision: object
+
+tools:
+  - name: question
+    capability: code.read
+    timeout_ms: 10000
+  - name: grep
+    capability: file.read
+    timeout_ms: 10000
+  - name: glob
+    capability: code.read
+    timeout_ms: 10000
+  - name: lsp
+    capability: code.read
+    timeout_ms: 30000
+  - name: read
+    capability: file.read
+    timeout_ms: 10000
+  - name: webfetch
+    capability: code.read
+    timeout_ms: 120000
+  - name: skill
+    capability: code.read
+    timeout_ms: 10000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 200
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: set
+          values:
+            observations: []
+            phase: choose
+
+    - id: summarize-boundary
+      when: phase == "choose" && _air.step >= 24
+      actions:
+        - kind: model_call
+          model: project_scout_summarizer
+          input:
+            object:
+              task:
+                ref: task
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_bytes: 200000
+          output: result
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: done
+
+    - id: choose
+      when: phase == "choose"
+      actions:
+        - kind: model_call
+          model: project_scout_decider
+          input:
+            object:
+              task:
+                ref: task
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_bytes: 200000
+              allowed_tools:
+                literal: [question, grep, glob, lsp, read, webfetch, skill]
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: act
+
+    - id: act
+      when: phase == "act" && decision.complete == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            path: decision.tool_calls
+          output: observation
+          max_calls: 16
+          timeout_seconds: 120
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: tool_result
+              assistant:
+                ref: decision
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: complete
+      when: phase == "act" && decision.complete == true
+      actions:
+        - kind: set
+          values:
+            result:
+              object:
+                answer:
+                  ref: decision._air_assistant.content
+                decision:
+                  ref: decision
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: result

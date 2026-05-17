@@ -1,0 +1,24 @@
+plan:
+  name: project-scout
+  version: 0.1.0
+description: "Read-only project planning scout."
+
+requires:
+  capabilities: [file.read, code.read]
+
+nodes:
+  - id: scout
+    module: project.scout@0.1.0
+
+entry: scout
+
+connect:
+  - from: $input.task
+    to: scout.task
+outputs:
+  result: scout.result
+
+decisions:
+  - id: choose-project-scout
+    rationale: "Run the bounded read-only project scout."
+    selected: [scout]
