@@ -49,6 +49,11 @@ mod http_tools;
 use http_tools::{
     call_http_json_tool, call_web_fetch_tool, HttpJsonToolConfig, WebFetchToolConfig,
 };
+mod observations;
+use observations::{
+    annotate_search_progress, observe_file_read_output, observed_tool_key, repeated_search_output,
+    search_observation_from_output, ReadObservation, SearchObservation,
+};
 mod artifact_tools;
 use artifact_tools::call_artifact_validate_tool;
 mod bash_classify;
@@ -550,22 +555,6 @@ pub struct ConfigTools {
     rust_analyzer_sessions: BTreeMap<String, RustAnalyzerSession>,
 }
 
-#[derive(Debug, Clone, Copy)]
-struct ReadObservation {
-    start_line: usize,
-    end_line: usize,
-    complete: bool,
-    snapshot: ReadSnapshot,
-}
-
-#[derive(Debug, Clone)]
-struct SearchObservation {
-    path: String,
-    pattern: String,
-    match_count: u64,
-    returned_match_count: u64,
-}
-
 impl Clone for ConfigTools {
     fn clone(&self) -> Self {
         Self {
@@ -658,76 +647,6 @@ impl ConfigTools {
         self.search_no_match_streak = 0;
     }
 
-    fn remember_read_observation(
-        &mut self,
-        path: &Path,
-        snapshot: ReadSnapshot,
-        start_line: usize,
-        end_line: usize,
-        complete: bool,
-    ) -> Result<(), RuntimeError> {
-        let path = fs::canonicalize(path).map_err(|error| {
-            RuntimeError::Provider(format!("tool file snapshot canonicalize path: {error}"))
-        })?;
-        self.read_snapshots.insert(path.clone(), snapshot);
-        self.read_observations
-            .entry(path)
-            .or_default()
-            .push(ReadObservation {
-                start_line,
-                end_line,
-                complete,
-                snapshot,
-            });
-        Ok(())
-    }
-
-    fn covered_read_observation(
-        &self,
-        path: &Path,
-        snapshot: ReadSnapshot,
-        start_line: usize,
-        end_line: usize,
-    ) -> Option<ReadObservation> {
-        self.read_observations
-            .get(path)?
-            .iter()
-            .copied()
-            .find(|seen| {
-                seen.complete
-                    && seen.snapshot == snapshot
-                    && seen.start_line == start_line
-                    && seen.end_line == end_line
-            })
-    }
-
-    fn observe_file_read_output(
-        &mut self,
-        name: &str,
-        output: &Value,
-    ) -> Result<Option<Value>, RuntimeError> {
-        let Some(path) = output.get("path").and_then(Value::as_str) else {
-            return Ok(None);
-        };
-        let path = Path::new(path);
-        let snapshot = read_snapshot(name, "input.path", path)?;
-        let (start_line, end_line) = extract_read_line_range(output);
-        if let Some(covered_by) =
-            self.covered_read_observation(path, snapshot, start_line, end_line)
-        {
-            self.read_snapshots.insert(path.to_path_buf(), snapshot);
-            return Ok(Some(repeated_read_output(
-                output, start_line, end_line, covered_by,
-            )));
-        }
-        let complete = !output
-            .get("truncated")
-            .and_then(Value::as_bool)
-            .unwrap_or(false);
-        self.remember_read_observation(path, snapshot, start_line, end_line, complete)?;
-        Ok(None)
-    }
-
     fn rust_analyzer_session(
         &mut self,
         tool_name: &str,
@@ -745,183 +664,6 @@ impl ConfigTools {
                 "tool {tool_name} failed to cache rust-analyzer session"
             ))
         })
-    }
-
-    fn annotate_search_progress(&mut self, mut output: Value) -> Value {
-        if search_output_no_matches(&output) {
-            self.search_no_match_streak = self.search_no_match_streak.saturating_add(1);
-            insert_output_field(
-                &mut output,
-                "no_match_streak",
-                Value::from(self.search_no_match_streak),
-            );
-            if self.search_no_match_streak >= 2 {
-                append_output_search_hint(
-                    &mut output,
-                    "Several recent searches returned no matches; broaden the search strategy, inspect the project file list, or switch to a more likely source/test extension instead of repeating this direction.",
-                );
-            }
-        } else if search_output_has_positive_results(&output) {
-            self.search_no_match_streak = 0;
-        }
-        output
-    }
-}
-
-const SEARCH_COUNT_FIELDS: &[&str] = &["match_count", "file_count", "returned_match_count"];
-const SEARCH_ARRAY_FIELDS: &[&str] = &["matches", "files", "symbols", "references", "locations"];
-
-fn search_output_no_matches(output: &Value) -> bool {
-    output
-        .get("no_matches")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-}
-
-fn any_search_count_positive(output: &Value) -> bool {
-    SEARCH_COUNT_FIELDS
-        .iter()
-        .any(|&field| output.get(field).and_then(Value::as_u64).unwrap_or(0) > 0)
-}
-
-fn any_search_array_nonempty(output: &Value) -> bool {
-    SEARCH_ARRAY_FIELDS.iter().any(|&field| {
-        output
-            .get(field)
-            .and_then(Value::as_array)
-            .is_some_and(|items| !items.is_empty())
-    })
-}
-
-fn search_output_has_positive_results(output: &Value) -> bool {
-    !search_output_no_matches(output)
-        && (any_search_count_positive(output) || any_search_array_nonempty(output))
-}
-
-fn insert_output_field(output: &mut Value, key: &str, value: Value) {
-    if let Some(object) = output.as_object_mut() {
-        object.insert(key.to_string(), value);
-    }
-}
-
-fn append_output_search_hint(output: &mut Value, hint: &str) {
-    let Some(object) = output.as_object_mut() else {
-        return;
-    };
-    let existing = object
-        .get("search_hint")
-        .and_then(Value::as_str)
-        .unwrap_or_default();
-    let next = if existing.trim().is_empty() {
-        hint.to_string()
-    } else if existing.contains(hint) {
-        existing.to_string()
-    } else {
-        format!("{existing} {hint}")
-    };
-    object.insert("search_hint".to_string(), Value::String(next));
-}
-
-fn observed_tool_key(generation: u64, name: &str, input: &Value) -> String {
-    let input = serde_json::to_string(input).unwrap_or_else(|_| "<unserializable>".to_string());
-    format!("{generation}\n{name}\n{input}")
-}
-
-fn extract_read_line_range(output: &Value) -> (usize, usize) {
-    let total_lines = output
-        .get("total_lines")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    let start_line = output
-        .get("start_line")
-        .and_then(Value::as_u64)
-        .map(|line| line as usize)
-        .unwrap_or(1);
-    let end_line = output
-        .get("end_line")
-        .and_then(Value::as_u64)
-        .map(|line| line as usize)
-        .unwrap_or(total_lines);
-    (start_line, end_line)
-}
-
-fn repeated_read_output(
-    previous_output: &Value,
-    start_line: usize,
-    end_line: usize,
-    covered_by: ReadObservation,
-) -> Value {
-    json!({
-        "path": previous_output.get("path").cloned().unwrap_or(Value::Null),
-        "start_line": start_line,
-        "end_line": end_line,
-        "total_lines": previous_output.get("total_lines").cloned().unwrap_or(Value::Null),
-        "no_new_information": true,
-        "already_read": true,
-        "covered_by": {
-            "start_line": covered_by.start_line,
-            "end_line": covered_by.end_line
-        },
-        "message": "This line range is already covered by a previous read and the file has not changed. Use the prior context, request a different line range, or edit based on the existing evidence.",
-        "artifacts": [{
-            "kind": "tool_notice",
-            "title": "read skipped: already covered",
-            "content": "No new file content returned because this unchanged line range was already read.",
-            "metadata": {
-                "provider": "file_read",
-                "no_new_information": true,
-                "already_read": true,
-                "covered_start_line": covered_by.start_line,
-                "covered_end_line": covered_by.end_line
-            }
-        }]
-    })
-}
-
-fn repeated_search_output(previous: &SearchObservation) -> Value {
-    json!({
-        "path": previous.path.clone(),
-        "pattern": previous.pattern.clone(),
-        "match_count": previous.match_count,
-        "returned_match_count": previous.returned_match_count,
-        "no_new_information": true,
-        "already_seen": true,
-        "message": "This exact search was already run for the current workspace state. Use the previous matches, narrow the query, or edit based on the existing evidence.",
-        "artifacts": [{
-            "kind": "tool_notice",
-            "title": "search skipped: already seen",
-            "content": "No match list returned because this exact search was already run.",
-            "metadata": {
-                "provider": "file_search",
-                "no_new_information": true,
-                "already_seen": true,
-                "match_count": previous.match_count,
-                "returned_match_count": previous.returned_match_count
-            }
-        }]
-    })
-}
-
-fn search_observation_from_output(output: &Value) -> SearchObservation {
-    SearchObservation {
-        path: output
-            .get("path")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        pattern: output
-            .get("pattern")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string(),
-        match_count: output
-            .get("match_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
-        returned_match_count: output
-            .get("returned_match_count")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
     }
 }
 
@@ -1083,7 +825,12 @@ impl ToolProvider for ConfigTools {
                 let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
                 let output =
                     call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))?;
-                if let Some(repeated_output) = self.observe_file_read_output(name, &output)? {
+                if let Some(repeated_output) = observe_file_read_output(
+                    &mut self.read_snapshots,
+                    &mut self.read_observations,
+                    name,
+                    &output,
+                )? {
                     return Ok(repeated_output);
                 }
                 Ok(output)
@@ -1137,7 +884,10 @@ impl ToolProvider for ConfigTools {
                 )?;
                 self.search_observations
                     .insert(observation_key, search_observation_from_output(&output));
-                Ok(self.annotate_search_progress(output))
+                Ok(annotate_search_progress(
+                    &mut self.search_no_match_streak,
+                    output,
+                ))
             }
             ToolConfig::FileWrite {
                 capability: _,
@@ -1229,7 +979,10 @@ impl ToolProvider for ConfigTools {
                     &resolve_config_path(&self.workspace_dir, &repo_dir),
                     max_files.unwrap_or(200),
                 )?;
-                Ok(self.annotate_search_progress(output))
+                Ok(annotate_search_progress(
+                    &mut self.search_no_match_streak,
+                    output,
+                ))
             }
             ToolConfig::RepoSearch {
                 capability: _,
@@ -1245,7 +998,10 @@ impl ToolProvider for ConfigTools {
                     max_matches.unwrap_or(80),
                     max_bytes.unwrap_or(256 * 1024),
                 )?;
-                Ok(self.annotate_search_progress(output))
+                Ok(annotate_search_progress(
+                    &mut self.search_no_match_streak,
+                    output,
+                ))
             }
             ToolConfig::RepoContext {
                 capability: _,
@@ -1265,7 +1021,10 @@ impl ToolProvider for ConfigTools {
                     context_lines.unwrap_or(6),
                     max_bytes.unwrap_or(256 * 1024),
                 )?;
-                Ok(self.annotate_search_progress(output))
+                Ok(annotate_search_progress(
+                    &mut self.search_no_match_streak,
+                    output,
+                ))
             }
             ToolConfig::RepoSymbols {
                 capability: _,
