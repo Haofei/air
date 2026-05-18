@@ -97,6 +97,8 @@ pub(super) struct ProjectTask {
     #[serde(default)]
     pub(super) depends_on: Vec<String>,
     #[serde(default)]
+    pub(super) skills: Vec<String>,
+    #[serde(default)]
     pub(super) allowed_files: Vec<String>,
     #[serde(default)]
     pub(super) forbidden_files: Vec<String>,

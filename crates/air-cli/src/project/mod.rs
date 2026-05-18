@@ -5,7 +5,9 @@ use crate::code_artifact::{
 };
 use crate::models::ModelProviderChoice;
 use crate::run_plan::{run_plan_capture, RunPlanOptions};
-use crate::skill::resolve_skill_run_metadata;
+use crate::skill::{
+    prepare_skill_composition, resolve_skill_run_metadata, route_skills_value_for_task,
+};
 use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -167,6 +169,7 @@ fn project_template_manifest(goal: String, defaults: ProjectDefaults) -> Project
             id: "task_001".to_string(),
             goal,
             depends_on: Vec::new(),
+            skills: Vec::new(),
             allowed_files: Vec::new(),
             forbidden_files: Vec::new(),
             verification: vec![ProjectVerificationCommand {
@@ -257,6 +260,7 @@ pub(crate) fn project_status(options: ProjectStatusOptions) -> Result<()> {
                 "id": task.id,
                 "status": status,
                 "depends_on": task.depends_on,
+                "skills": task.skills,
                 "artifact_path": task_state.map(|state| state.artifact_path.clone()),
                 "artifact_snapshot_matches_current": task_state.map(|state| state.artifact_snapshot_matches_current),
                 "worktree_path": task_state.and_then(|state| state.worktree_path.clone()),
@@ -643,9 +647,12 @@ impl ProjectTaskRunOutput {
 }
 
 fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) -> Result<Value> {
+    let available_skills =
+        route_skills_value_for_task(goal, 5).unwrap_or_else(|_| json!({ "instructions": [] }));
     Ok(json!({
         "goal": goal.trim(),
         "explorer_handoff": exploration,
+        "available_instruction_skills": available_skills,
         "repo": {
             "root": repo_root.display().to_string()
         },
@@ -665,6 +672,7 @@ fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) ->
                 "id": "lower_snake_case_task_id",
                 "goal": "one concrete coding task for the code-agent skill, including concrete file/symbol/line-range evidence from explorer_handoff when available",
                 "depends_on": [],
+                "skills": ["instruction-skill-id"],
                 "allowed_files": ["glob-like/path/**"],
                 "forbidden_files": ["target/**", ".air/**"],
                 "verification": [{"command": "cargo test -p crate-name", "description": "focused verification"}],
@@ -680,6 +688,7 @@ fn project_planner_request(goal: &str, repo_root: &Path, exploration: &Value) ->
             "Return exactly one JSON object matching output_contract; no markdown.",
             "Use explorer_handoff as the repository evidence. Do not assume the CLI already scanned the repository.",
             "Preserve useful file paths, symbol names, and line ranges from explorer_handoff directly in each task goal so the code agent can inspect targeted spans instead of rediscovering context.",
+            "For skills, recommend only installed instruction skill ids that directly help the task. Leave skills empty when no skill is clearly useful. Do not include the code-agent executor skill in task skills.",
             "Split the project into 2-8 well-scoped coding tasks when the goal is larger than a single edit.",
             "Use depends_on to form a DAG; avoid cycles.",
             "Each task must be executable by the existing code-agent skill edit loop.",
@@ -790,6 +799,9 @@ fn normalize_project_manifest(
         .map(|task| task.id.clone())
         .collect::<BTreeSet<_>>();
     for task in &mut manifest.tasks {
+        task.skills.retain(|skill| !skill.trim().is_empty());
+        task.skills.sort();
+        task.skills.dedup();
         for dep in &mut task.depends_on {
             if let Some(new_id) = old_to_new_ids.get(dep) {
                 *dep = new_id.clone();
@@ -868,12 +880,18 @@ fn run_project_task(
         &context.manifest.defaults.tool_config,
     );
     let trace_path = artifact_dir.join("trace.jsonl");
-    let artifact_extra = BTreeMap::from([
+    let prepared_skills = if task.skills.is_empty() {
+        None
+    } else {
+        Some(prepare_skill_composition(&task.skills)?)
+    };
+    let mut artifact_extra = BTreeMap::from([
         (
             "project_file".to_string(),
             json!(context.manifest_path.display().to_string()),
         ),
         ("project_task_id".to_string(), json!(task.id)),
+        ("project_task_skills".to_string(), json!(task.skills)),
         (
             "project_task_worktree".to_string(),
             json!(worktree_dir.display().to_string()),
@@ -883,13 +901,32 @@ fn run_project_task(
             serde_json::to_value(task)?,
         ),
     ]);
+    if let Some(prepared) = &prepared_skills {
+        artifact_extra.extend(prepared.artifact_extra.clone());
+    }
+    let task_prompt = if let Some(prepared) = &prepared_skills {
+        if let Some(prefix) = &prepared.task_prefix {
+            format!(
+                "{prefix}\n\n{}",
+                project_task_prompt(&context.manifest, task)
+            )
+        } else {
+            project_task_prompt(&context.manifest, task)
+        }
+    } else {
+        project_task_prompt(&context.manifest, task)
+    };
+    let skill_metadata = prepared_skills
+        .as_ref()
+        .map(|prepared| prepared.metadata.clone())
+        .or_else(|| resolve_skill_run_metadata("code-agent").ok());
     let previous_dir = std::env::current_dir().context("resolve current directory")?;
     std::env::set_current_dir(&worktree_dir)
         .with_context(|| format!("enter project task worktree {}", worktree_dir.display()))?;
     let output = run_code_agent(CodeOptions {
-        task: project_task_prompt(&context.manifest, task),
+        task: task_prompt,
         artifact_task: None,
-        skill: resolve_skill_run_metadata("code-agent").ok(),
+        skill: skill_metadata,
         profile: Some(profile),
         model_config: Some(model_config),
         trace_out: Some(trace_path),
@@ -1320,6 +1357,12 @@ fn project_task_prompt(manifest: &ProjectManifest, task: &ProjectTask) -> String
             prompt.push_str(&format!("- {path}\n"));
         }
     }
+    if !task.skills.is_empty() {
+        prompt.push_str("\nPreloaded instruction skills:\n");
+        for skill in &task.skills {
+            prompt.push_str(&format!("- {skill}\n"));
+        }
+    }
     if !task.verification.is_empty() {
         prompt.push_str("\nRun verification before finishing:\n");
         for command in &task.verification {
@@ -1411,6 +1454,12 @@ fn validate_manifest(manifest: &ProjectManifest) -> Result<()> {
         }
     }
     for task in &manifest.tasks {
+        if task.skills.iter().any(|skill| skill == "code-agent") {
+            bail!(
+                "task {} skills must list instruction skills, not the code-agent executor",
+                task.id
+            );
+        }
         for dep in &task.depends_on {
             if !ids.contains(dep) {
                 bail!("task {} depends on unknown task {dep}", task.id);
@@ -1547,6 +1596,7 @@ mod tests {
                     id: "second".to_string(),
                     goal: "second".to_string(),
                     depends_on: vec!["first".to_string()],
+                    skills: Vec::new(),
                     allowed_files: Vec::new(),
                     forbidden_files: Vec::new(),
                     verification: Vec::new(),
@@ -1558,6 +1608,7 @@ mod tests {
                     id: "first".to_string(),
                     goal: "first".to_string(),
                     depends_on: Vec::new(),
+                    skills: Vec::new(),
                     allowed_files: Vec::new(),
                     forbidden_files: Vec::new(),
                     verification: Vec::new(),
@@ -1580,6 +1631,7 @@ mod tests {
             id: "task".to_string(),
             goal: "goal".to_string(),
             depends_on: Vec::new(),
+            skills: Vec::new(),
             allowed_files: vec!["src/**".to_string()],
             forbidden_files: vec!["src/generated/**".to_string()],
             verification: Vec::new(),
@@ -1613,6 +1665,7 @@ mod tests {
             id: "task".to_string(),
             goal: "goal".to_string(),
             depends_on: Vec::new(),
+            skills: Vec::new(),
             allowed_files: vec!["crates/**/src/*.rs".to_string()],
             forbidden_files: Vec::new(),
             verification: Vec::new(),
@@ -1726,6 +1779,7 @@ mod tests {
             id: "task_001".to_string(),
             goal: "change parser".to_string(),
             depends_on: Vec::new(),
+            skills: vec!["tdd-workflow".to_string()],
             allowed_files: vec!["crates/air-parser/**".to_string()],
             forbidden_files: vec!["target/**".to_string()],
             verification: vec![ProjectVerificationCommand {
@@ -1742,6 +1796,7 @@ mod tests {
 
         let prompt = project_task_prompt(&manifest, &task);
         assert!(prompt.contains("Project goal: ship feature"));
+        assert!(prompt.contains("tdd-workflow"));
         assert!(prompt.contains("Only modify files allowed by this task"));
         assert!(prompt.contains("crates/air-parser/**"));
         assert!(prompt.contains("cargo test -p air-parser"));
@@ -1779,6 +1834,7 @@ mod tests {
                     id: "split-file-tools".to_string(),
                     goal: "split file tools".to_string(),
                     depends_on: Vec::new(),
+                    skills: Vec::new(),
                     allowed_files: Vec::new(),
                     forbidden_files: Vec::new(),
                     verification: Vec::new(),
@@ -1790,6 +1846,7 @@ mod tests {
                     id: "update-callers".to_string(),
                     goal: "update callers".to_string(),
                     depends_on: vec!["split-file-tools".to_string()],
+                    skills: Vec::new(),
                     allowed_files: Vec::new(),
                     forbidden_files: Vec::new(),
                     verification: Vec::new(),
@@ -1827,6 +1884,7 @@ mod tests {
                 id: "task".to_string(),
                 goal: "task".to_string(),
                 depends_on: Vec::new(),
+                skills: Vec::new(),
                 allowed_files: Vec::new(),
                 forbidden_files: Vec::new(),
                 verification: Vec::new(),

@@ -20,7 +20,14 @@ struct SkillManifest {
     #[serde(default)]
     instructions: SkillInstructions,
     #[serde(default)]
+    host: Option<SkillHost>,
+    #[serde(default)]
     routing: SkillRouting,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct SkillHost {
+    skill: String,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -36,7 +43,13 @@ struct SkillRouting {
     #[serde(default)]
     triggers: Vec<String>,
     #[serde(default)]
+    negative_triggers: Vec<String>,
+    #[serde(default)]
     repo_markers: Vec<PathBuf>,
+    #[serde(default)]
+    languages: Vec<String>,
+    #[serde(default)]
+    task_types: Vec<String>,
     #[serde(default)]
     exclude: Vec<String>,
 }
@@ -91,6 +104,19 @@ fn route_skills(root_dir: &Path, task: &str, top_k: usize) -> Result<Value, Runt
         if manifest.mode.as_deref().unwrap_or("executor") != "instruction" {
             continue;
         }
+        let host = manifest
+            .host
+            .as_ref()
+            .map(|host| host.skill.as_str())
+            .unwrap_or("code-agent");
+        if host != "code-agent" {
+            rejected.push(json!({
+                "id": manifest.id,
+                "manifest": display_path(&manifest_path),
+                "reason": format!("instruction skill host `{host}` is not `code-agent`"),
+            }));
+            continue;
+        }
         let risk = read_audit_risk(&manifest_path).unwrap_or_else(|| "unknown".to_string());
         if matches!(risk.as_str(), "high" | "critical") {
             rejected.push(json!({
@@ -123,6 +149,11 @@ fn route_skills(root_dir: &Path, task: &str, top_k: usize) -> Result<Value, Runt
     Ok(json!({
         "kind": "skill_route",
         "task": task,
+        "executor": {
+            "id": "code-agent",
+            "reason": "default code-agent executor for instruction skills"
+        },
+        "instructions": selected.clone(),
         "skills": selected,
         "rejected": rejected,
         "candidates": candidates,
@@ -155,11 +186,30 @@ fn score_skill_for_task(
             reasons.push(format!("task matches trigger `{trigger}`"));
         }
     }
-    for excluded in &manifest.routing.exclude {
+    for excluded in manifest
+        .routing
+        .exclude
+        .iter()
+        .chain(manifest.routing.negative_triggers.iter())
+    {
         let excluded_lower = excluded.to_ascii_lowercase();
         if !excluded_lower.is_empty() && task_lower.contains(&excluded_lower) {
             score -= 50;
             reasons.push(format!("task matches exclusion `{excluded}`"));
+        }
+    }
+    for language in &manifest.routing.languages {
+        let language_lower = language.to_ascii_lowercase();
+        if !language_lower.is_empty() && task_lower.contains(&language_lower) {
+            score += 8;
+            reasons.push(format!("task matches language `{language}`"));
+        }
+    }
+    for task_type in &manifest.routing.task_types {
+        let task_type_lower = task_type.to_ascii_lowercase();
+        if !task_type_lower.is_empty() && task_lower.contains(&task_type_lower) {
+            score += 10;
+            reasons.push(format!("task matches task type `{task_type}`"));
         }
     }
     for token in manifest

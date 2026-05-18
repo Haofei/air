@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const SKILL_MANIFEST: &str = "air-skill.yaml";
 const SKILL_SCHEMA: &str = "air.skill.v1";
+const DEFAULT_EXECUTOR_SKILL: &str = "code-agent";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AirSkillManifest {
@@ -99,7 +100,17 @@ pub(crate) struct SkillRouting {
     #[serde(default)]
     pub(crate) triggers: Vec<String>,
     #[serde(default)]
+    pub(crate) negative_triggers: Vec<String>,
+    #[serde(default)]
     pub(crate) repo_markers: Vec<PathBuf>,
+    #[serde(default)]
+    pub(crate) languages: Vec<String>,
+    #[serde(default)]
+    pub(crate) task_types: Vec<String>,
+    #[serde(default)]
+    pub(crate) compatible_with: Vec<String>,
+    #[serde(default)]
+    pub(crate) incompatible_with: Vec<String>,
     #[serde(default)]
     pub(crate) exclude: Vec<String>,
 }
@@ -171,9 +182,17 @@ struct SkillListItem {
 
 #[derive(Debug, Clone, Serialize)]
 struct SkillRouteResult {
+    executor: SkillRouteExecutor,
+    instructions: Vec<SkillRouteCard>,
     selected: Vec<SkillRouteCard>,
     rejected: Vec<SkillRouteRejection>,
     candidates: Vec<SkillRouteCard>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillRouteExecutor {
+    id: String,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -224,6 +243,8 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
     if options.explain {
         print_json(&json!({
             "task": options.task,
+            "executor": route.executor,
+            "instructions": route.instructions,
             "selected": route.selected,
             "rejected": route.rejected,
             "candidates": route.candidates,
@@ -231,6 +252,8 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
     } else {
         print_json(&json!({
             "task": options.task,
+            "executor": route.executor,
+            "instructions": route.instructions,
             "selected": route.selected,
         }))
     }
@@ -238,11 +261,22 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
 
 fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
     let task_lower = task.to_ascii_lowercase();
-    let mut selected = Vec::new();
     let mut rejected = Vec::new();
     let mut candidates = Vec::new();
+    let mut positive = Vec::<(SkillRouteCard, Vec<String>)>::new();
     for skill in discover_skills()? {
         if skill.manifest.mode != SkillMode::Instruction {
+            continue;
+        }
+        let host = instruction_host_id(&skill.manifest);
+        if host != DEFAULT_EXECUTOR_SKILL {
+            rejected.push(SkillRouteRejection {
+                id: skill.manifest.id.clone(),
+                manifest: path_ref(&skill.manifest_path),
+                reason: format!(
+                    "instruction skill host `{host}` is not `{DEFAULT_EXECUTOR_SKILL}`"
+                ),
+            });
             continue;
         }
         let audit = audit_resolved_skill(&skill)?;
@@ -267,17 +301,63 @@ fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
         };
         candidates.push(card.clone());
         if score > 0 {
-            selected.push(card);
+            positive.push((card, skill.manifest.routing.incompatible_with.clone()));
         }
     }
     candidates.sort_by(skill_route_order);
-    selected.sort_by(skill_route_order);
-    selected.truncate(top_k);
+    positive.sort_by(|left, right| skill_route_order(&left.0, &right.0));
+    let mut selected = Vec::new();
+    let mut selected_incompatibilities = BTreeMap::<String, Vec<String>>::new();
+    for (card, incompatible_with) in positive {
+        if selected.len() >= top_k {
+            break;
+        }
+        if let Some(conflict) =
+            selected_skill_conflict(&card, &incompatible_with, &selected_incompatibilities)
+        {
+            rejected.push(SkillRouteRejection {
+                id: card.id,
+                manifest: card.manifest,
+                reason: format!("incompatible with selected skill `{conflict}`"),
+            });
+            continue;
+        }
+        selected_incompatibilities.insert(card.id.clone(), incompatible_with);
+        selected.push(card);
+    }
+    let executor = SkillRouteExecutor {
+        id: DEFAULT_EXECUTOR_SKILL.to_string(),
+        reason: "default code-agent executor for instruction skills".to_string(),
+    };
     Ok(SkillRouteResult {
+        executor,
+        instructions: selected.clone(),
         selected,
         rejected,
         candidates,
     })
+}
+
+pub(crate) fn route_skills_value_for_task(task: &str, top_k: usize) -> Result<Value> {
+    Ok(serde_json::to_value(route_skills_for_task(
+        task,
+        top_k.max(1),
+    )?)?)
+}
+
+fn selected_skill_conflict(
+    card: &SkillRouteCard,
+    incompatible_with: &[String],
+    selected_incompatibilities: &BTreeMap<String, Vec<String>>,
+) -> Option<String> {
+    for (selected_id, selected_incompatible_with) in selected_incompatibilities {
+        if incompatible_with.iter().any(|id| id == selected_id)
+            || selected_incompatible_with.iter().any(|id| id == &card.id)
+        {
+            return Some(selected_id.clone());
+        }
+    }
+    None
 }
 
 fn skill_route_order(left: &SkillRouteCard, right: &SkillRouteCard) -> std::cmp::Ordering {
@@ -298,11 +378,29 @@ fn score_skill_for_task(skill: &ResolvedSkill, task_lower: &str) -> (i32, Vec<St
             reasons.push(format!("task matches trigger `{trigger}`"));
         }
     }
-    for excluded in &routing.exclude {
+    for excluded in routing
+        .exclude
+        .iter()
+        .chain(routing.negative_triggers.iter())
+    {
         let excluded_lower = excluded.to_ascii_lowercase();
         if !excluded_lower.is_empty() && task_lower.contains(&excluded_lower) {
             score -= 50;
             reasons.push(format!("task matches exclusion `{excluded}`"));
+        }
+    }
+    for language in &routing.languages {
+        let language_lower = language.to_ascii_lowercase();
+        if !language_lower.is_empty() && task_lower.contains(&language_lower) {
+            score += 8;
+            reasons.push(format!("task matches language `{language}`"));
+        }
+    }
+    for task_type in &routing.task_types {
+        let task_type_lower = task_type.to_ascii_lowercase();
+        if !task_type_lower.is_empty() && task_lower.contains(&task_type_lower) {
+            score += 10;
+            reasons.push(format!("task matches task type `{task_type}`"));
         }
     }
     if let Some(description) = &skill.manifest.description {
@@ -486,11 +584,11 @@ pub(crate) fn run_skill(options: SkillRunOptions) -> Result<()> {
 pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
     let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
     let selected = route
-        .selected
-        .first()
+        .instructions
+        .iter()
         .map(|card| card.id.clone())
-        .unwrap_or_else(|| "code-agent".to_string());
-    let prepared = prepare_skill_run_context(&selected)?;
+        .collect::<Vec<_>>();
+    let prepared = prepare_skill_composition(&selected)?;
     let task = if let Some(prefix) = &prepared.task_prefix {
         format!("{prefix}\n\nTask: {}", options.task)
     } else {
@@ -501,7 +599,8 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
         "skill_route".to_string(),
         json!({
             "task": options.task,
-            "selected_skill": selected,
+            "executor": route.executor,
+            "instructions": route.instructions,
             "selected": route.selected,
             "rejected": route.rejected,
         }),
@@ -529,6 +628,88 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
         replay_from: options.replay_from,
     })?;
     print_json(&outputs)
+}
+
+pub(crate) fn prepare_skill_composition(
+    instruction_references: &[String],
+) -> Result<PreparedSkillRun> {
+    let executor = resolve_skill(DEFAULT_EXECUTOR_SKILL)?;
+    validate_resolved_skill(&executor)?;
+    let executor_audit = audit_resolved_skill(&executor)?;
+    if !executor_audit.allowed_to_run {
+        bail!(
+            "executor skill `{}` audit risk is {}; refusing to run",
+            executor.manifest.id,
+            executor_audit.risk
+        );
+    }
+    let effective = effective_execution(&executor)?;
+    let metadata = skill_metadata_with_context(&executor, Some(&executor_audit), &effective)?;
+    let mut preloaded_skills = Vec::new();
+    let mut instruction_metadata = Vec::new();
+    let mut seen = BTreeSet::new();
+    for reference in instruction_references {
+        if !seen.insert(reference.clone()) {
+            continue;
+        }
+        let skill = resolve_skill(reference)?;
+        validate_resolved_skill(&skill)?;
+        if skill.manifest.mode != SkillMode::Instruction {
+            bail!(
+                "skill composition only accepts instruction skills; `{}` is {}",
+                skill.manifest.id,
+                skill.manifest.mode.as_str()
+            );
+        }
+        let host = instruction_host_id(&skill.manifest);
+        if host != DEFAULT_EXECUTOR_SKILL {
+            bail!(
+                "instruction skill `{}` is hosted by `{host}`, but this composition uses `{DEFAULT_EXECUTOR_SKILL}`",
+                skill.manifest.id
+            );
+        }
+        let audit = audit_resolved_skill(&skill)?;
+        if !audit.allowed_to_run {
+            bail!(
+                "instruction skill `{}` audit risk is {}; refusing to load",
+                skill.manifest.id,
+                audit.risk
+            );
+        }
+        let instruction_effective = effective_execution(&skill)?;
+        preloaded_skills.extend(preload_skill_for_run(&skill, &audit)?);
+        instruction_metadata.push(skill_metadata_with_context(
+            &skill,
+            Some(&audit),
+            &instruction_effective,
+        )?);
+    }
+    let task_prefix = if preloaded_skills.is_empty() {
+        None
+    } else {
+        Some(render_preloaded_skill_instructions(&preloaded_skills))
+    };
+    let artifact_extra = BTreeMap::from([
+        ("skill".to_string(), json!(metadata.clone())),
+        (
+            "skill_composition".to_string(),
+            json!({
+                "executor": metadata.clone(),
+                "instructions": instruction_metadata,
+                "profile": path_ref(&effective.profile),
+                "tool_config": effective.tool_config.as_ref().map(|path| path_ref(path)),
+                "capabilities": effective.capabilities,
+                "preloaded_instruction_files": preloaded_instruction_files(&preloaded_skills),
+            }),
+        ),
+    ]);
+    Ok(PreparedSkillRun {
+        metadata,
+        profile: effective.profile,
+        tool_config: effective.tool_config,
+        task_prefix,
+        artifact_extra,
+    })
 }
 
 pub(crate) fn prepare_skill_run_context(reference: &str) -> Result<PreparedSkillRun> {
@@ -808,6 +989,14 @@ fn validate_resolved_skill(skill: &ResolvedSkill) -> Result<Value> {
         "capability_deny": skill.manifest.capabilities.deny,
         "effective_capabilities": effective.capabilities,
     }))
+}
+
+fn instruction_host_id(manifest: &AirSkillManifest) -> &str {
+    manifest
+        .host
+        .as_ref()
+        .map(|host| host.skill.as_str())
+        .unwrap_or(DEFAULT_EXECUTOR_SKILL)
 }
 
 fn validate_executor_capabilities(
@@ -1641,7 +1830,23 @@ workflow:
     #[test]
     fn routes_tdd_tasks_to_tdd_workflow() {
         let route = route_skills_for_task("use TDD to refactor a small helper", 3).unwrap();
+        assert_eq!(route.executor.id, "code-agent");
+        assert!(route
+            .instructions
+            .iter()
+            .any(|card| card.id == "tdd-workflow"));
         assert!(route.selected.iter().any(|card| card.id == "tdd-workflow"));
+    }
+
+    #[test]
+    fn skill_composition_preloads_instruction_skills_on_code_agent() {
+        let prepared = prepare_skill_composition(&["tdd-workflow".to_string()]).unwrap();
+        assert_eq!(prepared.metadata.id, "code-agent");
+        assert!(prepared.profile.ends_with("edit.air-profile.yaml"));
+        let prefix = prepared.task_prefix.unwrap_or_default();
+        assert!(prefix.contains("<skill_instructions>"));
+        assert!(prefix.contains("tdd-workflow"));
+        assert!(prepared.artifact_extra.contains_key("skill_composition"));
     }
 
     #[test]

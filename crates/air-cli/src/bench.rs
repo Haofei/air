@@ -3,7 +3,7 @@ use crate::code_artifact::{
     path_content_identity, read_code_run_artifact, replay_code_run_artifact, CodeRunDescriptor,
     CodeRunMode, CodeRunSkill, FailureCategory, FailureReason, WorkspaceSnapshot,
 };
-use crate::skill::{prepare_skill_run_context, resolve_skill_run_metadata};
+use crate::skill::{prepare_skill_composition, resolve_skill_run_metadata};
 use air_runtime::read_trace_jsonl;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -32,6 +32,7 @@ pub(crate) struct BenchCodeAgentOptions {
 
 pub(crate) struct BenchSkillOptions {
     pub(crate) skill: String,
+    pub(crate) skills: Vec<String>,
     pub(crate) suite: Option<PathBuf>,
     pub(crate) out_dir: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
@@ -90,6 +91,8 @@ struct BenchRun {
     model_config: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     skill: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    skills: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     runs: Option<Vec<BenchRun>>,
     summary: BenchSummary,
@@ -273,6 +276,7 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
         profile: profile.display().to_string(),
         model_config: model_config.display().to_string(),
         skill: None,
+        skills: Vec::new(),
         runs: None,
         summary,
         tasks: task_runs,
@@ -329,7 +333,9 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
             .model_config
             .unwrap_or_else(|| repo_root.join(DEFAULT_MODEL_CONFIG)),
     );
-    let prepared = prepare_skill_run_context(&options.skill)?;
+    let skill_ids = bench_skill_ids(&options.skill, &options.skills);
+    let prepared = prepare_skill_composition(&skill_ids)?;
+    let skill_label = skill_ids.join("+");
 
     let mut groups = Vec::new();
     if options.compare_no_skill {
@@ -347,6 +353,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
             repo_root: &repo_root,
             subagents: suite.subagents,
             skill: resolve_skill_run_metadata("code-agent").ok(),
+            skills: Vec::new(),
             task_prefix: None,
             artifact_extra: BTreeMap::from([("bench_skill_group".to_string(), json!("no-skill"))]),
             log: options.log,
@@ -357,7 +364,8 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
     let skill_group_dir = run_dir.join("skill");
     let mut skill_extra = prepared.artifact_extra.clone();
     skill_extra.insert("bench_skill_group".to_string(), json!("skill"));
-    skill_extra.insert("bench_skill".to_string(), json!(options.skill));
+    skill_extra.insert("bench_skill".to_string(), json!(skill_label));
+    skill_extra.insert("bench_skills".to_string(), json!(skill_ids));
     groups.push(run_bench_group(BenchGroupOptions {
         label: "skill",
         suite: &suite,
@@ -370,6 +378,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         repo_root: &repo_root,
         subagents: suite.subagents,
         skill: Some(prepared.metadata),
+        skills: skill_ids.clone(),
         task_prefix: prepared.task_prefix.as_deref(),
         artifact_extra: skill_extra,
         log: options.log,
@@ -390,7 +399,8 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         run_dir: run_dir.display().to_string(),
         profile: prepared.profile.display().to_string(),
         model_config: model_config.display().to_string(),
-        skill: Some(options.skill),
+        skill: Some(skill_label),
+        skills: skill_ids,
         runs: Some(groups),
         summary,
         tasks: Vec::new(),
@@ -401,6 +411,23 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(&run.summary)?);
     println!("run_json: {}", run_json.display());
     Ok(())
+}
+
+fn bench_skill_ids(primary: &str, additional: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    primary
+        .split(',')
+        .chain(additional.iter().flat_map(|value| value.split(',')))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            if seen.insert(value.to_string()) {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 struct BenchGroupOptions<'a> {
@@ -415,6 +442,7 @@ struct BenchGroupOptions<'a> {
     repo_root: &'a Path,
     subagents: bool,
     skill: Option<CodeRunSkill>,
+    skills: Vec<String>,
     task_prefix: Option<&'a str>,
     artifact_extra: BTreeMap<String, Value>,
     log: bool,
@@ -457,6 +485,7 @@ fn run_bench_group(options: BenchGroupOptions<'_>) -> Result<BenchRun> {
         profile: options.profile.display().to_string(),
         model_config: options.model_config.display().to_string(),
         skill: context.skill.as_ref().map(|skill| skill.id.clone()),
+        skills: options.skills,
         runs: None,
         summary,
         tasks: task_runs,

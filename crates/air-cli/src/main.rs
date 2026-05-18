@@ -561,8 +561,12 @@ enum BenchCommand {
     },
     /// Run a code-agent suite with a skill preloaded, optionally comparing no-skill.
     Skill {
-        /// Skill id, manifest path, or skill directory.
+        /// Skill id, manifest path, skill directory, or comma-separated instruction skill ids.
         skill: String,
+
+        /// Additional instruction skills to preload.
+        #[arg(long, value_delimiter = ',')]
+        skills: Vec<String>,
 
         /// Benchmark suite JSON file.
         #[arg(long)]
@@ -765,6 +769,7 @@ fn main() -> Result<()> {
             }),
             BenchCommand::Skill {
                 skill,
+                skills,
                 suite,
                 out_dir,
                 model_config,
@@ -776,6 +781,7 @@ fn main() -> Result<()> {
                 refresh,
             } => bench_skill(BenchSkillOptions {
                 skill,
+                skills,
                 suite,
                 out_dir,
                 model_config,

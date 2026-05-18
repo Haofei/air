@@ -3401,6 +3401,8 @@ workflow:
         )
         .unwrap();
     assert_eq!(routed["kind"], json!("skill_route"));
+    assert_eq!(routed["executor"]["id"], json!("code-agent"));
+    assert_eq!(routed["instructions"][0]["id"], json!("tdd-workflow"));
     assert_eq!(routed["skills"][0]["id"], json!("tdd-workflow"));
 
     let loaded = tools
