@@ -494,6 +494,7 @@ fn run_project_bench_case(
                 delta,
                 Vec::new(),
                 None,
+                None,
             )?;
             write_code_run_artifact(&artifact_dir, &artifact, &json!({}), None)?;
             fs::write(
@@ -1751,6 +1752,7 @@ mod tests {
             &after,
             delta,
             Vec::new(),
+            None,
             None,
         )
         .unwrap();

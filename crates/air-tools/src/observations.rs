@@ -1,17 +1,4 @@
-use crate::file_tools::{read_snapshot, ReadSnapshot};
-use air_runtime::RuntimeError;
 use serde_json::{json, Value};
-use std::collections::BTreeMap;
-use std::fs;
-use std::path::{Path, PathBuf};
-
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct ReadObservation {
-    pub(crate) start_line: usize,
-    pub(crate) end_line: usize,
-    pub(crate) complete: bool,
-    pub(crate) snapshot: ReadSnapshot,
-}
 
 #[derive(Debug, Clone)]
 pub(crate) struct SearchObservation {
@@ -19,42 +6,6 @@ pub(crate) struct SearchObservation {
     pub(crate) pattern: String,
     pub(crate) match_count: u64,
     pub(crate) returned_match_count: u64,
-}
-
-pub(crate) fn observe_file_read_output(
-    read_snapshots: &mut BTreeMap<PathBuf, ReadSnapshot>,
-    read_observations: &mut BTreeMap<PathBuf, Vec<ReadObservation>>,
-    name: &str,
-    output: &Value,
-) -> Result<Option<Value>, RuntimeError> {
-    let Some(path) = output.get("path").and_then(Value::as_str) else {
-        return Ok(None);
-    };
-    let path = Path::new(path);
-    let snapshot = read_snapshot(name, "input.path", path)?;
-    let (start_line, end_line) = extract_read_line_range(output);
-    if let Some(covered_by) =
-        covered_read_observation(read_observations, path, snapshot, start_line, end_line)
-    {
-        read_snapshots.insert(path.to_path_buf(), snapshot);
-        return Ok(Some(repeated_read_output(
-            output, start_line, end_line, covered_by,
-        )));
-    }
-    let complete = !output
-        .get("truncated")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    remember_read_observation(
-        read_snapshots,
-        read_observations,
-        path,
-        snapshot,
-        start_line,
-        end_line,
-        complete,
-    )?;
-    Ok(None)
 }
 
 const SEARCH_COUNT_FIELDS: &[&str] = &["match_count", "file_count", "returned_match_count"];
@@ -137,97 +88,6 @@ pub(crate) fn annotate_search_progress(
 pub(crate) fn observed_tool_key(generation: u64, name: &str, input: &Value) -> String {
     let input = serde_json::to_string(input).unwrap_or_else(|_| "<unserializable>".to_string());
     format!("{generation}\n{name}\n{input}")
-}
-
-fn remember_read_observation(
-    read_snapshots: &mut BTreeMap<PathBuf, ReadSnapshot>,
-    read_observations: &mut BTreeMap<PathBuf, Vec<ReadObservation>>,
-    path: &Path,
-    snapshot: ReadSnapshot,
-    start_line: usize,
-    end_line: usize,
-    complete: bool,
-) -> Result<(), RuntimeError> {
-    let path = fs::canonicalize(path).map_err(|error| {
-        RuntimeError::Provider(format!("tool file snapshot canonicalize path: {error}"))
-    })?;
-    read_snapshots.insert(path.clone(), snapshot);
-    read_observations
-        .entry(path)
-        .or_default()
-        .push(ReadObservation {
-            start_line,
-            end_line,
-            complete,
-            snapshot,
-        });
-    Ok(())
-}
-
-fn covered_read_observation(
-    read_observations: &BTreeMap<PathBuf, Vec<ReadObservation>>,
-    path: &Path,
-    snapshot: ReadSnapshot,
-    start_line: usize,
-    end_line: usize,
-) -> Option<ReadObservation> {
-    read_observations.get(path)?.iter().copied().find(|seen| {
-        seen.complete
-            && seen.snapshot == snapshot
-            && seen.start_line == start_line
-            && seen.end_line == end_line
-    })
-}
-
-fn extract_read_line_range(output: &Value) -> (usize, usize) {
-    let total_lines = output
-        .get("total_lines")
-        .and_then(Value::as_u64)
-        .unwrap_or(0) as usize;
-    let start_line = output
-        .get("start_line")
-        .and_then(Value::as_u64)
-        .map(|line| line as usize)
-        .unwrap_or(1);
-    let end_line = output
-        .get("end_line")
-        .and_then(Value::as_u64)
-        .map(|line| line as usize)
-        .unwrap_or(total_lines);
-    (start_line, end_line)
-}
-
-pub(crate) fn repeated_read_output(
-    previous_output: &Value,
-    start_line: usize,
-    end_line: usize,
-    covered_by: ReadObservation,
-) -> Value {
-    json!({
-        "path": previous_output.get("path").cloned().unwrap_or(Value::Null),
-        "start_line": start_line,
-        "end_line": end_line,
-        "total_lines": previous_output.get("total_lines").cloned().unwrap_or(Value::Null),
-        "no_new_information": true,
-        "already_read": true,
-        "covered_by": {
-            "start_line": covered_by.start_line,
-            "end_line": covered_by.end_line
-        },
-        "message": "This line range is already covered by a previous read and the file has not changed. Use the prior context, request a different line range, or edit based on the existing evidence.",
-        "artifacts": [{
-            "kind": "tool_notice",
-            "title": "read skipped: already covered",
-            "content": "No new file content returned because this unchanged line range was already read.",
-            "metadata": {
-                "provider": "file_read",
-                "no_new_information": true,
-                "already_read": true,
-                "covered_start_line": covered_by.start_line,
-                "covered_end_line": covered_by.end_line
-            }
-        }]
-    })
 }
 
 pub(crate) fn repeated_search_output(previous: &SearchObservation) -> Value {

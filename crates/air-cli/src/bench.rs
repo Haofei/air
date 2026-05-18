@@ -1,7 +1,9 @@
 use crate::code_agent::{run_code_agent, CodeOptions};
 use crate::code_artifact::{
-    path_content_identity, read_code_run_artifact, replay_code_run_artifact, CodeRunDescriptor,
-    CodeRunMode, CodeRunSkill, FailureCategory, FailureReason, WorkspaceSnapshot,
+    derive_code_run_verdict_from_facts, path_content_identity, read_code_run_artifact,
+    replay_code_run_artifact, CodeRunDescriptor, CodeRunMode, CodeRunSkill, CodeRunVerdict,
+    CodeRunVerdictConstraints, CodeRunVerificationFacts, FailureCategory, FailureReason,
+    WorkspaceDelta, WorkspaceSnapshot,
 };
 use crate::skill::{prepare_skill_composition, resolve_skill_run_metadata};
 use air_runtime::read_trace_jsonl;
@@ -28,6 +30,7 @@ pub(crate) struct BenchCodeAgentOptions {
     pub(crate) log: bool,
     pub(crate) keep_workdirs: bool,
     pub(crate) refresh: bool,
+    pub(crate) report: Option<PathBuf>,
 }
 
 pub(crate) struct BenchSkillOptions {
@@ -42,6 +45,7 @@ pub(crate) struct BenchSkillOptions {
     pub(crate) log: bool,
     pub(crate) keep_workdirs: bool,
     pub(crate) refresh: bool,
+    pub(crate) report: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,7 +83,11 @@ struct DiffConstraints {
     #[serde(default)]
     required_changed_files: Vec<String>,
     #[serde(default)]
+    forbidden_changed_files: Vec<String>,
+    #[serde(default)]
     required_diff_contains: Vec<String>,
+    #[serde(default)]
+    max_diff_lines: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -106,6 +114,18 @@ struct BenchSummary {
     failed: usize,
     executed: usize,
     replayed: usize,
+    pass_rate: f64,
+    verified_pass_rate: f64,
+    patch_applied_rate: f64,
+    false_success_rate: f64,
+    avg_model_calls: f64,
+    avg_tool_calls: f64,
+    avg_changed_files: f64,
+    avg_diff_lines: f64,
+    step_budget_failures: usize,
+    verification_failures: usize,
+    unrelated_file_touch_rate: f64,
+    replay_success_rate: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -119,6 +139,9 @@ struct TaskRun {
     trace_path: String,
     output_path: String,
     changed_files: Vec<String>,
+    diff_lines: usize,
+    agent_reported_success: bool,
+    verdict: CodeRunVerdict,
     metrics: TraceMetrics,
     verification: Vec<VerificationResult>,
     diff_constraints: ConstraintResult,
@@ -135,7 +158,6 @@ struct TraceMetrics {
     tool_errors: usize,
     tool_counts: BTreeMap<String, usize>,
     first_edit_tool_index: Option<usize>,
-    repeated_reads: usize,
     verification_tool_calls: usize,
     verification_failures: usize,
     repair_iterations: usize,
@@ -253,22 +275,7 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
         task_runs.push(run);
     }
 
-    let passed = task_runs.iter().filter(|task| task.pass).count();
-    let executed = task_runs
-        .iter()
-        .filter(|task| matches!(task.mode, CodeRunMode::Executed))
-        .count();
-    let replayed = task_runs
-        .iter()
-        .filter(|task| matches!(task.mode, CodeRunMode::Replayed))
-        .count();
-    let summary = BenchSummary {
-        total: task_runs.len(),
-        passed,
-        failed: task_runs.len().saturating_sub(passed),
-        executed,
-        replayed,
-    };
+    let summary = bench_summary(&task_runs);
     let run = BenchRun {
         suite: suite.name,
         description: suite.description,
@@ -284,6 +291,11 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
     let run_json = run_dir.join("run.json");
     fs::write(&run_json, serde_json::to_vec_pretty(&run)?)
         .with_context(|| format!("write {}", run_json.display()))?;
+    if let Some(report) = options.report {
+        let report = absolutize(&repo_root, report);
+        write_bench_report(&report, &run)?;
+        println!("report: {}", report.display());
+    }
     println!("{}", serde_json::to_string_pretty(&run.summary)?);
     println!("run_json: {}", run_json.display());
     Ok(())
@@ -386,13 +398,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         refresh: options.refresh,
     })?);
 
-    let summary = BenchSummary {
-        total: groups.iter().map(|run| run.summary.total).sum(),
-        passed: groups.iter().map(|run| run.summary.passed).sum(),
-        failed: groups.iter().map(|run| run.summary.failed).sum(),
-        executed: groups.iter().map(|run| run.summary.executed).sum(),
-        replayed: groups.iter().map(|run| run.summary.replayed).sum(),
-    };
+    let summary = combined_bench_summary(&groups);
     let run = BenchRun {
         suite: suite.name,
         description: suite.description,
@@ -408,6 +414,11 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
     let run_json = run_dir.join("run.json");
     fs::write(&run_json, serde_json::to_vec_pretty(&run)?)
         .with_context(|| format!("write {}", run_json.display()))?;
+    if let Some(report) = options.report {
+        let report = absolutize(&repo_root, report);
+        write_bench_report(&report, &run)?;
+        println!("report: {}", report.display());
+    }
     println!("{}", serde_json::to_string_pretty(&run.summary)?);
     println!("run_json: {}", run_json.display());
     Ok(())
@@ -502,13 +513,146 @@ fn bench_summary(task_runs: &[TaskRun]) -> BenchSummary {
         .iter()
         .filter(|task| matches!(task.mode, CodeRunMode::Replayed))
         .count();
+    let replayed_passed = task_runs
+        .iter()
+        .filter(|task| matches!(task.mode, CodeRunMode::Replayed) && task.pass)
+        .count();
+    let total = task_runs.len();
     BenchSummary {
-        total: task_runs.len(),
+        total,
         passed,
-        failed: task_runs.len().saturating_sub(passed),
+        failed: total.saturating_sub(passed),
         executed,
         replayed,
+        pass_rate: ratio(passed, total),
+        verified_pass_rate: ratio(
+            task_runs
+                .iter()
+                .filter(|task| task.verdict.verification_passed)
+                .count(),
+            total,
+        ),
+        patch_applied_rate: ratio(
+            task_runs
+                .iter()
+                .filter(|task| task.verdict.patch_applied)
+                .count(),
+            total,
+        ),
+        false_success_rate: ratio(
+            task_runs
+                .iter()
+                .filter(|task| task.agent_reported_success && !task.pass)
+                .count(),
+            total,
+        ),
+        avg_model_calls: average_usize(task_runs.iter().map(|task| task.metrics.model_calls)),
+        avg_tool_calls: average_usize(task_runs.iter().map(|task| task.metrics.tool_calls)),
+        avg_changed_files: average_usize(task_runs.iter().map(|task| task.changed_files.len())),
+        avg_diff_lines: average_usize(task_runs.iter().map(|task| task.diff_lines)),
+        step_budget_failures: task_runs
+            .iter()
+            .filter(|task| {
+                task_failure_mentions(
+                    task,
+                    &[
+                        "budget",
+                        "step limit",
+                        "model call",
+                        "max_model_calls",
+                        "max_tool_calls",
+                        "policy.max",
+                    ],
+                )
+            })
+            .count(),
+        verification_failures: task_runs
+            .iter()
+            .filter(|task| task.verdict.verification_ran && !task.verdict.verification_passed)
+            .count(),
+        unrelated_file_touch_rate: ratio(
+            task_runs
+                .iter()
+                .filter(|task| !task.verdict.allowed_files_ok || !task.verdict.forbidden_files_ok)
+                .count(),
+            total,
+        ),
+        replay_success_rate: ratio(replayed_passed, replayed),
     }
+}
+
+fn combined_bench_summary(runs: &[BenchRun]) -> BenchSummary {
+    let total = runs.iter().map(|run| run.summary.total).sum::<usize>();
+    let passed = runs.iter().map(|run| run.summary.passed).sum::<usize>();
+    let failed = runs.iter().map(|run| run.summary.failed).sum::<usize>();
+    let executed = runs.iter().map(|run| run.summary.executed).sum::<usize>();
+    let replayed = runs.iter().map(|run| run.summary.replayed).sum::<usize>();
+    let weighted = |field: fn(&BenchSummary) -> f64| -> f64 {
+        if total == 0 {
+            return 0.0;
+        }
+        runs.iter()
+            .map(|run| field(&run.summary) * run.summary.total as f64)
+            .sum::<f64>()
+            / total as f64
+    };
+    let replayed_passed = runs
+        .iter()
+        .map(|run| (run.summary.replay_success_rate * run.summary.replayed as f64).round() as usize)
+        .sum::<usize>();
+    BenchSummary {
+        total,
+        passed,
+        failed,
+        executed,
+        replayed,
+        pass_rate: ratio(passed, total),
+        verified_pass_rate: weighted(|summary| summary.verified_pass_rate),
+        patch_applied_rate: weighted(|summary| summary.patch_applied_rate),
+        false_success_rate: weighted(|summary| summary.false_success_rate),
+        avg_model_calls: weighted(|summary| summary.avg_model_calls),
+        avg_tool_calls: weighted(|summary| summary.avg_tool_calls),
+        avg_changed_files: weighted(|summary| summary.avg_changed_files),
+        avg_diff_lines: weighted(|summary| summary.avg_diff_lines),
+        step_budget_failures: runs
+            .iter()
+            .map(|run| run.summary.step_budget_failures)
+            .sum(),
+        verification_failures: runs
+            .iter()
+            .map(|run| run.summary.verification_failures)
+            .sum(),
+        unrelated_file_touch_rate: weighted(|summary| summary.unrelated_file_touch_rate),
+        replay_success_rate: ratio(replayed_passed, replayed),
+    }
+}
+
+fn ratio(numerator: usize, denominator: usize) -> f64 {
+    if denominator == 0 {
+        0.0
+    } else {
+        numerator as f64 / denominator as f64
+    }
+}
+
+fn average_usize(values: impl Iterator<Item = usize>) -> f64 {
+    let mut count = 0usize;
+    let mut sum = 0usize;
+    for value in values {
+        count += 1;
+        sum += value;
+    }
+    ratio(sum, count)
+}
+
+fn task_failure_mentions(task: &TaskRun, needles: &[&str]) -> bool {
+    let haystack = task
+        .failure_reason
+        .as_ref()
+        .map(|reason| format!("{:?} {}", reason.category, reason.message).to_ascii_lowercase())
+        .or_else(|| task.error.as_ref().map(|error| error.to_ascii_lowercase()))
+        .unwrap_or_default();
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<TaskRun> {
@@ -648,15 +792,30 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
         .collect::<Result<Vec<_>>>()?;
     let changed_files = git_changed_files(&workdir)?;
     let diff = git_diff(&workdir)?;
+    let workspace_delta = WorkspaceDelta {
+        changed_files: changed_files.clone(),
+        diff: diff.clone(),
+    };
     let diff_constraints = check_diff_constraints(&task.diff, &changed_files, &diff);
+    let diff_lines = bench_diff_line_count(&diff);
     let metrics = trace_metrics(&trace_path).unwrap_or_default();
+    let agent_reported_success = read_agent_reported_success(&output_path).unwrap_or(false);
     let verification_passed = verification.iter().all(|result| result.success);
-    let pass = error.is_none() && verification_passed && diff_constraints.passed;
+    let verdict = derive_code_run_verdict_from_facts(
+        &workspace_delta,
+        CodeRunVerificationFacts {
+            verification_ran: !verification.is_empty(),
+            verification_passed,
+        },
+        &bench_verdict_constraints(&task.diff),
+    );
+    let pass = error.is_none() && verdict.final_success;
     let failure_reason = bench_failure_reason(
         error.as_deref(),
         &verification,
         &diff_constraints,
         &changed_files,
+        &verdict,
     );
     let model_calls_spent = if matches!(mode, CodeRunMode::Replayed) {
         0
@@ -678,6 +837,9 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
         trace_path: trace_path.display().to_string(),
         output_path: output_path.display().to_string(),
         changed_files,
+        diff_lines,
+        agent_reported_success,
+        verdict,
         metrics,
         verification,
         diff_constraints,
@@ -704,6 +866,17 @@ fn run_verification_command(
         stdout_preview: preview_bytes(&output.stdout, 4000),
         stderr_preview: preview_bytes(&output.stderr, 4000),
     })
+}
+
+fn read_agent_reported_success(path: &Path) -> Result<bool> {
+    let output: Value = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    Ok(output
+        .pointer("/edit/final_success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false))
 }
 
 fn check_diff_constraints(
@@ -737,6 +910,13 @@ fn check_diff_constraints(
                 .push(format!("required changed file missing: {path}"));
         }
     }
+    for path in &constraints.forbidden_changed_files {
+        if changed.contains(path) {
+            result
+                .violations
+                .push(format!("forbidden changed file touched: {path}"));
+        }
+    }
     for needle in &constraints.required_diff_contains {
         if !diff.contains(needle) {
             result
@@ -744,8 +924,40 @@ fn check_diff_constraints(
                 .push(format!("diff does not contain required text: {needle}"));
         }
     }
+    if let Some(limit) = constraints.max_diff_lines {
+        let changed_lines = bench_diff_line_count(diff);
+        if changed_lines > limit {
+            result.violations.push(format!(
+                "diff changed {changed_lines} lines, above max {limit}"
+            ));
+        }
+    }
     result.passed = result.violations.is_empty();
     result
+}
+
+fn bench_verdict_constraints(diff: &DiffConstraints) -> CodeRunVerdictConstraints {
+    CodeRunVerdictConstraints {
+        require_patch: true,
+        require_verification: true,
+        allowed_changed_files: diff.allowed_changed_files.clone(),
+        required_changed_files: diff.required_changed_files.clone(),
+        forbidden_changed_files: diff.forbidden_changed_files.clone(),
+        required_diff_contains: diff.required_diff_contains.clone(),
+        max_diff_lines: diff.max_diff_lines,
+    }
+}
+
+fn bench_diff_line_count(diff: &str) -> usize {
+    diff.lines()
+        .filter(|line| {
+            !line.starts_with("diff ")
+                && !line.starts_with("index ")
+                && !line.starts_with("--- ")
+                && !line.starts_with("+++ ")
+                && !line.starts_with("@@")
+        })
+        .count()
 }
 
 fn bench_failure_reason(
@@ -753,6 +965,7 @@ fn bench_failure_reason(
     verification: &[VerificationResult],
     diff_constraints: &ConstraintResult,
     changed_files: &[String],
+    verdict: &CodeRunVerdict,
 ) -> Option<FailureReason> {
     if let Some(error) = agent_error {
         return Some(FailureReason {
@@ -788,7 +1001,158 @@ fn bench_failure_reason(
             details: BTreeMap::new(),
         });
     }
-    None
+    verdict.failure_reason.clone()
+}
+
+fn write_bench_report(path: &Path, run: &BenchRun) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut out = String::new();
+    out.push_str("# AIR Code Agent Benchmark Report\n\n");
+    out.push_str(&format!("- suite: `{}`\n", run.suite));
+    if let Some(description) = &run.description {
+        out.push_str(&format!("- description: {}\n", description));
+    }
+    out.push_str(&format!("- run_dir: `{}`\n", run.run_dir));
+    out.push_str(&format!("- profile: `{}`\n", run.profile));
+    out.push_str(&format!("- model_config: `{}`\n", run.model_config));
+    if let Some(skill) = &run.skill {
+        out.push_str(&format!("- skill: `{}`\n", skill));
+    }
+    if !run.skills.is_empty() {
+        out.push_str(&format!("- skills: `{}`\n", run.skills.join(", ")));
+    }
+    out.push('\n');
+    push_summary_table(&mut out, "Summary", &run.summary);
+    if let Some(groups) = &run.runs {
+        out.push_str("\n## Groups\n\n");
+        out.push_str("| Group | Passed | Pass Rate | Verified | Patch | False Success | Avg Model Calls | Avg Tool Calls |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        for group in groups {
+            out.push_str(&format!(
+                "| {} | {}/{} | {} | {} | {} | {} | {:.1} | {:.1} |\n",
+                md_cell(&group.suite),
+                group.summary.passed,
+                group.summary.total,
+                percent(group.summary.pass_rate),
+                percent(group.summary.verified_pass_rate),
+                percent(group.summary.patch_applied_rate),
+                percent(group.summary.false_success_rate),
+                group.summary.avg_model_calls,
+                group.summary.avg_tool_calls,
+            ));
+        }
+        for group in groups {
+            push_task_table(&mut out, &format!("Tasks: {}", group.suite), &group.tasks);
+        }
+    } else {
+        push_task_table(&mut out, "Tasks", &run.tasks);
+    }
+    fs::write(path, out).with_context(|| format!("write {}", path.display()))
+}
+
+fn push_summary_table(out: &mut String, title: &str, summary: &BenchSummary) {
+    out.push_str(&format!("## {title}\n\n"));
+    out.push_str("| Metric | Value |\n");
+    out.push_str("|---|---:|\n");
+    out.push_str(&format!("| total | {} |\n", summary.total));
+    out.push_str(&format!("| passed | {} |\n", summary.passed));
+    out.push_str(&format!("| failed | {} |\n", summary.failed));
+    out.push_str(&format!("| executed | {} |\n", summary.executed));
+    out.push_str(&format!("| replayed | {} |\n", summary.replayed));
+    out.push_str(&format!("| pass_rate | {} |\n", percent(summary.pass_rate)));
+    out.push_str(&format!(
+        "| verified_pass_rate | {} |\n",
+        percent(summary.verified_pass_rate)
+    ));
+    out.push_str(&format!(
+        "| patch_applied_rate | {} |\n",
+        percent(summary.patch_applied_rate)
+    ));
+    out.push_str(&format!(
+        "| false_success_rate | {} |\n",
+        percent(summary.false_success_rate)
+    ));
+    out.push_str(&format!(
+        "| avg_model_calls | {:.1} |\n",
+        summary.avg_model_calls
+    ));
+    out.push_str(&format!(
+        "| avg_tool_calls | {:.1} |\n",
+        summary.avg_tool_calls
+    ));
+    out.push_str(&format!(
+        "| avg_changed_files | {:.1} |\n",
+        summary.avg_changed_files
+    ));
+    out.push_str(&format!(
+        "| avg_diff_lines | {:.1} |\n",
+        summary.avg_diff_lines
+    ));
+    out.push_str(&format!(
+        "| step_budget_failures | {} |\n",
+        summary.step_budget_failures
+    ));
+    out.push_str(&format!(
+        "| verification_failures | {} |\n",
+        summary.verification_failures
+    ));
+    out.push_str(&format!(
+        "| unrelated_file_touch_rate | {} |\n",
+        percent(summary.unrelated_file_touch_rate)
+    ));
+    out.push_str(&format!(
+        "| replay_success_rate | {} |\n",
+        percent(summary.replay_success_rate)
+    ));
+}
+
+fn push_task_table(out: &mut String, title: &str, tasks: &[TaskRun]) {
+    out.push_str(&format!("\n## {title}\n\n"));
+    out.push_str("| Task | Pass | Mode | Final | Verify | Patch | Model Calls | Tool Calls | Changed Files | Failure |\n");
+    out.push_str("|---|---:|---|---:|---:|---:|---:|---:|---|---|\n");
+    for task in tasks {
+        out.push_str(&format!(
+            "| {} | {} | {:?} | {} | {} | {} | {} | {} | {} | {} |\n",
+            md_cell(&task.id),
+            yes_no(task.pass),
+            task.mode,
+            yes_no(task.verdict.final_success),
+            yes_no(task.verdict.verification_passed),
+            yes_no(task.verdict.patch_applied),
+            task.metrics.model_calls,
+            task.metrics.tool_calls,
+            md_cell(&task.changed_files.join(", ")),
+            md_cell(
+                &task
+                    .failure_reason
+                    .as_ref()
+                    .map(|reason| format!("{:?}: {}", reason.category, reason.message))
+                    .or_else(|| task.error.clone())
+                    .unwrap_or_default()
+            ),
+        ));
+    }
+}
+
+fn percent(value: f64) -> String {
+    format!("{:.1}%", value * 100.0)
+}
+
+fn yes_no(value: bool) -> &'static str {
+    if value {
+        "yes"
+    } else {
+        "no"
+    }
+}
+
+fn md_cell(value: &str) -> String {
+    value
+        .replace('\\', "\\\\")
+        .replace('|', "\\|")
+        .replace('\n', "<br>")
 }
 
 fn classify_agent_error(error: &str) -> FailureCategory {
@@ -852,7 +1216,6 @@ fn trace_metrics_inner(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<T
     let events = read_trace_jsonl(path)
         .map_err(|error| anyhow::anyhow!("read trace {}: {error}", path.display()))?;
     let mut metrics = TraceMetrics::default();
-    let mut read_keys = BTreeSet::new();
     for event in events {
         match event.action.as_str() {
             "model_call" => {
@@ -910,16 +1273,6 @@ fn trace_metrics_inner(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<T
                 {
                     metrics.first_edit_tool_index = Some(metrics.tool_calls);
                 }
-                if matches!(tool.as_str(), "read" | "read_range" | "read_contains") {
-                    let key = event
-                        .input
-                        .as_ref()
-                        .map(read_key)
-                        .unwrap_or_else(|| "<missing-input>".to_string());
-                    if !read_keys.insert(key) {
-                        metrics.repeated_reads += 1;
-                    }
-                }
                 if event
                     .output
                     .as_ref()
@@ -936,27 +1289,6 @@ fn trace_metrics_inner(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<T
     }
     metrics.repair_iterations = metrics.verification_failures;
     Ok(metrics)
-}
-
-fn read_key(input: &Value) -> String {
-    let path = input
-        .get("filePath")
-        .or_else(|| input.get("path"))
-        .and_then(Value::as_str)
-        .unwrap_or("");
-    let offset = input
-        .get("offset")
-        .or_else(|| input.get("start_line"))
-        .or_else(|| input.get("startLine"))
-        .map(Value::to_string)
-        .unwrap_or_default();
-    let limit = input
-        .get("limit")
-        .or_else(|| input.get("max_bytes"))
-        .or_else(|| input.get("maxBytes"))
-        .map(Value::to_string)
-        .unwrap_or_default();
-    format!("{path}:{offset}:{limit}")
 }
 
 fn is_verification_event(output: &Value, tool: &str) -> bool {
@@ -1291,7 +1623,9 @@ mod tests {
         let constraints = DiffConstraints {
             allowed_changed_files: vec!["src/lib.rs".to_string()],
             required_changed_files: vec!["src/lib.rs".to_string()],
+            forbidden_changed_files: Vec::new(),
             required_diff_contains: vec!["helper".to_string()],
+            max_diff_lines: None,
         };
         let result = check_diff_constraints(
             &constraints,
@@ -1304,14 +1638,6 @@ mod tests {
             .violations
             .iter()
             .any(|violation| violation.contains("README.md")));
-    }
-
-    #[test]
-    fn read_key_uses_path_and_range() {
-        assert_eq!(
-            read_key(&json!({"filePath": "src/lib.rs", "offset": 10, "limit": 20})),
-            "src/lib.rs:10:20"
-        );
     }
 
     #[test]

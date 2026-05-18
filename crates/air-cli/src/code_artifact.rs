@@ -1,5 +1,5 @@
 use crate::run_plan::write_trace;
-use air_runtime::{read_trace_jsonl, system_return_event};
+use air_runtime::{read_trace_jsonl, system_return_event, TraceStatus};
 use anyhow::{bail, Context, Result};
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,8 @@ pub(crate) struct CodeRunArtifact {
     pub(crate) mode: CodeRunMode,
     pub(crate) snapshot: CodeRunSnapshot,
     pub(crate) delta: WorkspaceDelta,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) verdict: Option<CodeRunVerdict>,
     pub(crate) files: CodeRunArtifactFiles,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure_reason: Option<FailureReason>,
@@ -118,6 +120,49 @@ pub(crate) struct WorkspaceDelta {
     pub(crate) diff: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct CodeRunVerdict {
+    pub(crate) patch_applied: bool,
+    pub(crate) verification_ran: bool,
+    pub(crate) verification_passed: bool,
+    pub(crate) changed_files: Vec<String>,
+    pub(crate) allowed_files_ok: bool,
+    pub(crate) required_files_ok: bool,
+    pub(crate) forbidden_files_ok: bool,
+    pub(crate) required_diff_ok: bool,
+    pub(crate) max_diff_lines_ok: bool,
+    pub(crate) final_success: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) failure_reason: Option<FailureReason>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CodeRunVerdictConstraints {
+    pub(crate) require_patch: bool,
+    pub(crate) require_verification: bool,
+    pub(crate) allowed_changed_files: Vec<String>,
+    pub(crate) required_changed_files: Vec<String>,
+    pub(crate) forbidden_changed_files: Vec<String>,
+    pub(crate) required_diff_contains: Vec<String>,
+    pub(crate) max_diff_lines: Option<usize>,
+}
+
+impl CodeRunVerdictConstraints {
+    pub(crate) fn code_edit() -> Self {
+        Self {
+            require_patch: true,
+            require_verification: true,
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct CodeRunVerificationFacts {
+    pub(crate) verification_ran: bool,
+    pub(crate) verification_passed: bool,
+}
+
 impl WorkspaceSnapshot {
     pub(crate) fn capture(root: &Path) -> Result<Self> {
         let mut files = BTreeMap::new();
@@ -183,7 +228,7 @@ pub(crate) fn patch_code_output_with_workspace_delta(
     outputs: &mut Value,
     delta: &WorkspaceDelta,
     preexisting_changed_files: &[String],
-    failure_reason: Option<&FailureReason>,
+    verdict: &CodeRunVerdict,
 ) {
     let Some(edit) = outputs.get_mut("edit").and_then(Value::as_object_mut) else {
         return;
@@ -209,16 +254,13 @@ pub(crate) fn patch_code_output_with_workspace_delta(
     );
     edit.insert(
         "patch_applied".to_string(),
-        Value::Bool(!delta.changed_files.is_empty()),
+        Value::Bool(verdict.patch_applied),
     );
-    if edit
-        .get("final_success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-        && delta.changed_files.is_empty()
-    {
-        edit.insert("final_success".to_string(), Value::Bool(false));
-    }
+    edit.insert(
+        "final_success".to_string(),
+        Value::Bool(verdict.final_success),
+    );
+    edit.insert("verdict".to_string(), json!(verdict));
     edit.insert(
         "workspace_diff".to_string(),
         json!({
@@ -230,9 +272,228 @@ pub(crate) fn patch_code_output_with_workspace_delta(
             "truncated": false,
         }),
     );
-    if let Some(reason) = failure_reason {
+    if let Some(reason) = verdict.failure_reason.as_ref() {
         edit.insert("failure_reason".to_string(), json!(reason));
     }
+}
+
+pub(crate) fn derive_code_run_verdict(
+    outputs: &Value,
+    delta: &WorkspaceDelta,
+    trace_path: Option<&Path>,
+    constraints: &CodeRunVerdictConstraints,
+) -> CodeRunVerdict {
+    let facts = trace_path
+        .and_then(verification_facts_from_trace)
+        .unwrap_or_else(|| verification_facts_from_output(outputs));
+    derive_code_run_verdict_from_facts(delta, facts, constraints)
+}
+
+pub(crate) fn derive_code_run_verdict_from_facts(
+    delta: &WorkspaceDelta,
+    facts: CodeRunVerificationFacts,
+    constraints: &CodeRunVerdictConstraints,
+) -> CodeRunVerdict {
+    let patch_applied = !delta.changed_files.is_empty();
+    let allowed_files_ok = constraints.allowed_changed_files.is_empty()
+        || delta
+            .changed_files
+            .iter()
+            .all(|path| constraints.allowed_changed_files.contains(path));
+    let required_files_ok = constraints
+        .required_changed_files
+        .iter()
+        .all(|path| delta.changed_files.contains(path));
+    let forbidden_files_ok = constraints
+        .forbidden_changed_files
+        .iter()
+        .all(|path| !delta.changed_files.contains(path));
+    let required_diff_ok = constraints
+        .required_diff_contains
+        .iter()
+        .all(|needle| delta.diff.contains(needle));
+    let max_diff_lines_ok = constraints
+        .max_diff_lines
+        .is_none_or(|limit| code_diff_line_count(&delta.diff) <= limit);
+    let patch_ok = !constraints.require_patch || patch_applied;
+    let verification_ok =
+        !constraints.require_verification || (facts.verification_ran && facts.verification_passed);
+    let final_success = patch_ok
+        && verification_ok
+        && allowed_files_ok
+        && required_files_ok
+        && forbidden_files_ok
+        && required_diff_ok
+        && max_diff_lines_ok;
+    let mut verdict = CodeRunVerdict {
+        patch_applied,
+        verification_ran: facts.verification_ran,
+        verification_passed: facts.verification_passed,
+        changed_files: delta.changed_files.clone(),
+        allowed_files_ok,
+        required_files_ok,
+        forbidden_files_ok,
+        required_diff_ok,
+        max_diff_lines_ok,
+        final_success,
+        failure_reason: None,
+    };
+    verdict.failure_reason = code_verdict_failure_reason(&verdict, constraints);
+    verdict
+}
+
+fn verification_facts_from_trace(path: &Path) -> Option<CodeRunVerificationFacts> {
+    let events = read_trace_jsonl(path).ok()?;
+    let mut verification_ran = false;
+    let mut verification_passed = false;
+    for event in events {
+        if event.action != "tool_batch_dispatch_item" || event.status != TraceStatus::Ok {
+            continue;
+        }
+        let output = event.output.as_ref()?;
+        if output
+            .get("workspace_changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            verification_passed = false;
+        }
+        if !is_verification_tool_output(output, tool_name_from_trace_event(&event).as_deref()) {
+            continue;
+        }
+        verification_ran = true;
+        let success = output
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        let workspace_changed = output
+            .get("workspace_changed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false);
+        if success && !workspace_changed {
+            verification_passed = true;
+        } else if !success {
+            verification_passed = false;
+        }
+    }
+    Some(CodeRunVerificationFacts {
+        verification_ran,
+        verification_passed,
+    })
+}
+
+fn verification_facts_from_output(outputs: &Value) -> CodeRunVerificationFacts {
+    let fallback_passed = outputs
+        .pointer("/edit/final_success")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    CodeRunVerificationFacts {
+        verification_ran: fallback_passed,
+        verification_passed: fallback_passed,
+    }
+}
+
+fn tool_name_from_trace_event(event: &air_runtime::TraceEvent) -> Option<String> {
+    event
+        .meta
+        .as_ref()
+        .and_then(Value::as_object)
+        .and_then(|meta| meta.get("tool"))
+        .or_else(|| {
+            event
+                .output
+                .as_ref()
+                .and_then(|output| output.pointer("/output/tool"))
+        })
+        .or_else(|| {
+            event
+                .input
+                .as_ref()
+                .and_then(|input| input.get("tool").or_else(|| input.get("name")))
+        })
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn is_verification_tool_output(output: &Value, tool: Option<&str>) -> bool {
+    if tool == Some("test") {
+        return true;
+    }
+    output
+        .get("verification")
+        .or_else(|| output.pointer("/output/verification"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn code_verdict_failure_reason(
+    verdict: &CodeRunVerdict,
+    constraints: &CodeRunVerdictConstraints,
+) -> Option<FailureReason> {
+    if verdict.final_success {
+        return None;
+    }
+    if constraints.require_patch && !verdict.patch_applied {
+        return Some(FailureReason {
+            category: FailureCategory::NoPatchApplied,
+            message: "code agent finished without changing workspace files".to_string(),
+            details: BTreeMap::new(),
+        });
+    }
+    if constraints.require_verification && !verdict.verification_ran {
+        return Some(FailureReason {
+            category: FailureCategory::VerificationFailed,
+            message: "code agent finished without running verification".to_string(),
+            details: BTreeMap::new(),
+        });
+    }
+    if constraints.require_verification && !verdict.verification_passed {
+        return Some(FailureReason {
+            category: FailureCategory::VerificationFailed,
+            message: "code agent verification did not pass".to_string(),
+            details: BTreeMap::new(),
+        });
+    }
+    let mut violations = Vec::new();
+    if !verdict.allowed_files_ok {
+        violations.push("changed file outside allowed_changed_files".to_string());
+    }
+    if !verdict.required_files_ok {
+        violations.push("required changed file missing".to_string());
+    }
+    if !verdict.forbidden_files_ok {
+        violations.push("forbidden file changed".to_string());
+    }
+    if !verdict.required_diff_ok {
+        violations.push("required diff text missing".to_string());
+    }
+    if !verdict.max_diff_lines_ok {
+        violations.push("diff exceeds max_diff_lines".to_string());
+    }
+    if !violations.is_empty() {
+        return Some(FailureReason {
+            category: FailureCategory::DiffConstraintFailed,
+            message: "code run diff constraints failed".to_string(),
+            details: BTreeMap::from([("violations".to_string(), json!(violations))]),
+        });
+    }
+    Some(FailureReason {
+        category: FailureCategory::AgentError,
+        message: "code run did not satisfy AIR verdict requirements".to_string(),
+        details: BTreeMap::new(),
+    })
+}
+
+fn code_diff_line_count(diff: &str) -> usize {
+    diff.lines()
+        .filter(|line| {
+            !line.starts_with("diff ")
+                && !line.starts_with("index ")
+                && !line.starts_with("--- ")
+                && !line.starts_with("+++ ")
+                && !line.starts_with("@@")
+        })
+        .count()
 }
 
 pub(crate) fn patch_trace_return(path: &Path, outputs: &Value, trace_redact: bool) -> Result<()> {
@@ -299,6 +560,7 @@ pub(crate) fn build_code_run_artifact(
     delta: WorkspaceDelta,
     preexisting_changed_files: Vec<String>,
     failure_reason: Option<FailureReason>,
+    verdict: Option<CodeRunVerdict>,
 ) -> Result<CodeRunArtifact> {
     let fingerprint = descriptor.fingerprint(before)?;
     Ok(CodeRunArtifact {
@@ -316,6 +578,7 @@ pub(crate) fn build_code_run_artifact(
             preexisting_changed_files,
         },
         delta,
+        verdict,
         files: CodeRunArtifactFiles {
             output: "output.json".to_string(),
             trace: "trace.jsonl".to_string(),
@@ -787,7 +1050,8 @@ mod tests {
             extra: BTreeMap::new(),
         };
         let artifact =
-            build_code_run_artifact(descriptor, &before, &after, delta, Vec::new(), None).unwrap();
+            build_code_run_artifact(descriptor, &before, &after, delta, Vec::new(), None, None)
+                .unwrap();
         let output = json!({"edit": {"final_success": true}});
         write_code_run_artifact(&artifact_dir, &artifact, &output, None).unwrap();
 
@@ -801,6 +1065,98 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn code_run_verdict_ignores_model_success_without_verification_trace() {
+        let temp_dir = unique_temp_dir("air-code-verdict-no-verification");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let trace_path = temp_dir.join("trace.jsonl");
+        fs::write(
+            &trace_path,
+            "{\"agent\":\"code\",\"step\":1,\"rule\":\"done\",\"action\":\"return\",\"status\":\"ok\"}\n",
+        )
+        .unwrap();
+        let delta = WorkspaceDelta {
+            changed_files: vec!["src/lib.rs".to_string()],
+            diff: "+pub fn helper() {}\n".to_string(),
+        };
+        let outputs = json!({"edit": {"final_success": true}});
+
+        let verdict = derive_code_run_verdict(
+            &outputs,
+            &delta,
+            Some(&trace_path),
+            &CodeRunVerdictConstraints::code_edit(),
+        );
+
+        assert!(verdict.patch_applied);
+        assert!(!verdict.verification_ran);
+        assert!(!verdict.final_success);
+        assert_eq!(
+            verdict.failure_reason.unwrap().category,
+            FailureCategory::VerificationFailed
+        );
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn code_run_verdict_accepts_fresh_verification_and_patch() {
+        let temp_dir = unique_temp_dir("air-code-verdict-passed");
+        fs::create_dir_all(&temp_dir).unwrap();
+        let trace_path = temp_dir.join("trace.jsonl");
+        fs::write(
+            &trace_path,
+            "{\"agent\":\"code\",\"step\":1,\"rule\":\"act\",\"action\":\"tool_batch_dispatch_item\",\"status\":\"ok\",\"meta\":{\"tool\":\"bash\"},\"output\":{\"verification\":true,\"success\":true,\"workspace_changed\":false}}\n",
+        )
+        .unwrap();
+        let delta = WorkspaceDelta {
+            changed_files: vec!["src/lib.rs".to_string()],
+            diff: "+pub fn normalize_key_char() {}\n".to_string(),
+        };
+
+        let verdict = derive_code_run_verdict(
+            &json!({"edit": {"final_success": false}}),
+            &delta,
+            Some(&trace_path),
+            &CodeRunVerdictConstraints {
+                required_changed_files: vec!["src/lib.rs".to_string()],
+                required_diff_contains: vec!["normalize_key_char".to_string()],
+                ..CodeRunVerdictConstraints::code_edit()
+            },
+        );
+
+        assert!(verdict.verification_ran);
+        assert!(verdict.verification_passed);
+        assert!(verdict.final_success);
+        assert!(verdict.failure_reason.is_none());
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn code_run_verdict_rejects_forbidden_file_changes() {
+        let delta = WorkspaceDelta {
+            changed_files: vec!["Cargo.toml".to_string()],
+            diff: "+serde = \"1\"\n".to_string(),
+        };
+        let verdict = derive_code_run_verdict_from_facts(
+            &delta,
+            CodeRunVerificationFacts {
+                verification_ran: true,
+                verification_passed: true,
+            },
+            &CodeRunVerdictConstraints {
+                forbidden_changed_files: vec!["Cargo.toml".to_string()],
+                ..CodeRunVerdictConstraints::code_edit()
+            },
+        );
+
+        assert!(!verdict.forbidden_files_ok);
+        assert!(!verdict.final_success);
+        assert_eq!(
+            verdict.failure_reason.unwrap().category,
+            FailureCategory::DiffConstraintFailed
+        );
     }
 
     #[test]
@@ -846,7 +1202,8 @@ mod tests {
             extra: BTreeMap::new(),
         };
         let artifact =
-            build_code_run_artifact(descriptor, &before, &after, delta, Vec::new(), None).unwrap();
+            build_code_run_artifact(descriptor, &before, &after, delta, Vec::new(), None, None)
+                .unwrap();
 
         write_code_run_artifact(
             &artifact_dir,

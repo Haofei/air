@@ -681,56 +681,6 @@ fn file_read_rejects_byte_large_unscoped_reads_even_when_line_count_is_small() {
 }
 
 #[test]
-fn file_read_repeated_same_range_returns_no_new_information() {
-    let dir = temp_dir("air-tools-file-read-repeat-range");
-    fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\n").unwrap();
-    let config_path = write_config(
-        &dir,
-        r#"{
-              "tools": {
-                "read": {
-                  "kind": "file_read",
-                  "capability": "file.read",
-                  "base_dir": "."
-                }
-              }
-            }"#,
-    );
-    let mut tools = ConfigTools::from_file(config_path).unwrap();
-
-    let first = tools
-        .call_tool(
-            "read",
-            &json!({"filePath": "note.txt", "offset": 0, "limit": 3}),
-        )
-        .unwrap();
-    assert_eq!(first["no_new_information"], Value::Null);
-
-    let repeated = tools
-        .call_tool(
-            "read",
-            &json!({"filePath": "note.txt", "offset": 0, "limit": 3}),
-        )
-        .unwrap();
-
-    assert_eq!(repeated["no_new_information"], json!(true));
-    assert_eq!(repeated["already_read"], json!(true));
-    assert_eq!(repeated["content"], Value::Null);
-    assert_eq!(repeated["covered_by"]["start_line"], json!(1));
-    assert_eq!(repeated["covered_by"]["end_line"], json!(3));
-
-    let narrower = tools
-        .call_tool(
-            "read",
-            &json!({"filePath": "note.txt", "offset": 1, "limit": 1}),
-        )
-        .unwrap();
-    assert_eq!(narrower["no_new_information"], Value::Null);
-    assert_eq!(narrower["content"], json!("00002| one"));
-    let _ = fs::remove_dir_all(dir);
-}
-
-#[test]
 fn file_read_accepts_start_line_limit() {
     let dir = temp_dir("air-tools-file-read-start-line-limit");
     fs::write(dir.join("note.txt"), "zero\none\ntwo\nthree\n").unwrap();

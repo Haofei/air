@@ -558,6 +558,10 @@ enum BenchCommand {
         /// Ignore cached code-run artifacts and spend model calls again.
         #[arg(long)]
         refresh: bool,
+
+        /// Optional Markdown benchmark report output path.
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
     /// Run a code-agent suite with a skill preloaded, optionally comparing no-skill.
     Skill {
@@ -603,6 +607,10 @@ enum BenchCommand {
         /// Ignore cached code-run artifacts and spend model calls again.
         #[arg(long)]
         refresh: bool,
+
+        /// Optional Markdown benchmark report output path.
+        #[arg(long)]
+        report: Option<PathBuf>,
     },
     /// Run deterministic project-orchestrator benchmark cases.
     Project {
@@ -756,6 +764,7 @@ fn main() -> Result<()> {
                 log,
                 keep_workdirs,
                 refresh,
+                report,
             } => bench_code_agent(BenchCodeAgentOptions {
                 suite,
                 out_dir,
@@ -766,6 +775,7 @@ fn main() -> Result<()> {
                 log,
                 keep_workdirs,
                 refresh,
+                report,
             }),
             BenchCommand::Skill {
                 skill,
@@ -779,6 +789,7 @@ fn main() -> Result<()> {
                 log,
                 keep_workdirs,
                 refresh,
+                report,
             } => bench_skill(BenchSkillOptions {
                 skill,
                 skills,
@@ -791,6 +802,7 @@ fn main() -> Result<()> {
                 log,
                 keep_workdirs,
                 refresh,
+                report,
             }),
             BenchCommand::Project { suite, out_dir } => {
                 bench_project(BenchProjectOptions { suite, out_dir })

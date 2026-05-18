@@ -1331,61 +1331,6 @@ pub(super) fn is_likely_binary(bytes: &[u8]) -> bool {
     non_printable * 10 > sample.len() * 3
 }
 
-pub(super) fn file_modified_time(
-    name: &str,
-    label: &str,
-    path: &Path,
-) -> Result<SystemTime, RuntimeError> {
-    fs::metadata(path)
-        .and_then(|metadata| metadata.modified())
-        .map_err(|error| {
-            RuntimeError::Provider(format!(
-                "tool {name} read modification time for {label}: {error}"
-            ))
-        })
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ReadSnapshot {
-    pub(super) modified: SystemTime,
-    fingerprint: FileFingerprint,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct FileFingerprint {
-    len: u64,
-    hash: u64,
-}
-
-pub(super) fn read_snapshot(
-    name: &str,
-    label: &str,
-    path: &Path,
-) -> Result<ReadSnapshot, RuntimeError> {
-    let modified = file_modified_time(name, label, path)?;
-    let bytes = fs::read(path).map_err(|error| {
-        RuntimeError::Provider(format!(
-            "tool {name} read content fingerprint for {label}: {error}"
-        ))
-    })?;
-    Ok(ReadSnapshot {
-        modified,
-        fingerprint: file_fingerprint(&bytes),
-    })
-}
-
-fn file_fingerprint(bytes: &[u8]) -> FileFingerprint {
-    let mut hash = 0xcbf29ce484222325u64;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    FileFingerprint {
-        len: bytes.len() as u64,
-        hash,
-    }
-}
-
 pub(super) struct FileWriteOptions<'a> {
     pub(super) base_dir: &'a Path,
     pub(super) max_bytes: usize,

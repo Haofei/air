@@ -25,7 +25,7 @@ use context_tools::call_context_measure_tool;
 use edit_tools::{call_file_edit_tool, FileEditOptions};
 use file_tools::{
     call_file_read_many_tool, call_file_read_tool, call_file_search_tool, call_file_write_tool,
-    read_snapshot, FileWriteOptions, ReadSnapshot,
+    FileWriteOptions,
 };
 mod provider;
 pub use provider::{EchoTools, ToolProviderChoice};
@@ -58,8 +58,8 @@ use http_tools::{
 };
 mod observations;
 use observations::{
-    annotate_search_progress, observe_file_read_output, observed_tool_key, repeated_search_output,
-    search_observation_from_output, ReadObservation, SearchObservation,
+    annotate_search_progress, observed_tool_key, repeated_search_output,
+    search_observation_from_output, SearchObservation,
 };
 mod artifact_tools;
 use artifact_tools::call_artifact_validate_tool;
@@ -544,8 +544,6 @@ pub struct ConfigTools {
     approvals: BTreeMap<String, ApprovalConfig>,
     config_dir: PathBuf,
     workspace_dir: PathBuf,
-    read_snapshots: BTreeMap<PathBuf, ReadSnapshot>,
-    read_observations: BTreeMap<PathBuf, Vec<ReadObservation>>,
     search_observations: BTreeMap<String, SearchObservation>,
     search_no_match_streak: u32,
     workspace_generation: u64,
@@ -559,8 +557,6 @@ impl Clone for ConfigTools {
             approvals: self.approvals.clone(),
             config_dir: self.config_dir.clone(),
             workspace_dir: self.workspace_dir.clone(),
-            read_snapshots: self.read_snapshots.clone(),
-            read_observations: self.read_observations.clone(),
             search_observations: self.search_observations.clone(),
             search_no_match_streak: self.search_no_match_streak,
             workspace_generation: self.workspace_generation,
@@ -590,8 +586,6 @@ impl ConfigTools {
             approvals: config.approvals,
             config_dir,
             workspace_dir,
-            read_snapshots: BTreeMap::new(),
-            read_observations: BTreeMap::new(),
             search_observations: BTreeMap::new(),
             search_no_match_streak: 0,
             workspace_generation: 0,
@@ -610,22 +604,11 @@ impl ConfigTools {
             approvals: config.approvals,
             config_dir: PathBuf::from("."),
             workspace_dir: PathBuf::from("."),
-            read_snapshots: BTreeMap::new(),
-            read_observations: BTreeMap::new(),
             search_observations: BTreeMap::new(),
             search_no_match_streak: 0,
             workspace_generation: 0,
             rust_analyzer_sessions: BTreeMap::new(),
         }
-    }
-
-    fn remember_read_snapshot(&mut self, path: &Path) -> Result<(), RuntimeError> {
-        let path = fs::canonicalize(path).map_err(|error| {
-            RuntimeError::Provider(format!("tool file snapshot canonicalize path: {error}"))
-        })?;
-        let snapshot = read_snapshot("tool", "path", &path)?;
-        self.read_snapshots.insert(path, snapshot);
-        Ok(())
     }
 
     fn note_workspace_may_have_changed(&mut self) {
@@ -810,17 +793,7 @@ impl ToolProvider for ConfigTools {
                 max_bytes,
             } => {
                 let base_dir = resolve_config_path(&self.workspace_dir, &base_dir);
-                let output =
-                    call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))?;
-                if let Some(repeated_output) = observe_file_read_output(
-                    &mut self.read_snapshots,
-                    &mut self.read_observations,
-                    name,
-                    &output,
-                )? {
-                    return Ok(repeated_output);
-                }
-                Ok(output)
+                call_file_read_tool(name, input, &base_dir, max_bytes.unwrap_or(256 * 1024))
             }
             ToolConfig::FileReadMany {
                 capability: _,
@@ -836,15 +809,6 @@ impl ToolProvider for ConfigTools {
                     max_bytes.unwrap_or(64 * 1024),
                     max_files.unwrap_or(8),
                 )?;
-                for path in output
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|file| file.get("path").and_then(Value::as_str))
-                {
-                    self.remember_read_snapshot(Path::new(path))?;
-                }
                 Ok(output)
             }
             ToolConfig::FileSearch {
@@ -894,9 +858,6 @@ impl ToolProvider for ConfigTools {
                         allow_overwrite: allow_overwrite.unwrap_or(false),
                     },
                 )?;
-                if let Some(path) = output.get("path").and_then(Value::as_str) {
-                    self.remember_read_snapshot(Path::new(path))?;
-                }
                 self.note_workspace_may_have_changed();
                 Ok(output)
             }
@@ -915,9 +876,6 @@ impl ToolProvider for ConfigTools {
                         max_changed_lines,
                     },
                 )?;
-                if let Some(path) = output.get("path").and_then(Value::as_str) {
-                    self.remember_read_snapshot(Path::new(path))?;
-                }
                 self.note_workspace_may_have_changed();
                 Ok(output)
             }
@@ -934,24 +892,6 @@ impl ToolProvider for ConfigTools {
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                     },
                 )?;
-                for file in output
-                    .get("files")
-                    .and_then(Value::as_array)
-                    .into_iter()
-                    .flatten()
-                {
-                    if file.get("kind").and_then(Value::as_str) == Some("delete") {
-                        continue;
-                    }
-                    let path = file
-                        .get("move_absolute_path")
-                        .and_then(Value::as_str)
-                        .or_else(|| file.get("absolute_path").and_then(Value::as_str))
-                        .or_else(|| file.get("path").and_then(Value::as_str));
-                    if let Some(path) = path {
-                        self.remember_read_snapshot(Path::new(path))?;
-                    }
-                }
                 self.note_workspace_may_have_changed();
                 Ok(output)
             }

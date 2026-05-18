@@ -54,5 +54,5 @@ a real failure mode rather than another copy of the same refactor.
 
 `rust-subagent-smoke` enables the `task` subagent tool and writes nested child
 trace/output paths into the parent trace. Use it to compare whether isolated
-read-only exploration reduces repeated reads and parent model calls without
-turning subagents into an opaque cost sink.
+read-only exploration reduces parent model/tool calls without turning subagents
+into an opaque cost sink.

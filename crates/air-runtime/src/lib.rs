@@ -1895,7 +1895,7 @@ fn tool_batch_error_observation_for_runtime_error(
         let policy = json!({
             "error_code": "repeat_reason_required",
             "permission": "repeat_reason_required",
-            "message": "This read/search/diagnostic tool call repeats a previous semantic input. Reissue it only if you include repeat_reason naming the exact missing fact; otherwise use existing observations and edit, verify, complete, or abort.",
+            "message": "This context tool call repeats a previous semantic input. Reissue it only if you include repeat_reason naming the exact missing fact; otherwise use existing observations and edit, verify, complete, or abort.",
             "tool": tool,
             "attempted": attempted,
         });
@@ -2033,11 +2033,7 @@ fn enforce_repeated_tool_policy(
 fn context_tool_requires_repeat_reason(tool: &str) -> bool {
     matches!(
         tool,
-        "read"
-            | "file.read"
-            | "read_many"
-            | "file.read_many"
-            | "grep"
+        "grep"
             | "file.search"
             | "glob"
             | "repo.files"
@@ -2072,21 +2068,6 @@ fn recent_repeated_tool_call_count(
 
 fn repeated_tool_input_key(tool: &str, input: &Value) -> Value {
     match tool {
-        "read" | "file.read" => pick_tool_input_fields(
-            input,
-            &[
-                "path",
-                "filePath",
-                "offset",
-                "limit",
-                "start_line",
-                "end_line",
-                "lines",
-                "contains",
-                "occurrence",
-            ],
-        ),
-        "read_many" | "file.read_many" => pick_tool_input_fields(input, &["files"]),
         "grep" | "file.search" => {
             pick_tool_input_fields(input, &["path", "include", "pattern", "query"])
         }
@@ -2932,7 +2913,7 @@ mod tests {
     }
 
     #[test]
-    fn repeated_tool_key_ignores_non_semantic_read_and_search_options() {
+    fn repeated_tool_key_ignores_non_semantic_search_options() {
         assert_eq!(
             repeated_tool_input_key(
                 "grep",
@@ -2952,30 +2933,6 @@ mod tests {
                     "context_lines": 5,
                     "max_matches": 80,
                     "repeat_reason": "checking whether the same match appears"
-                })
-            )
-        );
-        assert_eq!(
-            repeated_tool_input_key(
-                "read",
-                &json!({
-                    "filePath": "src/lib.rs",
-                    "start_line": 10,
-                    "end_line": 20,
-                    "line_numbers": true,
-                    "max_bytes": 4096,
-                    "repeat_reason": "confirming same range"
-                })
-            ),
-            repeated_tool_input_key(
-                "read",
-                &json!({
-                    "filePath": "src/lib.rs",
-                    "start_line": 10,
-                    "end_line": 20,
-                    "line_numbers": false,
-                    "max_bytes": 65536,
-                    "repeat_reason": "different explanation should not reset repeat policy"
                 })
             )
         );
@@ -3031,7 +2988,6 @@ mod tests {
 
     #[test]
     fn repeated_context_tools_require_model_visible_reason() {
-        assert!(context_tool_requires_repeat_reason("read"));
         assert!(context_tool_requires_repeat_reason("grep"));
         assert!(context_tool_requires_repeat_reason("repo.symbols"));
         assert!(context_tool_requires_repeat_reason("lsp"));
@@ -3049,11 +3005,11 @@ mod tests {
         assert!(!has_repeat_reason(&json!({"path": "src/lib.rs"})));
 
         let error = RuntimeError::RepeatedContextToolCallRequiresReason {
-            tool: "read".to_string(),
+            tool: "grep".to_string(),
             attempted: 2,
         };
         let observation = tool_batch_error_observation_for_runtime_error(
-            "read",
+            "grep",
             &json!({"path": "src/lib.rs"}),
             &error,
         );

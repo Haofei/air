@@ -1,8 +1,8 @@
 use crate::code_artifact::{
-    build_code_run_artifact, code_run_path_rewrites, code_run_trace_path, git_changed_files,
-    patch_code_output_with_workspace_delta, patch_trace_return, path_content_identity,
-    replay_code_run_artifact, write_code_run_artifact, CodeRunDescriptor, CodeRunSkill,
-    FailureCategory, FailureReason, WorkspaceDelta, WorkspaceSnapshot,
+    build_code_run_artifact, code_run_path_rewrites, code_run_trace_path, derive_code_run_verdict,
+    git_changed_files, patch_code_output_with_workspace_delta, patch_trace_return,
+    path_content_identity, replay_code_run_artifact, write_code_run_artifact, CodeRunDescriptor,
+    CodeRunSkill, CodeRunVerdictConstraints, WorkspaceSnapshot,
 };
 use crate::models::ModelReplayOptions;
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
@@ -12,6 +12,7 @@ use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 pub(crate) const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
 
@@ -99,7 +100,15 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
             })
         })
         .transpose()?;
-    let effective_trace_out = trace_out.clone().or_else(|| artifact_trace_path.clone());
+    let implicit_trace_out = if trace_out.is_none() && artifact_trace_path.is_none() {
+        Some(implicit_code_trace_path())
+    } else {
+        None
+    };
+    let effective_trace_out = trace_out
+        .clone()
+        .or_else(|| artifact_trace_path.clone())
+        .or_else(|| implicit_trace_out.clone());
     let trace_out_for_patch = trace_out.clone();
     let trace_redact_for_patch = trace_redact || !trace_raw;
     let mut outputs = run_plan_capture(RunPlanOptions {
@@ -124,12 +133,17 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
 
     let after = WorkspaceSnapshot::capture(&cwd)?;
     let delta = before.delta(&after)?;
-    let failure_reason = derive_code_failure_reason(&outputs, &delta);
+    let verdict = derive_code_run_verdict(
+        &outputs,
+        &delta,
+        effective_trace_out.as_deref(),
+        &CodeRunVerdictConstraints::code_edit(),
+    );
     patch_code_output_with_workspace_delta(
         &mut outputs,
         &delta,
         &preexisting_changed_files,
-        failure_reason.as_ref(),
+        &verdict,
     );
     if let Some(trace_path) = trace_out_for_patch.or(artifact_trace_path) {
         patch_trace_return(&trace_path, &outputs, trace_redact_for_patch)?;
@@ -141,7 +155,8 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
             &after,
             delta,
             preexisting_changed_files,
-            failure_reason,
+            verdict.failure_reason.clone(),
+            Some(verdict),
         )?;
         write_code_run_artifact(
             &artifact_dir,
@@ -150,7 +165,21 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
             effective_trace_out.as_deref(),
         )?;
     }
+    if let Some(path) = implicit_trace_out {
+        let _ = fs::remove_file(path);
+    }
     Ok(outputs)
+}
+
+fn implicit_code_trace_path() -> PathBuf {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    std::env::temp_dir().join(format!(
+        "air-code-trace-{}-{nanos}.jsonl",
+        std::process::id()
+    ))
 }
 
 pub(crate) fn code_profile_explain(
@@ -181,29 +210,6 @@ pub(crate) fn build_input(task: String) -> Map<String, Value> {
 
 pub(crate) fn path_ref_to_input_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
-}
-
-fn derive_code_failure_reason(outputs: &Value, delta: &WorkspaceDelta) -> Option<FailureReason> {
-    let edit = outputs.get("edit")?;
-    if delta.changed_files.is_empty() {
-        return Some(FailureReason {
-            category: FailureCategory::NoPatchApplied,
-            message: "code agent finished without changing workspace files".to_string(),
-            details: BTreeMap::new(),
-        });
-    }
-    if edit
-        .get("final_success")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return None;
-    }
-    Some(FailureReason {
-        category: FailureCategory::AgentError,
-        message: "code agent did not report final_success=true".to_string(),
-        details: BTreeMap::new(),
-    })
 }
 
 pub(crate) struct CodeExplainMetadata {
@@ -238,6 +244,7 @@ pub(crate) fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplain
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::code_artifact::WorkspaceDelta;
     use serde_json::Value;
     use std::fs;
 
@@ -562,7 +569,14 @@ mod tests {
         };
         let preexisting = vec!["crates/air-cli/src/code_agent.rs".to_string()];
 
-        patch_code_output_with_workspace_delta(&mut outputs, &delta, &preexisting, None);
+        let verdict = derive_code_run_verdict(
+            &outputs,
+            &delta,
+            None,
+            &CodeRunVerdictConstraints::code_edit(),
+        );
+
+        patch_code_output_with_workspace_delta(&mut outputs, &delta, &preexisting, &verdict);
 
         let edit = &outputs["edit"];
         assert_eq!(
@@ -604,9 +618,14 @@ mod tests {
             changed_files: vec![],
             diff: String::new(),
         };
-        let failure = derive_code_failure_reason(&outputs, &delta);
+        let verdict = derive_code_run_verdict(
+            &outputs,
+            &delta,
+            None,
+            &CodeRunVerdictConstraints::code_edit(),
+        );
 
-        patch_code_output_with_workspace_delta(&mut outputs, &delta, &[], failure.as_ref());
+        patch_code_output_with_workspace_delta(&mut outputs, &delta, &[], &verdict);
 
         assert_eq!(outputs["edit"]["patch_applied"], json!(false));
         assert_eq!(outputs["edit"]["final_success"], json!(false));
