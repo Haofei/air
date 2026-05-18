@@ -29,6 +29,7 @@ pub(crate) struct CodeOptions {
     pub(crate) tool_config: Option<PathBuf>,
     pub(crate) artifact_out: Option<PathBuf>,
     pub(crate) artifact_extra: BTreeMap<String, Value>,
+    pub(crate) verdict_constraints: CodeRunVerdictConstraints,
     pub(crate) replay_artifact: Option<PathBuf>,
     pub(crate) replay_from: Option<usize>,
 }
@@ -47,6 +48,7 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
         tool_config,
         artifact_out,
         artifact_extra,
+        verdict_constraints,
         replay_artifact,
         replay_from,
     } = options;
@@ -137,7 +139,7 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
         &outputs,
         &delta,
         effective_trace_out.as_deref(),
-        &CodeRunVerdictConstraints::code_edit(),
+        &verdict_constraints,
     );
     patch_code_output_with_workspace_delta(
         &mut outputs,

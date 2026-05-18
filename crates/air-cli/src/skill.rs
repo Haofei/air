@@ -2,7 +2,7 @@ use crate::code_agent::{
     build_input, code_profile_explain, explain_metadata_for_profile, path_ref_to_input_string,
     run_code_agent, CodeOptions,
 };
-use crate::code_artifact::{path_content_identity, CodeRunSkill};
+use crate::code_artifact::{path_content_identity, CodeRunSkill, CodeRunVerdictConstraints};
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -126,6 +126,7 @@ pub(crate) struct SkillAutoRunOptions {
     pub(crate) task: String,
     pub(crate) top_k: usize,
     pub(crate) skills: Vec<String>,
+    pub(crate) executor_override: Option<String>,
     pub(crate) profile_override: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
@@ -188,6 +189,7 @@ struct SkillRouteExecutor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillRouteCard {
     id: String,
+    host: String,
     mode: String,
     version: Option<String>,
     description: Option<String>,
@@ -458,13 +460,18 @@ pub(crate) fn explain_skill(reference: &str, profile_override: Option<PathBuf>) 
 
 pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
     let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
+    let executor_id = options
+        .executor_override
+        .clone()
+        .unwrap_or_else(|| route.executor.id.clone());
     let mut selected = route
         .instructions
         .iter()
+        .filter(|card| card.host == executor_id)
         .map(|card| card.id.clone())
         .collect::<Vec<_>>();
     selected = merge_skill_ids(&selected, &options.skills);
-    let prepared = prepare_skill_composition(&selected)?;
+    let prepared = prepare_skill_composition_for_executor(&executor_id, &selected)?;
     let task = if let Some(prefix) = &prepared.task_prefix {
         format!("{prefix}\n\nTask: {}", options.task)
     } else {
@@ -476,6 +483,7 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
         json!({
             "task": options.task,
             "executor": route.executor,
+            "effective_executor": executor_id,
             "instructions": route.instructions,
             "forced_instructions": options.skills,
             "selected": route.selected,
@@ -501,10 +509,19 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
             .or_else(|| prepared.tool_config.clone()),
         artifact_out: options.artifact_out,
         artifact_extra,
+        verdict_constraints: verdict_constraints_for_executor(&prepared.metadata.id),
         replay_artifact: options.replay_artifact,
         replay_from: options.replay_from,
     })?;
     print_json(&outputs)
+}
+
+pub(crate) fn verdict_constraints_for_executor(executor_id: &str) -> CodeRunVerdictConstraints {
+    if executor_id == "review-agent" {
+        CodeRunVerdictConstraints::review()
+    } else {
+        CodeRunVerdictConstraints::code_edit()
+    }
 }
 
 fn merge_skill_ids(primary: &[String], additional: &[String]) -> Vec<String> {
@@ -528,7 +545,14 @@ fn merge_skill_ids(primary: &[String], additional: &[String]) -> Vec<String> {
 pub(crate) fn prepare_skill_composition(
     instruction_references: &[String],
 ) -> Result<PreparedSkillRun> {
-    let executor = resolve_skill(DEFAULT_EXECUTOR_SKILL)?;
+    prepare_skill_composition_for_executor(DEFAULT_EXECUTOR_SKILL, instruction_references)
+}
+
+pub(crate) fn prepare_skill_composition_for_executor(
+    executor_id: &str,
+    instruction_references: &[String],
+) -> Result<PreparedSkillRun> {
+    let executor = resolve_skill(executor_id)?;
     validate_resolved_skill(&executor)?;
     let executor_audit = audit_resolved_skill(&executor)?;
     if !executor_audit.allowed_to_run {
@@ -557,10 +581,10 @@ pub(crate) fn prepare_skill_composition(
             );
         }
         let host = instruction_host_id(&skill.manifest);
-        if host != DEFAULT_EXECUTOR_SKILL {
+        if host != executor_id {
             bail!(
-                "instruction skill `{}` is hosted by `{host}`, but this composition uses `{DEFAULT_EXECUTOR_SKILL}`",
-                skill.manifest.id
+                "instruction skill `{}` is hosted by `{host}`, but this composition uses `{executor_id}`",
+                skill.manifest.id,
             );
         }
         let audit = audit_resolved_skill(&skill)?;
@@ -2417,6 +2441,16 @@ workflow:
             .iter()
             .any(|card| card.id == "tdd-workflow"));
         assert!(route.selected.iter().any(|card| card.id == "tdd-workflow"));
+    }
+
+    #[test]
+    fn routes_review_tasks_to_review_agent() {
+        let route = route_skills_for_task("review this MR for correctness", 3).unwrap();
+        assert_eq!(route.executor.id, "review-agent");
+        assert!(route
+            .instructions
+            .iter()
+            .any(|card| card.id == "code-review" && card.host == "review-agent"));
     }
 
     #[test]

@@ -942,6 +942,7 @@ fn run_project_task(
         tool_config: Some(tool_config),
         artifact_out: Some(artifact_dir.clone()),
         artifact_extra,
+        verdict_constraints: crate::code_artifact::CodeRunVerdictConstraints::code_edit(),
         replay_artifact: None,
         replay_from: None,
     });

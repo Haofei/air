@@ -14,7 +14,7 @@ instructions:
 capabilities: {}
 
 host:
-  skill: code-agent
+  skill: review-agent
 
 routing:
   summary: Use for code review of diffs, pull requests, merge requests, changed files, and proposed patches.

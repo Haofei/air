@@ -1,6 +1,7 @@
 use crate::project::{
     default_project_file, project_plan, project_run, ProjectPlanOptions, ProjectRunOptions,
 };
+use crate::review_agent::{explain_review_agent, run_review_agent, ReviewOptions};
 use crate::skill::{
     prepare_skill_composition, route_skills_value_for_task, run_skill_auto, SkillAutoRunOptions,
 };
@@ -15,6 +16,7 @@ pub(crate) enum EntryMode {
     Auto,
     Code,
     Project,
+    Review,
 }
 
 #[derive(Debug)]
@@ -43,6 +45,7 @@ pub(crate) struct EntryTaskOptions {
 enum EntryExecutor {
     Code,
     Project,
+    Review,
 }
 
 pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
@@ -58,6 +61,7 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
             task: options.task,
             top_k: options.top_k,
             skills: options.skills,
+            executor_override: Some("code-agent".to_string()),
             profile_override: None,
             model_config: options.model_config,
             trace_out: options.trace_out,
@@ -107,6 +111,24 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
                 log: options.log,
             })
         }
+        EntryExecutor::Review => {
+            let outputs = run_review_agent(ReviewOptions {
+                task: options.task,
+                top_k: options.top_k,
+                skills: options.skills,
+                model_config: options.model_config,
+                trace_out: options.trace_out,
+                trace_redact: options.trace_redact,
+                trace_raw: options.trace_raw,
+                log: options.log,
+                tool_config: options.tool_config,
+                artifact_out: options.artifact_out,
+                replay_artifact: options.replay_artifact,
+                replay_from: options.replay_from,
+            })?;
+            println!("{}", serde_json::to_string_pretty(&outputs)?);
+            Ok(())
+        }
     }
 }
 
@@ -137,6 +159,14 @@ fn explain_entry_task(options: &EntryTaskOptions, executor: EntryExecutor) -> Re
                 }
             })
         }
+        EntryExecutor::Review => explain_review_agent(
+            &options.task,
+            options.top_k,
+            &options.skills,
+            &options.model_config,
+            &options.trace_out,
+            &options.artifact_out,
+        )?,
     };
     println!("{}", serde_json::to_string_pretty(&explanation)?);
     Ok(())
@@ -149,6 +179,7 @@ fn explain_code_entry(options: &EntryTaskOptions) -> Result<Value> {
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
+        .filter(|card| card.get("host").and_then(Value::as_str) == Some("code-agent"))
         .filter_map(|card| card.get("id").and_then(Value::as_str))
         .map(str::to_string)
         .collect::<Vec<_>>();
@@ -208,14 +239,42 @@ fn select_entry_executor(task: &str, mode: EntryMode) -> EntryExecutor {
     match mode {
         EntryMode::Code => EntryExecutor::Code,
         EntryMode::Project => EntryExecutor::Project,
+        EntryMode::Review => EntryExecutor::Review,
         EntryMode::Auto => {
-            if task_looks_project_sized(task) {
+            if task_looks_like_review(task) {
+                EntryExecutor::Review
+            } else if task_looks_project_sized(task) {
                 EntryExecutor::Project
             } else {
                 EntryExecutor::Code
             }
         }
     }
+}
+
+fn task_looks_like_review(task: &str) -> bool {
+    let task = task.to_ascii_lowercase();
+    let review_markers = [
+        "code review",
+        "review code",
+        "review diff",
+        "review this diff",
+        "review this pr",
+        "review this mr",
+        "pull request review",
+        "merge request review",
+        "mr review",
+        "pr review",
+        "review merge request",
+        "review pull request",
+        "/merge_requests/",
+        "/pull/",
+        "审核",
+        "审查",
+        "代码评审",
+        "评审",
+    ];
+    review_markers.iter().any(|marker| task.contains(marker))
 }
 
 fn task_looks_project_sized(task: &str) -> bool {
@@ -279,6 +338,21 @@ mod tests {
     }
 
     #[test]
+    fn auto_routes_review_tasks_to_review_executor() {
+        assert_eq!(
+            select_entry_executor("review this MR for regressions", EntryMode::Auto),
+            EntryExecutor::Review
+        );
+        assert_eq!(
+            select_entry_executor(
+                "review https://gitlab.example.com/a/b/-/merge_requests/123",
+                EntryMode::Auto
+            ),
+            EntryExecutor::Review
+        );
+    }
+
+    #[test]
     fn explicit_mode_overrides_auto_routing() {
         assert_eq!(
             select_entry_executor("refactor the whole crate", EntryMode::Code),
@@ -287,6 +361,10 @@ mod tests {
         assert_eq!(
             select_entry_executor("small rename", EntryMode::Project),
             EntryExecutor::Project
+        );
+        assert_eq!(
+            select_entry_executor("small rename", EntryMode::Review),
+            EntryExecutor::Review
         );
     }
 }

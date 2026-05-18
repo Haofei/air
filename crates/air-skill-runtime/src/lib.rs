@@ -223,6 +223,7 @@ pub struct SkillRouteExecutor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillRouteCard {
     pub id: String,
+    pub host: String,
     pub mode: String,
     pub version: Option<String>,
     pub description: Option<String>,
@@ -387,17 +388,7 @@ pub fn route_skills_for_task(
         if skill.manifest.mode != SkillMode::Instruction {
             continue;
         }
-        let host = instruction_host_id(&skill.manifest);
-        if host != DEFAULT_EXECUTOR_SKILL {
-            rejected.push(SkillRouteRejection {
-                id: skill.manifest.id.clone(),
-                manifest: path_ref(&skill.manifest_path),
-                reason: format!(
-                    "instruction skill host `{host}` is not `{DEFAULT_EXECUTOR_SKILL}`"
-                ),
-            });
-            continue;
-        }
+        let host = instruction_host_id(&skill.manifest).to_string();
         let audit = audit_resolved_skill(&skill)?;
         if !audit.allowed_to_run {
             rejected.push(SkillRouteRejection {
@@ -410,6 +401,7 @@ pub fn route_skills_for_task(
         let (score, reasons) = score_skill_for_task(root_dir, &skill, &task_lower);
         let card = SkillRouteCard {
             id: skill.manifest.id.clone(),
+            host,
             mode: skill.manifest.mode.as_str().to_string(),
             version: skill.manifest.version.clone(),
             description: skill_description_for_route(&skill),
@@ -426,10 +418,26 @@ pub fn route_skills_for_task(
     candidates.sort_by(skill_route_order);
     positive.sort_by(|left, right| skill_route_order(&left.0, &right.0));
     let mut selected = Vec::new();
+    let mut selected_host = None::<String>;
     let mut selected_incompatibilities = BTreeMap::<String, Vec<String>>::new();
     for (card, incompatible_with) in positive {
         if selected.len() >= top_k {
             break;
+        }
+        if let Some(host) = selected_host.as_ref() {
+            if &card.host != host {
+                rejected.push(SkillRouteRejection {
+                    id: card.id,
+                    manifest: card.manifest,
+                    reason: format!(
+                        "host `{}` differs from selected executor `{host}`",
+                        card.host
+                    ),
+                });
+                continue;
+            }
+        } else {
+            selected_host = Some(card.host.clone());
         }
         if let Some(conflict) =
             selected_skill_conflict(&card, &incompatible_with, &selected_incompatibilities)
@@ -444,10 +452,15 @@ pub fn route_skills_for_task(
         selected_incompatibilities.insert(card.id.clone(), incompatible_with);
         selected.push(card);
     }
+    let executor_id = selected_host.unwrap_or_else(|| DEFAULT_EXECUTOR_SKILL.to_string());
     Ok(SkillRouteResult {
         executor: SkillRouteExecutor {
-            id: DEFAULT_EXECUTOR_SKILL.to_string(),
-            reason: "default code-agent executor for instruction skills".to_string(),
+            reason: if executor_id == DEFAULT_EXECUTOR_SKILL {
+                "default code-agent executor for instruction skills".to_string()
+            } else {
+                format!("selected from instruction skill host `{executor_id}`")
+            },
+            id: executor_id,
         },
         instructions: selected.clone(),
         selected,

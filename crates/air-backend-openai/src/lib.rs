@@ -1021,6 +1021,15 @@ fn native_tool_description(original_name: &str, schema: Option<&Value>, input: &
         "todowrite" => return opencode_todowrite_description(),
         "todoread" => return "Use this tool to read your todo list".to_string(),
         "skill" => return opencode_skill_description(input.get("available_skills")),
+        "gitlab_mr" => {
+            return "Fetch GitLab merge request metadata. Parse project_id and merge_request_iid from a GitLab MR URL such as https://host/group/project/-/merge_requests/23532 where project_id is group/project and merge_request_iid is 23532.".to_string();
+        }
+        "gitlab_mr_files" => {
+            return "List files changed by a GitLab merge request. Use project_id and merge_request_iid parsed from the MR URL.".to_string();
+        }
+        "gitlab_mr_diffs" => {
+            return "Fetch GitLab merge request diffs for code review. Use project_id and merge_request_iid parsed from the MR URL.".to_string();
+        }
         _ => {}
     }
     let Some(schema) = schema else {
@@ -1856,6 +1865,24 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                 "additionalProperties": false
             });
         }
+        "gitlab_mr" | "gitlab_mr_files" | "gitlab_mr_diffs" => {
+            return json!({
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "project_id": {
+                        "description": "GitLab project ID or path from the MR URL. For https://host/group/sub/project/-/merge_requests/23532 use group/sub/project.",
+                        "type": "string"
+                    },
+                    "merge_request_iid": {
+                        "description": "Merge request IID from the MR URL. For /-/merge_requests/23532 use 23532.",
+                        "type": "string"
+                    }
+                },
+                "required": ["project_id", "merge_request_iid"],
+                "additionalProperties": false
+            });
+        }
         _ => {}
     }
     let mut properties = serde_json::Map::new();
@@ -2263,12 +2290,42 @@ fn render_tool_output_transcript(tool: &str, output: &Value, lines: &mut Vec<Str
         "repo.symbols" | "repo_symbols" => render_symbols_transcript(output, lines),
         "rust_analyzer" | "lsp" => render_lsp_transcript(output, lines),
         "bash" | "command.run" | "command_run" => render_bash_transcript(output, lines),
+        "mcp" | "mcp_tool" | "gitlab" | "gitlab_graphql" | "gitlab_mr" | "gitlab_mr_files"
+        | "gitlab_mr_diffs" => render_mcp_transcript(output, lines),
         "task" => render_task_transcript(output, lines),
         "todowrite" | "todo.write" | "todo_write" => render_todowrite_transcript(output, lines),
         _ => {
             lines.push(format!("output: {}", compact_json_fallback(output)));
         }
     }
+}
+
+fn render_mcp_transcript(output: &Value, lines: &mut Vec<String>) {
+    if let Some(tool) = output.get("tool").and_then(Value::as_str) {
+        lines.push(format!("mcp_tool: {tool}"));
+    }
+    if let Some(content) = output
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+    {
+        for item in content.iter().take(4) {
+            if let Some(text) = item.get("text").and_then(Value::as_str) {
+                lines.push(truncate_text(text, NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS));
+            } else {
+                lines.push(compact_json_fallback(item));
+            }
+        }
+        return;
+    }
+    if let Some(result) = output.get("result") {
+        lines.push(truncate_text(
+            &compact_json(result),
+            NATIVE_TOOL_OUTPUT_TRANSCRIPT_MAX_CHARS,
+        ));
+        return;
+    }
+    lines.push(compact_json_fallback(output));
 }
 
 fn task_transcript_output_text(output: &Value) -> String {

@@ -241,6 +241,13 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
     {
         return compact_subagent_output_context(object);
     }
+    let has_mcp_content = object
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .is_some();
+    if object.get("kind").and_then(Value::as_str) == Some("mcp_tool_result") || has_mcp_content {
+        return compact_mcp_tool_output_context(object);
+    }
 
     let mut compact = Map::new();
     for field in [
@@ -301,6 +308,39 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
     } else {
         Value::Object(compact)
     }
+}
+
+fn compact_mcp_tool_output_context(object: &Map<String, Value>) -> Value {
+    let mut compact = Map::new();
+    for field in ["kind", "tool", "endpoint", "transport"] {
+        copy_context_field(&mut compact, object, field);
+    }
+    if let Some(content) = object
+        .get("result")
+        .and_then(|result| result.get("content"))
+        .and_then(Value::as_array)
+    {
+        let text = content
+            .iter()
+            .filter_map(|item| item.get("text").and_then(Value::as_str))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if !text.is_empty() {
+            compact.insert(
+                "content".to_string(),
+                Value::String(compact_model_context_string(&text, 60_000)),
+            );
+        }
+    } else if let Some(result) = object.get("result") {
+        compact.insert("result".to_string(), compact_json_value(result, 60_000));
+    }
+    if let Some(artifacts) = object.get("artifacts") {
+        compact.insert(
+            "artifact_refs".to_string(),
+            compact_artifact_refs(artifacts),
+        );
+    }
+    Value::Object(compact)
 }
 
 fn compact_subagent_output_context(object: &Map<String, Value>) -> Value {

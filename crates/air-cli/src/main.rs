@@ -10,6 +10,7 @@ mod models;
 mod planner;
 mod profile;
 mod project;
+mod review_agent;
 mod run_plan;
 mod skill;
 mod tools;

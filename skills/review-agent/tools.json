@@ -1,0 +1,148 @@
+{
+  "tools": {
+    "glob": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 100
+    },
+    "question": {
+      "kind": "local_reflection",
+      "capability": "code.read"
+    },
+    "read_range": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 51200
+    },
+    "read_contains": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 51200
+    },
+    "grep": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_matches": 100,
+      "max_context_lines": 2,
+      "max_line_chars": 2000,
+      "max_bytes": 51200
+    },
+    "webfetch": {
+      "kind": "web_fetch",
+      "capability": "code.read",
+      "timeout_seconds": 120,
+      "max_bytes": 51200
+    },
+    "skill": {
+      "kind": "skill",
+      "capability": "code.read",
+      "root_dir": "../..",
+      "max_bytes": 65536
+    },
+    "gitlab": {
+      "kind": "mcp",
+      "capability": "gitlab.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_TOOLSETS": "merge_requests,repositories,branches,projects,users",
+        "GITLAB_TOOLS": "execute_graphql",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "timeout_seconds": 60,
+      "max_bytes": 131072
+    },
+    "gitlab_mr": {
+      "kind": "mcp",
+      "capability": "gitlab.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_TOOLSETS": "merge_requests,repositories,branches,projects,users",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "tool": "get_merge_request",
+      "timeout_seconds": 60,
+      "max_bytes": 131072
+    },
+    "gitlab_mr_files": {
+      "kind": "mcp",
+      "capability": "gitlab.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_TOOLSETS": "merge_requests,repositories,branches,projects,users",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "tool": "list_merge_request_changed_files",
+      "timeout_seconds": 60,
+      "max_bytes": 131072
+    },
+    "gitlab_mr_diffs": {
+      "kind": "mcp",
+      "capability": "gitlab.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_TOOLSETS": "merge_requests,repositories,branches,projects,users",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "tool": "get_merge_request_diffs",
+      "timeout_seconds": 60,
+      "max_bytes": 262144
+    },
+    "gitlab_graphql": {
+      "kind": "mcp",
+      "capability": "gitlab.graphql.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_TOOLSETS": "merge_requests,repositories,branches,projects,users",
+        "GITLAB_TOOLS": "execute_graphql",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "tool": "execute_graphql",
+      "timeout_seconds": 60,
+      "max_bytes": 131072
+    }
+  }
+}

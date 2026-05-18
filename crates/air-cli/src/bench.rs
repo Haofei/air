@@ -774,6 +774,7 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
             tool_config: Some(tool_config.clone()),
             artifact_out: Some(artifact_dir.clone()),
             artifact_extra,
+            verdict_constraints: CodeRunVerdictConstraints::code_edit(),
             replay_artifact: None,
             replay_from: None,
         });
@@ -965,6 +966,7 @@ fn bench_verdict_constraints(diff: &DiffConstraints) -> CodeRunVerdictConstraint
     CodeRunVerdictConstraints {
         require_patch: true,
         require_verification: true,
+        forbid_workspace_changes: false,
         allowed_changed_files: diff.allowed_changed_files.clone(),
         required_changed_files: diff.required_changed_files.clone(),
         forbidden_changed_files: diff.forbidden_changed_files.clone(),

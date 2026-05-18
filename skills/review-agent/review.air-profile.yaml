@@ -1,0 +1,4 @@
+plan: review.air-plan.yaml
+store: module-store.air-store.yaml
+model_config: ../../examples/bigmodel-openai-compatible.json
+tool_config: tools.json

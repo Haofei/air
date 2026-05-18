@@ -126,6 +126,8 @@ pub(crate) struct CodeRunVerdict {
     pub(crate) verification_ran: bool,
     pub(crate) verification_passed: bool,
     pub(crate) changed_files: Vec<String>,
+    #[serde(default)]
+    pub(crate) workspace_clean_ok: bool,
     pub(crate) allowed_files_ok: bool,
     pub(crate) required_files_ok: bool,
     pub(crate) forbidden_files_ok: bool,
@@ -140,6 +142,7 @@ pub(crate) struct CodeRunVerdict {
 pub(crate) struct CodeRunVerdictConstraints {
     pub(crate) require_patch: bool,
     pub(crate) require_verification: bool,
+    pub(crate) forbid_workspace_changes: bool,
     pub(crate) allowed_changed_files: Vec<String>,
     pub(crate) required_changed_files: Vec<String>,
     pub(crate) forbidden_changed_files: Vec<String>,
@@ -152,6 +155,13 @@ impl CodeRunVerdictConstraints {
         Self {
             require_patch: true,
             require_verification: true,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn review() -> Self {
+        Self {
+            forbid_workspace_changes: true,
             ..Self::default()
         }
     }
@@ -295,6 +305,7 @@ pub(crate) fn derive_code_run_verdict_from_facts(
     constraints: &CodeRunVerdictConstraints,
 ) -> CodeRunVerdict {
     let patch_applied = !delta.changed_files.is_empty();
+    let workspace_clean_ok = !constraints.forbid_workspace_changes || !patch_applied;
     let allowed_files_ok = constraints.allowed_changed_files.is_empty()
         || delta
             .changed_files
@@ -318,7 +329,8 @@ pub(crate) fn derive_code_run_verdict_from_facts(
     let patch_ok = !constraints.require_patch || patch_applied;
     let verification_ok =
         !constraints.require_verification || (facts.verification_ran && facts.verification_passed);
-    let final_success = patch_ok
+    let final_success = workspace_clean_ok
+        && patch_ok
         && verification_ok
         && allowed_files_ok
         && required_files_ok
@@ -330,6 +342,7 @@ pub(crate) fn derive_code_run_verdict_from_facts(
         verification_ran: facts.verification_ran,
         verification_passed: facts.verification_passed,
         changed_files: delta.changed_files.clone(),
+        workspace_clean_ok,
         allowed_files_ok,
         required_files_ok,
         forbidden_files_ok,
@@ -452,6 +465,13 @@ fn code_verdict_failure_reason(
             category: FailureCategory::VerificationFailed,
             message: "code agent verification did not pass".to_string(),
             details: BTreeMap::new(),
+        });
+    }
+    if constraints.forbid_workspace_changes && !verdict.workspace_clean_ok {
+        return Some(FailureReason {
+            category: FailureCategory::PolicyViolation,
+            message: "read-only agent changed workspace files".to_string(),
+            details: BTreeMap::from([("changed_files".to_string(), json!(verdict.changed_files))]),
         });
     }
     let mut violations = Vec::new();
@@ -1181,6 +1201,26 @@ mod tests {
         assert_eq!(
             verdict.failure_reason.unwrap().category,
             FailureCategory::DiffConstraintFailed
+        );
+    }
+
+    #[test]
+    fn review_verdict_rejects_workspace_changes() {
+        let delta = WorkspaceDelta {
+            changed_files: vec!["src/lib.rs".to_string()],
+            diff: "+review should not edit\n".to_string(),
+        };
+        let verdict = derive_code_run_verdict_from_facts(
+            &delta,
+            CodeRunVerificationFacts::default(),
+            &CodeRunVerdictConstraints::review(),
+        );
+
+        assert!(!verdict.workspace_clean_ok);
+        assert!(!verdict.final_success);
+        assert_eq!(
+            verdict.failure_reason.unwrap().category,
+            FailureCategory::PolicyViolation
         );
     }
 

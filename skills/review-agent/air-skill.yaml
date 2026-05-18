@@ -1,0 +1,48 @@
+schema: air.skill.v1
+id: review-agent
+mode: executor
+version: 0.1.0
+description: Read-only AIR executor for reviewing diffs, pull requests, merge requests, and changed files.
+
+source:
+  type: local
+
+instructions:
+  files:
+    - SKILL.md
+
+capabilities:
+  allow:
+    - file.read
+    - code.read
+    - gitlab.read
+    - gitlab.graphql.read
+  deny:
+    - file.write
+    - code.test
+    - shell.unrestricted
+    - secrets.read
+
+tools:
+  config: tools.json
+
+workflow:
+  profile: review.air-profile.yaml
+
+routing:
+  summary: Review-only executor for PR/MR/diff analysis without workspace edits.
+  triggers:
+    - review
+    - code review
+    - review diff
+    - review PR
+    - review MR
+    - merge request review
+    - pull request review
+  task_types:
+    - review
+
+verification:
+  mode: review_only
+  require_patch: false
+  forbid_workspace_changes: true
