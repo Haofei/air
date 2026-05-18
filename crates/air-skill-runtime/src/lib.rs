@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 
 pub const SKILL_MANIFEST: &str = "air-skill.yaml";
 pub const SKILL_SCHEMA: &str = "air.skill.v1";
+pub const SKILLS_LOCK: &str = "skills.lock";
+pub const SKILLS_LOCK_SCHEMA: &str = "air.skills_lock.v1";
 pub const DEFAULT_EXECUTOR_SKILL: &str = "code-agent";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -132,6 +134,75 @@ pub struct SkillAuditFinding {
     pub severity: String,
     pub reason: String,
     pub file: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillsLock {
+    pub schema: String,
+    #[serde(default)]
+    pub skills: BTreeMap<String, SkillLockEntry>,
+}
+
+impl Default for SkillsLock {
+    fn default() -> Self {
+        Self {
+            schema: SKILLS_LOCK_SCHEMA.to_string(),
+            skills: BTreeMap::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SkillLockEntry {
+    pub manifest: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
+    pub sha256: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audit_sha256: Option<String>,
+    pub trusted: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trusted_reason: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub imported_at_unix_ms: Option<u128>,
+}
+
+pub fn read_skills_lock(path: &Path) -> Result<SkillsLock> {
+    if !path.exists() {
+        return Ok(SkillsLock::default());
+    }
+    let content = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    let lock: SkillsLock =
+        serde_yaml::from_str(&content).with_context(|| format!("parse {}", path.display()))?;
+    if lock.schema != SKILLS_LOCK_SCHEMA {
+        bail!(
+            "unsupported skills lock schema `{}` in {}",
+            lock.schema,
+            path.display()
+        );
+    }
+    Ok(lock)
+}
+
+pub fn write_skills_lock(path: &Path, lock: &SkillsLock) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::write(path, serde_yaml::to_string(lock)?)
+        .with_context(|| format!("write {}", path.display()))
+}
+
+pub fn find_skills_lock_for_skill(skill_dir: &Path) -> Option<PathBuf> {
+    for ancestor in skill_dir.ancestors() {
+        let candidate = ancestor.join(SKILLS_LOCK);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -451,10 +522,6 @@ pub fn is_trusted_import_source(source: &str) -> bool {
     owner == "anthropics" && repo == "skills"
 }
 
-fn is_trusted_provenance_source(source: &str) -> bool {
-    source.trim() == "builtin:air" || is_trusted_import_source(source)
-}
-
 pub fn skill_frontmatter_for_dir(skill_dir: &Path) -> Option<SkillFrontmatter> {
     for name in ["SKILL.md", "README.md"] {
         let path = skill_dir.join(name);
@@ -653,24 +720,31 @@ fn route_tokens(text: &str) -> Vec<String> {
 }
 
 fn trusted_skill_source(skill: &ResolvedSkill) -> bool {
+    if let Some(lock_path) = find_skills_lock_for_skill(&skill.manifest_dir) {
+        if let Ok(lock) = read_skills_lock(&lock_path) {
+            if let Some(entry) = lock.skills.get(&skill.manifest.id) {
+                if entry.trusted
+                    && directory_identity(&skill.manifest_dir)
+                        .ok()
+                        .as_deref()
+                        .is_some_and(|actual| actual == entry.sha256)
+                {
+                    return true;
+                }
+            }
+        }
+    }
+    trusted_builtin_source(skill)
+}
+
+fn trusted_builtin_source(skill: &ResolvedSkill) -> bool {
     let Ok(content) = fs::read_to_string(skill.manifest_dir.join("source.json")) else {
         return false;
     };
     let Ok(source) = serde_json::from_str::<Value>(&content) else {
         return false;
     };
-    if !source
-        .get("trusted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return false;
-    }
-    if !source
-        .get("source")
-        .and_then(Value::as_str)
-        .is_some_and(is_trusted_provenance_source)
-    {
+    if source.get("source").and_then(Value::as_str) != Some("builtin:air") {
         return false;
     }
     source
@@ -755,8 +829,6 @@ fn audit_risk(findings: &[SkillAuditFinding]) -> String {
         "high".to_string()
     } else if findings.iter().any(|finding| finding.severity == "medium") {
         "medium".to_string()
-    } else if findings.iter().any(|finding| finding.severity == "low") {
-        "low".to_string()
     } else {
         "low".to_string()
     }
@@ -778,6 +850,7 @@ fn collect_skill_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Res
             || relative.starts_with("node_modules")
             || relative == Path::new("audit.json")
             || relative == Path::new("source.json")
+            || relative == Path::new(SKILLS_LOCK)
         {
             continue;
         }

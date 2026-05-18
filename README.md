@@ -85,6 +85,9 @@ Multiple compatible instruction skills stack onto one executor:
 # User entry point: auto-route skills and run through the host executor
 cargo run -p air-cli -- run "use TDD to fix the failing add function"
 
+# Explain executor, routed skills, permissions, and verification without running
+cargo run -p air-cli -- run "use TDD to fix the failing add function" --explain
+
 # Force additional instruction skills
 cargo run -p air-cli -- run "refactor a helper and run tests" \
   --skills tdd-workflow
@@ -101,6 +104,7 @@ cargo run -p air-cli -- skill validate code-agent
 cargo run -p air-cli -- skill explain code-agent
 cargo run -p air-cli -- skill audit code-agent
 cargo run -p air-cli -- skill import ./some-skill
+cargo run -p air-cli -- skill upgrade tdd-workflow --dry-run
 ```
 
 Audit risk gates (`high`/`critical`) refuse to load or run untrusted skills.
@@ -115,16 +119,34 @@ cargo run -p air-cli -- skill import \
 cargo run -p air-cli -- skill import https://github.com/anthropics/skills
 ```
 
-AIR treats the official `github.com/anthropics/skills` repository as a trusted
-instruction-skill source: audit findings are still recorded, but high-risk text
-patterns in bundled examples/scripts do not block loading the skill. Imported
-scripts are not executed automatically; they remain skill assets unless wrapped
-by an AIR tool.
+AIR records imported skill provenance in `source.json` and trust decisions in
+the repo-level `skills.lock`. The lock pins source, content hash, audit hash,
+and the local trusted/untrusted decision; skill manifests and source metadata
+describe provenance but do not grant trust by themselves. Imported scripts are
+not executed automatically; they remain skill assets unless wrapped by an AIR
+tool.
 
 ```bash
 cargo run -p air-cli -- skill audit tdd-workflow
 cargo run -p air-cli -- skill route "use TDD to refactor a Rust helper"
 ```
+
+## MCP Governance
+
+AIR can call Streamable HTTP MCP servers through configured tools, but MCP is
+treated as governed network capability rather than an untracked side channel.
+Inspect MCP declarations before exposing them to an agent:
+
+```bash
+cargo run -p air-cli -- mcp list --tool-config skills/code-agent/tools.json
+cargo run -p air-cli -- mcp explain github.issue --tool-config tools.json
+cargo run -p air-cli -- mcp audit --tool-config tools.json
+```
+
+Each `kind: "mcp"` tool declares a `server_url`, optional fixed MCP `tool`,
+auth headers or `bearer_token_env`, and a narrow AIR `capability` such as
+`github.issue.read`. MCP tool calls emit provenance artifacts with server URL,
+method, and selected MCP tool.
 
 ## Code Agent
 
@@ -337,7 +359,8 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | --- | --- |
 | `run` | User entry point; routes skills and picks code-agent or project-agent |
 | `skill route` | Route a task to matching skills |
-| `skill list/validate/explain/audit/import` | Skill lifecycle management |
+| `skill list/validate/explain/audit/import/upgrade` | Skill lifecycle management |
+| `mcp list/explain/audit` | Inspect MCP tool governance before runs |
 | `bench code` | Benchmark code agent on a suite |
 | `bench skill` | Benchmark with skill preload, optional no-skill comparison |
 | `dev` | Advanced IR/runtime tools for AIR development |

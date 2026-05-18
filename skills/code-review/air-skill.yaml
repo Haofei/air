@@ -1,0 +1,56 @@
+schema: air.skill.v1
+id: code-review
+mode: instruction
+version: 0.1.0
+description: Review code changes, pull requests, merge requests, and diffs with findings-first engineering feedback.
+
+source:
+  type: local
+
+instructions:
+  files:
+    - SKILL.md
+
+capabilities: {}
+
+host:
+  skill: code-agent
+
+routing:
+  summary: Use for code review of diffs, pull requests, merge requests, changed files, and proposed patches.
+  triggers:
+    - code review
+    - review code
+    - review diff
+    - review this diff
+    - review this PR
+    - review this MR
+    - pull request review
+    - merge request review
+    - MR review
+    - PR review
+    - audit diff
+    - changed files
+    - findings
+  negative_triggers:
+    - implement
+    - fix it
+    - write code
+    - refactor
+  repo_markers:
+    - Cargo.toml
+    - package.json
+    - pnpm-lock.yaml
+    - yarn.lock
+    - package-lock.json
+  task_types:
+    - review
+    - audit
+  compatible_with:
+    - tdd-workflow
+  incompatible_with: []
+  exclude: []
+
+verification:
+  mode: instruction_only
+  scripts: disabled

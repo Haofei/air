@@ -121,6 +121,10 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
             }
             ToolConfig::Mcp {
                 server_url,
+                command,
+                args,
+                env,
+                cwd,
                 tool,
                 headers,
                 bearer_token_env,
@@ -131,13 +135,56 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                 max_bytes,
                 ..
             } => {
-                if server_url.trim().is_empty()
-                    || !(server_url.starts_with("http://") || server_url.starts_with("https://"))
-                {
-                    anyhow::bail!(
-                        "tool config {} tools.{name}.server_url must be an http(s) URL",
-                        path.display()
-                    );
+                match (server_url.as_deref(), command.as_deref()) {
+                    (Some(server_url), None) => {
+                        if server_url.trim().is_empty()
+                            || !(server_url.starts_with("http://")
+                                || server_url.starts_with("https://"))
+                        {
+                            anyhow::bail!(
+                                "tool config {} tools.{name}.server_url must be an http(s) URL",
+                                path.display()
+                            );
+                        }
+                    }
+                    (None, Some(command)) => {
+                        if command.trim().is_empty() {
+                            anyhow::bail!(
+                                "tool config {} tools.{name}.command must not be empty",
+                                path.display()
+                            );
+                        }
+                        if args.iter().any(|arg| arg.trim().is_empty()) {
+                            anyhow::bail!(
+                                "tool config {} tools.{name}.args must contain non-empty strings",
+                                path.display()
+                            );
+                        }
+                        if env.keys().any(|key| key.trim().is_empty()) {
+                            anyhow::bail!(
+                                "tool config {} tools.{name}.env contains an empty key",
+                                path.display()
+                            );
+                        }
+                        if cwd.as_ref().is_some_and(|path| path.as_os_str().is_empty()) {
+                            anyhow::bail!(
+                                "tool config {} tools.{name}.cwd must not be empty",
+                                path.display()
+                            );
+                        }
+                    }
+                    (Some(_), Some(_)) => {
+                        anyhow::bail!(
+                            "tool config {} tools.{name} must use either server_url or command, not both",
+                            path.display()
+                        );
+                    }
+                    (None, None) => {
+                        anyhow::bail!(
+                            "tool config {} tools.{name} must set server_url or command",
+                            path.display()
+                        );
+                    }
                 }
                 if tool.as_deref().is_some_and(|value| value.trim().is_empty()) {
                     anyhow::bail!(

@@ -134,7 +134,20 @@ enum ToolConfig {
         #[serde(default)]
         capability: Option<String>,
 
-        server_url: String,
+        #[serde(default)]
+        server_url: Option<String>,
+
+        #[serde(default)]
+        command: Option<String>,
+
+        #[serde(default)]
+        args: Vec<String>,
+
+        #[serde(default)]
+        env: BTreeMap<String, String>,
+
+        #[serde(default)]
+        cwd: Option<PathBuf>,
 
         #[serde(default)]
         tool: Option<String>,
@@ -746,6 +759,10 @@ impl ToolProvider for ConfigTools {
             ToolConfig::Mcp {
                 capability: _,
                 server_url,
+                command,
+                args,
+                env,
+                cwd,
                 tool,
                 headers,
                 bearer_token_env,
@@ -758,7 +775,11 @@ impl ToolProvider for ConfigTools {
                 name,
                 input,
                 McpToolConfig {
-                    server_url: &server_url,
+                    server_url: server_url.as_deref(),
+                    command: command.as_deref(),
+                    args: &args,
+                    env: &env,
+                    cwd: cwd.as_ref(),
                     tool: tool.as_deref(),
                     headers: &headers,
                     bearer_token_env: bearer_token_env.as_deref(),

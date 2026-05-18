@@ -1,9 +1,13 @@
 use crate::project::{
     default_project_file, project_plan, project_run, ProjectPlanOptions, ProjectRunOptions,
 };
-use crate::skill::{run_skill_auto, SkillAutoRunOptions};
+use crate::skill::{
+    prepare_skill_composition, route_skills_value_for_task, run_skill_auto, SkillAutoRunOptions,
+};
 use anyhow::{bail, Result};
 use clap::ValueEnum;
+use serde_json::{json, Value};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -24,6 +28,7 @@ pub(crate) struct EntryTaskOptions {
     pub(crate) trace_redact: bool,
     pub(crate) trace_raw: bool,
     pub(crate) log: bool,
+    pub(crate) explain: bool,
     pub(crate) tool_config: Option<PathBuf>,
     pub(crate) artifact_out: Option<PathBuf>,
     pub(crate) replay_artifact: Option<PathBuf>,
@@ -45,6 +50,9 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
         bail!("air run task must not be empty");
     }
     let executor = select_entry_executor(&options.task, options.mode);
+    if options.explain {
+        return explain_entry_task(&options, executor);
+    }
     match executor {
         EntryExecutor::Code => run_skill_auto(SkillAutoRunOptions {
             task: options.task,
@@ -100,6 +108,100 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
             })
         }
     }
+}
+
+fn explain_entry_task(options: &EntryTaskOptions, executor: EntryExecutor) -> Result<()> {
+    let explanation = match executor {
+        EntryExecutor::Code => explain_code_entry(options)?,
+        EntryExecutor::Project => {
+            let project_file = options
+                .project_file
+                .clone()
+                .unwrap_or_else(|| PathBuf::from(".air/run").join(default_project_file()));
+            json!({
+                "task": options.task,
+                "executor": "project-agent",
+                "mode": "project",
+                "project_file": project_file,
+                "will_execute": options.execute,
+                "plan_only": options.plan_only || !options.execute,
+                "planner_model": options.planner_model,
+                "model_config": options.model_config,
+                "permissions": {
+                    "filesystem": "project tasks run through isolated code-agent worktrees before applying patches",
+                    "verification": "per-task verification commands and diff constraints come from the generated project manifest",
+                },
+                "artifacts": {
+                    "project_state": ".air/project/state.json",
+                    "task_artifacts": ".air/project/tasks/<task-id>/artifact",
+                }
+            })
+        }
+    };
+    println!("{}", serde_json::to_string_pretty(&explanation)?);
+    Ok(())
+}
+
+fn explain_code_entry(options: &EntryTaskOptions) -> Result<Value> {
+    let route = route_skills_value_for_task(&options.task, options.top_k.max(1))?;
+    let routed = route
+        .get("instructions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|card| card.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let selected = merge_skill_ids(&routed, &options.skills);
+    let prepared = prepare_skill_composition(&selected)?;
+    let composition = prepared
+        .artifact_extra
+        .get("skill_composition")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "task": options.task,
+        "executor": "code-agent",
+        "mode": "code",
+        "route": route,
+        "forced_skills": options.skills,
+        "selected_instruction_skills": selected,
+        "profile": prepared.profile,
+        "tool_config": prepared.tool_config,
+        "composition": composition,
+        "model_config": options.model_config,
+        "trace_out": options.trace_out,
+        "artifact_out": options.artifact_out,
+        "permissions": {
+            "file.read": "allowed through bounded read/search tools",
+            "file.write": "allowed under the configured code-agent tools",
+            "shell.unrestricted": "denied by code-agent skill capability policy",
+            "network": "only configured tools such as webfetch or mcp can access network",
+        },
+        "verification": {
+            "requires_patch": true,
+            "requires_verification_after_write": true,
+            "success_source": "runtime-derived artifact verdict, not model-claimed success",
+        }
+    }))
+}
+
+fn merge_skill_ids(primary: &[String], additional: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    primary
+        .iter()
+        .map(String::as_str)
+        .chain(additional.iter().flat_map(|value| value.split(',')))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            if seen.insert(value.to_string()) {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 fn select_entry_executor(task: &str, mode: EntryMode) -> EntryExecutor {

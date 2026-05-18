@@ -5,6 +5,7 @@ mod code_artifact;
 mod diagnostics;
 mod entry;
 mod explain;
+mod mcp;
 mod models;
 mod planner;
 mod profile;
@@ -16,6 +17,10 @@ use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSk
 use crate::diagnostics::emit_diagnostics;
 use crate::entry::{run_entry_task, EntryMode, EntryTaskOptions};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
+use crate::mcp::{
+    audit_mcp, call_mcp, explain_mcp, list_mcp, McpAuditOptions, McpCallOptions, McpExplainOptions,
+    McpListOptions,
+};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
     module_base_dir_for_modules, module_base_dir_for_store_path, plan_task, PlanOptions,
@@ -32,8 +37,8 @@ use crate::run_plan::{
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
 };
 use crate::skill::{
-    audit_skill, explain_skill, import_skill, list_skills, route_skill, validate_skill,
-    SkillRouteOptions,
+    audit_skill, explain_skill, import_skill, list_skills, route_skill, upgrade_skill,
+    validate_skill, SkillRouteOptions, SkillUpgradeOptions,
 };
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
@@ -106,6 +111,11 @@ enum Command {
         #[command(subcommand)]
         command: BenchCommand,
     },
+    /// Inspect and audit MCP tools declared in AIR tool configs.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Advanced AIR IR/runtime tools.
     Dev {
         #[command(subcommand)]
@@ -170,6 +180,10 @@ enum Command {
         #[arg(long)]
         log: bool,
 
+        /// Explain selected executor, skills, and permissions without running a model.
+        #[arg(long)]
+        explain: bool,
+
         /// Optional tool provider config JSON.
         #[arg(long, hide = true)]
         tool_config: Option<PathBuf>,
@@ -216,6 +230,15 @@ enum SkillCommand {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Check what would change if an imported skill was upgraded from its source.
+    Upgrade {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+
+        /// Show the upgrade diff without changing files.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Route a task to the most relevant local AIR skills.
     Route {
         /// Natural-language task.
@@ -237,6 +260,47 @@ enum SkillCommand {
         /// Skill run profile override.
         #[arg(long)]
         profile: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum McpCommand {
+    /// List MCP tools declared in a tool config.
+    List {
+        /// AIR tool config JSON.
+        #[arg(long, default_value = "skills/code-agent/tools.json")]
+        tool_config: PathBuf,
+    },
+    /// Explain one MCP tool declaration without connecting to it.
+    Explain {
+        /// MCP tool name from the AIR tool config.
+        tool: String,
+
+        /// AIR tool config JSON.
+        #[arg(long, default_value = "skills/code-agent/tools.json")]
+        tool_config: PathBuf,
+    },
+    /// Audit MCP tool declarations for auth, transport, and capability risk.
+    Audit {
+        /// Optional MCP tool name from the AIR tool config.
+        tool: Option<String>,
+
+        /// AIR tool config JSON.
+        #[arg(long, default_value = "skills/code-agent/tools.json")]
+        tool_config: PathBuf,
+    },
+    /// Call an MCP tool through AIR's configured MCP adapter.
+    Call {
+        /// AIR tool config tool name.
+        tool: String,
+
+        /// AIR tool config JSON.
+        #[arg(long, default_value = "skills/code-agent/tools.json")]
+        tool_config: PathBuf,
+
+        /// JSON object passed to the AIR MCP tool. Defaults to list_tools.
+        #[arg(long)]
+        input_json: Option<String>,
     },
 }
 
@@ -697,6 +761,9 @@ fn main() -> Result<()> {
             SkillCommand::Validate { skill } => validate_skill(&skill),
             SkillCommand::Audit { skill, write } => audit_skill(&skill, write),
             SkillCommand::Import { source, out } => import_skill(&source, out.as_deref()),
+            SkillCommand::Upgrade { skill, dry_run } => {
+                upgrade_skill(SkillUpgradeOptions { skill, dry_run })
+            }
             SkillCommand::Route {
                 task,
                 top_k,
@@ -707,6 +774,24 @@ fn main() -> Result<()> {
                 explain,
             }),
             SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
+        },
+        Command::Mcp { command } => match command {
+            McpCommand::List { tool_config } => list_mcp(McpListOptions { tool_config }),
+            McpCommand::Explain { tool, tool_config } => {
+                explain_mcp(McpExplainOptions { tool, tool_config })
+            }
+            McpCommand::Audit { tool, tool_config } => {
+                audit_mcp(McpAuditOptions { tool, tool_config })
+            }
+            McpCommand::Call {
+                tool,
+                tool_config,
+                input_json,
+            } => call_mcp(McpCallOptions {
+                tool,
+                tool_config,
+                input_json,
+            }),
         },
         Command::Bench { command } => match command {
             BenchCommand::Code {
@@ -800,6 +885,7 @@ fn main() -> Result<()> {
             trace_redact,
             trace_raw,
             log,
+            explain,
             tool_config,
             artifact_out,
             replay_artifact,
@@ -814,6 +900,7 @@ fn main() -> Result<()> {
             trace_redact,
             trace_raw,
             log,
+            explain,
             tool_config,
             artifact_out,
             replay_artifact,
@@ -1910,7 +1997,7 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
 
-        for command in ["run", "skill", "bench", "dev"] {
+        for command in ["run", "skill", "bench", "mcp", "dev"] {
             assert!(
                 command_names.contains(&command),
                 "expected {command} in help"
@@ -2016,7 +2103,9 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
 
-        for command in ["list", "validate", "audit", "import", "route", "explain"] {
+        for command in [
+            "list", "validate", "audit", "import", "upgrade", "route", "explain",
+        ] {
             assert!(
                 command_names.contains(&command),
                 "expected {command} in skill help"
@@ -2060,6 +2149,29 @@ mod tests {
     }
 
     #[test]
+    fn mcp_audit_accepts_tool_config() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "mcp",
+            "audit",
+            "github",
+            "--tool-config",
+            "tools.json",
+        ])
+        .unwrap();
+
+        let Command::Mcp {
+            command: McpCommand::Audit { tool, tool_config },
+        } = cli.command
+        else {
+            panic!("expected mcp audit command");
+        };
+
+        assert_eq!(tool, Some("github".to_string()));
+        assert_eq!(tool_config, PathBuf::from("tools.json"));
+    }
+
+    #[test]
     fn run_accepts_natural_language_task() {
         let cli = Cli::try_parse_from([
             "air",
@@ -2069,6 +2181,7 @@ mod tests {
             "tdd-workflow",
             "--mode",
             "code",
+            "--explain",
         ])
         .unwrap();
 
@@ -2077,6 +2190,7 @@ mod tests {
             mode,
             skills,
             execute,
+            explain,
             ..
         } = cli.command
         else {
@@ -2087,6 +2201,7 @@ mod tests {
         assert_eq!(mode, EntryMode::Code);
         assert_eq!(skills, vec!["tdd-workflow"]);
         assert!(!execute);
+        assert!(explain);
     }
 
     #[test]

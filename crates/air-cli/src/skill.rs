@@ -144,6 +144,11 @@ pub(crate) struct SkillRouteOptions {
     pub(crate) explain: bool,
 }
 
+pub(crate) struct SkillUpgradeOptions {
+    pub(crate) skill: String,
+    pub(crate) dry_run: bool,
+}
+
 pub(crate) struct PreparedSkillRun {
     pub(crate) metadata: CodeRunSkill,
     pub(crate) profile: PathBuf,
@@ -613,6 +618,97 @@ pub(crate) fn audit_skill(reference: &str, write: bool) -> Result<()> {
     print_json(&json!(audit))
 }
 
+pub(crate) fn upgrade_skill(options: SkillUpgradeOptions) -> Result<()> {
+    if !options.dry_run {
+        bail!("skill upgrade currently supports only --dry-run");
+    }
+    let current = resolve_skill(&options.skill)?;
+    let source_path = current.manifest_dir.join("source.json");
+    let source_metadata: Value = serde_json::from_slice(
+        &fs::read(&source_path).with_context(|| format!("read {}", source_path.display()))?,
+    )
+    .with_context(|| format!("parse {}", source_path.display()))?;
+    let source = source_metadata
+        .get("source")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow::anyhow!("skill source.json missing string field `source`"))?;
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "air-skill-upgrade-{}-{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+    ));
+    fs::create_dir_all(&temp_dir).with_context(|| format!("create {}", temp_dir.display()))?;
+    let imported_root = import_source_to_temp(source, &temp_dir)?;
+    let import_units = discover_import_units(&imported_root)?;
+    let unit = import_units
+        .iter()
+        .find(|unit| unit.id == current.manifest.id)
+        .or_else(|| {
+            if import_units.len() == 1 {
+                import_units.first()
+            } else {
+                None
+            }
+        })
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "imported source did not contain a matching skill id `{}`",
+                current.manifest.id
+            )
+        })?;
+    let candidate_dir = temp_dir.join("candidate").join(&current.manifest.id);
+    copy_dir_all(&unit.path, &candidate_dir)?;
+    let source_label = if unit.relative.as_os_str().is_empty() {
+        source.to_string()
+    } else {
+        format!("{source}#{}", path_ref(&unit.relative))
+    };
+    ensure_import_manifest(&source_label, &candidate_dir)?;
+    let candidate = resolve_skill(candidate_dir.to_string_lossy().as_ref())?;
+    let current_audit = audit_resolved_skill(&current)?;
+    let candidate_audit = audit_resolved_skill(&candidate)?;
+    let current_files = skill_file_identity_map(&current.manifest_dir)?;
+    let candidate_files = skill_file_identity_map(&candidate.manifest_dir)?;
+    let diff = skill_file_diff(&current_files, &candidate_files);
+    let files_changed = skill_file_diff_changed(&diff);
+    let current_sha256 = directory_identity(&current.manifest_dir)?;
+    let candidate_sha256 = directory_identity(&candidate.manifest_dir)?;
+    let current_capabilities = skill_capability_set(&current.manifest);
+    let candidate_capabilities = skill_capability_set(&candidate.manifest);
+    let capability_added = candidate_capabilities
+        .difference(&current_capabilities)
+        .cloned()
+        .collect::<Vec<_>>();
+    let capability_removed = current_capabilities
+        .difference(&candidate_capabilities)
+        .cloned()
+        .collect::<Vec<_>>();
+    let _ = fs::remove_dir_all(temp_dir);
+    print_json(&json!({
+        "dry_run": true,
+        "skill": current.manifest.id,
+        "source": source,
+        "current_sha256": current_sha256,
+        "candidate_sha256": candidate_sha256,
+        "changed": files_changed
+            || !capability_added.is_empty()
+            || !capability_removed.is_empty(),
+        "files": diff,
+        "capabilities": {
+            "added": capability_added,
+            "removed": capability_removed,
+        },
+        "audit": {
+            "current": current_audit,
+            "candidate": candidate_audit,
+        },
+    }))
+}
+
 pub(crate) fn import_skill(source: &str, out: Option<&Path>) -> Result<()> {
     let temp_dir = std::env::temp_dir().join(format!(
         "air-skill-import-{}-{}",
@@ -843,6 +939,7 @@ fn copy_import_unit(
         serde_json::to_vec_pretty(&audit)?,
     )
     .with_context(|| format!("write {}", destination.join("audit.json").display()))?;
+    update_skills_lock(source, destination, &resolved, &audit, trusted)?;
     Ok(json!({
         "imported": path_ref(destination),
         "skill": resolved.manifest.id,
@@ -850,6 +947,48 @@ fn copy_import_unit(
         "audit_risk": audit.risk,
         "allowed_to_run": audit.allowed_to_run,
     }))
+}
+
+fn update_skills_lock(
+    source: &str,
+    destination: &Path,
+    resolved: &ResolvedSkill,
+    audit: &SkillAudit,
+    trusted: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let lock_path = cwd.join(air_skill_runtime::SKILLS_LOCK);
+    let mut lock = air_skill_runtime::read_skills_lock(&lock_path)?;
+    let audit_path = destination.join("audit.json");
+    lock.skills.insert(
+        resolved.manifest.id.clone(),
+        air_skill_runtime::SkillLockEntry {
+            manifest: path_ref(&resolved.manifest_path),
+            source: Some(source.to_string()),
+            sha256: directory_identity(destination)?,
+            audit_sha256: if audit_path.exists() {
+                Some(path_content_identity(&audit_path)?)
+            } else {
+                None
+            },
+            trusted,
+            trusted_reason: if trusted {
+                Some(format!(
+                    "trusted importer source; audit risk {}",
+                    audit.risk
+                ))
+            } else {
+                None
+            },
+            imported_at_unix_ms: Some(
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis(),
+            ),
+        },
+    );
+    air_skill_runtime::write_skills_lock(&lock_path, &lock)
 }
 
 pub(crate) fn resolve_skill_run_metadata(reference: &str) -> Result<CodeRunSkill> {
@@ -1103,6 +1242,7 @@ fn collect_skill_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Res
             || relative.starts_with("node_modules")
             || relative == Path::new("audit.json")
             || relative == Path::new("source.json")
+            || relative == Path::new(air_skill_runtime::SKILLS_LOCK)
         {
             continue;
         }
@@ -1391,6 +1531,65 @@ fn directory_identity(root: &Path) -> Result<String> {
         "sha256:{}",
         crate::code_artifact::sha256_hex(&encoded)
     ))
+}
+
+fn skill_file_identity_map(root: &Path) -> Result<BTreeMap<String, String>> {
+    let mut files = BTreeMap::new();
+    for file in skill_files(root)? {
+        let relative = path_ref(file.strip_prefix(root).unwrap_or(&file));
+        files.insert(relative, path_content_identity(&file)?);
+    }
+    Ok(files)
+}
+
+fn skill_file_diff(
+    current: &BTreeMap<String, String>,
+    candidate: &BTreeMap<String, String>,
+) -> Value {
+    let current_paths = current.keys().cloned().collect::<BTreeSet<_>>();
+    let candidate_paths = candidate.keys().cloned().collect::<BTreeSet<_>>();
+    let added = candidate_paths
+        .difference(&current_paths)
+        .cloned()
+        .collect::<Vec<_>>();
+    let removed = current_paths
+        .difference(&candidate_paths)
+        .cloned()
+        .collect::<Vec<_>>();
+    let changed = current_paths
+        .intersection(&candidate_paths)
+        .filter(|path| current.get(*path) != candidate.get(*path))
+        .cloned()
+        .collect::<Vec<_>>();
+    json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed,
+    })
+}
+
+fn skill_file_diff_changed(diff: &Value) -> bool {
+    ["added", "removed", "changed"].iter().any(|key| {
+        diff.get(*key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
+}
+
+fn skill_capability_set(manifest: &AirSkillManifest) -> BTreeSet<String> {
+    manifest
+        .capabilities
+        .allow
+        .iter()
+        .map(|capability| format!("allow:{capability}"))
+        .chain(
+            manifest
+                .capabilities
+                .deny
+                .iter()
+                .map(|capability| format!("deny:{capability}")),
+        )
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -1792,12 +1991,25 @@ instructions:
             serde_json::to_vec_pretty(&json!({
                 "source": "https://github.com/anthropics/skills",
                 "sha256": directory_identity(&temp).unwrap(),
-                "trusted": true,
-                "trusted_by": "air importer rule: github.com/anthropics/skills",
             }))
             .unwrap(),
         )
         .unwrap();
+        let mut lock = air_skill_runtime::SkillsLock::default();
+        lock.skills.insert(
+            "trusted-doc-skill".to_string(),
+            air_skill_runtime::SkillLockEntry {
+                manifest: path_ref(&temp.join(SKILL_MANIFEST)),
+                source: Some("https://github.com/anthropics/skills".to_string()),
+                sha256: directory_identity(&temp).unwrap(),
+                audit_sha256: None,
+                trusted: true,
+                trusted_reason: Some("test trust decision".to_string()),
+                imported_at_unix_ms: None,
+            },
+        );
+        air_skill_runtime::write_skills_lock(&temp.join(air_skill_runtime::SKILLS_LOCK), &lock)
+            .unwrap();
         let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
         let audit = audit_resolved_skill(&skill).unwrap();
         assert_eq!(audit.risk, "high");

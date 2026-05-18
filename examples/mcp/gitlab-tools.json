@@ -1,0 +1,41 @@
+{
+  "tools": {
+    "gitlab": {
+      "kind": "mcp",
+      "capability": "gitlab.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "timeout_seconds": 120,
+      "max_bytes": 131072
+    },
+    "gitlab_graphql": {
+      "kind": "mcp",
+      "capability": "gitlab.graphql.read",
+      "command": "npx",
+      "args": [
+        "--registry",
+        "https://registry.npmjs.org/",
+        "-y",
+        "@zereight/mcp-gitlab"
+      ],
+      "env": {
+        "GITLAB_PERSONAL_ACCESS_TOKEN": "${GITLAB_PERSONAL_ACCESS_TOKEN}",
+        "GITLAB_API_URL": "https://gitlab.infr.zglbl.net/api/v4",
+        "GITLAB_READ_ONLY_MODE": "true"
+      },
+      "tool": "execute_graphql",
+      "timeout_seconds": 120,
+      "max_bytes": 131072
+    }
+  }
+}
