@@ -1493,6 +1493,7 @@ fn default_bench_tool_config(
                     "cwd": ".",
                     "command": [
                         "{air_exe}",
+                        "dev",
                         "run-plan",
                         "--profile",
                         paths.repo_root.join("skills/code-agent/explore.air-profile.yaml"),
@@ -1809,6 +1810,7 @@ mod tests {
             .and_then(Value::as_array)
             .unwrap();
 
+        assert!(command.iter().any(|value| value == "dev"));
         assert!(command.iter().any(|value| value == "--trace-out"));
         assert!(command.iter().any(|value| value == "{trace_file}"));
     }

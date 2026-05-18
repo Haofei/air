@@ -31,6 +31,7 @@ dependencies = [
  "air-linker",
  "air-parser",
  "air-runtime",
+ "air-skill-runtime",
  "air-tools",
  "air-verify",
  "anyhow",
@@ -88,11 +89,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "air-skill-runtime"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ring",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "air-tools"
 version = "0.1.0"
 dependencies = [
  "air-core",
  "air-runtime",
+ "air-skill-runtime",
  "air-tools-core",
  "anyhow",
  "globset",

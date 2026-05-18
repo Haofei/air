@@ -505,10 +505,15 @@ fn run_project_bench_case(
             Ok(ProjectBenchCaseRun {
                 id: id.clone(),
                 kind: "stale_artifact".to_string(),
-                pass: !state.artifact_snapshot_matches_current,
+                pass: matches!(state.status, ProjectTaskStatus::Failed)
+                    && state
+                        .failure_reason
+                        .as_ref()
+                        .is_some_and(|reason| reason.category == FailureCategory::ReplayMismatch),
                 details: json!({
                     "artifact_snapshot_matches_current": state.artifact_snapshot_matches_current,
                     "status": state.status,
+                    "failure_reason": state.failure_reason,
                 }),
                 error: None,
             })
@@ -1179,9 +1184,13 @@ fn evaluate_project_task(
     let constraints =
         check_task_constraints(task, &artifact.delta.changed_files, &artifact.delta.diff);
     let verification_passed = verification.iter().all(|result| result.success);
-    let failure_reason = project_failure_reason(&verification, &constraints);
+    let failure_reason = project_failure_reason(
+        &verification,
+        &constraints,
+        artifact_snapshot_matches_current,
+    );
     Ok(ProjectTaskState {
-        status: if verification_passed && constraints.passed {
+        status: if verification_passed && constraints.passed && artifact_snapshot_matches_current {
             ProjectTaskStatus::Passed
         } else {
             ProjectTaskStatus::Failed
@@ -1312,6 +1321,7 @@ fn normalized_project_path(path: &str) -> String {
 fn project_failure_reason(
     verification: &[ProjectVerificationResult],
     constraints: &ProjectConstraintResult,
+    artifact_snapshot_matches_current: bool,
 ) -> Option<FailureReason> {
     if let Some(failed) = verification.iter().find(|result| !result.success) {
         return Some(FailureReason {
@@ -1328,6 +1338,16 @@ fn project_failure_reason(
             category: FailureCategory::DiffConstraintFailed,
             message: "project task diff constraints failed".to_string(),
             details: BTreeMap::from([("violations".to_string(), json!(constraints.violations))]),
+        });
+    }
+    if !artifact_snapshot_matches_current {
+        return Some(FailureReason {
+            category: FailureCategory::ReplayMismatch,
+            message: "artifact after snapshot does not match current workspace".to_string(),
+            details: BTreeMap::from([(
+                "artifact_snapshot_matches_current".to_string(),
+                json!(false),
+            )]),
         });
     }
     None
@@ -1989,7 +2009,27 @@ mod tests {
             violations: Vec::new(),
         };
 
-        assert!(project_failure_reason(&verification, &constraints).is_none());
+        assert!(project_failure_reason(&verification, &constraints, true).is_none());
+    }
+
+    #[test]
+    fn project_failure_reason_marks_stale_artifact_as_replay_mismatch() {
+        let verification = vec![ProjectVerificationResult {
+            command: "cargo test".to_string(),
+            description: None,
+            success: true,
+            status: Some(0),
+            stdout_preview: String::new(),
+            stderr_preview: String::new(),
+        }];
+        let constraints = ProjectConstraintResult {
+            passed: true,
+            violations: Vec::new(),
+        };
+
+        let reason = project_failure_reason(&verification, &constraints, false).unwrap();
+        assert_eq!(reason.category, FailureCategory::ReplayMismatch);
+        assert!(reason.message.contains("artifact after snapshot"));
     }
 
     #[test]

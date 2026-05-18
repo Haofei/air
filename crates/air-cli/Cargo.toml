@@ -15,6 +15,7 @@ air-core = { path = "../air-core" }
 air-linker = { path = "../air-linker" }
 air-parser = { path = "../air-parser" }
 air-runtime = { path = "../air-runtime" }
+air-skill-runtime = { path = "../air-skill-runtime" }
 air-tools = { path = "../air-tools" }
 air-verify = { path = "../air-verify" }
 anyhow.workspace = true

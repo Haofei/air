@@ -165,7 +165,7 @@ struct SkillListItem {
     explain: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillRouteResult {
     executor: SkillRouteExecutor,
     instructions: Vec<SkillRouteCard>,
@@ -174,13 +174,13 @@ struct SkillRouteResult {
     candidates: Vec<SkillRouteCard>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillRouteExecutor {
     id: String,
     reason: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillRouteCard {
     id: String,
     mode: String,
@@ -192,7 +192,7 @@ struct SkillRouteCard {
     reasons: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SkillRouteRejection {
     id: String,
     manifest: String,
@@ -269,82 +269,13 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
 }
 
 fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
-    let task_lower = task.to_ascii_lowercase();
-    let mut rejected = Vec::new();
-    let mut candidates = Vec::new();
-    let mut positive = Vec::<(SkillRouteCard, Vec<String>)>::new();
-    for skill in discover_skills()? {
-        if skill.manifest.mode != SkillMode::Instruction {
-            continue;
-        }
-        let host = instruction_host_id(&skill.manifest);
-        if host != DEFAULT_EXECUTOR_SKILL {
-            rejected.push(SkillRouteRejection {
-                id: skill.manifest.id.clone(),
-                manifest: path_ref(&skill.manifest_path),
-                reason: format!(
-                    "instruction skill host `{host}` is not `{DEFAULT_EXECUTOR_SKILL}`"
-                ),
-            });
-            continue;
-        }
-        let audit = audit_resolved_skill(&skill)?;
-        if !audit.allowed_to_run {
-            rejected.push(SkillRouteRejection {
-                id: skill.manifest.id.clone(),
-                manifest: path_ref(&skill.manifest_path),
-                reason: format!("audit risk {}", audit.risk),
-            });
-            continue;
-        }
-        let (score, reasons) = score_skill_for_task(&skill, &task_lower);
-        let card = SkillRouteCard {
-            id: skill.manifest.id.clone(),
-            mode: skill.manifest.mode.as_str().to_string(),
-            version: skill.manifest.version.clone(),
-            description: skill_description_for_route(&skill),
-            manifest: path_ref(&skill.manifest_path),
-            audit_risk: audit.risk,
-            score,
-            reasons,
-        };
-        candidates.push(card.clone());
-        if score > 0 {
-            positive.push((card, skill.manifest.routing.incompatible_with.clone()));
-        }
-    }
-    candidates.sort_by(skill_route_order);
-    positive.sort_by(|left, right| skill_route_order(&left.0, &right.0));
-    let mut selected = Vec::new();
-    let mut selected_incompatibilities = BTreeMap::<String, Vec<String>>::new();
-    for (card, incompatible_with) in positive {
-        if selected.len() >= top_k {
-            break;
-        }
-        if let Some(conflict) =
-            selected_skill_conflict(&card, &incompatible_with, &selected_incompatibilities)
-        {
-            rejected.push(SkillRouteRejection {
-                id: card.id,
-                manifest: card.manifest,
-                reason: format!("incompatible with selected skill `{conflict}`"),
-            });
-            continue;
-        }
-        selected_incompatibilities.insert(card.id.clone(), incompatible_with);
-        selected.push(card);
-    }
-    let executor = SkillRouteExecutor {
-        id: DEFAULT_EXECUTOR_SKILL.to_string(),
-        reason: "default code-agent executor for instruction skills".to_string(),
+    let root = if Path::new("skills").exists() {
+        PathBuf::from(".")
+    } else {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
     };
-    Ok(SkillRouteResult {
-        executor,
-        instructions: selected.clone(),
-        selected,
-        rejected,
-        candidates,
-    })
+    let route = air_skill_runtime::route_skills_for_task(&root, task, top_k)?;
+    Ok(serde_json::from_value(serde_json::to_value(route)?)?)
 }
 
 pub(crate) fn route_skills_value_for_task(task: &str, top_k: usize) -> Result<Value> {
@@ -354,114 +285,12 @@ pub(crate) fn route_skills_value_for_task(task: &str, top_k: usize) -> Result<Va
     )?)?)
 }
 
-fn selected_skill_conflict(
-    card: &SkillRouteCard,
-    incompatible_with: &[String],
-    selected_incompatibilities: &BTreeMap<String, Vec<String>>,
-) -> Option<String> {
-    for (selected_id, selected_incompatible_with) in selected_incompatibilities {
-        if incompatible_with.iter().any(|id| id == selected_id)
-            || selected_incompatible_with.iter().any(|id| id == &card.id)
-        {
-            return Some(selected_id.clone());
-        }
-    }
-    None
-}
-
-fn skill_route_order(left: &SkillRouteCard, right: &SkillRouteCard) -> std::cmp::Ordering {
-    right
-        .score
-        .cmp(&left.score)
-        .then_with(|| left.id.cmp(&right.id))
-}
-
-fn score_skill_for_task(skill: &ResolvedSkill, task_lower: &str) -> (i32, Vec<String>) {
-    let mut hard_score = 0;
-    let mut soft_score = 0;
-    let mut reasons = Vec::new();
-    let routing = &skill.manifest.routing;
-    for trigger in &routing.triggers {
-        let trigger_lower = trigger.to_ascii_lowercase();
-        if !trigger_lower.is_empty() && task_lower.contains(&trigger_lower) {
-            hard_score += 25;
-            reasons.push(format!("task matches trigger `{trigger}`"));
-        }
-    }
-    for excluded in routing
-        .exclude
-        .iter()
-        .chain(routing.negative_triggers.iter())
-    {
-        let excluded_lower = excluded.to_ascii_lowercase();
-        if !excluded_lower.is_empty() && task_lower.contains(&excluded_lower) {
-            hard_score -= 50;
-            reasons.push(format!("task matches exclusion `{excluded}`"));
-        }
-    }
-    for language in &routing.languages {
-        let language_lower = language.to_ascii_lowercase();
-        if !language_lower.is_empty() && task_lower.contains(&language_lower) {
-            hard_score += 8;
-            reasons.push(format!("task matches language `{language}`"));
-        }
-    }
-    for task_type in &routing.task_types {
-        let task_type_lower = task_type.to_ascii_lowercase();
-        if !task_type_lower.is_empty() && task_lower.contains(&task_type_lower) {
-            hard_score += 10;
-            reasons.push(format!("task matches task type `{task_type}`"));
-        }
-    }
-    if let Some(description) = &skill.manifest.description {
-        for token in route_tokens(description) {
-            if task_lower.contains(&token) {
-                soft_score += 3;
-            }
-        }
-    }
-    if let Some(summary) = &routing.summary {
-        for token in route_tokens(summary) {
-            if task_lower.contains(&token) {
-                soft_score += 5;
-            }
-        }
-    }
-    let matching_markers = routing
-        .repo_markers
-        .iter()
-        .filter(|marker| marker.exists())
-        .count();
-    if matching_markers > 0 {
-        hard_score += (matching_markers as i32) * 8;
-        reasons.push(format!("{matching_markers} repo marker(s) exist"));
-    }
-    let score = if hard_score > 0 {
-        hard_score + soft_score
-    } else {
-        hard_score
-    };
-    (score, reasons)
-}
-
 fn route_tokens(text: &str) -> Vec<String> {
     text.split(|character: char| !character.is_ascii_alphanumeric())
         .map(str::trim)
         .filter(|token| token.len() >= 4)
         .map(str::to_ascii_lowercase)
         .collect()
-}
-
-fn skill_description_for_route(skill: &ResolvedSkill) -> Option<String> {
-    skill
-        .manifest
-        .routing
-        .summary
-        .clone()
-        .or_else(|| skill.manifest.description.clone())
-        .or_else(|| {
-            skill_frontmatter_for_dir(&skill.manifest_dir).and_then(|front| front.description)
-        })
 }
 
 fn skill_frontmatter_for_dir(skill_dir: &Path) -> Option<SkillFrontmatter> {
@@ -989,23 +818,31 @@ fn copy_import_unit(
     };
     ensure_import_manifest(&source_label, destination)?;
     let resolved = resolve_skill(destination.to_string_lossy().as_ref())?;
+    let trusted = is_trusted_import_source(source);
+    let source_metadata = json!({
+        "source": source,
+        "source_path": path_ref(&unit.relative),
+        "imported_at_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+        "manifest": path_ref(&resolved.manifest_path),
+        "sha256": directory_identity(destination)?,
+        "trusted": trusted,
+        "trusted_by": if trusted {
+            Some("air importer rule: github.com/anthropics/skills")
+        } else {
+            None
+        },
+    });
+    fs::write(
+        destination.join("source.json"),
+        serde_json::to_vec_pretty(&source_metadata)?,
+    )
+    .with_context(|| format!("write {}", destination.join("source.json").display()))?;
     let audit = audit_resolved_skill(&resolved)?;
     fs::write(
         destination.join("audit.json"),
         serde_json::to_vec_pretty(&audit)?,
     )
     .with_context(|| format!("write {}", destination.join("audit.json").display()))?;
-    fs::write(
-        destination.join("source.json"),
-        serde_json::to_vec_pretty(&json!({
-            "source": source,
-            "source_path": path_ref(&unit.relative),
-            "imported_at_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
-            "manifest": path_ref(&resolved.manifest_path),
-            "sha256": directory_identity(destination)?,
-        }))?,
-    )
-    .with_context(|| format!("write {}", destination.join("source.json").display()))?;
     Ok(json!({
         "imported": path_ref(destination),
         "skill": resolved.manifest.id,
@@ -1242,192 +1079,12 @@ fn validate_executor_capabilities(
 }
 
 fn audit_resolved_skill(skill: &ResolvedSkill) -> Result<SkillAudit> {
-    let mut findings = Vec::new();
-    for path in skill_files(&skill.manifest_dir)? {
-        let content = match fs::read_to_string(&path) {
-            Ok(content) => content,
-            Err(_) => continue,
-        };
-        let relative = path_ref(path.strip_prefix(&skill.manifest_dir).unwrap_or(&path));
-        let lower = content.to_ascii_lowercase();
-        for (severity, reason, needles) in audit_patterns() {
-            if needles.iter().any(|needle| lower.contains(needle)) {
-                findings.push(SkillAuditFinding {
-                    severity: severity.to_string(),
-                    reason: reason.to_string(),
-                    file: relative.clone(),
-                });
-            }
-        }
-        if relative != SKILL_MANIFEST
-            && (lower.contains("http://") || lower.contains("https://") || lower.contains("www."))
-        {
-            findings.push(SkillAuditFinding {
-                severity: "medium".to_string(),
-                reason: "external URL reference in skill content".to_string(),
-                file: relative.clone(),
-            });
-        }
-        if is_executable_script_path(&path) {
-            findings.push(SkillAuditFinding {
-                severity: "medium".to_string(),
-                reason: "skill contains executable script content".to_string(),
-                file: relative,
-            });
-        }
-    }
-    for capability in &skill.manifest.capabilities.allow {
-        if matches!(
-            capability.as_str(),
-            "shell" | "shell.unrestricted" | "network" | "secrets.read"
-        ) {
-            findings.push(SkillAuditFinding {
-                severity: "high".to_string(),
-                reason: format!("skill requests high-risk capability `{capability}`"),
-                file: path_ref(&skill.manifest_path),
-            });
-        }
-    }
-    let risk = audit_risk(&findings);
-    let trusted_source = trusted_skill_source(skill);
-    let blocked_by_risk = matches!(risk.as_str(), "critical" | "high");
-    Ok(SkillAudit {
-        schema: "air.skill_audit.v1".to_string(),
-        skill_id: skill.manifest.id.clone(),
-        trusted_source,
-        allowed_to_run: trusted_source || !blocked_by_risk,
-        allowed_reason: if trusted_source && blocked_by_risk {
-            Some(
-                "trusted source overrides audit risk gate; findings are still recorded".to_string(),
-            )
-        } else {
-            None
-        },
-        risk,
-        findings,
-    })
-}
-
-fn trusted_skill_source(skill: &ResolvedSkill) -> bool {
-    let Some(source) = &skill.manifest.source else {
-        return false;
-    };
-    if source
-        .get("trusted")
-        .and_then(Value::as_bool)
-        .unwrap_or(false)
-    {
-        return true;
-    }
-    source
-        .get("original")
-        .and_then(Value::as_str)
-        .is_some_and(is_trusted_import_source)
+    let audit = air_skill_runtime::audit_manifest_path(&skill.manifest_path)?;
+    Ok(serde_json::from_value(serde_json::to_value(audit)?)?)
 }
 
 fn is_trusted_import_source(source: &str) -> bool {
-    let source = source.to_ascii_lowercase();
-    source.contains("github.com/anthropics/skills")
-}
-
-fn audit_patterns() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
-    vec![
-        (
-            "critical",
-            "remote shell execution pattern",
-            vec![
-                "curl | sh",
-                "curl -fs",
-                "wget | sh",
-                "iex(",
-                "powershell -enc",
-            ],
-        ),
-        (
-            "critical",
-            "secret or wallet path access pattern",
-            vec![
-                "~/.ssh",
-                ".aws/credentials",
-                "login keychain",
-                "metamask",
-                "wallet.dat",
-            ],
-        ),
-        (
-            "high",
-            "environment or credential exfiltration pattern",
-            vec![
-                "process.env",
-                "os.environ",
-                "printenv",
-                "cat .env",
-                "env |",
-                "dotenv",
-            ],
-        ),
-        (
-            "high",
-            "dynamic command execution pattern",
-            vec!["bash -c", "sh -c", "python -c", "node -e", "eval "],
-        ),
-        (
-            "high",
-            "network exfiltration or webhook pattern",
-            vec![
-                "webhook",
-                "exfiltrate",
-                "upload to",
-                "send to http",
-                "curl -x post",
-                "curl -d",
-                "fetch(",
-                "requests.post",
-            ],
-        ),
-        (
-            "medium",
-            "installer command pattern",
-            vec![
-                "npm install",
-                "pnpm install",
-                "yarn add",
-                "pip install",
-                "uv pip install",
-                "cargo install",
-                "brew install",
-                "apt-get install",
-            ],
-        ),
-        (
-            "medium",
-            "filesystem mutation command pattern",
-            vec![
-                "rm -rf",
-                "chmod +x",
-                "cat >",
-                "tee ",
-                "overwrite",
-                "append to ~/.",
-                "write to ~/.",
-            ],
-        ),
-    ]
-}
-
-fn audit_risk(findings: &[SkillAuditFinding]) -> String {
-    if findings
-        .iter()
-        .any(|finding| finding.severity == "critical")
-    {
-        "critical".to_string()
-    } else if findings.iter().any(|finding| finding.severity == "high") {
-        "high".to_string()
-    } else if findings.iter().any(|finding| finding.severity == "medium") {
-        "medium".to_string()
-    } else {
-        "low".to_string()
-    }
+    air_skill_runtime::is_trusted_import_source(source)
 }
 
 fn skill_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1614,7 +1271,6 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
         source: Some(json!({
             "type": "imported",
             "original": source,
-            "trusted": is_trusted_import_source(source),
             "frontmatter": frontmatter,
         })),
         instructions: SkillInstructions {
@@ -2131,6 +1787,17 @@ instructions:
 "#,
         )
         .unwrap();
+        fs::write(
+            temp.join("source.json"),
+            serde_json::to_vec_pretty(&json!({
+                "source": "https://github.com/anthropics/skills",
+                "sha256": directory_identity(&temp).unwrap(),
+                "trusted": true,
+                "trusted_by": "air importer rule: github.com/anthropics/skills",
+            }))
+            .unwrap(),
+        )
+        .unwrap();
         let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
         let audit = audit_resolved_skill(&skill).unwrap();
         assert_eq!(audit.risk, "high");
@@ -2142,6 +1809,63 @@ instructions:
             .iter()
             .any(|finding| finding.severity == "high"));
         let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn manifest_cannot_self_declare_trusted_source() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-trust-spoof-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("SKILL.md"),
+            "Use process.env only as documentation.",
+        )
+        .unwrap();
+        fs::write(
+            temp.join(SKILL_MANIFEST),
+            r#"
+schema: air.skill.v1
+id: spoofed-trust
+mode: instruction
+host:
+  skill: code-agent
+source:
+  type: imported
+  original: https://github.com/anthropics/skills-fake
+  trusted: true
+instructions:
+  files: [SKILL.md]
+"#,
+        )
+        .unwrap();
+
+        let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
+        let audit = audit_resolved_skill(&skill).unwrap();
+        assert_eq!(audit.risk, "high");
+        assert!(!audit.trusted_source);
+        assert!(!audit.allowed_to_run);
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn trusted_import_source_matches_exact_github_repo() {
+        assert!(is_trusted_import_source(
+            "https://github.com/anthropics/skills"
+        ));
+        assert!(is_trusted_import_source(
+            "https://github.com/anthropics/skills/tree/main/skills/docx"
+        ));
+        assert!(!is_trusted_import_source(
+            "https://github.com/anthropics/skills-fake"
+        ));
+        assert!(!is_trusted_import_source(
+            "https://example.com/anthropics/skills"
+        ));
     }
 
     #[test]

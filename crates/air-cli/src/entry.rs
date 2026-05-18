@@ -30,6 +30,7 @@ pub(crate) struct EntryTaskOptions {
     pub(crate) replay_from: Option<usize>,
     pub(crate) project_file: Option<PathBuf>,
     pub(crate) plan_only: bool,
+    pub(crate) execute: bool,
     pub(crate) planner_model: String,
 }
 
@@ -85,7 +86,11 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
                 planner_model: options.planner_model,
                 template: false,
             })?;
-            if options.plan_only {
+            if options.plan_only || !options.execute {
+                eprintln!(
+                    "[air run] project plan written; review it, then run `air project run --file {} --log` or pass --execute",
+                    project_file.display()
+                );
                 return Ok(());
             }
             project_run(ProjectRunOptions {

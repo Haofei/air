@@ -6,6 +6,7 @@ members = [
     "crates/air-linker",
     "crates/air-parser",
     "crates/air-runtime",
+    "crates/air-skill-runtime",
     "crates/air-tools-core",
     "crates/air-tools",
     "crates/air-verify",

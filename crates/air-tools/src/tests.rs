@@ -3366,11 +3366,7 @@ workflow:
         .contains("Write failing tests"));
     assert_eq!(loaded["artifacts"][0]["kind"], json!("skill_instruction"));
 
-    fs::write(
-        skill_dir.join("audit.json"),
-        r#"{"schema":"air.skill_audit.v1","skill_id":"tdd-workflow","risk":"high","allowed_to_run":false,"findings":[]}"#,
-    )
-    .unwrap();
+    fs::write(skill_dir.join("SKILL.md"), "Use process.env.").unwrap();
     let error = tools
         .call_tool("skill", &json!({"name": "tdd-workflow"}))
         .unwrap_err()

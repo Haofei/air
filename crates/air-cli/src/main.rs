@@ -139,8 +139,12 @@ enum Command {
         project_file: Option<PathBuf>,
 
         /// For project mode, stop after writing the project manifest.
-        #[arg(long)]
+        #[arg(long, hide = true, conflicts_with = "execute")]
         plan_only: bool,
+
+        /// For project mode, run the generated project manifest immediately.
+        #[arg(long)]
+        execute: bool,
 
         /// Project planner model alias from --model-config.
         #[arg(long, default_value = "project_planner", hide = true)]
@@ -789,6 +793,7 @@ fn main() -> Result<()> {
             skills,
             project_file,
             plan_only,
+            execute,
             planner_model,
             model_config,
             trace_out,
@@ -815,6 +820,7 @@ fn main() -> Result<()> {
             replay_from,
             project_file,
             plan_only,
+            execute,
             planner_model,
         }),
     }
@@ -2070,6 +2076,7 @@ mod tests {
             target,
             mode,
             skills,
+            execute,
             ..
         } = cli.command
         else {
@@ -2079,6 +2086,61 @@ mod tests {
         assert_eq!(target, "use TDD to fix the failing add function");
         assert_eq!(mode, EntryMode::Code);
         assert_eq!(skills, vec!["tdd-workflow"]);
+        assert!(!execute);
+    }
+
+    #[test]
+    fn run_project_execute_is_explicit() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "run",
+            "refactor the whole crate",
+            "--mode",
+            "project",
+            "--execute",
+        ])
+        .unwrap();
+
+        let Command::Run {
+            mode,
+            plan_only,
+            execute,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run command");
+        };
+
+        assert_eq!(mode, EntryMode::Project);
+        assert!(!plan_only);
+        assert!(execute);
+    }
+
+    #[test]
+    fn bundled_subagent_configs_use_dev_run_plan() {
+        let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir
+            .parent()
+            .and_then(|path| path.parent())
+            .expect("air-cli crate lives under crates/air-cli");
+        let config_path = repo_root.join("skills/code-agent/tools.json");
+        let config: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&config_path).unwrap()).unwrap();
+        let command = config
+            .pointer("/tools/task/subagents/explore/command")
+            .and_then(serde_json::Value::as_array)
+            .expect("explore subagent command");
+
+        let run_plan_index = command
+            .iter()
+            .position(|value| value == "run-plan")
+            .expect("subagent command includes run-plan");
+        assert_eq!(
+            command
+                .get(run_plan_index.saturating_sub(1))
+                .and_then(serde_json::Value::as_str),
+            Some("dev")
+        );
     }
 
     #[test]

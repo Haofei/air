@@ -75,6 +75,7 @@
           "cwd": "../..",
           "command": [
             "{air_exe}",
+            "dev",
             "run-plan",
             "--profile",
             "skills/code-agent/explore.air-profile.yaml",

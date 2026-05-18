@@ -166,15 +166,15 @@ Use `--replay-from <trace-line>` to replay the earlier trace up to a chosen even
 For tasks larger than one edit loop, AIR has a project orchestrator with task DAGs, per-task worktree isolation, skill assignment, and diff constraints:
 
 ```bash
-# The simple entry point can route project-sized work automatically.
-cargo run -p air-cli -- run "refactor the tools crate into smaller modules" --mode project --log
+# The simple entry point can route project-sized work and write a reviewable manifest.
+cargo run -p air-cli -- run "refactor the tools crate into smaller modules" --mode project
 
 # Advanced: review and run an explicit project manifest.
 cargo run -p air-cli -- project plan "refactor the tools crate into smaller modules" \
   --output air-project.yaml
-cargo run -p air-cli -- project run --log
-cargo run -p air-cli -- project status
-cargo run -p air-cli -- project verify
+cargo run -p air-cli -- project run --file air-project.yaml --log
+cargo run -p air-cli -- project status --file air-project.yaml
+cargo run -p air-cli -- project verify --file air-project.yaml
 ```
 
 Each task runs in an isolated workspace copy. On success, changes are merged back only if the main workspace snapshot still matches the task baseline. Project manifests support per-task `skills`, `allowed_files`, `forbidden_files`, `verification`, and `success_conditions`.

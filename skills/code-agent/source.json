@@ -1,0 +1,7 @@
+{
+  "source": "builtin:air",
+  "manifest": "skills/code-agent/air-skill.yaml",
+  "sha256": "sha256:00bf7617da2d0ec49e70d0582b3b0654ffc15804090c9139d2daca2276a25ed2",
+  "trusted": true,
+  "trusted_by": "air builtin skill provenance"
+}
