@@ -1,68 +1,49 @@
 # AIR
 
-**Composable Agent IR: compile, link, run, and observe bounded agents on a native VM.**
+**Bounded code agents with auditable traces, composable skills, and runtime-enforced safety.**
 
-AIR is a compiler-first module system for production agent workflows. Agents are written as typed, bounded state machines in `.air.yaml`; applications compose them with verified RunPlans; the native Rust VM executes the checked graph and records auditable traces.
+AIR is a Rust runtime for coding agents that optimizes for **what you can verify after the agent runs**, not for how much freedom the agent has during execution. Agents are declarative state machines in `.air.yaml`; the VM enforces tool constraints, verification gates, and context budgets; traces record everything that happened.
 
 ## Why AIR
 
-AIR's core value is not merely "agents can run". It is "after an AI acted, you can inspect what
-actually happened". The native VM, traces, typed tool contracts, budgets, and RunPlan validation are
-designed around that audit surface. opencode optimizes for developer freedom; AIR optimizes for
-bounded freedom with guarantees.
+The core insight: **context window is scarce, model self-assessment is unreliable, and agent runs must be auditable**.
 
-The end state is not an AI that rewrites its own constitution at runtime. It is a stable AIR
-constitution that lets coding agents continuously improve modules, tools, prompts, and runtime adapters
-through auditable traces, tests, benchmarks, and reviewed changes.
-
-| Problem | AIR |
+| Problem | AIR approach |
 | --- | --- |
-| Agent code is locked to one SDK | One checked IR runs on the native AIR VM behind a stable module and tool contract |
-| Multi-agent flows are prompt-shaped | RunPlans connect typed module inputs and outputs with static validation |
-| Dynamic agent graphs are hard to audit | Dynamic fan-out/fan-in is bounded, typed, traced, and can be specialized |
-| Tool permissions are implicit | Capabilities, provider tool contracts, budgets, and approval gates are verified |
-| Long runs are opaque | Human logs, JSONL traces, checkpoints, resume, and replay are built in |
-
-For coding agents, that means the important questions have first-class places to live:
-
-| Question | AIR audit surface |
-| --- | --- |
-| Which files changed? | `edit`, bash-run `git diff`, and edit-loop `workspace_diff` record the audited workspace change |
-| Why did the model make the change? | `model_call` inputs and outputs are traced, redacted by default |
-| What evidence was cited? | Search/context tools return source ids, and compaction/report modules carry those ids forward |
-| Did it run a risky command? | `command_run` is exposed through allowlisted command templates, not raw shell access |
-| Did it exceed the budget or repeat itself? | `max_tool_calls`, `max_model_calls`, `max_repeated_tool_calls`, timeouts, and capability gates are checked by the runtime |
-| What will this agent be allowed to do? | `air skill explain code-agent` shows the resolved profile, RunPlan, capabilities, and write permission before execution |
+| Model says "done" without verifying | `CodeRunVerdict` derives pass/fail from trace events, not model output |
+| Agent reads entire files, blows context | `read_range` / `read_contains` — bounded reads only, no unscoped access |
+| Verification commands silently edit files | Workspace snapshots detect file changes; verification that mutates workspace does not count as passed |
+| One agent must handle everything | Skill routing picks the right instruction set per task; skills compose on one executor |
+| Tool permissions are hints to the model | `allowed_tools` on `tool_batch_dispatch` is enforced at runtime, not in the prompt |
+| Long runs are opaque | JSONL traces, code-run artifacts, sub-agent trace/output, markdown bench reports |
 
 ## Status
 
-AIR is usable as a local compiler/runtime prototype with bounded production-oriented semantics. The native Rust VM is the reference runtime. Generated backend lowering has been removed and can return later as a separate compatibility layer.
+AIR is a local compiler/runtime prototype. The native Rust VM is the reference runtime.
 
 | Feature | Status |
 | --- | --- |
 | Typed state-machine AIR modules | Supported |
-| Module schema validation | Supported, including opt-in strict object fields with `additional_properties: false` |
-| Model/tool providers and capability checks | Supported; common native tools live in `air-tools`; bounded `tool_batch_dispatch` lets a model select declared tools without bypassing AIR capability/budget checks |
-| Reusable standard modules | Supported; `modules/std` includes generic context compaction |
-| Approval gates, retry, budgets, repeated-tool guards, and action timeouts | Supported; runtime forwards action deadlines to timeout-aware providers |
-| RunPlan module composition | Supported |
-| Dynamic bounded fan-out/fan-in | Supported |
-| Checkpoint, halt/resume, replay, and JIT hot-path specialization | Supported |
-| Hard cancellation of arbitrary synchronous providers | Not yet; OpenAI/http-json providers enforce request deadlines |
-| Trace redaction and sensitive-field policy | Supported: trace files are redacted by default; use `--trace-raw` only in trusted debug runs |
+| Bounded tool dispatch with runtime-enforced `allowed_tools` | Supported |
+| `CodeRunVerdict` — trace-derived pass/fail/verification/patch/constraints | Supported |
+| Skill routing, composition, and instruction/executor separation | Supported |
+| Workspace change detection (bash/command snapshots) | Supported |
+| Project orchestrator with per-task DAG, worktree isolation, skills, constraints | Supported |
+| Sub-agent observability (`.air/subagents/` trace + output) | Supported |
+| Benchmark suite with `--report` markdown output and skill comparison | Supported |
+| `_air` runtime namespace protection | Supported |
+| RunPlan module composition, dynamic fan-out/fan-in, checkpoint/resume | Supported |
+| Trace redaction and sensitive-field policy | Supported |
 
 ## Quick Start
-
-Run the small packaged example first:
 
 ```bash
 cargo build
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
-
 cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 
-`air` now auto-loads a repository-root `.env`. Put provider settings there:
+`air` auto-loads a repository-root `.env`:
 
 ```dotenv
 AIR_MODEL_PROFILE=glm
@@ -70,47 +51,75 @@ AIR_MODEL_PROFILE=glm
 AIR_MODEL_GLM_API_KEY=...
 AIR_MODEL_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
 AIR_MODEL_GLM_MODEL=GLM-5.1
-
-AIR_MODEL_LOCAL_API_KEY=change-me
-AIR_MODEL_LOCAL_BASE_URL=http://localhost:8080/v1
-AIR_MODEL_LOCAL_MODEL=gpt-5.3-codex:high
 ```
 
-Switch providers by changing only `AIR_MODEL_PROFILE` to `glm` or `local`. If you want to set `OPENAI_*` directly, leave `AIR_MODEL_PROFILE` unset.
-
-The profile packages a RunPlan, module store, input, model config, and tool config. It is the recommended shape for user-facing AIR apps.
+Switch providers by changing `AIR_MODEL_PROFILE`. To use `OPENAI_*` directly, leave it unset.
 
 ## Skills
 
-AIR skills package instructions, workflow profile, tool config, capabilities,
-and verification expectations behind one auditable entrypoint. The built-in
-general coding skill lives at `skills/code-agent/`.
+Skills separate **instructions** (what the agent should know) from **execution** (how it runs). The built-in `code-agent` is the executor; instruction skills like `tdd-workflow` inject task-specific guidance.
+
+### Skill routing
+
+The router matches a natural-language task to the best instruction skills using triggers, description tokens, repo markers, and language/task-type hints:
+
+```bash
+# See which skills match a task
+cargo run -p air-cli -- skill route "use TDD to refactor the parser"
+
+# Explain the routing decision
+cargo run -p air-cli -- skill explain-route "fix a security vulnerability"
+```
+
+### Skill composition
+
+Multiple compatible instruction skills stack onto one executor:
+
+```bash
+# Auto-route and run
+cargo run -p air-cli -- skill run --auto "use TDD to fix the failing add function"
+
+# Explicit skill
+cargo run -p air-cli -- skill run code-agent "refactor a helper and run tests"
+```
+
+Skills declare `incompatible_with` to prevent contradictory instructions from loading together.
+
+### Skill lifecycle
 
 ```bash
 cargo run -p air-cli -- skill list
 cargo run -p air-cli -- skill validate code-agent
 cargo run -p air-cli -- skill explain code-agent
 cargo run -p air-cli -- skill audit code-agent
-cargo run -p air-cli -- skill run code-agent "refactor a helper and run tests"
-```
-
-External skills should be imported before use:
-
-```bash
 cargo run -p air-cli -- skill import ./some-skill --out skills/vendor/some-skill
-cargo run -p air-cli -- skill audit skills/vendor/some-skill
+cargo run -p air-cli -- skill compile code-agent
 ```
 
-Import copies files and writes `source.json` / `audit.json`; it does not run
-installer scripts. `skill compile` emits the resolved AIR descriptor that will be
-used for trace and artifact metadata.
+Audit risk gates (`high`/`critical`) refuse to load or run untrusted skills.
+
+## Code Agent
+
+The code agent edit loop is a phased state machine:
+
+```
+init → choose → act → post_act → verify → verify_act → ... → summarize → done
+```
+
+Key safety properties:
+
+| Property | Mechanism |
+| --- | --- |
+| Agent cannot read whole files | `read_range` and `read_contains` require offset/limit or a search query |
+| Verification is separate from editing | `verify` phase only gets `bash`; `allowed_tools` enforced at runtime |
+| Verification that edits files does not count | Workspace snapshots before/after bash detect mutations |
+| Model self-report is not trusted | `CodeRunVerdict` scans trace events for actual verification tool calls |
+| Context window is bounded | 600KB observation window, 16KB unscoped read preview, compaction |
+| Repeated reads/searches are blocked | Runtime `repeated_tool_policy` requires `repeat_reason` for context tools |
 
 ## Project Workflows
 
-For coding work that is larger than one edit loop, AIR has a thin project
-orchestrator. The project layer does not replace the `code-agent` skill; it gives
-a larger task an explicit manifest, task DAG, per-task verification, diff
-constraints, status, and artifact-backed replay surface.
+For tasks larger than one edit loop, AIR has a project orchestrator with task DAGs, per-task worktree isolation, skill assignment, and diff constraints:
 
 ```bash
 cargo run -p air-cli -- project plan "refactor the tools crate into smaller modules" \
@@ -121,14 +130,7 @@ cargo run -p air-cli -- project status
 cargo run -p air-cli -- project verify
 ```
 
-`air-project.yaml` is intentionally editable:
-
-`project plan` first runs a bounded read-only project scout that can freely use
-glob, grep, LSP, and narrow reads for the specific goal, then passes that
-handoff to the `project_planner` model from
-`examples/bigmodel-openai-compatible.json`. The output should be a task DAG, not
-a single static scaffold. Use `--template` only when you explicitly want an
-offline one-task starter file.
+Each task runs in an isolated workspace copy. On success, changes are merged back only if the main workspace snapshot still matches the task baseline. Project manifests support per-task `skills`, `allowed_files`, `forbidden_files`, `verification`, and `success_conditions`.
 
 ```yaml
 schema: air.project.v1
@@ -144,6 +146,7 @@ tasks:
   - id: split_file_tools
     goal: split file read/write/edit helpers into focused modules
     depends_on: []
+    skills: ["tdd-workflow"]
     allowed_files: ["crates/air-tools/src/**"]
     forbidden_files: ["target/**"]
     verification:
@@ -155,21 +158,41 @@ tasks:
     max_diff_lines: 400
 ```
 
-Each task runs through the normal code agent and writes a code-run artifact under
-`.air/project/tasks/<task-id>/artifact`. `status` and `verify` read those
-artifacts and do not call a model.
+## Benchmarks
 
-## Examples
+AIR includes a benchmark framework for measuring code agent quality:
 
-The repository intentionally keeps examples focused:
+```bash
+# Run a benchmark suite
+cargo run -p air-cli -- bench code --suite suite.json --log --report report.md
 
-| Example | Purpose |
+# Benchmark with a skill, comparing against no-skill baseline
+cargo run -p air-cli -- bench skill tdd-workflow --suite suite.json --compare-no-skill --report report.md
+```
+
+Benchmarks produce JSON run artifacts and optional Markdown reports with per-task pass/fail, model calls, tool calls, and failure reasons. Code-run artifacts are cached by input fingerprint and replayed on subsequent runs.
+
+## CodeRunVerdict
+
+Every code agent run produces a `CodeRunVerdict` — a structured pass/fail derived from trace events:
+
+| Field | Source |
 | --- | --- |
-| `examples/simple-helpdesk/` | One-agent RAG workflow with local document search, model call, typed output, and provider capability check |
-| `examples/deep-research/` | Multi-agent research workflow with clarification, planning, bounded fan-out, fan-in, resume, and parallel execution |
-| `skills/code-agent/` | Bounded coding workflow with exploration, review, one unified edit loop, context compaction, constrained tools, and patch audit traces |
+| `patch_applied` | Workspace snapshot diff (did files change?) |
+| `verification_ran` | Trace scan for verification tool calls |
+| `verification_passed` | Verification tool returned success without mutating workspace |
+| `allowed_files_ok` | Changed files within allowed set |
+| `required_files_ok` | Required files were actually changed |
+| `forbidden_files_ok` | No forbidden files changed |
+| `required_diff_ok` | Diff contains required text |
+| `max_diff_lines_ok` | Diff within line budget |
+| `final_success` | All of the above |
 
-The shared OpenAI-compatible model config lives at `examples/bigmodel-openai-compatible.json` and defaults to `OPENAI_API_KEY`, `OPENAI_BASE_URL`, and `OPENAI_MODEL`. `AIR_MODEL_PROFILE` fills those variables from the selected profile at startup.
+This replaces trusting the model's self-reported `final_success`. If the trace shows no verification ran, the verdict fails even if the model claims success.
+
+## Sub-agents
+
+The `task` tool launches isolated exploration sub-agents. Each sub-agent writes its own trace, output, and artifacts under `.air/subagents/task-{timestamp}/`. The parent trace records child paths and metrics (model calls, tool calls, errors) without embedding the full child output, keeping the parent context compact.
 
 ## What An Agent Looks Like
 
@@ -223,10 +246,6 @@ workflow:
 
 A RunPlan links modules into an application:
 
-The native VM executes `state_machine` modules. DAG-shaped execution is modeled
-at the RunPlan/AirSystem linker layer, where multiple bounded modules are wired
-together and executed in dependency order.
-
 ```yaml
 plan:
   name: simple-helpdesk
@@ -249,67 +268,40 @@ outputs:
   answer: helpdesk.answer
 ```
 
-Validate and run it:
-
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --trace-out target/generated/simple.trace.jsonl
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --trace-out target/generated/simple.raw.trace.jsonl --trace-raw
+cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 
 ## Deep Research
 
-Deep research is the main research proof case. It maps a LangGraph-style research app into AIR without arbitrary runtime `goto`.
+Deep research demonstrates multi-agent workflows with clarification, dynamic fan-out/fan-in, nested fan-out, parallel execution, checkpoint/resume, and JIT hot-path specialization:
 
 ```bash
 cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --log
 cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --parallel
 ```
 
-It demonstrates:
-
-- clarification and halt/resume;
-- static DAG composition;
-- dynamic bounded fan-out and array fan-in;
-- nested dynamic fan-out;
-- schedule groups and opt-in parallel execution;
-- model/tool call budgets and action timeouts;
-- schema retry and token-limit compaction retry;
-- reusable context-budget measurement and semantic compaction module;
-- local tool capability handshakes;
-- checkpoint/resume;
-- JIT hot-path specialization;
-- native trace/replay and JIT specialization.
-
 ## CLI Surface
-
-Primary user-facing commands:
 
 | Command | Description |
 | --- | --- |
-| `plan` | Ask a planner model to select modules and generate a bounded RunPlan |
-| `validate-plan` | Verify a `.air-plan.yaml` against a module store or profile |
-| `run-plan` | Execute a RunPlan or packaged profile on the native VM |
-| `resume-plan` | Resume a halted/checkpointed plan with typed overrides |
-| `code` | Minimal coding-agent wrapper around the default read/search/edit/verify AIR loop, with `--explain` permission preflight |
-
-Lower-level module, system, and trace commands exist for development and tests, but are hidden from default help output.
+| `code` | Run the code agent edit loop on a task |
+| `skill run` | Run a skill explicitly or with `--auto` routing |
+| `skill route` | Route a task to matching skills |
+| `skill list/validate/explain/audit` | Skill lifecycle management |
+| `project plan/run/status/verify` | Multi-task project orchestrator |
+| `bench code` | Benchmark code agent on a suite |
+| `bench skill` | Benchmark with skill preload, optional no-skill comparison |
+| `run-plan` | Execute a RunPlan or packaged profile |
+| `resume-plan` | Resume a halted/checkpointed plan |
 
 ## Verification
-
-Run the workspace checks:
 
 ```bash
 cargo fmt --all --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
-```
-
-Targeted example smoke checks live with their examples when you need them:
-
-```bash
-bash examples/deep-research/dev/verify.sh
 ```
 
 ## Documentation
@@ -320,6 +312,8 @@ bash examples/deep-research/dev/verify.sh
 
 ## Roadmap
 
-- [ ] **Whole-program compilation (merge + flatten).** The linker currently composes modules into a plan but preserves module boundaries at runtime. A merge compiler would flatten a multi-module plan into a single state machine with a unified state schema, resolved field names, and merged policies. This simplifies analysis, replay, and any future execution targets by removing module dispatch from the hot path. Analogous to LLVM LTO or TensorFlow XLA: separate compilation for development, whole-program compilation for output.
-- [ ] **Module registry.** A publish/install system for sharing agent modules across projects. Module stores are currently local files; a registry would let teams publish versioned modules (`air publish context.compact@0.2.0`) and consume them via dependency declarations, enabling a shared standard library of reusable agent components.
-- [ ] **Schema conformance testing.** A lightweight test harness that calls real LLMs but only validates output structure against the declared AIR schema—no assertion on specific content. This catches the most common production failure mode (LLM returning wrong shapes) without brittle mock providers. The runtime already has `validate_output`; the test layer just needs a harness that runs a module's model calls against a real provider and reports schema violations per phase.
+- [ ] **Whole-program compilation (merge + flatten).** Flatten a multi-module plan into a single state machine with unified state schema, resolved field names, and merged policies. Analogous to LLVM LTO: separate compilation for development, whole-program compilation for output.
+- [ ] **Module registry.** A publish/install system for sharing agent modules across projects. Teams publish versioned modules and consume them via dependency declarations.
+- [ ] **Schema conformance testing.** A lightweight test harness that calls real LLMs but only validates output structure against the declared AIR schema — no assertion on specific content.
+- [ ] **Multi-executor skill routing.** Support multiple executor skills (not just `code-agent`) so the router can choose between entirely different agent architectures.
+- [ ] **Skill marketplace metrics.** Aggregate benchmark results across skills to surface which instruction sets actually improve task success rates.
