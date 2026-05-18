@@ -52,7 +52,7 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     } = options;
 
     if task.trim().is_empty() {
-        bail!("air skill run code-agent task must not be empty");
+        bail!("air run task must not be empty");
     }
 
     let profile = profile.unwrap_or_else(|| PathBuf::from(DEFAULT_CODE_PROFILE));
@@ -189,7 +189,7 @@ pub(crate) fn code_profile_explain(
 ) -> Result<Value> {
     let metadata = explain_metadata_for_profile(profile)?;
     Ok(json!({
-        "command": "skill run",
+        "command": "run",
         "skill": skill_id,
         "will_run": false,
         "profile": path_ref_to_input_string(profile),
@@ -393,9 +393,10 @@ mod tests {
             .unwrap();
 
         assert!(diff_command.contains("git diff --no-index -- /dev/null"));
-        assert!(diff_command.contains("git ls-files --others --exclude-standard"));
-        assert!(names_command.contains("git diff --name-only --"));
-        assert!(names_command.contains("git ls-files --others --exclude-standard"));
+        assert!(diff_command.contains("git diff -- ."));
+        assert!(diff_command.contains("git ls-files --others --exclude-standard -- ."));
+        assert!(names_command.contains("git diff --name-only -- ."));
+        assert!(names_command.contains("git ls-files --others --exclude-standard -- ."));
     }
 
     #[test]

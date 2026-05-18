@@ -59,7 +59,11 @@ pub(crate) fn call_skill_tool(
     input: &Value,
     root_dir: &Path,
     max_bytes: usize,
+    enabled: bool,
 ) -> Result<Value, RuntimeError> {
+    if !enabled {
+        return disabled_skill_tool(name, input);
+    }
     let root_dir = root_dir
         .canonicalize()
         .unwrap_or_else(|_| root_dir.to_path_buf());
@@ -89,6 +93,47 @@ pub(crate) fn call_skill_tool(
         Some(skill_name) => load_skill(name, &root_dir, skill_name, max_bytes),
         None => list_skills(&root_dir),
     }
+}
+
+fn disabled_skill_tool(name: &str, input: &Value) -> Result<Value, RuntimeError> {
+    if let Some(skill_name) = input
+        .get("name")
+        .or_else(|| input.get("skill"))
+        .or_else(|| input.get("id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Err(RuntimeError::Provider(format!(
+            "tool {name} is disabled and cannot load AIR skill `{skill_name}`"
+        )));
+    }
+    if let Some(task) = input
+        .get("route_task")
+        .or_else(|| input.get("task"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(json!({
+            "kind": "skill_route",
+            "task": task,
+            "disabled": true,
+            "executor": {
+                "id": "code-agent",
+                "reason": "skill routing disabled for this run"
+            },
+            "instructions": [],
+            "skills": [],
+            "rejected": [],
+            "candidates": [],
+        }));
+    }
+    Ok(json!({
+        "kind": "skill_list",
+        "disabled": true,
+        "skills": [],
+    }))
 }
 
 fn route_skills(root_dir: &Path, task: &str, top_k: usize) -> Result<Value, RuntimeError> {

@@ -1,0 +1,70 @@
+{
+  "name": "node-small",
+  "description": "Small deterministic JavaScript refactor tasks for AIR code-agent non-Rust baselines.",
+  "tasks": [
+    {
+      "id": "extract_slug_segment_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/slug.js by extracting the per-segment slug normalization from slugify into a small private helper named normalizeSlugSegment. Preserve behavior and run node --test.",
+      "verification": [
+        {
+          "command": "node --test",
+          "description": "Run the fixture Node tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/slug.js"],
+        "required_changed_files": ["src/slug.js"],
+        "required_diff_contains": ["normalizeSlugSegment"]
+      }
+    },
+    {
+      "id": "extract_price_discount_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/pricing.js by extracting the percent clamping logic from applyDiscount into a small private helper named clampDiscountPercent. Preserve behavior and run node --test.",
+      "verification": [
+        {
+          "command": "node --test",
+          "description": "Run the fixture Node tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/pricing.js"],
+        "required_changed_files": ["src/pricing.js"],
+        "required_diff_contains": ["clampDiscountPercent"]
+      }
+    },
+    {
+      "id": "extract_http_status_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/http.js by extracting the status code success check from statusLabel into a small private helper named isSuccessStatus. Preserve behavior and run node --test.",
+      "verification": [
+        {
+          "command": "node --test",
+          "description": "Run the fixture Node tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/http.js"],
+        "required_changed_files": ["src/http.js"],
+        "required_diff_contains": ["isSuccessStatus"]
+      }
+    },
+    {
+      "id": "extract_user_initials_helper",
+      "fixture": "fixture",
+      "prompt": "Refactor src/users.js by extracting the initials calculation from displayName into a small private helper named userInitials. Preserve behavior and run node --test.",
+      "verification": [
+        {
+          "command": "node --test",
+          "description": "Run the fixture Node tests"
+        }
+      ],
+      "diff": {
+        "allowed_changed_files": ["src/users.js"],
+        "required_changed_files": ["src/users.js"],
+        "required_diff_contains": ["userInitials"]
+      }
+    }
+  ]
+}

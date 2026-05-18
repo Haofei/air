@@ -159,33 +159,33 @@ The expanded manual commands below are useful when debugging individual checks:
 ```bash
 cargo fmt --check
 cargo test
-target/debug/air plan \
+target/debug/air dev make-plan \
   --task "Compare the commercial readiness of 800V EV platforms, silicon carbide drives, solid-state batteries, and distributed drive systems for automakers planning 2026-2030 products. Build a deep research workflow with a planning step, multiple bounded researcher steps, and a final report." \
   --store examples/deep-research/module-store.air-store.yaml \
   --model-config examples/bigmodel-openai-compatible.json \
   --allow-internal \
   --output target/generated/deep_research_planned_current.air-plan.yaml
-target/debug/air validate-plan target/generated/deep_research_planned_current.air-plan.yaml \
+target/debug/air dev validate-plan target/generated/deep_research_planned_current.air-plan.yaml \
   --store examples/deep-research/module-store.air-store.yaml
 ```
 
 The recipe-selection path has also been verified with:
 
 ```bash
-target/debug/air plan \
+target/debug/air dev make-plan \
   --task "Compare the commercial readiness of 800V EV platforms, silicon carbide drives, solid-state batteries, and distributed drive systems for automakers planning 2026-2030 products. Build a deep research workflow with a planning step, multiple bounded researcher steps, and a final report." \
   --store examples/deep-research/module-store.air-store.yaml \
   --model-config examples/bigmodel-openai-compatible.json \
   --allow-internal \
   --output target/generated/deep_research_planned_recipe_selection.air-plan.yaml
-target/debug/air validate-plan target/generated/deep_research_planned_recipe_selection.air-plan.yaml \
+target/debug/air dev validate-plan target/generated/deep_research_planned_recipe_selection.air-plan.yaml \
   --store examples/deep-research/module-store.air-store.yaml
 ```
 
 For AIR-only real execution, run the planner-generated RunPlan through the AIR VM with `examples/bigmodel-openai-compatible.json` and `examples/deep-research/tools.json`:
 
 ```bash
-target/debug/air run-plan target/generated/deep_research_planned_current.air-plan.yaml \
+target/debug/air dev run-plan target/generated/deep_research_planned_current.air-plan.yaml \
   --store examples/deep-research/module-store.air-store.yaml \
   --input examples/deep-research/input.json \
   --model-config examples/bigmodel-openai-compatible.json \
@@ -198,20 +198,20 @@ target/debug/air run-plan target/generated/deep_research_planned_current.air-pla
 The checked deep-research example can also be run through the generic profile path, which keeps CLI complexity out of app-specific commands:
 
 ```bash
-target/debug/air validate-plan --profile examples/deep-research/profile.air-profile.yaml
-target/debug/air run-plan --profile examples/deep-research/profile.air-profile.yaml
-target/debug/air run-plan --profile examples/deep-research/profile.air-profile.yaml --parallel
+target/debug/air dev validate-plan --profile examples/deep-research/profile.air-profile.yaml
+target/debug/air dev run-plan --profile examples/deep-research/profile.air-profile.yaml
+target/debug/air dev run-plan --profile examples/deep-research/profile.air-profile.yaml --parallel
 ```
 
 The trace-specialization prototype is exposed through the hidden developer `replay` command so it does not expand the public command surface:
 
 ```bash
-target/debug/air replay target/generated/parallel_smoke.trace.jsonl \
+target/debug/air dev replay target/generated/parallel_smoke.trace.jsonl \
   --specialize-run-plan \
   --store tests/plans/parallel-smoke.air-store.yaml \
   --output target/generated/parallel_smoke.specialized.air-plan.yaml \
   --identity-out target/generated/parallel_smoke.identity.json
-target/debug/air validate-plan target/generated/parallel_smoke.specialized.air-plan.yaml \
+target/debug/air dev validate-plan target/generated/parallel_smoke.specialized.air-plan.yaml \
   --store tests/plans/parallel-smoke.air-store.yaml
 ```
 
@@ -220,7 +220,7 @@ For AIR-only clarification/resume validation, run the clarified plan with `--sta
 An AIR-only real-model smoke run has been verified with BigModel/OpenAI-compatible chat completions and `examples/deep-research/tools.json`:
 
 ```bash
-target/debug/air run-plan examples/deep-research/deep-research-clarified.air-plan.yaml \
+target/debug/air dev run-plan examples/deep-research/deep-research-clarified.air-plan.yaml \
   --store examples/deep-research/module-store.air-store.yaml \
   --input examples/deep-research/input.json \
   --model-config examples/bigmodel-openai-compatible.json \
@@ -235,7 +235,7 @@ The planner-generated AIR-only run has also been verified end to end. Its trace 
 The supervised AIR-only run has also been verified with real model calls:
 
 ```bash
-target/debug/air run-plan examples/deep-research/deep-research-supervised.air-plan.yaml \
+target/debug/air dev run-plan examples/deep-research/deep-research-supervised.air-plan.yaml \
   --store examples/deep-research/module-store.air-store.yaml \
   --input examples/deep-research/input.json \
   --model-config examples/bigmodel-openai-compatible.json \
@@ -249,7 +249,7 @@ In that run, the supervisor emitted `action: conduct_research`, `needs_more: tru
 For AIR-only bounded multi-step supervisor validation, run:
 
 ```bash
-target/debug/air validate-plan examples/deep-research/deep-research-supervised-two-step.air-plan.yaml \
+target/debug/air dev validate-plan examples/deep-research/deep-research-supervised-two-step.air-plan.yaml \
   --store examples/deep-research/module-store.air-store.yaml
 cargo test -p air-linker two_step_supervised_deep_research
 ```
@@ -279,7 +279,7 @@ Missing or intentionally simplified:
 
 For the current AIR-only slice, AIR should be considered to have migrated this app's core workflow when:
 
-- the user-facing path is `air plan` plus `air run-plan`, not hand-authored topic topology;
+- the user-facing path is `air dev make-plan` plus `air dev run-plan`, not hand-authored topic topology;
 - the generated plan validates against module input/output schemas;
 - the generated plan runs on the AIR VM;
 - tool calls and model calls are real, not mocked, for at least one non-trivial research query;

@@ -950,6 +950,10 @@ fn ignored_workspace_path(path: &str) -> bool {
         || path == "__pycache__"
         || path.starts_with(".git/")
         || path.starts_with(".air/")
+        || path.ends_with("/.git")
+        || path.ends_with("/.air")
+        || path.contains("/.git/")
+        || path.contains("/.air/")
         || path.starts_with("target/")
         || path.starts_with("node_modules/")
         || path.starts_with("__pycache__/")
@@ -1064,6 +1068,27 @@ mod tests {
             "pub fn value() -> i32 {\n    2\n}\n"
         );
 
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn workspace_snapshot_ignores_nested_air_tool_outputs() {
+        let temp_dir = unique_temp_dir("air-code-artifact-ignore-air");
+        let workdir = temp_dir.join("work");
+        fs::create_dir_all(workdir.join("nested/.air/tool-output")).unwrap();
+        fs::create_dir_all(workdir.join("src")).unwrap();
+        fs::write(workdir.join("src/lib.rs"), "pub fn value() -> i32 { 1 }\n").unwrap();
+        fs::write(
+            workdir.join("nested/.air/tool-output/bash.log"),
+            "large tool log\n",
+        )
+        .unwrap();
+
+        let snapshot = WorkspaceSnapshot::capture(&workdir).unwrap();
+        let files = snapshot.summary().files;
+
+        assert!(files.iter().any(|file| file.path == "src/lib.rs"));
+        assert!(files.iter().all(|file| !file.path.contains("/.air/")));
         let _ = fs::remove_dir_all(temp_dir);
     }
 

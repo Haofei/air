@@ -7,7 +7,7 @@ runs verification, and reports the final diff.
 ## Interface
 
 ```bash
-cargo run -p air-cli -- skill run code-agent "fix the failing add function and retest"
+cargo run -p air-cli -- run "fix the failing add function and retest"
 ```
 
 There is one built-in skill, one loop, and one default tool set. The default path
@@ -63,7 +63,7 @@ so the handoff stays concise without losing auditability.
 ## Dogfood
 
 ```bash
-cargo run -p air-cli -- skill run code-agent "refactor a small helper and run tests" \
+cargo run -p air-cli -- run "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
   --tool-config skills/code-agent/tools.json \
   --trace-out target/generated/code-agent.trace.jsonl \
@@ -82,7 +82,7 @@ default tool surface, and run a deterministic edit fixture.
 The skill also carries its own benchmark suites under `benches/`:
 
 ```bash
-cargo run -p air-cli -- bench code-agent --suite skills/code-agent/benches/rust-small/suite.json --limit 1
+cargo run -p air-cli -- bench code --suite skills/code-agent/benches/rust-small/suite.json --limit 1
 ```
 
 ## Code-Run Artifacts
@@ -91,7 +91,7 @@ Use `--artifact-out` when you want an auditable, replayable record of one code
 agent run:
 
 ```bash
-cargo run -p air-cli -- skill run code-agent "refactor a small helper and run tests" \
+cargo run -p air-cli -- run "refactor a small helper and run tests" \
   --model-config examples/bigmodel-openai-compatible.json \
   --tool-config skills/code-agent/tools.json \
   --artifact-out target/generated/code-run-artifacts/manual-run

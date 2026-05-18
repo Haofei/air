@@ -3,6 +3,7 @@ mod bench;
 mod code_agent;
 mod code_artifact;
 mod diagnostics;
+mod entry;
 mod explain;
 mod models;
 mod planner;
@@ -13,6 +14,7 @@ mod skill;
 mod tools;
 use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSkillOptions};
 use crate::diagnostics::emit_diagnostics;
+use crate::entry::{run_entry_task, EntryMode, EntryTaskOptions};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -30,8 +32,8 @@ use crate::run_plan::{
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
 };
 use crate::skill::{
-    audit_skill, compile_skill, explain_skill, import_skill, list_skills, route_skill, run_skill,
-    run_skill_auto, validate_skill, SkillAutoRunOptions, SkillRouteOptions, SkillRunOptions,
+    audit_skill, explain_skill, import_skill, list_skills, route_skill, validate_skill,
+    SkillRouteOptions,
 };
 use crate::tools::ToolProviderChoice;
 use anyhow::Result;
@@ -85,7 +87,7 @@ fn normalize_model_profile_key(profile: &str) -> String {
 
 #[derive(Debug, Parser)]
 #[command(name = "air")]
-#[command(about = "AIR compiler CLI")]
+#[command(about = "AIR skill runtime CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -104,19 +106,250 @@ enum Command {
         #[command(subcommand)]
         command: BenchCommand,
     },
+    /// Advanced AIR IR/runtime tools.
+    Dev {
+        #[command(subcommand)]
+        command: DevCommand,
+    },
     /// Run bounded multi-task coding projects.
+    #[command(hide = true)]
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
     },
-    /// Parse and statically verify an AIR module.
-    #[command(hide = true)]
+    /// Run a user task through AIR's entry agent.
+    Run {
+        /// Natural-language task.
+        target: String,
+
+        /// Entry routing mode for natural-language tasks.
+        #[arg(long, value_enum, default_value_t = EntryMode::Auto)]
+        mode: EntryMode,
+
+        /// Number of instruction skills to route into the host agent.
+        #[arg(long, default_value_t = 3, hide = true)]
+        top_k: usize,
+
+        /// Additional instruction skills to preload. Accepts repeated flags or comma-separated ids.
+        #[arg(long = "skills", value_delimiter = ',')]
+        skills: Vec<String>,
+
+        /// Project manifest path when --mode project is selected.
+        #[arg(long, hide = true)]
+        project_file: Option<PathBuf>,
+
+        /// For project mode, stop after writing the project manifest.
+        #[arg(long)]
+        plan_only: bool,
+
+        /// Project planner model alias from --model-config.
+        #[arg(long, default_value = "project_planner", hide = true)]
+        planner_model: String,
+
+        /// Optional OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Optional JSONL trace output path.
+        #[arg(long, hide = true)]
+        trace_out: Option<PathBuf>,
+
+        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
+        #[arg(long, hide = true)]
+        trace_redact: bool,
+
+        /// Write raw trace events without redaction.
+        #[arg(long, conflicts_with = "trace_redact", hide = true)]
+        trace_raw: bool,
+
+        /// Print human-readable execution logs to stderr.
+        #[arg(long)]
+        log: bool,
+
+        /// Optional tool provider config JSON.
+        #[arg(long, hide = true)]
+        tool_config: Option<PathBuf>,
+
+        /// Optional directory for an auditable code-run artifact.
+        #[arg(long, hide = true)]
+        artifact_out: Option<PathBuf>,
+
+        /// Replay a previous code-run artifact, optionally switching to live execution with --replay-from.
+        #[arg(long, hide = true)]
+        replay_artifact: Option<PathBuf>,
+
+        /// 1-based trace event line where replay should switch to the live provider.
+        #[arg(long, requires = "replay_artifact", hide = true)]
+        replay_from: Option<usize>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SkillCommand {
+    /// List local AIR skills.
+    List,
+    /// Validate an AIR skill manifest.
     Validate {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+    },
+    /// Audit an AIR skill package without executing it.
+    Audit {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+
+        /// Write audit.json next to the skill manifest.
+        #[arg(long)]
+        write: bool,
+    },
+    /// Import a local folder, git repository, or zip as AIR skill package(s).
+    Import {
+        /// Local directory/path, git URL, or zip URL/path.
+        source: String,
+
+        /// Destination skill directory for one skill, or destination root for a skill collection.
+        /// Defaults to skills/vendor for collections and skills/vendor/<skill-id> for single skills.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+    /// Route a task to the most relevant local AIR skills.
+    Route {
+        /// Natural-language task.
+        task: String,
+
+        /// Number of selected skill cards to return.
+        #[arg(long, default_value_t = 3)]
+        top_k: usize,
+
+        /// Include deterministic routing score details.
+        #[arg(long)]
+        explain: bool,
+    },
+    /// Explain what a skill is allowed to do without running it.
+    Explain {
+        /// Skill id, manifest path, or skill directory.
+        skill: String,
+
+        /// Skill run profile override.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BenchCommand {
+    /// Run the code-agent benchmark suite.
+    Code {
+        /// Benchmark suite JSON file.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Output directory for run.json, traces, and workdirs.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Coding-agent run profile.
+        #[arg(long)]
+        profile: Option<PathBuf>,
+
+        /// OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Run only one task id.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Run at most N selected tasks.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Print AIR execution logs while the benchmark runs.
+        #[arg(long)]
+        log: bool,
+
+        /// Keep successful task workdirs. Failed task workdirs are always kept.
+        #[arg(long)]
+        keep_workdirs: bool,
+
+        /// Ignore cached code-run artifacts and spend model calls again.
+        #[arg(long)]
+        refresh: bool,
+
+        /// Optional Markdown benchmark report output path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Run a code-agent suite with a skill preloaded, optionally comparing no-skill.
+    Skill {
+        /// Skill id, manifest path, skill directory, or comma-separated instruction skill ids.
+        skill: String,
+
+        /// Additional instruction skills to preload.
+        #[arg(long, value_delimiter = ',')]
+        skills: Vec<String>,
+
+        /// Benchmark suite JSON file.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Output directory for run.json, traces, and workdirs.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Run only one task id.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Run at most N selected tasks.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Compare against a no-skill baseline in the same benchmark run.
+        #[arg(long)]
+        compare_no_skill: bool,
+
+        /// Print AIR execution logs while the benchmark runs.
+        #[arg(long)]
+        log: bool,
+
+        /// Keep successful task workdirs. Failed task workdirs are always kept.
+        #[arg(long)]
+        keep_workdirs: bool,
+
+        /// Ignore cached code-run artifacts and spend model calls again.
+        #[arg(long)]
+        refresh: bool,
+
+        /// Optional Markdown benchmark report output path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Run deterministic project-orchestrator benchmark cases.
+    #[command(hide = true)]
+    Project {
+        /// Project benchmark suite JSON file.
+        #[arg(long)]
+        suite: Option<PathBuf>,
+
+        /// Output directory for run.json.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DevCommand {
+    /// Parse and statically verify an AIR module.
+    ValidateModule {
         /// Path to a .air.yaml, .air.yml, or .air.json file.
         file: PathBuf,
     },
     /// Parse and statically verify an AIR system.
-    #[command(hide = true)]
     ValidateSystem {
         /// Path to a .air-system.yaml file.
         file: PathBuf,
@@ -139,7 +372,7 @@ enum Command {
         explain: bool,
     },
     /// Ask a planner model to generate a dynamic AIR run plan from a task.
-    Plan {
+    MakePlan {
         /// Natural-language task to plan.
         #[arg(long, conflicts_with = "task_file")]
         task: Option<String>,
@@ -172,9 +405,8 @@ enum Command {
         #[arg(long)]
         output: Option<PathBuf>,
     },
-    /// Run a state-machine AIR module with built-in mock providers.
-    #[command(hide = true)]
-    Run {
+    /// Run a state-machine AIR module directly.
+    RunModule {
         /// Path to a .air.yaml, .air.yml, or .air.json file.
         file: PathBuf,
 
@@ -211,7 +443,6 @@ enum Command {
         tool_config: Option<PathBuf>,
     },
     /// Run an AIR system DAG with built-in mock providers.
-    #[command(hide = true)]
     RunSystem {
         /// Path to a .air-system.yaml file.
         file: PathBuf,
@@ -371,7 +602,6 @@ enum Command {
         tool_config: Option<PathBuf>,
     },
     /// Replay final output from a JSONL trace.
-    #[command(hide = true)]
     Replay {
         /// Path to a trace JSONL file.
         trace: PathBuf,
@@ -395,232 +625,6 @@ enum Command {
         /// Print trace statistics and final output as JSON.
         #[arg(long)]
         stats: bool,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum SkillCommand {
-    /// List local AIR skills.
-    List,
-    /// Validate an AIR skill manifest.
-    Validate {
-        /// Skill id, manifest path, or skill directory.
-        skill: String,
-    },
-    /// Audit an AIR skill package without executing it.
-    Audit {
-        /// Skill id, manifest path, or skill directory.
-        skill: String,
-
-        /// Write audit.json next to the skill manifest.
-        #[arg(long)]
-        write: bool,
-    },
-    /// Import a local folder, git repository, or zip as an AIR skill package.
-    Import {
-        /// Local directory/path, git URL, or zip URL/path.
-        source: String,
-
-        /// Destination skill directory.
-        #[arg(long)]
-        out: PathBuf,
-    },
-    /// Compile a skill manifest into a resolved AIR skill descriptor.
-    Compile {
-        /// Skill id, manifest path, or skill directory.
-        skill: String,
-
-        /// Optional JSON descriptor output path. Prints JSON when omitted.
-        #[arg(long)]
-        output: Option<PathBuf>,
-    },
-    /// Route a task to the most relevant local AIR skills.
-    Route {
-        /// Natural-language task.
-        task: String,
-
-        /// Number of selected skill cards to return.
-        #[arg(long, default_value_t = 3)]
-        top_k: usize,
-    },
-    /// Explain how AIR routes a task across local skills.
-    ExplainRoute {
-        /// Natural-language task.
-        task: String,
-
-        /// Number of selected skill cards to return.
-        #[arg(long, default_value_t = 3)]
-        top_k: usize,
-    },
-    /// Run an AIR skill from a task prompt.
-    Run {
-        /// Skill id when running explicitly, or task text when --auto is set.
-        target: String,
-
-        /// Natural-language task for explicit skill runs.
-        task: Option<String>,
-
-        /// Route the task automatically and run the best matching skill.
-        #[arg(long)]
-        auto: bool,
-
-        /// Number of skills to consider when --auto is set.
-        #[arg(long, default_value_t = 3)]
-        top_k: usize,
-
-        /// Skill run profile override.
-        #[arg(long)]
-        profile: Option<PathBuf>,
-
-        /// Optional OpenAI-compatible model config JSON.
-        #[arg(long)]
-        model_config: Option<PathBuf>,
-
-        /// Optional JSONL trace output path.
-        #[arg(long)]
-        trace_out: Option<PathBuf>,
-
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact")]
-        trace_raw: bool,
-
-        /// Print human-readable execution logs to stderr.
-        #[arg(long)]
-        log: bool,
-
-        /// Optional tool provider config JSON.
-        #[arg(long)]
-        tool_config: Option<PathBuf>,
-
-        /// Optional directory for an auditable code-run artifact.
-        #[arg(long)]
-        artifact_out: Option<PathBuf>,
-
-        /// Replay a previous code-run artifact, optionally switching to live execution with --replay-from.
-        #[arg(long)]
-        replay_artifact: Option<PathBuf>,
-
-        /// 1-based trace event line where replay should switch to the live provider.
-        #[arg(long, requires = "replay_artifact")]
-        replay_from: Option<usize>,
-    },
-    /// Explain what a skill is allowed to do without running it.
-    Explain {
-        /// Skill id, manifest path, or skill directory.
-        skill: String,
-
-        /// Skill run profile override.
-        #[arg(long)]
-        profile: Option<PathBuf>,
-    },
-}
-
-#[derive(Debug, Subcommand)]
-enum BenchCommand {
-    /// Run the code-agent benchmark suite.
-    CodeAgent {
-        /// Benchmark suite JSON file.
-        #[arg(long)]
-        suite: Option<PathBuf>,
-
-        /// Output directory for run.json, traces, and workdirs.
-        #[arg(long)]
-        out_dir: Option<PathBuf>,
-
-        /// Coding-agent run profile.
-        #[arg(long)]
-        profile: Option<PathBuf>,
-
-        /// OpenAI-compatible model config JSON.
-        #[arg(long)]
-        model_config: Option<PathBuf>,
-
-        /// Run only one task id.
-        #[arg(long)]
-        task: Option<String>,
-
-        /// Run at most N selected tasks.
-        #[arg(long)]
-        limit: Option<usize>,
-
-        /// Print AIR execution logs while the benchmark runs.
-        #[arg(long)]
-        log: bool,
-
-        /// Keep successful task workdirs. Failed task workdirs are always kept.
-        #[arg(long)]
-        keep_workdirs: bool,
-
-        /// Ignore cached code-run artifacts and spend model calls again.
-        #[arg(long)]
-        refresh: bool,
-
-        /// Optional Markdown benchmark report output path.
-        #[arg(long)]
-        report: Option<PathBuf>,
-    },
-    /// Run a code-agent suite with a skill preloaded, optionally comparing no-skill.
-    Skill {
-        /// Skill id, manifest path, skill directory, or comma-separated instruction skill ids.
-        skill: String,
-
-        /// Additional instruction skills to preload.
-        #[arg(long, value_delimiter = ',')]
-        skills: Vec<String>,
-
-        /// Benchmark suite JSON file.
-        #[arg(long)]
-        suite: Option<PathBuf>,
-
-        /// Output directory for run.json, traces, and workdirs.
-        #[arg(long)]
-        out_dir: Option<PathBuf>,
-
-        /// OpenAI-compatible model config JSON.
-        #[arg(long)]
-        model_config: Option<PathBuf>,
-
-        /// Run only one task id.
-        #[arg(long)]
-        task: Option<String>,
-
-        /// Run at most N selected tasks.
-        #[arg(long)]
-        limit: Option<usize>,
-
-        /// Compare against a no-skill baseline in the same benchmark run.
-        #[arg(long)]
-        compare_no_skill: bool,
-
-        /// Print AIR execution logs while the benchmark runs.
-        #[arg(long)]
-        log: bool,
-
-        /// Keep successful task workdirs. Failed task workdirs are always kept.
-        #[arg(long)]
-        keep_workdirs: bool,
-
-        /// Ignore cached code-run artifacts and spend model calls again.
-        #[arg(long)]
-        refresh: bool,
-
-        /// Optional Markdown benchmark report output path.
-        #[arg(long)]
-        report: Option<PathBuf>,
-    },
-    /// Run deterministic project-orchestrator benchmark cases.
-    Project {
-        /// Project benchmark suite JSON file.
-        #[arg(long)]
-        suite: Option<PathBuf>,
-
-        /// Output directory for run.json.
-        #[arg(long)]
-        out_dir: Option<PathBuf>,
     },
 }
 
@@ -688,73 +692,20 @@ fn main() -> Result<()> {
             SkillCommand::List => list_skills(),
             SkillCommand::Validate { skill } => validate_skill(&skill),
             SkillCommand::Audit { skill, write } => audit_skill(&skill, write),
-            SkillCommand::Import { source, out } => import_skill(&source, &out),
-            SkillCommand::Compile { skill, output } => compile_skill(&skill, output),
-            SkillCommand::Route { task, top_k } => route_skill(SkillRouteOptions {
+            SkillCommand::Import { source, out } => import_skill(&source, out.as_deref()),
+            SkillCommand::Route {
                 task,
                 top_k,
-                explain: false,
+                explain,
+            } => route_skill(SkillRouteOptions {
+                task,
+                top_k,
+                explain,
             }),
-            SkillCommand::ExplainRoute { task, top_k } => route_skill(SkillRouteOptions {
-                task,
-                top_k,
-                explain: true,
-            }),
-            SkillCommand::Run {
-                target,
-                task,
-                auto,
-                top_k,
-                profile,
-                model_config,
-                trace_out,
-                trace_redact,
-                trace_raw,
-                log,
-                tool_config,
-                artifact_out,
-                replay_artifact,
-                replay_from,
-            } => {
-                if auto {
-                    run_skill_auto(SkillAutoRunOptions {
-                        task: target,
-                        top_k,
-                        profile_override: profile,
-                        model_config,
-                        trace_out,
-                        trace_redact,
-                        trace_raw,
-                        log,
-                        tool_config_override: tool_config,
-                        artifact_out,
-                        replay_artifact,
-                        replay_from,
-                    })
-                } else {
-                    let Some(task) = task else {
-                        anyhow::bail!("air skill run <skill> requires a task unless --auto is set")
-                    };
-                    run_skill(SkillRunOptions {
-                        reference: target,
-                        task,
-                        profile_override: profile,
-                        model_config,
-                        trace_out,
-                        trace_redact,
-                        trace_raw,
-                        log,
-                        tool_config_override: tool_config,
-                        artifact_out,
-                        replay_artifact,
-                        replay_from,
-                    })
-                }
-            }
             SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
         },
         Command::Bench { command } => match command {
-            BenchCommand::CodeAgent {
+            BenchCommand::Code {
                 suite,
                 out_dir,
                 profile,
@@ -808,6 +759,7 @@ fn main() -> Result<()> {
                 bench_project(BenchProjectOptions { suite, out_dir })
             }
         },
+        Command::Dev { command } => run_dev_command(command),
         Command::Project { command } => match command {
             ProjectCommand::Plan {
                 goal,
@@ -830,9 +782,49 @@ fn main() -> Result<()> {
                 project_verify(ProjectVerifyOptions { file, task })
             }
         },
-        Command::Validate { file } => validate(file),
-        Command::ValidateSystem { file } => validate_system(file),
-        Command::ValidatePlan {
+        Command::Run {
+            target,
+            mode,
+            top_k,
+            skills,
+            project_file,
+            plan_only,
+            planner_model,
+            model_config,
+            trace_out,
+            trace_redact,
+            trace_raw,
+            log,
+            tool_config,
+            artifact_out,
+            replay_artifact,
+            replay_from,
+        } => run_entry_task(EntryTaskOptions {
+            task: target,
+            mode,
+            top_k,
+            skills,
+            model_config,
+            trace_out,
+            trace_redact,
+            trace_raw,
+            log,
+            tool_config,
+            artifact_out,
+            replay_artifact,
+            replay_from,
+            project_file,
+            plan_only,
+            planner_model,
+        }),
+    }
+}
+
+fn run_dev_command(command: DevCommand) -> Result<()> {
+    match command {
+        DevCommand::ValidateModule { file } => validate(file),
+        DevCommand::ValidateSystem { file } => validate_system(file),
+        DevCommand::ValidatePlan {
             plan,
             profile,
             store,
@@ -843,7 +835,7 @@ fn main() -> Result<()> {
             store,
             explain,
         }),
-        Command::Plan {
+        DevCommand::MakePlan {
             task,
             task_file,
             store,
@@ -862,7 +854,7 @@ fn main() -> Result<()> {
             explain,
             output,
         }),
-        Command::Run {
+        DevCommand::RunModule {
             file,
             input,
             model_config,
@@ -882,7 +874,7 @@ fn main() -> Result<()> {
             example_tools,
             tool_config,
         ),
-        Command::RunSystem {
+        DevCommand::RunSystem {
             file,
             input,
             model_config,
@@ -902,7 +894,7 @@ fn main() -> Result<()> {
             example_tools,
             tool_config,
         ),
-        Command::RunPlan {
+        DevCommand::RunPlan {
             plan,
             profile,
             store,
@@ -937,7 +929,7 @@ fn main() -> Result<()> {
             tool_config,
             model_replay: None,
         }),
-        Command::ResumePlan {
+        DevCommand::ResumePlan {
             plan,
             profile,
             store,
@@ -970,7 +962,7 @@ fn main() -> Result<()> {
             example_tools,
             tool_config,
         }),
-        Command::Replay {
+        DevCommand::Replay {
             trace,
             specialize_run_plan,
             store,
@@ -1899,7 +1891,7 @@ mod tests {
     }
 
     #[test]
-    fn default_help_exposes_only_primary_plan_commands() {
+    fn default_help_exposes_only_primary_commands() {
         let mut output = Vec::new();
         <Cli as clap::CommandFactory>::command()
             .write_help(&mut output)
@@ -1912,7 +1904,7 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
 
-        for command in ["skill", "validate-plan", "plan", "run-plan", "resume-plan"] {
+        for command in ["run", "skill", "bench", "dev"] {
             assert!(
                 command_names.contains(&command),
                 "expected {command} in help"
@@ -1920,10 +1912,14 @@ mod tests {
         }
 
         for command in [
+            "project",
+            "validate-plan",
+            "plan",
+            "run-plan",
+            "resume-plan",
             "validate-system",
             "run-system",
             "validate",
-            "run",
             "code",
             "lower",
             "lower-plan",
@@ -1938,68 +1934,174 @@ mod tests {
     }
 
     #[test]
-    fn skill_run_accepts_code_agent_task() {
-        let cli = Cli::try_parse_from([
-            "air",
-            "skill",
-            "run",
-            "code-agent",
-            "fix the failing add function and retest",
-        ])
-        .unwrap();
+    fn dev_help_exposes_internal_commands() {
+        let mut output = Vec::new();
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let dev = command.find_subcommand_mut("dev").unwrap();
+        dev.write_help(&mut output).unwrap();
+        let help = String::from_utf8(output).unwrap();
+        let command_names = help
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .filter(|line| !line.starts_with("-"))
+            .filter_map(|line| line.split_whitespace().next())
+            .collect::<Vec<_>>();
 
-        let Command::Skill {
-            command:
-                SkillCommand::Run {
-                    target,
-                    task,
-                    auto,
-                    profile,
-                    ..
-                },
-        } = cli.command
-        else {
-            panic!("expected skill run command");
-        };
-
-        assert_eq!(target, "code-agent");
-        assert_eq!(
-            task.as_deref(),
-            Some("fix the failing add function and retest")
-        );
-        assert!(!auto);
-        assert_eq!(profile, None);
+        for command in [
+            "validate-module",
+            "validate-system",
+            "validate-plan",
+            "make-plan",
+            "run-module",
+            "run-system",
+            "run-plan",
+            "resume-plan",
+            "replay",
+        ] {
+            assert!(
+                command_names.contains(&command),
+                "expected {command} in dev help"
+            );
+        }
     }
 
     #[test]
-    fn skill_run_auto_accepts_task_without_skill_name() {
+    fn dev_run_plan_accepts_profile() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "dev",
+            "run-plan",
+            "--profile",
+            "examples/deep-research/profile.air-profile.yaml",
+            "--log",
+        ])
+        .unwrap();
+
+        let Command::Dev {
+            command: DevCommand::RunPlan {
+                plan, profile, log, ..
+            },
+        } = cli.command
+        else {
+            panic!("expected dev run-plan command");
+        };
+
+        assert_eq!(plan, None);
+        assert_eq!(
+            profile,
+            Some(PathBuf::from(
+                "examples/deep-research/profile.air-profile.yaml"
+            ))
+        );
+        assert!(log);
+    }
+
+    #[test]
+    fn skill_help_exposes_lifecycle_not_execution_debug_commands() {
+        let mut output = Vec::new();
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let skill = command.find_subcommand_mut("skill").unwrap();
+        skill.write_help(&mut output).unwrap();
+        let help = String::from_utf8(output).unwrap();
+        let command_names = help
+            .lines()
+            .filter_map(|line| line.strip_prefix("  "))
+            .filter(|line| !line.starts_with("-"))
+            .filter_map(|line| line.split_whitespace().next())
+            .collect::<Vec<_>>();
+
+        for command in ["list", "validate", "audit", "import", "route", "explain"] {
+            assert!(
+                command_names.contains(&command),
+                "expected {command} in skill help"
+            );
+        }
+
+        for command in ["run", "compile"] {
+            assert!(
+                !command_names.contains(&command),
+                "did not expect {command} in default skill help"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_route_accepts_explain_flag() {
         let cli = Cli::try_parse_from([
             "air",
             "skill",
-            "run",
-            "--auto",
-            "use TDD to fix the failing add function",
+            "route",
+            "fix a security vulnerability",
+            "--explain",
         ])
         .unwrap();
 
         let Command::Skill {
             command:
-                SkillCommand::Run {
-                    target,
+                SkillCommand::Route {
                     task,
-                    auto,
                     top_k,
-                    ..
+                    explain,
                 },
         } = cli.command
         else {
-            panic!("expected skill run command");
+            panic!("expected skill route command");
+        };
+
+        assert_eq!(task, "fix a security vulnerability");
+        assert_eq!(top_k, 3);
+        assert!(explain);
+    }
+
+    #[test]
+    fn run_accepts_natural_language_task() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "run",
+            "use TDD to fix the failing add function",
+            "--skills",
+            "tdd-workflow",
+            "--mode",
+            "code",
+        ])
+        .unwrap();
+
+        let Command::Run {
+            target,
+            mode,
+            skills,
+            ..
+        } = cli.command
+        else {
+            panic!("expected run command");
         };
 
         assert_eq!(target, "use TDD to fix the failing add function");
-        assert_eq!(task, None);
-        assert!(auto);
-        assert_eq!(top_k, 3);
+        assert_eq!(mode, EntryMode::Code);
+        assert_eq!(skills, vec!["tdd-workflow"]);
+    }
+
+    #[test]
+    fn dev_run_module_accepts_low_level_module_input() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "dev",
+            "run-module",
+            "examples/model-smoke.air.yaml",
+            "--input",
+            "examples/model-smoke.input.json",
+        ])
+        .unwrap();
+
+        let Command::Dev {
+            command: DevCommand::RunModule { file, input, .. },
+        } = cli.command
+        else {
+            panic!("expected dev run-module command");
+        };
+
+        assert_eq!(file, PathBuf::from("examples/model-smoke.air.yaml"));
+        assert_eq!(input, PathBuf::from("examples/model-smoke.input.json"));
     }
 
     #[test]
@@ -2018,11 +2120,10 @@ mod tests {
     }
 
     #[test]
-    fn skill_validate_audit_compile_parse() {
+    fn skill_validate_audit_parse() {
         for args in [
             ["air", "skill", "validate", "code-agent"].as_slice(),
             ["air", "skill", "audit", "code-agent"].as_slice(),
-            ["air", "skill", "compile", "code-agent"].as_slice(),
         ] {
             let cli = Cli::try_parse_from(args).unwrap();
             let Command::Skill { .. } = cli.command else {
@@ -2035,6 +2136,7 @@ mod tests {
     fn resume_plan_accepts_profile_without_positional_plan() {
         let cli = Cli::try_parse_from([
             "air",
+            "dev",
             "resume-plan",
             "--profile",
             "examples/deep-research/profile.air-profile.yaml",
@@ -2043,16 +2145,19 @@ mod tests {
         ])
         .unwrap();
 
-        let Command::ResumePlan {
-            plan,
-            profile,
-            store,
-            input,
-            state,
-            ..
+        let Command::Dev {
+            command:
+                DevCommand::ResumePlan {
+                    plan,
+                    profile,
+                    store,
+                    input,
+                    state,
+                    ..
+                },
         } = cli.command
         else {
-            panic!("expected resume-plan command");
+            panic!("expected dev resume-plan command");
         };
 
         assert_eq!(plan, None);
@@ -2235,6 +2340,7 @@ mod tests {
     fn run_plan_accepts_parallel_flag_with_profile() {
         let cli = Cli::try_parse_from([
             "air",
+            "dev",
             "run-plan",
             "--profile",
             "examples/deep-research/profile.air-profile.yaml",
@@ -2242,14 +2348,17 @@ mod tests {
         ])
         .unwrap();
 
-        let Command::RunPlan {
-            plan,
-            profile,
-            parallel,
-            ..
+        let Command::Dev {
+            command:
+                DevCommand::RunPlan {
+                    plan,
+                    profile,
+                    parallel,
+                    ..
+                },
         } = cli.command
         else {
-            panic!("expected run-plan command");
+            panic!("expected dev run-plan command");
         };
 
         assert_eq!(plan, None);
@@ -2452,20 +2561,24 @@ modules:
     fn validate_plan_accepts_profile_without_positional_plan() {
         let cli = Cli::try_parse_from([
             "air",
+            "dev",
             "validate-plan",
             "--profile",
             "examples/deep-research/profile.air-profile.yaml",
         ])
         .unwrap();
 
-        let Command::ValidatePlan {
-            plan,
-            profile,
-            store,
-            explain,
+        let Command::Dev {
+            command:
+                DevCommand::ValidatePlan {
+                    plan,
+                    profile,
+                    store,
+                    explain,
+                },
         } = cli.command
         else {
-            panic!("expected validate-plan command");
+            panic!("expected dev validate-plan command");
         };
 
         assert_eq!(plan, None);
@@ -2483,6 +2596,7 @@ modules:
     fn validate_plan_accepts_explain_flag() {
         let cli = Cli::try_parse_from([
             "air",
+            "dev",
             "validate-plan",
             "tests/plans/approval-smoke.air-plan.yaml",
             "--store",
@@ -2491,8 +2605,11 @@ modules:
         ])
         .unwrap();
 
-        let Command::ValidatePlan { explain, .. } = cli.command else {
-            panic!("expected validate-plan command");
+        let Command::Dev {
+            command: DevCommand::ValidatePlan { explain, .. },
+        } = cli.command
+        else {
+            panic!("expected dev validate-plan command");
         };
 
         assert!(explain);
@@ -2502,7 +2619,8 @@ modules:
     fn plan_explain_accepts_no_model_config() {
         let cli = Cli::try_parse_from([
             "air",
-            "plan",
+            "dev",
+            "make-plan",
             "--explain",
             "--store",
             "skills/code-agent/module-store.air-store.yaml",
@@ -2511,13 +2629,16 @@ modules:
         ])
         .unwrap();
 
-        let Command::Plan {
-            model_config,
-            explain,
-            ..
+        let Command::Dev {
+            command:
+                DevCommand::MakePlan {
+                    model_config,
+                    explain,
+                    ..
+                },
         } = cli.command
         else {
-            panic!("expected plan command");
+            panic!("expected dev make-plan command");
         };
 
         assert_eq!(model_config, None);
@@ -2528,7 +2649,8 @@ modules:
     fn plan_requires_model_config_without_explain() {
         let error = Cli::try_parse_from([
             "air",
-            "plan",
+            "dev",
+            "make-plan",
             "--store",
             "skills/code-agent/module-store.air-store.yaml",
             "--task",

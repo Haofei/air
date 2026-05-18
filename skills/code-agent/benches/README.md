@@ -8,7 +8,7 @@ constraints.
 Run one task:
 
 ```bash
-cargo run -p air-cli -- bench code-agent --limit 1 --keep-workdirs
+cargo run -p air-cli -- bench code --limit 1 --keep-workdirs
 ```
 
 By default, the runner reuses code-run artifacts from
@@ -24,13 +24,21 @@ model, runtime, or tool implementation.
 Run the full small Rust suite:
 
 ```bash
-cargo run -p air-cli -- bench code-agent --refresh
+cargo run -p air-cli -- bench code --refresh
+```
+
+Run the non-Rust Node suite:
+
+```bash
+cargo run -p air-cli -- bench code \
+  --suite skills/code-agent/benches/node-small/suite.json \
+  --refresh
 ```
 
 Run the subagent smoke suite:
 
 ```bash
-cargo run -p air-cli -- bench code-agent \
+cargo run -p air-cli -- bench code \
   --suite skills/code-agent/benches/rust-subagent-smoke/suite.json \
   --refresh \
   --keep-workdirs
@@ -47,10 +55,10 @@ python3 dev/code-agent/analyze_metrics.py \
   target/generated/code-agent-bench/<run-id>/run.json
 ```
 
-The first baseline suite is `rust-small`: a small set of classic Rust refactor
+The first baseline suite is `rust-small`: a set of classic Rust refactor
 tasks that should preserve behavior, pass `cargo test -q`, and touch only the
-requested source file. Keep this suite compact; add new cases when they capture
-a real failure mode rather than another copy of the same refactor.
+requested source file. `node-small` provides the same shape for JavaScript using
+Node's built-in test runner.
 
 `rust-subagent-smoke` enables the `task` subagent tool and writes nested child
 trace/output paths into the parent trace. Use it to compare whether isolated

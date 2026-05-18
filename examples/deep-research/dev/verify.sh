@@ -32,15 +32,15 @@ cargo run -p air-cli -- validate examples/deep-research/research-supervisor.air.
 cargo run -p air-cli -- validate examples/deep-research/final-report.air.yaml
 
 echo "[air-verify] deep research plans"
-cargo run -p air-cli -- validate-plan examples/deep-research/deep-research.air-plan.yaml --store "$STORE"
-cargo run -p air-cli -- validate-plan examples/deep-research/deep-research-array.air-plan.yaml --store "$STORE"
-cargo run -p air-cli -- validate-plan examples/deep-research/deep-research-clarified.air-plan.yaml --store "$STORE"
-cargo run -p air-cli -- validate-plan examples/deep-research/deep-research-supervised.air-plan.yaml --store "$STORE"
-cargo run -p air-cli -- validate-plan examples/deep-research/deep-research-supervised-two-step.air-plan.yaml --store "$STORE"
-cargo run -p air-cli -- validate-plan examples/deep-research/deep-research-dynamic.air-plan.yaml --store "$STORE"
+cargo run -p air-cli -- dev validate-plan examples/deep-research/deep-research.air-plan.yaml --store "$STORE"
+cargo run -p air-cli -- dev validate-plan examples/deep-research/deep-research-array.air-plan.yaml --store "$STORE"
+cargo run -p air-cli -- dev validate-plan examples/deep-research/deep-research-clarified.air-plan.yaml --store "$STORE"
+cargo run -p air-cli -- dev validate-plan examples/deep-research/deep-research-supervised.air-plan.yaml --store "$STORE"
+cargo run -p air-cli -- dev validate-plan examples/deep-research/deep-research-supervised-two-step.air-plan.yaml --store "$STORE"
+cargo run -p air-cli -- dev validate-plan examples/deep-research/deep-research-dynamic.air-plan.yaml --store "$STORE"
 
 echo "[air-verify] deep research profile"
-cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
+cargo run -p air-cli -- dev validate-plan --profile examples/deep-research/profile.air-profile.yaml
 
 echo "[air-verify] deep research report quality contract"
 "$PYTHON" - <<'PY'
@@ -76,44 +76,44 @@ PY
   examples/deep-research/report-quality-output.json
 
 echo "[air-verify] parallel CLI smoke"
-cargo run -p air-cli -- validate-plan tests/plans/parallel-smoke.air-plan.yaml --store tests/plans/parallel-smoke.air-store.yaml
-cargo run -p air-cli -- run-plan tests/plans/parallel-smoke.air-plan.yaml \
+cargo run -p air-cli -- dev validate-plan tests/plans/parallel-smoke.air-plan.yaml --store tests/plans/parallel-smoke.air-store.yaml
+cargo run -p air-cli -- dev run-plan tests/plans/parallel-smoke.air-plan.yaml \
   --store tests/plans/parallel-smoke.air-store.yaml \
   --input "$MODEL_SMOKE_INPUT" \
   --parallel \
   --trace-out target/generated/parallel_smoke.trace.jsonl \
   > target/generated/parallel_smoke.output.json
-cargo run -p air-cli -- replay target/generated/parallel_smoke.trace.jsonl \
+cargo run -p air-cli -- dev replay target/generated/parallel_smoke.trace.jsonl \
   --specialize-run-plan \
   --store tests/plans/parallel-smoke.air-store.yaml \
   --output target/generated/parallel_smoke.specialized.air-plan.yaml \
   --identity-out target/generated/parallel_smoke.identity.json
-cargo run -p air-cli -- validate-plan target/generated/parallel_smoke.specialized.air-plan.yaml \
+cargo run -p air-cli -- dev validate-plan target/generated/parallel_smoke.specialized.air-plan.yaml \
   --store tests/plans/parallel-smoke.air-store.yaml
 
 echo "[air-verify] dynamic specialization smoke"
-cargo run -p air-cli -- validate-plan tests/plans/dynamic-smoke.air-plan.yaml \
+cargo run -p air-cli -- dev validate-plan tests/plans/dynamic-smoke.air-plan.yaml \
   --store tests/plans/dynamic-smoke.air-store.yaml
-cargo run -p air-cli -- run-plan tests/plans/dynamic-smoke.air-plan.yaml \
+cargo run -p air-cli -- dev run-plan tests/plans/dynamic-smoke.air-plan.yaml \
   --store tests/plans/dynamic-smoke.air-store.yaml \
   --input "$EMPTY_INPUT" \
   --trace-out target/generated/dynamic_smoke.trace.jsonl \
   > target/generated/dynamic_smoke.output.json
-cargo run -p air-cli -- replay target/generated/dynamic_smoke.trace.jsonl \
+cargo run -p air-cli -- dev replay target/generated/dynamic_smoke.trace.jsonl \
   --specialize-run-plan \
   --store tests/plans/dynamic-smoke.air-store.yaml \
   --output target/generated/dynamic_smoke.specialized.air-plan.yaml \
   --identity-out target/generated/dynamic_smoke.identity.json
-cargo run -p air-cli -- validate-plan target/generated/dynamic_smoke.specialized.air-plan.yaml \
+cargo run -p air-cli -- dev validate-plan target/generated/dynamic_smoke.specialized.air-plan.yaml \
   --store tests/plans/dynamic-smoke.air-store.yaml
 
 echo "[air-verify] dynamic JIT cache smoke"
-cargo run -p air-cli -- run-plan tests/plans/dynamic-smoke.air-plan.yaml \
+cargo run -p air-cli -- dev run-plan tests/plans/dynamic-smoke.air-plan.yaml \
   --store tests/plans/dynamic-smoke.air-store.yaml \
   --input "$EMPTY_INPUT" \
   --jit-cache target/generated/jit_cache_smoke \
   > target/generated/dynamic_smoke.jit_first.output.json
-cargo run -p air-cli -- run-plan tests/plans/dynamic-smoke.air-plan.yaml \
+cargo run -p air-cli -- dev run-plan tests/plans/dynamic-smoke.air-plan.yaml \
   --store tests/plans/dynamic-smoke.air-store.yaml \
   --input "$EMPTY_INPUT" \
   --jit-cache target/generated/jit_cache_smoke \

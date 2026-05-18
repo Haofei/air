@@ -10,7 +10,7 @@ from `air-skill.yaml`.
 Default command:
 
 ```bash
-air skill run code-agent "<task>"
+air run "<task>"
 ```
 
 Before changing files, locate the relevant files and symbols with search, glob,

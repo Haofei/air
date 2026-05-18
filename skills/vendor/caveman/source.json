@@ -1,0 +1,7 @@
+{
+  "imported_at_unix_ms": 1779084569715,
+  "manifest": "skills/vendor/caveman/air-skill.yaml",
+  "sha256": "sha256:a2ecd1fc2099b0e0228187c63c96bdf7c18f908b7bd2bd36cef56f99a881fa50",
+  "source": "https://github.com/JuliusBrussee/caveman/tree/main/skills/caveman",
+  "source_path": ""
+}

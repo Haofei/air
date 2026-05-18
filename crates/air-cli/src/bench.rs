@@ -120,6 +120,8 @@ struct BenchSummary {
     false_success_rate: f64,
     avg_model_calls: f64,
     avg_tool_calls: f64,
+    avg_provider_request_bytes: f64,
+    avg_total_tokens: f64,
     avg_changed_files: f64,
     avg_diff_lines: f64,
     step_budget_failures: usize,
@@ -166,6 +168,10 @@ struct TraceMetrics {
     subagent_model_calls: usize,
     subagent_tool_calls: usize,
     subagent_tool_errors: usize,
+    provider_request_bytes: usize,
+    provider_user_content_bytes: usize,
+    provider_tools_bytes: usize,
+    total_tokens: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -198,6 +204,7 @@ struct BenchTaskContext<'a> {
     log: bool,
     keep_workdirs: bool,
     refresh: bool,
+    skill_routing: bool,
 }
 
 pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
@@ -268,6 +275,7 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
         log: options.log,
         keep_workdirs: options.keep_workdirs,
         refresh: options.refresh,
+        skill_routing: true,
     };
     for task in selected {
         eprintln!("[air bench] running {}", task.id);
@@ -347,6 +355,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
     );
     let skill_ids = bench_skill_ids(&options.skill, &options.skills);
     let prepared = prepare_skill_composition(&skill_ids)?;
+    let prepared_profile = absolutize(&repo_root, prepared.profile.clone());
     let skill_label = skill_ids.join("+");
 
     let mut groups = Vec::new();
@@ -371,6 +380,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
             log: options.log,
             keep_workdirs: options.keep_workdirs,
             refresh: options.refresh,
+            skill_routing: false,
         })?);
     }
     let skill_group_dir = run_dir.join("skill");
@@ -384,7 +394,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         selected: &selected,
         suite_dir: &suite_dir,
         run_dir: &skill_group_dir,
-        profile: &prepared.profile,
+        profile: &prepared_profile,
         model_config: &model_config,
         artifact_cache_root: &artifact_cache_root,
         repo_root: &repo_root,
@@ -396,6 +406,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         log: options.log,
         keep_workdirs: options.keep_workdirs,
         refresh: options.refresh,
+        skill_routing: true,
     })?);
 
     let summary = combined_bench_summary(&groups);
@@ -403,7 +414,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         suite: suite.name,
         description: suite.description,
         run_dir: run_dir.display().to_string(),
-        profile: prepared.profile.display().to_string(),
+        profile: prepared_profile.display().to_string(),
         model_config: model_config.display().to_string(),
         skill: Some(skill_label),
         skills: skill_ids,
@@ -459,6 +470,7 @@ struct BenchGroupOptions<'a> {
     log: bool,
     keep_workdirs: bool,
     refresh: bool,
+    skill_routing: bool,
 }
 
 fn run_bench_group(options: BenchGroupOptions<'_>) -> Result<BenchRun> {
@@ -478,6 +490,7 @@ fn run_bench_group(options: BenchGroupOptions<'_>) -> Result<BenchRun> {
         log: options.log,
         keep_workdirs: options.keep_workdirs,
         refresh: options.refresh,
+        skill_routing: options.skill_routing,
     };
     let mut task_runs = Vec::new();
     for task in options.selected {
@@ -548,6 +561,12 @@ fn bench_summary(task_runs: &[TaskRun]) -> BenchSummary {
         ),
         avg_model_calls: average_usize(task_runs.iter().map(|task| task.metrics.model_calls)),
         avg_tool_calls: average_usize(task_runs.iter().map(|task| task.metrics.tool_calls)),
+        avg_provider_request_bytes: average_usize(
+            task_runs
+                .iter()
+                .map(|task| task.metrics.provider_request_bytes),
+        ),
+        avg_total_tokens: average_usize(task_runs.iter().map(|task| task.metrics.total_tokens)),
         avg_changed_files: average_usize(task_runs.iter().map(|task| task.changed_files.len())),
         avg_diff_lines: average_usize(task_runs.iter().map(|task| task.diff_lines)),
         step_budget_failures: task_runs
@@ -612,6 +631,8 @@ fn combined_bench_summary(runs: &[BenchRun]) -> BenchSummary {
         false_success_rate: weighted(|summary| summary.false_success_rate),
         avg_model_calls: weighted(|summary| summary.avg_model_calls),
         avg_tool_calls: weighted(|summary| summary.avg_tool_calls),
+        avg_provider_request_bytes: weighted(|summary| summary.avg_provider_request_bytes),
+        avg_total_tokens: weighted(|summary| summary.avg_total_tokens),
         avg_changed_files: weighted(|summary| summary.avg_changed_files),
         avg_diff_lines: weighted(|summary| summary.avg_diff_lines),
         step_budget_failures: runs
@@ -680,7 +701,11 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
     };
     fs::write(
         &tool_config,
-        default_bench_tool_config(context.repo_root, subagent_paths.as_ref()),
+        default_bench_tool_config(
+            context.repo_root,
+            subagent_paths.as_ref(),
+            context.skill_routing,
+        ),
     )?;
     let trace_path = task_dir.join("trace.jsonl");
     let output_path = task_dir.join("output.json");
@@ -1026,12 +1051,13 @@ fn write_bench_report(path: &Path, run: &BenchRun) -> Result<()> {
     out.push('\n');
     push_summary_table(&mut out, "Summary", &run.summary);
     if let Some(groups) = &run.runs {
+        push_comparison_highlights(&mut out, groups);
         out.push_str("\n## Groups\n\n");
-        out.push_str("| Group | Passed | Pass Rate | Verified | Patch | False Success | Avg Model Calls | Avg Tool Calls |\n");
-        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|\n");
+        out.push_str("| Group | Passed | Pass Rate | Verified | Patch | False Success | Avg Model Calls | Avg Tool Calls | Avg Request KB | Avg Tokens |\n");
+        out.push_str("|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n");
         for group in groups {
             out.push_str(&format!(
-                "| {} | {}/{} | {} | {} | {} | {} | {:.1} | {:.1} |\n",
+                "| {} | {}/{} | {} | {} | {} | {} | {:.1} | {:.1} | {:.1} | {} |\n",
                 md_cell(&group.suite),
                 group.summary.passed,
                 group.summary.total,
@@ -1041,6 +1067,8 @@ fn write_bench_report(path: &Path, run: &BenchRun) -> Result<()> {
                 percent(group.summary.false_success_rate),
                 group.summary.avg_model_calls,
                 group.summary.avg_tool_calls,
+                group.summary.avg_provider_request_bytes / 1024.0,
+                optional_metric(group.summary.avg_total_tokens),
             ));
         }
         for group in groups {
@@ -1050,6 +1078,63 @@ fn write_bench_report(path: &Path, run: &BenchRun) -> Result<()> {
         push_task_table(&mut out, "Tasks", &run.tasks);
     }
     fs::write(path, out).with_context(|| format!("write {}", path.display()))
+}
+
+fn push_comparison_highlights(out: &mut String, groups: &[BenchRun]) {
+    let Some(without) = groups
+        .iter()
+        .find(|group| group.suite == "no-skill" || group.suite.ends_with(":no-skill"))
+    else {
+        return;
+    };
+    let Some(with_skill) = groups
+        .iter()
+        .find(|group| group.suite == "skill" || group.suite.ends_with(":skill"))
+    else {
+        return;
+    };
+    out.push_str("\n## Comparison Highlights\n\n");
+    out.push_str(&format!(
+        "- Without skill: {}/{} passed\n",
+        without.summary.passed, without.summary.total
+    ));
+    out.push_str(&format!(
+        "- With skill: {}/{} passed\n",
+        with_skill.summary.passed, with_skill.summary.total
+    ));
+    out.push_str(&format!(
+        "- Verification failures: {} -> {}\n",
+        without.summary.verification_failures, with_skill.summary.verification_failures
+    ));
+    out.push_str(&format!(
+        "- Changed-file violations: {} -> {}\n",
+        changed_file_violations(&without.summary),
+        changed_file_violations(&with_skill.summary)
+    ));
+    if without.summary.avg_total_tokens > 0.0 && with_skill.summary.avg_total_tokens > 0.0 {
+        out.push_str(&format!(
+            "- Token usage: {}\n",
+            signed_percent_delta(
+                without.summary.avg_total_tokens,
+                with_skill.summary.avg_total_tokens
+            )
+        ));
+    } else if without.summary.avg_provider_request_bytes > 0.0
+        && with_skill.summary.avg_provider_request_bytes > 0.0
+    {
+        out.push_str(&format!(
+            "- Request bytes: {}\n",
+            signed_percent_delta(
+                without.summary.avg_provider_request_bytes,
+                with_skill.summary.avg_provider_request_bytes
+            )
+        ));
+    } else {
+        out.push_str(&format!(
+            "- Model calls: {:.1} -> {:.1}\n",
+            without.summary.avg_model_calls, with_skill.summary.avg_model_calls
+        ));
+    }
 }
 
 fn push_summary_table(out: &mut String, title: &str, summary: &BenchSummary) {
@@ -1081,6 +1166,14 @@ fn push_summary_table(out: &mut String, title: &str, summary: &BenchSummary) {
     out.push_str(&format!(
         "| avg_tool_calls | {:.1} |\n",
         summary.avg_tool_calls
+    ));
+    out.push_str(&format!(
+        "| avg_provider_request_kb | {:.1} |\n",
+        summary.avg_provider_request_bytes / 1024.0
+    ));
+    out.push_str(&format!(
+        "| avg_total_tokens | {} |\n",
+        optional_metric(summary.avg_total_tokens)
     ));
     out.push_str(&format!(
         "| avg_changed_files | {:.1} |\n",
@@ -1138,6 +1231,26 @@ fn push_task_table(out: &mut String, title: &str, tasks: &[TaskRun]) {
 
 fn percent(value: f64) -> String {
     format!("{:.1}%", value * 100.0)
+}
+
+fn signed_percent_delta(before: f64, after: f64) -> String {
+    if before <= 0.0 {
+        return "n/a".to_string();
+    }
+    let delta = (after - before) / before;
+    format!("{:+.1}%", delta * 100.0)
+}
+
+fn optional_metric(value: f64) -> String {
+    if value > 0.0 {
+        format!("{value:.1}")
+    } else {
+        "n/a".to_string()
+    }
+}
+
+fn changed_file_violations(summary: &BenchSummary) -> usize {
+    (summary.unrelated_file_touch_rate * summary.total as f64).round() as usize
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -1224,6 +1337,24 @@ fn trace_metrics_inner(path: &Path, visited: &mut BTreeSet<PathBuf>) -> Result<T
                 } else {
                     metrics.model_errors += 1;
                 }
+                if let Some(meta) = event.meta.as_ref().and_then(Value::as_object) {
+                    metrics.provider_request_bytes +=
+                        meta.get("provider_request_bytes")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0) as usize;
+                    metrics.provider_user_content_bytes +=
+                        meta.get("provider_user_content_bytes")
+                            .and_then(Value::as_u64)
+                            .unwrap_or(0) as usize;
+                    metrics.provider_tools_bytes += meta
+                        .get("provider_tools_bytes")
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    metrics.total_tokens += meta
+                        .get("provider_response")
+                        .and_then(provider_response_total_tokens)
+                        .unwrap_or(0);
+                }
             }
             "tool_batch_dispatch_item" => {
                 metrics.tool_calls += 1;
@@ -1302,6 +1433,14 @@ fn is_verification_event(output: &Value, tool: &str) -> bool {
         .unwrap_or(false)
 }
 
+fn provider_response_total_tokens(response: &Value) -> Option<usize> {
+    response
+        .pointer("/usage/total_tokens")
+        .or_else(|| response.pointer("/response/usage/total_tokens"))
+        .and_then(Value::as_u64)
+        .map(|value| value as usize)
+}
+
 fn tool_output_success(output: &Value) -> bool {
     output
         .get("success")
@@ -1343,6 +1482,7 @@ struct BenchSubagentPaths {
 fn default_bench_tool_config(
     repo_root: &Path,
     subagent_paths: Option<&BenchSubagentPaths>,
+    skill_routing: bool,
 ) -> String {
     let task_tool = if let Some(paths) = subagent_paths {
         json!({
@@ -1446,7 +1586,8 @@ fn default_bench_tool_config(
                 "kind": "skill",
                 "capability": "code.read",
                 "root_dir": repo_root,
-                "max_bytes": 65536
+                "max_bytes": 65536,
+                "enabled": skill_routing
             }
         },
         "approvals": {
@@ -1657,9 +1798,12 @@ mod tests {
             repo_root: PathBuf::from("/repo"),
             explore_tool_config: PathBuf::from("/run/tools.explore.json"),
         };
-        let config: Value =
-            serde_json::from_str(&default_bench_tool_config(Path::new("/repo"), Some(&paths)))
-                .unwrap();
+        let config: Value = serde_json::from_str(&default_bench_tool_config(
+            Path::new("/repo"),
+            Some(&paths),
+            true,
+        ))
+        .unwrap();
         let command = config
             .pointer("/tools/task/subagents/explore/command")
             .and_then(Value::as_array)
@@ -1667,5 +1811,14 @@ mod tests {
 
         assert!(command.iter().any(|value| value == "--trace-out"));
         assert!(command.iter().any(|value| value == "{trace_file}"));
+    }
+
+    #[test]
+    fn no_skill_bench_tool_config_disables_skill_routing() {
+        let config: Value =
+            serde_json::from_str(&default_bench_tool_config(Path::new("/repo"), None, false))
+                .unwrap();
+
+        assert_eq!(config.pointer("/tools/skill/enabled"), Some(&json!(false)));
     }
 }

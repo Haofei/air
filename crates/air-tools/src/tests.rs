@@ -3381,6 +3381,88 @@ workflow:
 }
 
 #[test]
+fn disabled_skill_tool_returns_empty_routes_and_refuses_loads() {
+    let dir = temp_dir("air-tools-disabled-skill-tool");
+    let skill_dir = dir.join("skills/vendor/tdd-workflow");
+    fs::create_dir_all(&skill_dir).unwrap();
+    fs::write(
+        skill_dir.join("air-skill.yaml"),
+        r#"
+schema: air.skill.v1
+id: tdd-workflow
+mode: instruction
+version: 0.1.0
+description: TDD workflow
+instructions:
+  files: [SKILL.md]
+routing:
+  triggers: [tdd]
+"#,
+    )
+    .unwrap();
+    fs::write(skill_dir.join("SKILL.md"), "# TDD\n").unwrap();
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "skill": {
+                    "kind": "skill",
+                    "capability": "code.read",
+                    "root_dir": ".",
+                    "enabled": false
+                }
+            }
+        })
+        .to_string(),
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let routed = tools
+        .call_tool("skill", &json!({"route_task": "use TDD", "top_k": 1}))
+        .unwrap();
+    assert_eq!(routed["kind"], json!("skill_route"));
+    assert_eq!(routed["disabled"], json!(true));
+    assert_eq!(routed["skills"], json!([]));
+    assert_eq!(routed["candidates"], json!([]));
+
+    let list = tools.call_tool("skill", &json!({})).unwrap();
+    assert_eq!(list["kind"], json!("skill_list"));
+    assert_eq!(list["skills"], json!([]));
+
+    let error = tools
+        .call_tool("skill", &json!({"name": "tdd-workflow"}))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("tool skill is disabled"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn mcp_tool_config_validates_server_url() {
+    let dir = temp_dir("air-tools-mcp-config");
+    let config_path = write_config(
+        &dir,
+        &json!({
+            "tools": {
+                "echo": {
+                    "kind": "mcp",
+                    "capability": "net.mcp",
+                    "server_url": "not-a-url",
+                    "tool": "echo"
+                }
+            }
+        })
+        .to_string(),
+    );
+
+    let error = ConfigTools::from_file(config_path).unwrap_err().to_string();
+    assert!(error.contains("tools.echo.server_url must be an http(s) URL"));
+
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn subagent_tool_runs_isolated_command_with_input_file() {
     let dir = temp_dir("air-tools-subagent");
     std::env::set_var("AIR_TEST_SUBAGENT_ENV", "ok");

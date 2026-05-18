@@ -15,8 +15,8 @@ A single-agent helpdesk RAG workflow:
 Run:
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+cargo run -p air-cli -- dev validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
+cargo run -p air-cli -- dev run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 
 ## `deep-research`
@@ -26,8 +26,8 @@ The main deep-research proof case. It includes clarification, bounded research f
 Run:
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --log
+cargo run -p air-cli -- dev validate-plan --profile examples/deep-research/profile.air-profile.yaml
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml --log
 ```
 
 ## `skills/code-agent`
@@ -55,8 +55,8 @@ model only when semantic compaction is needed.
 Run the deterministic under-budget path without a model config:
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/context-compact/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan examples/context-compact/context-compact.air-plan.yaml \
+cargo run -p air-cli -- dev validate-plan --profile examples/context-compact/profile.air-profile.yaml
+cargo run -p air-cli -- dev run-plan examples/context-compact/context-compact.air-plan.yaml \
   --store modules/std/module-store.air-store.yaml \
   --input examples/context-compact/input.json \
   --tool-config examples/context-compact/tools.json \

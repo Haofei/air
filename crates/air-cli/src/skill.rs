@@ -122,24 +122,10 @@ pub(crate) struct ResolvedSkill {
     pub(crate) manifest: AirSkillManifest,
 }
 
-pub(crate) struct SkillRunOptions {
-    pub(crate) reference: String,
-    pub(crate) task: String,
-    pub(crate) profile_override: Option<PathBuf>,
-    pub(crate) model_config: Option<PathBuf>,
-    pub(crate) trace_out: Option<PathBuf>,
-    pub(crate) trace_redact: bool,
-    pub(crate) trace_raw: bool,
-    pub(crate) log: bool,
-    pub(crate) tool_config_override: Option<PathBuf>,
-    pub(crate) artifact_out: Option<PathBuf>,
-    pub(crate) replay_artifact: Option<PathBuf>,
-    pub(crate) replay_from: Option<usize>,
-}
-
 pub(crate) struct SkillAutoRunOptions {
     pub(crate) task: String,
     pub(crate) top_k: usize,
+    pub(crate) skills: Vec<String>,
     pub(crate) profile_override: Option<PathBuf>,
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) trace_out: Option<PathBuf>,
@@ -176,7 +162,6 @@ struct SkillListItem {
     profile: String,
     tool_config: Option<String>,
     host: Option<String>,
-    run: String,
     explain: String,
 }
 
@@ -214,12 +199,36 @@ struct SkillRouteRejection {
     reason: String,
 }
 
+#[derive(Debug, Default, Clone, Serialize)]
+struct SkillFrontmatter {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    triggers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    repo_markers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    languages: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    task_types: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allowed_tools: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct SkillAudit {
     pub(crate) schema: String,
     pub(crate) skill_id: String,
     pub(crate) risk: String,
+    #[serde(default)]
+    pub(crate) trusted_source: bool,
     pub(crate) allowed_to_run: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub(crate) allowed_reason: Option<String>,
     pub(crate) findings: Vec<SkillAuditFinding>,
 }
 
@@ -368,13 +377,14 @@ fn skill_route_order(left: &SkillRouteCard, right: &SkillRouteCard) -> std::cmp:
 }
 
 fn score_skill_for_task(skill: &ResolvedSkill, task_lower: &str) -> (i32, Vec<String>) {
-    let mut score = 0;
+    let mut hard_score = 0;
+    let mut soft_score = 0;
     let mut reasons = Vec::new();
     let routing = &skill.manifest.routing;
     for trigger in &routing.triggers {
         let trigger_lower = trigger.to_ascii_lowercase();
         if !trigger_lower.is_empty() && task_lower.contains(&trigger_lower) {
-            score += 25;
+            hard_score += 25;
             reasons.push(format!("task matches trigger `{trigger}`"));
         }
     }
@@ -385,35 +395,35 @@ fn score_skill_for_task(skill: &ResolvedSkill, task_lower: &str) -> (i32, Vec<St
     {
         let excluded_lower = excluded.to_ascii_lowercase();
         if !excluded_lower.is_empty() && task_lower.contains(&excluded_lower) {
-            score -= 50;
+            hard_score -= 50;
             reasons.push(format!("task matches exclusion `{excluded}`"));
         }
     }
     for language in &routing.languages {
         let language_lower = language.to_ascii_lowercase();
         if !language_lower.is_empty() && task_lower.contains(&language_lower) {
-            score += 8;
+            hard_score += 8;
             reasons.push(format!("task matches language `{language}`"));
         }
     }
     for task_type in &routing.task_types {
         let task_type_lower = task_type.to_ascii_lowercase();
         if !task_type_lower.is_empty() && task_lower.contains(&task_type_lower) {
-            score += 10;
+            hard_score += 10;
             reasons.push(format!("task matches task type `{task_type}`"));
         }
     }
     if let Some(description) = &skill.manifest.description {
         for token in route_tokens(description) {
             if task_lower.contains(&token) {
-                score += 3;
+                soft_score += 3;
             }
         }
     }
     if let Some(summary) = &routing.summary {
         for token in route_tokens(summary) {
             if task_lower.contains(&token) {
-                score += 5;
+                soft_score += 5;
             }
         }
     }
@@ -423,12 +433,14 @@ fn score_skill_for_task(skill: &ResolvedSkill, task_lower: &str) -> (i32, Vec<St
         .filter(|marker| marker.exists())
         .count();
     if matching_markers > 0 {
-        score += (matching_markers as i32) * 8;
+        hard_score += (matching_markers as i32) * 8;
         reasons.push(format!("{matching_markers} repo marker(s) exist"));
     }
-    if reasons.is_empty() && score > 0 {
-        reasons.push("description matched task".to_string());
-    }
+    let score = if hard_score > 0 {
+        hard_score + soft_score
+    } else {
+        hard_score
+    };
     (score, reasons)
 }
 
@@ -447,6 +459,99 @@ fn skill_description_for_route(skill: &ResolvedSkill) -> Option<String> {
         .summary
         .clone()
         .or_else(|| skill.manifest.description.clone())
+        .or_else(|| {
+            skill_frontmatter_for_dir(&skill.manifest_dir).and_then(|front| front.description)
+        })
+}
+
+fn skill_frontmatter_for_dir(skill_dir: &Path) -> Option<SkillFrontmatter> {
+    for name in ["SKILL.md", "README.md"] {
+        let path = skill_dir.join(name);
+        let Ok(content) = fs::read_to_string(path) else {
+            continue;
+        };
+        if let Some(frontmatter) = parse_skill_frontmatter(&content) {
+            return Some(frontmatter);
+        }
+    }
+    None
+}
+
+fn parse_skill_frontmatter(content: &str) -> Option<SkillFrontmatter> {
+    let mut lines = content.lines();
+    if lines.next()?.trim() != "---" {
+        return None;
+    }
+    let mut yaml = String::new();
+    for line in lines {
+        if line.trim() == "---" {
+            break;
+        }
+        yaml.push_str(line);
+        yaml.push('\n');
+    }
+    if yaml.trim().is_empty() {
+        return None;
+    }
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).ok()?;
+    Some(SkillFrontmatter {
+        name: yaml_string_field(&value, &["name"]),
+        title: yaml_string_field(&value, &["title"]),
+        description: yaml_string_field(&value, &["description", "summary"]),
+        triggers: yaml_string_list_field(&value, &["triggers", "keywords"]),
+        repo_markers: yaml_string_list_field(&value, &["repo_markers", "repo-markers"]),
+        languages: yaml_string_list_field(&value, &["languages"]),
+        task_types: yaml_string_list_field(&value, &["task_types", "task-types"]),
+        allowed_tools: yaml_string_list_field(&value, &["allowed_tools", "allowed-tools", "tools"]),
+    })
+}
+
+fn yaml_string_field(value: &serde_yaml::Value, keys: &[&str]) -> Option<String> {
+    let mapping = value.as_mapping()?;
+    for key in keys {
+        if let Some(value) = mapping.get(serde_yaml::Value::String((*key).to_string())) {
+            if let Some(text) = value
+                .as_str()
+                .map(str::trim)
+                .filter(|text| !text.is_empty())
+            {
+                return Some(text.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn yaml_string_list_field(value: &serde_yaml::Value, keys: &[&str]) -> Vec<String> {
+    let Some(mapping) = value.as_mapping() else {
+        return Vec::new();
+    };
+    for key in keys {
+        let Some(value) = mapping.get(serde_yaml::Value::String((*key).to_string())) else {
+            continue;
+        };
+        return value_to_string_list(value);
+    }
+    Vec::new()
+}
+
+fn value_to_string_list(value: &serde_yaml::Value) -> Vec<String> {
+    match value {
+        serde_yaml::Value::String(text) => split_skill_list_text(text),
+        serde_yaml::Value::Sequence(items) => items
+            .iter()
+            .flat_map(value_to_string_list)
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    }
+}
+
+fn split_skill_list_text(text: &str) -> Vec<String> {
+    text.split([',', '\n'])
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect()
 }
 
 pub(crate) fn validate_skill(reference: &str) -> Result<()> {
@@ -517,77 +622,14 @@ pub(crate) fn explain_skill(reference: &str, profile_override: Option<PathBuf>) 
     print_json(&explanation)
 }
 
-pub(crate) fn compile_skill(reference: &str, output: Option<PathBuf>) -> Result<()> {
-    let skill = resolve_skill(reference)?;
-    validate_resolved_skill(&skill)?;
-    let effective = effective_execution(&skill)?;
-    let compiled = json!({
-        "schema": "air.compiled_skill.v1",
-        "skill": skill_metadata(&skill)?,
-        "mode": skill.manifest.mode.as_str(),
-        "host": effective.host_skill,
-        "manifest": path_ref(&skill.manifest_path),
-        "profile": path_ref(&effective.profile),
-        "tool_config": effective.tool_config.as_ref().map(|path| path_ref(path)),
-        "instructions": skill.manifest.instructions.files.iter().map(|path| path_ref(&skill.manifest_dir.join(path))).collect::<Vec<_>>(),
-        "effective_capabilities": effective.capabilities,
-        "capabilities": {
-            "allow": skill.manifest.capabilities.allow,
-            "deny": skill.manifest.capabilities.deny,
-        },
-        "verification": skill.manifest.verification,
-    });
-    if let Some(output) = output {
-        if let Some(parent) = output.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        fs::write(&output, serde_json::to_vec_pretty(&compiled)?)
-            .with_context(|| format!("write {}", output.display()))?;
-        print_json(&json!({ "compiled": path_ref(&output) }))
-    } else {
-        print_json(&compiled)
-    }
-}
-
-pub(crate) fn run_skill(options: SkillRunOptions) -> Result<()> {
-    let prepared = prepare_skill_run_context(&options.reference)?;
-    let task = if let Some(prefix) = &prepared.task_prefix {
-        format!("{prefix}\n\nTask: {}", options.task)
-    } else {
-        options.task.clone()
-    };
-    let outputs = run_code_agent(CodeOptions {
-        task,
-        artifact_task: Some(options.task.clone()),
-        skill: Some(prepared.metadata.clone()),
-        profile: Some(
-            options
-                .profile_override
-                .unwrap_or_else(|| prepared.profile.clone()),
-        ),
-        model_config: options.model_config,
-        trace_out: options.trace_out,
-        trace_redact: options.trace_redact,
-        trace_raw: options.trace_raw,
-        log: options.log,
-        tool_config: options
-            .tool_config_override
-            .or_else(|| prepared.tool_config.clone()),
-        artifact_out: options.artifact_out,
-        artifact_extra: prepared.artifact_extra,
-        replay_artifact: options.replay_artifact,
-        replay_from: options.replay_from,
-    })?;
-    print_json(&outputs)
-}
-
 pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
     let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
-    let selected = route
+    let mut selected = route
         .instructions
         .iter()
         .map(|card| card.id.clone())
         .collect::<Vec<_>>();
+    selected = merge_skill_ids(&selected, &options.skills);
     let prepared = prepare_skill_composition(&selected)?;
     let task = if let Some(prefix) = &prepared.task_prefix {
         format!("{prefix}\n\nTask: {}", options.task)
@@ -601,6 +643,7 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
             "task": options.task,
             "executor": route.executor,
             "instructions": route.instructions,
+            "forced_instructions": options.skills,
             "selected": route.selected,
             "rejected": route.rejected,
         }),
@@ -628,6 +671,24 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
         replay_from: options.replay_from,
     })?;
     print_json(&outputs)
+}
+
+fn merge_skill_ids(primary: &[String], additional: &[String]) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    primary
+        .iter()
+        .map(String::as_str)
+        .chain(additional.iter().flat_map(|value| value.split(',')))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .filter_map(|value| {
+            if seen.insert(value.to_string()) {
+                Some(value.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
 }
 
 pub(crate) fn prepare_skill_composition(
@@ -712,48 +773,6 @@ pub(crate) fn prepare_skill_composition(
     })
 }
 
-pub(crate) fn prepare_skill_run_context(reference: &str) -> Result<PreparedSkillRun> {
-    let skill = resolve_skill(reference)?;
-    validate_resolved_skill(&skill)?;
-    let audit = audit_resolved_skill(&skill)?;
-    if !audit.allowed_to_run {
-        bail!(
-            "skill `{}` audit risk is {}; refusing to run",
-            skill.manifest.id,
-            audit.risk
-        );
-    }
-    let effective = effective_execution(&skill)?;
-    let metadata = skill_metadata_with_context(&skill, Some(&audit), &effective)?;
-    let preloaded_skills = preload_skill_for_run(&skill, &audit)?;
-    let task_prefix = if preloaded_skills.is_empty() {
-        None
-    } else {
-        Some(render_preloaded_skill_instructions(&preloaded_skills))
-    };
-    let artifact_extra = BTreeMap::from([
-        ("skill".to_string(), json!(metadata.clone())),
-        (
-            "skill_effective_execution".to_string(),
-            json!({
-                "mode": skill.manifest.mode.as_str(),
-                "host": effective.host_skill,
-                "profile": path_ref(&effective.profile),
-                "tool_config": effective.tool_config.as_ref().map(|path| path_ref(path)),
-                "capabilities": effective.capabilities,
-                "preloaded_instruction_files": preloaded_instruction_files(&preloaded_skills),
-            }),
-        ),
-    ]);
-    Ok(PreparedSkillRun {
-        metadata,
-        profile: effective.profile,
-        tool_config: effective.tool_config,
-        task_prefix,
-        artifact_extra,
-    })
-}
-
 pub(crate) fn audit_skill(reference: &str, write: bool) -> Result<()> {
     let skill = resolve_skill(reference)?;
     let audit = audit_resolved_skill(&skill)?;
@@ -765,10 +784,7 @@ pub(crate) fn audit_skill(reference: &str, write: bool) -> Result<()> {
     print_json(&json!(audit))
 }
 
-pub(crate) fn import_skill(source: &str, out: &Path) -> Result<()> {
-    if out.exists() {
-        bail!("skill import output already exists: {}", out.display());
-    }
+pub(crate) fn import_skill(source: &str, out: Option<&Path>) -> Result<()> {
     let temp_dir = std::env::temp_dir().join(format!(
         "air-skill-import-{}-{}",
         std::process::id(),
@@ -779,29 +795,57 @@ pub(crate) fn import_skill(source: &str, out: &Path) -> Result<()> {
     ));
     fs::create_dir_all(&temp_dir).with_context(|| format!("create {}", temp_dir.display()))?;
     let imported_root = import_source_to_temp(source, &temp_dir)?;
-    fs::create_dir_all(out.parent().unwrap_or_else(|| Path::new(".")))
-        .with_context(|| format!("create parent for {}", out.display()))?;
-    copy_dir_all(&imported_root, out)?;
-    ensure_import_manifest(source, out)?;
-    let resolved = resolve_skill(out.to_string_lossy().as_ref())?;
-    let audit = audit_resolved_skill(&resolved)?;
-    fs::write(out.join("audit.json"), serde_json::to_vec_pretty(&audit)?)
-        .with_context(|| format!("write {}", out.join("audit.json").display()))?;
-    fs::write(
-        out.join("source.json"),
-        serde_json::to_vec_pretty(&json!({
-            "source": source,
-            "imported_at_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
-            "manifest": path_ref(&resolved.manifest_path),
-            "sha256": directory_identity(out)?,
-        }))?,
-    )
-    .with_context(|| format!("write {}", out.join("source.json").display()))?;
+    let import_units = discover_import_units(&imported_root)?;
+    let imported = if import_units.len() == 1 {
+        let unit = &import_units[0];
+        let destination = out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("skills/vendor").join(&unit.id));
+        if destination.exists() {
+            bail!(
+                "skill import output already exists: {}",
+                destination.display()
+            );
+        }
+        vec![copy_import_unit(
+            source,
+            &imported_root,
+            unit,
+            &destination,
+        )?]
+    } else {
+        let destination_root = out
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| PathBuf::from("skills/vendor"));
+        fs::create_dir_all(&destination_root)
+            .with_context(|| format!("create {}", destination_root.display()))?;
+        let mut results = Vec::new();
+        for unit in &import_units {
+            let destination = destination_root.join(&unit.id);
+            if destination.exists() {
+                results.push(json!({
+                    "skill": unit.id,
+                    "source_path": path_ref(&unit.relative),
+                    "skipped": true,
+                    "reason": "destination exists",
+                    "destination": path_ref(&destination),
+                }));
+                continue;
+            }
+            results.push(copy_import_unit(
+                source,
+                &imported_root,
+                unit,
+                &destination,
+            )?);
+        }
+        results
+    };
     let _ = fs::remove_dir_all(temp_dir);
     print_json(&json!({
-        "imported": path_ref(out),
-        "skill": resolved.manifest.id,
-        "audit_risk": audit.risk,
+        "source": source,
+        "count": imported.len(),
+        "imported": imported,
     }))
 }
 
@@ -814,6 +858,161 @@ pub(crate) fn resolve_skill(reference: &str) -> Result<ResolvedSkill> {
             .with_context(|| format!("unknown AIR skill `{reference}`; run `air skill list`"))?
     };
     read_skill_manifest(&manifest_path)
+}
+
+#[derive(Debug, Clone)]
+struct ImportUnit {
+    id: String,
+    path: PathBuf,
+    relative: PathBuf,
+}
+
+fn discover_import_units(root: &Path) -> Result<Vec<ImportUnit>> {
+    let dirs = discover_import_skill_dirs(root)?;
+    if dirs.is_empty() {
+        bail!(
+            "skill import source does not contain a SKILL.md or importable skill collection: {}",
+            root.display()
+        );
+    }
+    let mut ids = BTreeSet::new();
+    let mut units = Vec::new();
+    for dir in dirs {
+        let relative = dir.strip_prefix(root).unwrap_or(&dir).to_path_buf();
+        let base_id = imported_skill_id(&dir);
+        let mut id = base_id.clone();
+        let mut suffix = 2usize;
+        while ids.contains(&id) {
+            id = format!("{base_id}-{suffix}");
+            suffix += 1;
+        }
+        ids.insert(id.clone());
+        units.push(ImportUnit {
+            id,
+            path: dir,
+            relative,
+        });
+    }
+    units.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(units)
+}
+
+fn discover_import_skill_dirs(root: &Path) -> Result<Vec<PathBuf>> {
+    if root.join(SKILL_MANIFEST).exists() || root.join("SKILL.md").exists() {
+        return Ok(vec![root.to_path_buf()]);
+    }
+    for collection in [
+        "skills",
+        ".claude/skills",
+        ".agents/skills",
+        ".opencode/skills",
+    ] {
+        let path = root.join(collection);
+        let dirs = direct_skill_children(&path)?;
+        if !dirs.is_empty() {
+            return Ok(dirs);
+        }
+    }
+    let dirs = direct_skill_children(root)?;
+    if !dirs.is_empty() {
+        return Ok(dirs);
+    }
+    Ok(Vec::new())
+}
+
+fn direct_skill_children(root: &Path) -> Result<Vec<PathBuf>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut dirs = Vec::new();
+    for entry in fs::read_dir(root).with_context(|| format!("read {}", root.display()))? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        if path.join("SKILL.md").exists() || path.join(SKILL_MANIFEST).exists() {
+            dirs.push(path);
+        }
+    }
+    dirs.sort();
+    Ok(dirs)
+}
+
+fn imported_skill_id(skill_dir: &Path) -> String {
+    let frontmatter = skill_frontmatter_for_dir(skill_dir).unwrap_or_default();
+    let raw = frontmatter.name.or(frontmatter.title).unwrap_or_else(|| {
+        skill_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("imported-skill")
+            .to_string()
+    });
+    slugify_skill_id(&raw)
+}
+
+fn slugify_skill_id(raw: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_dash = false;
+    for character in raw.chars() {
+        if character.is_ascii_alphanumeric() {
+            out.push(character.to_ascii_lowercase());
+            last_was_dash = false;
+        } else if !last_was_dash && !out.is_empty() {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    if out.is_empty() {
+        "imported-skill".to_string()
+    } else {
+        out
+    }
+}
+
+fn copy_import_unit(
+    source: &str,
+    _source_root: &Path,
+    unit: &ImportUnit,
+    destination: &Path,
+) -> Result<Value> {
+    fs::create_dir_all(destination.parent().unwrap_or_else(|| Path::new(".")))
+        .with_context(|| format!("create parent for {}", destination.display()))?;
+    copy_dir_all(&unit.path, destination)?;
+    let source_label = if unit.relative.as_os_str().is_empty() {
+        source.to_string()
+    } else {
+        format!("{source}#{}", path_ref(&unit.relative))
+    };
+    ensure_import_manifest(&source_label, destination)?;
+    let resolved = resolve_skill(destination.to_string_lossy().as_ref())?;
+    let audit = audit_resolved_skill(&resolved)?;
+    fs::write(
+        destination.join("audit.json"),
+        serde_json::to_vec_pretty(&audit)?,
+    )
+    .with_context(|| format!("write {}", destination.join("audit.json").display()))?;
+    fs::write(
+        destination.join("source.json"),
+        serde_json::to_vec_pretty(&json!({
+            "source": source,
+            "source_path": path_ref(&unit.relative),
+            "imported_at_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_millis(),
+            "manifest": path_ref(&resolved.manifest_path),
+            "sha256": directory_identity(destination)?,
+        }))?,
+    )
+    .with_context(|| format!("write {}", destination.join("source.json").display()))?;
+    Ok(json!({
+        "imported": path_ref(destination),
+        "skill": resolved.manifest.id,
+        "source_path": path_ref(&unit.relative),
+        "audit_risk": audit.risk,
+        "allowed_to_run": audit.allowed_to_run,
+    }))
 }
 
 pub(crate) fn resolve_skill_run_metadata(reference: &str) -> Result<CodeRunSkill> {
@@ -1060,6 +1259,15 @@ fn audit_resolved_skill(skill: &ResolvedSkill) -> Result<SkillAudit> {
                 });
             }
         }
+        if relative != SKILL_MANIFEST
+            && (lower.contains("http://") || lower.contains("https://") || lower.contains("www."))
+        {
+            findings.push(SkillAuditFinding {
+                severity: "medium".to_string(),
+                reason: "external URL reference in skill content".to_string(),
+                file: relative.clone(),
+            });
+        }
         if is_executable_script_path(&path) {
             findings.push(SkillAuditFinding {
                 severity: "medium".to_string(),
@@ -1081,13 +1289,45 @@ fn audit_resolved_skill(skill: &ResolvedSkill) -> Result<SkillAudit> {
         }
     }
     let risk = audit_risk(&findings);
+    let trusted_source = trusted_skill_source(skill);
+    let blocked_by_risk = matches!(risk.as_str(), "critical" | "high");
     Ok(SkillAudit {
         schema: "air.skill_audit.v1".to_string(),
         skill_id: skill.manifest.id.clone(),
-        allowed_to_run: !matches!(risk.as_str(), "critical" | "high"),
+        trusted_source,
+        allowed_to_run: trusted_source || !blocked_by_risk,
+        allowed_reason: if trusted_source && blocked_by_risk {
+            Some(
+                "trusted source overrides audit risk gate; findings are still recorded".to_string(),
+            )
+        } else {
+            None
+        },
         risk,
         findings,
     })
+}
+
+fn trusted_skill_source(skill: &ResolvedSkill) -> bool {
+    let Some(source) = &skill.manifest.source else {
+        return false;
+    };
+    if source
+        .get("trusted")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    source
+        .get("original")
+        .and_then(Value::as_str)
+        .is_some_and(is_trusted_import_source)
+}
+
+fn is_trusted_import_source(source: &str) -> bool {
+    let source = source.to_ascii_lowercase();
+    source.contains("github.com/anthropics/skills")
 }
 
 fn audit_patterns() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
@@ -1131,6 +1371,47 @@ fn audit_patterns() -> Vec<(&'static str, &'static str, Vec<&'static str>)> {
             "dynamic command execution pattern",
             vec!["bash -c", "sh -c", "python -c", "node -e", "eval "],
         ),
+        (
+            "high",
+            "network exfiltration or webhook pattern",
+            vec![
+                "webhook",
+                "exfiltrate",
+                "upload to",
+                "send to http",
+                "curl -x post",
+                "curl -d",
+                "fetch(",
+                "requests.post",
+            ],
+        ),
+        (
+            "medium",
+            "installer command pattern",
+            vec![
+                "npm install",
+                "pnpm install",
+                "yarn add",
+                "pip install",
+                "uv pip install",
+                "cargo install",
+                "brew install",
+                "apt-get install",
+            ],
+        ),
+        (
+            "medium",
+            "filesystem mutation command pattern",
+            vec![
+                "rm -rf",
+                "chmod +x",
+                "cat >",
+                "tee ",
+                "overwrite",
+                "append to ~/.",
+                "write to ~/.",
+            ],
+        ),
     ]
 }
 
@@ -1163,6 +1444,8 @@ fn collect_skill_files(root: &Path, dir: &Path, files: &mut Vec<PathBuf>) -> Res
         if relative.starts_with(".git")
             || relative.starts_with("target")
             || relative.starts_with("node_modules")
+            || relative == Path::new("audit.json")
+            || relative == Path::new("source.json")
         {
             continue;
         }
@@ -1302,12 +1585,26 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
     if manifest_path.exists() {
         return Ok(());
     }
+    let frontmatter = skill_frontmatter_for_dir(out).unwrap_or_default();
     let id = out
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("imported-skill")
         .to_string();
-    let description = format!("Imported AIR skill wrapper for {source}");
+    let description = frontmatter
+        .description
+        .clone()
+        .or_else(|| frontmatter.title.clone())
+        .or_else(|| frontmatter.name.clone())
+        .unwrap_or_else(|| format!("Imported AIR skill wrapper for {source}"));
+    let routing = SkillRouting {
+        summary: Some(description.clone()),
+        triggers: derived_skill_triggers(&id, &frontmatter, &description),
+        repo_markers: frontmatter.repo_markers.iter().map(PathBuf::from).collect(),
+        languages: frontmatter.languages.clone(),
+        task_types: frontmatter.task_types.clone(),
+        ..Default::default()
+    };
     let manifest = AirSkillManifest {
         schema: Some(SKILL_SCHEMA.to_string()),
         id,
@@ -1317,6 +1614,8 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
         source: Some(json!({
             "type": "imported",
             "original": source,
+            "trusted": is_trusted_import_source(source),
+            "frontmatter": frontmatter,
         })),
         instructions: SkillInstructions {
             files: find_instruction_files(out)?,
@@ -1327,7 +1626,7 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
             skill: "code-agent".to_string(),
         }),
         workflow: None,
-        routing: SkillRouting::default(),
+        routing,
         verification: json!({
             "mode": "instruction_only",
             "scripts": "disabled",
@@ -1335,6 +1634,51 @@ fn ensure_import_manifest(source: &str, out: &Path) -> Result<()> {
     };
     fs::write(&manifest_path, serde_yaml::to_string(&manifest)?)
         .with_context(|| format!("write {}", manifest_path.display()))
+}
+
+fn derived_skill_triggers(
+    id: &str,
+    frontmatter: &SkillFrontmatter,
+    description: &str,
+) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut triggers = Vec::new();
+    for trigger in &frontmatter.triggers {
+        let trigger = trigger.trim().to_ascii_lowercase();
+        if !trigger.is_empty() && seen.insert(trigger.clone()) {
+            triggers.push(trigger);
+        }
+    }
+    for value in frontmatter.name.iter().chain(frontmatter.title.iter()) {
+        for token in value
+            .split(|character: char| !character.is_ascii_alphanumeric())
+            .map(str::trim)
+            .filter(|token| token.len() >= 3)
+        {
+            let token = token.to_ascii_lowercase();
+            if seen.insert(token.clone()) {
+                triggers.push(token);
+            }
+        }
+    }
+    for token in route_tokens(id)
+        .into_iter()
+        .chain(route_tokens(description))
+        .filter(|token| !route_stop_words().contains(token.as_str()))
+        .take(12)
+    {
+        if seen.insert(token.clone()) {
+            triggers.push(token);
+        }
+    }
+    triggers
+}
+
+fn route_stop_words() -> BTreeSet<&'static str> {
+    BTreeSet::from([
+        "this", "that", "with", "when", "from", "using", "code", "skill", "workflow", "writing",
+        "existing",
+    ])
 }
 
 fn find_instruction_files(root: &Path) -> Result<Vec<PathBuf>> {
@@ -1483,8 +1827,31 @@ fn preload_skill_for_run(skill: &ResolvedSkill, audit: &SkillAudit) -> Result<Ve
         "mode": skill.manifest.mode.as_str(),
         "audit_risk": audit.risk,
         "manifest": path_ref(&skill.manifest_path),
+        "root": path_ref(&skill.manifest_dir),
+        "scripts": skill_script_assets(skill)?,
         "instructions": load_instruction_files(skill, 65_536)?,
     })])
+}
+
+fn skill_script_assets(skill: &ResolvedSkill) -> Result<Vec<Value>> {
+    let mut scripts = Vec::new();
+    for path in skill_files(&skill.manifest_dir)? {
+        if !is_executable_script_path(&path) {
+            continue;
+        }
+        let relative = path.strip_prefix(&skill.manifest_dir).unwrap_or(&path);
+        scripts.push(json!({
+            "path": path_ref(relative),
+            "absolute_path": path_ref(&path),
+        }));
+    }
+    scripts.sort_by(|left, right| {
+        left["path"]
+            .as_str()
+            .unwrap_or_default()
+            .cmp(right["path"].as_str().unwrap_or_default())
+    });
+    Ok(scripts)
 }
 
 fn load_instruction_files(skill: &ResolvedSkill, max_bytes: usize) -> Result<Vec<Value>> {
@@ -1520,6 +1887,31 @@ fn render_preloaded_skill_instructions(preloaded_skills: &[Value]) -> String {
             .and_then(Value::as_str)
             .unwrap_or("instruction");
         output.push_str(&format!("\n<skill id=\"{id}\" mode=\"{mode}\">"));
+        if let Some(root) = skill.get("root").and_then(Value::as_str) {
+            output.push_str(&format!("\n<skill_root>{root}</skill_root>"));
+            output.push_str(
+                "\n<asset_note>Paths mentioned by this skill are relative to skill_root. Use absolute_path when invoking bundled scripts from another workspace.</asset_note>",
+            );
+        }
+        if let Some(scripts) = skill.get("scripts").and_then(Value::as_array) {
+            if !scripts.is_empty() {
+                output.push_str("\n<scripts>");
+                for script in scripts {
+                    let path = script
+                        .get("path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let absolute_path = script
+                        .get("absolute_path")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    output.push_str(&format!(
+                        "\n<script path=\"{path}\" absolute_path=\"{absolute_path}\" />"
+                    ));
+                }
+                output.push_str("\n</scripts>");
+            }
+        }
         if let Some(instructions) = skill.get("instructions").and_then(Value::as_array) {
             for instruction in instructions {
                 let path = instruction
@@ -1615,12 +2007,13 @@ impl ResolvedSkill {
             id: self.manifest.id.clone(),
             mode: self.manifest.mode.as_str().to_string(),
             version: self.manifest.version.clone(),
-            description: self.manifest.description.clone(),
+            description: self.manifest.description.clone().or_else(|| {
+                skill_frontmatter_for_dir(&self.manifest_dir).and_then(|front| front.description)
+            }),
             manifest: path_ref(&self.manifest_path),
             profile: path_ref(&effective.profile),
             tool_config: effective.tool_config.map(|path| path_ref(&path)),
             host: self.host_skill_id().map(str::to_string),
-            run: format!("air skill run {} \"<task>\"", self.manifest.id),
             explain: format!("air skill explain {}", self.manifest.id),
         })
     }
@@ -1708,6 +2101,222 @@ instructions:
     }
 
     #[test]
+    fn trusted_anthropic_skill_source_can_run_with_recorded_high_findings() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-trusted-source-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("SKILL.md"),
+            "Use process.env only as documentation.",
+        )
+        .unwrap();
+        fs::write(
+            temp.join(SKILL_MANIFEST),
+            r#"
+schema: air.skill.v1
+id: trusted-doc-skill
+mode: instruction
+host:
+  skill: code-agent
+source:
+  type: imported
+  original: https://github.com/anthropics/skills#skills/docx
+instructions:
+  files: [SKILL.md]
+"#,
+        )
+        .unwrap();
+        let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
+        let audit = audit_resolved_skill(&skill).unwrap();
+        assert_eq!(audit.risk, "high");
+        assert!(audit.trusted_source);
+        assert!(audit.allowed_to_run);
+        assert!(audit.allowed_reason.is_some());
+        assert!(audit
+            .findings
+            .iter()
+            .any(|finding| finding.severity == "high"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn audits_external_urls_installers_and_mutating_scripts() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-audit-pattern-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("SKILL.md"),
+            "Fetch https://example.com/docs, run npm install, then chmod +x helper.sh.",
+        )
+        .unwrap();
+        fs::write(
+            temp.join(SKILL_MANIFEST),
+            r#"
+schema: air.skill.v1
+id: risky-docs
+mode: instruction
+host:
+  skill: code-agent
+instructions:
+  files: [SKILL.md]
+"#,
+        )
+        .unwrap();
+        let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
+        let audit = audit_resolved_skill(&skill).unwrap();
+        assert_eq!(audit.risk, "medium");
+        assert!(audit
+            .findings
+            .iter()
+            .any(|finding| finding.reason.contains("external URL")));
+        assert!(audit
+            .findings
+            .iter()
+            .any(|finding| finding.reason.contains("installer command")));
+        assert!(audit
+            .findings
+            .iter()
+            .any(|finding| finding.reason.contains("filesystem mutation")));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn parses_skill_frontmatter_metadata() {
+        let frontmatter = parse_skill_frontmatter(
+            r#"---
+name: tdd-workflow
+description: Use test-driven development for bug fixes.
+triggers:
+  - tdd
+  - failing test
+repo_markers:
+  - package.json
+languages: rust, typescript
+allowed-tools: Read, Bash
+---
+
+# TDD
+"#,
+        )
+        .unwrap();
+        assert_eq!(frontmatter.name.as_deref(), Some("tdd-workflow"));
+        assert_eq!(
+            frontmatter.description.as_deref(),
+            Some("Use test-driven development for bug fixes.")
+        );
+        assert_eq!(frontmatter.triggers, vec!["tdd", "failing test"]);
+        assert_eq!(frontmatter.repo_markers, vec!["package.json"]);
+        assert_eq!(frontmatter.languages, vec!["rust", "typescript"]);
+        assert_eq!(frontmatter.allowed_tools, vec!["Read", "Bash"]);
+    }
+
+    #[test]
+    fn imported_skill_manifest_uses_frontmatter_for_routing() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-frontmatter-import-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&temp).unwrap();
+        fs::write(
+            temp.join("SKILL.md"),
+            r#"---
+name: custom-tdd
+description: Use TDD for parser bugs.
+triggers:
+  - parser bug
+---
+
+# Custom TDD
+"#,
+        )
+        .unwrap();
+        ensure_import_manifest("local", &temp).unwrap();
+        let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
+        assert_eq!(skill.manifest.mode, SkillMode::Instruction);
+        assert_eq!(
+            skill.manifest.description.as_deref(),
+            Some("Use TDD for parser bugs.")
+        );
+        assert!(skill
+            .manifest
+            .routing
+            .triggers
+            .iter()
+            .any(|trigger| trigger == "parser bug"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn discovers_collection_skills_from_anthropic_style_repo() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-collection-import-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let skills_dir = temp.join("skills");
+        fs::create_dir_all(skills_dir.join("First Skill")).unwrap();
+        fs::create_dir_all(skills_dir.join("second-skill")).unwrap();
+        fs::create_dir_all(temp.join("template")).unwrap();
+        fs::write(
+            skills_dir.join("First Skill").join("SKILL.md"),
+            r#"---
+name: first-skill
+description: First imported skill.
+---
+
+# First
+"#,
+        )
+        .unwrap();
+        fs::write(
+            skills_dir.join("second-skill").join("SKILL.md"),
+            r#"---
+description: Second imported skill.
+---
+
+# Second
+"#,
+        )
+        .unwrap();
+        fs::write(temp.join("template").join("SKILL.md"), "# Template").unwrap();
+
+        let units = discover_import_units(&temp).unwrap();
+        assert_eq!(
+            units
+                .iter()
+                .map(|unit| unit.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first-skill", "second-skill"]
+        );
+        assert!(units.iter().all(|unit| unit.relative.starts_with("skills")));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn skill_id_merge_deduplicates_auto_and_forced_skills() {
+        let merged = merge_skill_ids(
+            &["tdd-workflow".to_string()],
+            &["tdd-workflow,extra-skill".to_string()],
+        );
+        assert_eq!(merged, vec!["tdd-workflow", "extra-skill"]);
+    }
+
+    #[test]
     fn instruction_skill_preload_includes_instruction_content() {
         let temp = std::env::temp_dir().join(format!(
             "air-skill-preload-test-{}",
@@ -1743,6 +2352,42 @@ instructions:
         assert!(task.contains("<skill_instructions>"));
         assert!(task.contains("tests before implementation"));
         assert!(task.ends_with("Task: fix bug"));
+        let _ = fs::remove_dir_all(temp);
+    }
+
+    #[test]
+    fn preloaded_skill_instructions_include_script_asset_paths() {
+        let temp = std::env::temp_dir().join(format!(
+            "air-skill-script-assets-test-{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(temp.join("scripts")).unwrap();
+        fs::write(temp.join("SKILL.md"), "Run scripts/helper.py --help first.").unwrap();
+        fs::write(temp.join("scripts/helper.py"), "print('help')").unwrap();
+        fs::write(
+            temp.join(SKILL_MANIFEST),
+            r#"
+schema: air.skill.v1
+id: script-helper
+mode: instruction
+host:
+  skill: code-agent
+instructions:
+  files: [SKILL.md]
+"#,
+        )
+        .unwrap();
+        let skill = read_skill_manifest(&temp.join(SKILL_MANIFEST)).unwrap();
+        let audit = audit_resolved_skill(&skill).unwrap();
+        let preloaded = preload_skill_for_run(&skill, &audit).unwrap();
+        let rendered = render_preloaded_skill_instructions(&preloaded);
+        assert!(rendered.contains("<skill_root>"));
+        assert!(rendered.contains("<scripts>"));
+        assert!(rendered.contains("scripts/helper.py"));
+        assert!(rendered.contains("absolute_path="));
         let _ = fs::remove_dir_all(temp);
     }
 
@@ -1836,6 +2481,19 @@ workflow:
             .iter()
             .any(|card| card.id == "tdd-workflow"));
         assert!(route.selected.iter().any(|card| card.id == "tdd-workflow"));
+    }
+
+    #[test]
+    fn generic_refactor_does_not_default_to_tdd_workflow() {
+        let route = route_skills_for_task(
+            "refactor the duplicated retry helper and run the existing tests",
+            3,
+        )
+        .unwrap();
+        assert!(!route
+            .instructions
+            .iter()
+            .any(|card| card.id == "tdd-workflow"));
     }
 
     #[test]

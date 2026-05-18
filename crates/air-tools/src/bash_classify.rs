@@ -107,6 +107,20 @@ pub(super) fn normalize_bash_verification_result(object: &mut Map<String, Value>
             });
         }
     }
+    if echoed_missing_file_assertion(&log) {
+        object.insert("success".to_string(), Value::Bool(false));
+        object.insert(
+            "verification_failure_reason".to_string(),
+            Value::String("verification command reported missing file".to_string()),
+        );
+        update_artifact_metadata(object, |metadata| {
+            metadata.insert("success".to_string(), Value::Bool(false));
+            metadata.insert(
+                "verification_failure_reason".to_string(),
+                Value::String("verification command reported missing file".to_string()),
+            );
+        });
+    }
 }
 
 fn update_artifact_metadata(
@@ -153,6 +167,12 @@ fn echoed_exit_status(log: &str) -> Option<i64> {
         let value = leading_i64_text(value)?;
         value.parse::<i64>().ok()
     })
+}
+
+fn echoed_missing_file_assertion(log: &str) -> bool {
+    log.lines()
+        .map(str::trim)
+        .any(|line| matches!(line, "NOT FOUND" | "MISSING"))
 }
 
 fn leading_i64_text(value: &str) -> Option<&str> {
@@ -209,6 +229,9 @@ pub(super) fn is_verification_bash_command(command: &str, description: Option<&s
 }
 
 fn is_command_verification(command: &str) -> bool {
+    if is_filesystem_assertion_command(command) {
+        return true;
+    }
     if command.contains("cargo fmt") {
         return command.contains("--check");
     }
@@ -248,6 +271,25 @@ fn is_command_verification(command: &str) -> bool {
     ]
     .iter()
     .any(|needle| command.contains(needle))
+}
+
+fn is_filesystem_assertion_command(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    let normalized = trimmed
+        .trim_start_matches("bash -lc ")
+        .trim_start_matches("bash -c ")
+        .trim_start_matches('"')
+        .trim_start_matches('\'')
+        .trim_start();
+    normalized.starts_with("test -f ")
+        || normalized.starts_with("test -d ")
+        || normalized.starts_with("test -s ")
+        || normalized.starts_with("[ -f ")
+        || normalized.starts_with("[ -d ")
+        || normalized.starts_with("[ -s ")
+        || normalized.starts_with("[[ -f ")
+        || normalized.starts_with("[[ -d ")
+        || normalized.starts_with("[[ -s ")
 }
 
 fn is_ambiguous_verification_command(command: &str) -> bool {
@@ -319,6 +361,51 @@ mod tests {
             "prettier --write src/app.ts",
             Some("verify formatting")
         ));
+    }
+
+    #[test]
+    fn file_assertion_commands_are_verification() {
+        assert!(is_verification_bash_command(
+            "test -f WEBAPP_TESTING_HELP.md",
+            Some("Verify file exists")
+        ));
+        assert!(is_verification_bash_command(
+            "test -f WEBAPP_TESTING_HELP.md && echo EXISTS || echo NOT FOUND",
+            Some("Verify file exists")
+        ));
+        assert!(is_verification_bash_command(
+            "[ -s output.md ]",
+            Some("Verify file is non-empty")
+        ));
+    }
+
+    #[test]
+    fn echoed_missing_file_assertion_marks_verification_failed() {
+        let mut output = json!({
+            "success": true,
+            "status": 0,
+            "log": "NOT FOUND\n",
+            "artifacts": [{
+                "metadata": {
+                    "success": true
+                }
+            }]
+        })
+        .as_object()
+        .cloned()
+        .unwrap_or_else(Map::new);
+
+        normalize_bash_verification_result(&mut output);
+
+        assert_eq!(output.get("success"), Some(&Value::Bool(false)));
+        assert_eq!(
+            output
+                .get("artifacts")
+                .and_then(Value::as_array)
+                .and_then(|artifacts| artifacts.first())
+                .and_then(|artifact| artifact.pointer("/metadata/success")),
+            Some(&Value::Bool(false))
+        );
     }
 
     #[test]

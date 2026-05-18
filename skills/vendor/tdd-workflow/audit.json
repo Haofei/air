@@ -1,7 +1,13 @@
 {
   "schema": "air.skill_audit.v1",
   "skill_id": "tdd-workflow",
-  "risk": "low",
+  "risk": "medium",
   "allowed_to_run": true,
-  "findings": []
+  "findings": [
+    {
+      "severity": "medium",
+      "reason": "external URL reference in skill content",
+      "file": "SKILL.md"
+    }
+  ]
 }

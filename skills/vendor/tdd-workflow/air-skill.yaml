@@ -2,8 +2,11 @@ schema: air.skill.v1
 id: tdd-workflow
 mode: instruction
 version: 0.1.0
-description: Imported AIR skill wrapper for https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow
+description: Use this skill when writing new features, fixing bugs, or refactoring code. Enforces test-driven development with 80%+ coverage including unit, integration, and E2E tests.
 source:
+  frontmatter:
+    name: tdd-workflow
+    description: Use this skill when writing new features, fixing bugs, or refactoring code. Enforces test-driven development with 80%+ coverage including unit, integration, and E2E tests.
   original: https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow
   type: imported
 instructions:
@@ -13,14 +16,20 @@ capabilities: {}
 host:
   skill: code-agent
 routing:
-  summary: Use test-driven development for code changes, bug fixes, features, and refactors.
+  summary: Use explicit test-driven development when the task asks for TDD, red/green flow, or writing tests before implementation.
   triggers:
   - tdd
   - test-driven
-  - write tests
-  - failing test
-  - bug fix
-  - refactor
+  - test driven
+  - test first
+  - tests first
+  - write test first
+  - write tests first
+  - red green
+  - red-green
+  - red/green
+  - add failing test
+  - failing test first
 verification:
   mode: instruction_only
   scripts: disabled

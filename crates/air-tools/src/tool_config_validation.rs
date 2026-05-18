@@ -119,6 +119,72 @@ pub(super) fn validate_tool_config(config: &ToolConfigFile, path: &Path) -> Resu
                 )?;
                 validate_max_bytes(path, name, *max_bytes)?;
             }
+            ToolConfig::Mcp {
+                server_url,
+                tool,
+                headers,
+                bearer_token_env,
+                timeout_seconds,
+                protocol_version,
+                client_name,
+                client_version,
+                max_bytes,
+                ..
+            } => {
+                if server_url.trim().is_empty()
+                    || !(server_url.starts_with("http://") || server_url.starts_with("https://"))
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.server_url must be an http(s) URL",
+                        path.display()
+                    );
+                }
+                if tool.as_deref().is_some_and(|value| value.trim().is_empty()) {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.tool must not be empty",
+                        path.display()
+                    );
+                }
+                if protocol_version
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.protocol_version must not be empty",
+                        path.display()
+                    );
+                }
+                if client_name
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.client_name must not be empty",
+                        path.display()
+                    );
+                }
+                if client_version
+                    .as_deref()
+                    .is_some_and(|value| value.trim().is_empty())
+                {
+                    anyhow::bail!(
+                        "tool config {} tools.{name}.client_version must not be empty",
+                        path.display()
+                    );
+                }
+                validate_headers_and_bearer_token_env(
+                    path,
+                    name,
+                    headers,
+                    bearer_token_env.as_deref(),
+                )?;
+                validate_positive_u64(
+                    path,
+                    &format!("tools.{name}.timeout_seconds"),
+                    *timeout_seconds,
+                )?;
+                validate_max_bytes(path, name, *max_bytes)?;
+            }
             ToolConfig::PlaywrightSearch {
                 script_path,
                 query_variants,

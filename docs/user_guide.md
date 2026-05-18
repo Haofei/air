@@ -13,9 +13,9 @@ Host applications provide model, tool, and approval implementations through type
 ## 1. Run The Simple Example
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
+cargo run -p air-cli -- dev validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+cargo run -p air-cli -- dev run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 
 `air` auto-loads a repository-root `.env`. Put real provider settings there:
@@ -53,7 +53,7 @@ cargo run -p air-cli -- skill explain code-agent
 To run it:
 
 ```bash
-cargo run -p air-cli -- skill run code-agent "refactor a helper and run tests"
+cargo run -p air-cli -- run "refactor a helper and run tests"
 ```
 
 Imported skills are copied and audited before use. AIR does not execute install
@@ -300,7 +300,7 @@ AIR_MODEL_LOCAL_MODEL=example-model
 ```
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
+cargo run -p air-cli -- dev run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
 ```
 
 Every AIR profile can point at the same shared model config, so examples and local apps do not need to repeat provider settings.
@@ -578,20 +578,20 @@ Default behavior is fail-closed. If approval is missing or denied, execution sto
 Use logs for humans:
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --log
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml --log
 ```
 
 Use JSONL traces for replay/audit. Trace files are redacted by default: common sensitive keys such as API keys, authorization headers, passwords, secrets, and tokens are masked, and large string/event payloads are capped.
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml \
   --trace-out target/generated/run.trace.jsonl
 ```
 
 Use raw traces only for trusted local debugging. Raw traces preserve complete model/tool inputs and outputs, which can include prompts, documents, credentials, or user data.
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml \
   --trace-out target/generated/run.raw.trace.jsonl \
   --trace-raw
 ```
@@ -599,10 +599,10 @@ cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-pr
 Use checkpoint/resume for long plans:
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml \
   --checkpoint-out target/generated/run.state.json
 
-cargo run -p air-cli -- resume-plan --profile examples/deep-research/profile.air-profile.yaml \
+cargo run -p air-cli -- dev resume-plan --profile examples/deep-research/profile.air-profile.yaml \
   --state target/generated/run.state.json \
   --override clarify.clarification.normalized_question='"Updated question"'
 ```
@@ -610,7 +610,7 @@ cargo run -p air-cli -- resume-plan --profile examples/deep-research/profile.air
 Use JIT hot-path cache for stable dynamic topologies:
 
 ```bash
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml \
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml \
   --jit-cache target/generated/jit_cache
 ```
 

@@ -56,6 +56,8 @@ mod http_tools;
 use http_tools::{
     call_http_json_tool, call_web_fetch_tool, HttpJsonToolConfig, WebFetchToolConfig,
 };
+mod mcp_tools;
+use mcp_tools::{call_mcp_tool, McpToolConfig};
 mod observations;
 use observations::{
     annotate_search_progress, observed_tool_key, repeated_search_output,
@@ -124,6 +126,36 @@ enum ToolConfig {
 
         #[serde(default)]
         timeout_seconds: Option<u64>,
+
+        #[serde(default)]
+        max_bytes: Option<usize>,
+    },
+    Mcp {
+        #[serde(default)]
+        capability: Option<String>,
+
+        server_url: String,
+
+        #[serde(default)]
+        tool: Option<String>,
+
+        #[serde(default)]
+        headers: BTreeMap<String, String>,
+
+        #[serde(default)]
+        bearer_token_env: Option<String>,
+
+        #[serde(default)]
+        timeout_seconds: Option<u64>,
+
+        #[serde(default)]
+        protocol_version: Option<String>,
+
+        #[serde(default)]
+        client_name: Option<String>,
+
+        #[serde(default)]
+        client_version: Option<String>,
 
         #[serde(default)]
         max_bytes: Option<usize>,
@@ -450,6 +482,9 @@ enum ToolConfig {
 
         #[serde(default)]
         max_bytes: Option<usize>,
+
+        #[serde(default = "default_true")]
+        enabled: bool,
     },
     Subagent {
         #[serde(default)]
@@ -507,6 +542,7 @@ impl ToolConfig {
             | ToolConfig::LocalReflection { capability }
             | ToolConfig::HttpJson { capability, .. }
             | ToolConfig::WebFetch { capability, .. }
+            | ToolConfig::Mcp { capability, .. }
             | ToolConfig::PlaywrightSearch { capability, .. }
             | ToolConfig::PlaywrightPageAudit { capability, .. }
             | ToolConfig::FileRead { capability, .. }
@@ -536,6 +572,10 @@ impl ToolConfig {
 
 fn default_http_method() -> String {
     "POST".to_string()
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug)]
@@ -700,6 +740,33 @@ impl ToolProvider for ConfigTools {
                     bearer_token_env: bearer_token_env.as_deref(),
                     timeout_seconds,
                     action_timeout: Some(timeout),
+                    max_bytes: max_bytes.unwrap_or(256 * 1024),
+                },
+            ),
+            ToolConfig::Mcp {
+                capability: _,
+                server_url,
+                tool,
+                headers,
+                bearer_token_env,
+                timeout_seconds,
+                protocol_version,
+                client_name,
+                client_version,
+                max_bytes,
+            } => call_mcp_tool(
+                name,
+                input,
+                McpToolConfig {
+                    server_url: &server_url,
+                    tool: tool.as_deref(),
+                    headers: &headers,
+                    bearer_token_env: bearer_token_env.as_deref(),
+                    timeout_seconds,
+                    action_timeout: Some(timeout),
+                    protocol_version: protocol_version.as_deref(),
+                    client_name: client_name.as_deref(),
+                    client_version: client_version.as_deref(),
                     max_bytes: max_bytes.unwrap_or(256 * 1024),
                 },
             ),
@@ -1069,11 +1136,13 @@ impl ToolProvider for ConfigTools {
                 capability: _,
                 root_dir,
                 max_bytes,
+                enabled,
             } => call_skill_tool(
                 name,
                 input,
                 &resolve_config_path(&self.workspace_dir, &root_dir),
                 max_bytes.unwrap_or(64 * 1024),
+                enabled,
             ),
             ToolConfig::Subagent {
                 capability: _,
@@ -1154,6 +1223,7 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::LocalReflection { capability }
             | ToolConfig::HttpJson { capability, .. }
             | ToolConfig::WebFetch { capability, .. }
+            | ToolConfig::Mcp { capability, .. }
             | ToolConfig::PlaywrightSearch { capability, .. }
             | ToolConfig::PlaywrightPageAudit { capability, .. }
             | ToolConfig::FileRead { capability, .. }

@@ -14,7 +14,7 @@ fn emit_diagnostic(diagnostic: &Diagnostic) {
         diagnostic.message
     );
     eprintln!(
-        "  help: Run `air validate` or `air validate-plan` after editing the AIR file to re-check the IR contract."
+        "  help: Run `air dev validate-module` or `air dev validate-plan` after editing the AIR file to re-check the IR contract."
     );
 }
 

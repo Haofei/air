@@ -1,0 +1,8 @@
+{
+  "schema": "air.skill_audit.v1",
+  "skill_id": "caveman",
+  "risk": "low",
+  "trusted_source": false,
+  "allowed_to_run": true,
+  "findings": []
+}

@@ -39,8 +39,14 @@ AIR is a local compiler/runtime prototype. The native Rust VM is the reference r
 
 ```bash
 cargo build
-cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+
+# Inspect which local skills match a task without spending model calls.
+cargo run -p air-cli -- skill route "use TDD to refactor the parser"
+
+# Run a task through AIR's entry agent.
+# AIR routes skills and picks the right executor. Small coding tasks use code-agent;
+# larger project tasks can be routed to the project orchestrator.
+cargo run -p air-cli -- run "use TDD to fix the failing add function" --log
 ```
 
 `air` auto-loads a repository-root `.env`:
@@ -68,7 +74,7 @@ The router matches a natural-language task to the best instruction skills using 
 cargo run -p air-cli -- skill route "use TDD to refactor the parser"
 
 # Explain the routing decision
-cargo run -p air-cli -- skill explain-route "fix a security vulnerability"
+cargo run -p air-cli -- skill route "fix a security vulnerability" --explain
 ```
 
 ### Skill composition
@@ -76,11 +82,13 @@ cargo run -p air-cli -- skill explain-route "fix a security vulnerability"
 Multiple compatible instruction skills stack onto one executor:
 
 ```bash
-# Auto-route and run
-cargo run -p air-cli -- skill run --auto "use TDD to fix the failing add function"
+# User entry point: auto-route skills and run through the host executor
+cargo run -p air-cli -- run "use TDD to fix the failing add function"
 
-# Explicit skill
-cargo run -p air-cli -- skill run code-agent "refactor a helper and run tests"
+# Force additional instruction skills
+cargo run -p air-cli -- run "refactor a helper and run tests" \
+  --skills tdd-workflow
+
 ```
 
 Skills declare `incompatible_with` to prevent contradictory instructions from loading together.
@@ -92,11 +100,31 @@ cargo run -p air-cli -- skill list
 cargo run -p air-cli -- skill validate code-agent
 cargo run -p air-cli -- skill explain code-agent
 cargo run -p air-cli -- skill audit code-agent
-cargo run -p air-cli -- skill import ./some-skill --out skills/vendor/some-skill
-cargo run -p air-cli -- skill compile code-agent
+cargo run -p air-cli -- skill import ./some-skill
 ```
 
 Audit risk gates (`high`/`critical`) refuse to load or run untrusted skills.
+
+External skills are imported as local AIR packages before use. Import does not execute install scripts:
+
+```bash
+cargo run -p air-cli -- skill import \
+  https://github.com/affaan-m/everything-claude-code/tree/main/skills/tdd-workflow
+
+# Collection repositories are split into one AIR instruction skill per SKILL.md.
+cargo run -p air-cli -- skill import https://github.com/anthropics/skills
+```
+
+AIR treats the official `github.com/anthropics/skills` repository as a trusted
+instruction-skill source: audit findings are still recorded, but high-risk text
+patterns in bundled examples/scripts do not block loading the skill. Imported
+scripts are not executed automatically; they remain skill assets unless wrapped
+by an AIR tool.
+
+```bash
+cargo run -p air-cli -- skill audit tdd-workflow
+cargo run -p air-cli -- skill route "use TDD to refactor a Rust helper"
+```
 
 ## Code Agent
 
@@ -114,17 +142,36 @@ Key safety properties:
 | Verification is separate from editing | `verify` phase only gets `bash`; `allowed_tools` enforced at runtime |
 | Verification that edits files does not count | Workspace snapshots before/after bash detect mutations |
 | Model self-report is not trusted | `CodeRunVerdict` scans trace events for actual verification tool calls |
-| Context window is bounded | 600KB observation window, 16KB unscoped read preview, compaction |
-| Repeated reads/searches are blocked | Runtime `repeated_tool_policy` requires `repeat_reason` for context tools |
+| Context window is bounded | Observations are compacted before model calls; file reads require bounded selectors |
+| Repeated context searches can be gated | Runtime `repeated_tool_policy` can require `repeat_reason` for grep/LSP/symbol lookups |
+
+### Artifacts and replay
+
+Code-agent runs can write an auditable artifact directory and replay it later without spending model calls:
+
+```bash
+cargo run -p air-cli -- run "refactor a helper and run tests" \
+  --trace-out target/generated/code-runs/helper.trace.jsonl \
+  --artifact-out target/generated/code-runs/helper \
+  --log
+
+cargo run -p air-cli -- run "refactor a helper and run tests" \
+  --replay-artifact target/generated/code-runs/helper
+```
+
+Use `--replay-from <trace-line>` to replay the earlier trace up to a chosen event and switch back to live execution from that point.
 
 ## Project Workflows
 
 For tasks larger than one edit loop, AIR has a project orchestrator with task DAGs, per-task worktree isolation, skill assignment, and diff constraints:
 
 ```bash
+# The simple entry point can route project-sized work automatically.
+cargo run -p air-cli -- run "refactor the tools crate into smaller modules" --mode project --log
+
+# Advanced: review and run an explicit project manifest.
 cargo run -p air-cli -- project plan "refactor the tools crate into smaller modules" \
   --output air-project.yaml
-
 cargo run -p air-cli -- project run --log
 cargo run -p air-cli -- project status
 cargo run -p air-cli -- project verify
@@ -194,7 +241,9 @@ This replaces trusting the model's self-reported `final_success`. If the trace s
 
 The `task` tool launches isolated exploration sub-agents. Each sub-agent writes its own trace, output, and artifacts under `.air/subagents/task-{timestamp}/`. The parent trace records child paths and metrics (model calls, tool calls, errors) without embedding the full child output, keeping the parent context compact.
 
-## What An Agent Looks Like
+## Low-Level AIR Module (Advanced)
+
+Most users should start from skills. AIR modules are the lower-level typed IR that executor skills and advanced workflows compile to or run directly:
 
 ```yaml
 agent:
@@ -269,8 +318,8 @@ outputs:
 ```
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+cargo run -p air-cli -- dev validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
+cargo run -p air-cli -- dev run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
 ```
 
 ## Deep Research
@@ -278,23 +327,22 @@ cargo run -p air-cli -- run-plan --profile examples/simple-helpdesk/profile.air-
 Deep research demonstrates multi-agent workflows with clarification, dynamic fan-out/fan-in, nested fan-out, parallel execution, checkpoint/resume, and JIT hot-path specialization:
 
 ```bash
-cargo run -p air-cli -- validate-plan --profile examples/deep-research/profile.air-profile.yaml
-cargo run -p air-cli -- run-plan --profile examples/deep-research/profile.air-profile.yaml --parallel
+cargo run -p air-cli -- dev validate-plan --profile examples/deep-research/profile.air-profile.yaml
+cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml --parallel
 ```
 
 ## CLI Surface
 
 | Command | Description |
 | --- | --- |
-| `code` | Run the code agent edit loop on a task |
-| `skill run` | Run a skill explicitly or with `--auto` routing |
+| `run` | User entry point; routes skills and picks code-agent or project-agent |
 | `skill route` | Route a task to matching skills |
-| `skill list/validate/explain/audit` | Skill lifecycle management |
-| `project plan/run/status/verify` | Multi-task project orchestrator |
+| `skill list/validate/explain/audit/import` | Skill lifecycle management |
 | `bench code` | Benchmark code agent on a suite |
 | `bench skill` | Benchmark with skill preload, optional no-skill comparison |
-| `run-plan` | Execute a RunPlan or packaged profile |
-| `resume-plan` | Resume a halted/checkpointed plan |
+| `dev` | Advanced IR/runtime tools for AIR development |
+
+Lower-level IR commands live under `air dev` (`dev validate-plan`, `dev make-plan`, `dev run-plan`, `dev resume-plan`, `dev replay`, and `dev run-module`). The public workflow should start from `air run`.
 
 ## Verification
 
@@ -313,7 +361,7 @@ cargo test --workspace
 ## Roadmap
 
 - [ ] **Whole-program compilation (merge + flatten).** Flatten a multi-module plan into a single state machine with unified state schema, resolved field names, and merged policies. Analogous to LLVM LTO: separate compilation for development, whole-program compilation for output.
-- [ ] **Module registry.** A publish/install system for sharing agent modules across projects. Teams publish versioned modules and consume them via dependency declarations.
+- [ ] **Skill registry and governance.** A publish/install system for sharing audited AIR skill packages with capability, route, benchmark, and provenance metadata.
 - [ ] **Schema conformance testing.** A lightweight test harness that calls real LLMs but only validates output structure against the declared AIR schema — no assertion on specific content.
 - [ ] **Multi-executor skill routing.** Support multiple executor skills (not just `code-agent`) so the router can choose between entirely different agent architectures.
 - [ ] **Skill marketplace metrics.** Aggregate benchmark results across skills to surface which instruction sets actually improve task success rates.

@@ -383,14 +383,14 @@ workflow:
                     literal: bash
                   input:
                     literal:
-                      command: git diff -- && git ls-files --others --exclude-standard | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
+                      command: git diff -- . && git ls-files --others --exclude-standard -- . | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
                       description: Show workspace diff including untracked files
               - object:
                   tool:
                     literal: bash
                   input:
                     literal:
-                      command: '{ git diff --name-only --; git ls-files --others --exclude-standard; } | sort -u'
+                      command: '{ git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u'
                       description: List changed files including untracked files
           output: final_diff_result
           max_calls: 2
