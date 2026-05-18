@@ -1,4 +1,5 @@
 /target/
+.air/
 .air/tool-output/
 .air/subagents/
 .air/project/

@@ -93,6 +93,7 @@ struct DiffConstraints {
 #[derive(Debug, Serialize)]
 struct BenchRun {
     suite: String,
+    suite_path: String,
     description: Option<String>,
     run_dir: String,
     profile: String,
@@ -286,6 +287,7 @@ pub(crate) fn bench_code_agent(options: BenchCodeAgentOptions) -> Result<()> {
     let summary = bench_summary(&task_runs);
     let run = BenchRun {
         suite: suite.name,
+        suite_path: suite_path.display().to_string(),
         description: suite.description,
         run_dir: run_dir.display().to_string(),
         profile: profile.display().to_string(),
@@ -365,6 +367,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
         groups.push(run_bench_group(BenchGroupOptions {
             label: "no-skill",
             suite: &suite,
+            suite_path: &suite_path,
             selected: &selected,
             suite_dir: &suite_dir,
             run_dir: &group_dir,
@@ -391,6 +394,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
     groups.push(run_bench_group(BenchGroupOptions {
         label: "skill",
         suite: &suite,
+        suite_path: &suite_path,
         selected: &selected,
         suite_dir: &suite_dir,
         run_dir: &skill_group_dir,
@@ -412,6 +416,7 @@ pub(crate) fn bench_skill(options: BenchSkillOptions) -> Result<()> {
     let summary = combined_bench_summary(&groups);
     let run = BenchRun {
         suite: suite.name,
+        suite_path: suite_path.display().to_string(),
         description: suite.description,
         run_dir: run_dir.display().to_string(),
         profile: prepared_profile.display().to_string(),
@@ -455,6 +460,7 @@ fn bench_skill_ids(primary: &str, additional: &[String]) -> Vec<String> {
 struct BenchGroupOptions<'a> {
     label: &'a str,
     suite: &'a BenchSuite,
+    suite_path: &'a Path,
     selected: &'a [&'a BenchTask],
     suite_dir: &'a Path,
     run_dir: &'a Path,
@@ -504,6 +510,7 @@ fn run_bench_group(options: BenchGroupOptions<'_>) -> Result<BenchRun> {
     let summary = bench_summary(&task_runs);
     Ok(BenchRun {
         suite: format!("{}:{}", options.suite.name, options.label),
+        suite_path: options.suite_path.display().to_string(),
         description: options.suite.description.clone(),
         run_dir: options.run_dir.display().to_string(),
         profile: options.profile.display().to_string(),

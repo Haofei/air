@@ -5,6 +5,7 @@ mod code_artifact;
 mod diagnostics;
 mod entry;
 mod explain;
+mod improve;
 mod mcp;
 mod models;
 mod planner;
@@ -18,6 +19,7 @@ use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSk
 use crate::diagnostics::emit_diagnostics;
 use crate::entry::{run_entry_task, EntryMode, EntryTaskOptions};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
+use crate::improve::{run_improve, ImproveAction, ImproveOptions};
 use crate::mcp::{
     audit_mcp, call_mcp, explain_mcp, list_mcp, McpAuditOptions, McpCallOptions, McpExplainOptions,
     McpListOptions,
@@ -111,6 +113,23 @@ enum Command {
     Bench {
         #[command(subcommand)]
         command: BenchCommand,
+    },
+    /// Mine AIR artifacts and benchmark runs for failures and regression candidates.
+    Improve {
+        #[command(subcommand)]
+        command: Option<ImproveCommand>,
+
+        /// Artifact, benchmark, or generated output roots to scan.
+        #[arg(long = "from", global = true)]
+        from: Vec<PathBuf>,
+
+        /// Output directory for observations, findings, suggested regressions, and report.
+        #[arg(long, global = true)]
+        out_dir: Option<PathBuf>,
+
+        /// Write one suggested regression JSON file per finding.
+        #[arg(long, global = true)]
+        write_regressions: bool,
     },
     /// Inspect and audit MCP tools declared in AIR tool configs.
     Mcp {
@@ -408,6 +427,27 @@ enum BenchCommand {
         /// Output directory for run.json.
         #[arg(long)]
         out_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImproveCommand {
+    /// Pick the highest-priority finding and show the next action.
+    Next,
+    /// Rerun the smallest known benchmark reproduction for a finding.
+    Check {
+        /// Finding id such as IMP-001.
+        finding: String,
+    },
+    /// Write a suggested regression candidate into the repo for review.
+    Promote {
+        /// Finding id such as IMP-001.
+        finding: String,
+    },
+    /// Prepare the next safe fix step without changing source code automatically.
+    Fix {
+        /// Optional finding id. Defaults to the highest-priority finding.
+        finding: Option<String>,
     },
 }
 
@@ -849,6 +889,17 @@ fn main() -> Result<()> {
                 bench_project(BenchProjectOptions { suite, out_dir })
             }
         },
+        Command::Improve {
+            command,
+            from,
+            out_dir,
+            write_regressions,
+        } => run_improve(ImproveOptions {
+            action: improve_action(command),
+            from,
+            out_dir,
+            write_regressions,
+        }),
         Command::Dev { command } => run_dev_command(command),
         Command::Project { command } => match command {
             ProjectCommand::Plan {
@@ -911,6 +962,16 @@ fn main() -> Result<()> {
             execute,
             planner_model,
         }),
+    }
+}
+
+fn improve_action(command: Option<ImproveCommand>) -> ImproveAction {
+    match command {
+        None => ImproveAction::Report,
+        Some(ImproveCommand::Next) => ImproveAction::Next,
+        Some(ImproveCommand::Check { finding }) => ImproveAction::Check { finding },
+        Some(ImproveCommand::Promote { finding }) => ImproveAction::Promote { finding },
+        Some(ImproveCommand::Fix { finding }) => ImproveAction::Fix { finding },
     }
 }
 

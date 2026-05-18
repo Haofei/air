@@ -517,7 +517,7 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
 }
 
 pub(crate) fn verdict_constraints_for_executor(executor_id: &str) -> CodeRunVerdictConstraints {
-    if executor_id == "review-agent" {
+    if matches!(executor_id, "review-agent" | "bench-agent") {
         CodeRunVerdictConstraints::review()
     } else {
         CodeRunVerdictConstraints::code_edit()

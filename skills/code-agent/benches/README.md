@@ -48,11 +48,21 @@ The runner writes `run.json`, per-task `trace.jsonl`, per-task `output.json`,
 an `artifact/` copy, and failed task workdirs under
 `target/generated/code-agent-bench/<run-id>/`.
 
-Summarize one or more runs:
+Generate a Markdown report while running the suite:
 
 ```bash
-python3 dev/code-agent/analyze_metrics.py \
-  target/generated/code-agent-bench/<run-id>/run.json
+cargo run -p air-cli -- bench code \
+  --suite skills/code-agent/benches/rust-small/suite.json \
+  --report target/generated/code-agent-bench/rust-small.md
+```
+
+For skill A/B checks, compare against a no-skill baseline in the same report:
+
+```bash
+cargo run -p air-cli -- bench skill tdd-workflow \
+  --suite skills/code-agent/benches/rust-small/suite.json \
+  --compare-no-skill \
+  --report target/generated/code-agent-bench/tdd-workflow.md
 ```
 
 The first baseline suite is `rust-small`: a set of classic Rust refactor

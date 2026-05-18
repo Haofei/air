@@ -1,0 +1,223 @@
+agent:
+  name: bench-agent-loop
+  version: 0.1.0
+  description: "Controlled benchmark-analysis loop for comparing AIR tool/profile variants."
+
+inputs:
+  task: string
+
+outputs:
+  bench:
+    type: object
+    properties:
+      completed: boolean
+      final_success: boolean
+      assistant: object
+      experiments:
+        type: array
+        items: object
+      recommendation: string
+      rationale: string
+
+requires:
+  capabilities: [file.read, code.read, code.test]
+
+policy:
+  max_model_calls: 50
+  max_tool_calls: 350
+
+state:
+  phase:
+    type: enum
+    enum: [init, choose, act, summarize, done]
+  observations:
+    type: array
+    items: object
+  available_skills:
+    type: object
+    properties:
+      kind: string
+      skills:
+        type: array
+        items: object
+  decision:
+    type: object
+    required: [complete, tool_calls]
+    properties:
+      complete: boolean
+      tool_calls:
+        type: array
+        items:
+          type: object
+          required: [tool, input]
+          properties:
+            tool: string
+            input: object
+  observation:
+    type: array
+    items: object
+  bench:
+    type: object
+    properties:
+      completed: boolean
+      final_success: boolean
+      assistant: object
+      experiments:
+        type: array
+        items: object
+      recommendation: string
+      rationale: string
+
+tools:
+  - name: question
+    capability: code.read
+    timeout_ms: 10000
+  - name: bash
+    capability: code.test
+    timeout_ms: 900000
+  - name: grep
+    capability: file.read
+    timeout_ms: 10000
+  - name: glob
+    capability: code.read
+    timeout_ms: 10000
+  - name: read_range
+    capability: file.read
+    timeout_ms: 10000
+  - name: read_contains
+    capability: file.read
+    timeout_ms: 10000
+  - name: webfetch
+    capability: code.read
+    timeout_ms: 120000
+  - name: skill
+    capability: code.read
+    timeout_ms: 10000
+
+workflow:
+  kind: state_machine
+  initial: init
+  max_steps: 180
+  rules:
+    - id: init
+      when: phase == "init"
+      actions:
+        - kind: tool_call
+          tool: skill
+          input:
+            object:
+              route_task:
+                ref: task
+              top_k:
+                literal: 3
+          output: available_skills
+          timeout_seconds: 10
+        - kind: set
+          values:
+            observations: []
+            phase: choose
+
+    - id: summarize-at-step-limit
+      when: phase == "choose" && _air.is_last_action_step == true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: step_budget_reached
+              result:
+                object:
+                  runtime:
+                    ref: _air
+        - kind: set
+          values:
+            phase: summarize
+
+    - id: choose
+      when: phase == "choose"
+      actions:
+        - kind: model_call
+          model: code_edit_decider
+          input:
+            object:
+              task:
+                ref: task
+              bench_mode:
+                literal: "Benchmark-analysis mode: run controlled experiments in isolated temp workdirs, collect trace metrics, and recommend default/optional/reject. Keep the source workspace unchanged."
+              observations:
+                take_last_within_bytes:
+                  ref: observations
+                max_bytes: 600000
+              available_skills:
+                ref: available_skills
+              allowed_tools:
+                literal: [question, bash, grep, glob, read_contains, read_range, webfetch, skill]
+          output: decision
+          timeout_seconds: 180
+          retry:
+            max_attempts: 4
+        - kind: set
+          values:
+            phase: act
+
+    - id: act
+      when: phase == "act" && decision.complete == false
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            path: decision.tool_calls
+          output: observation
+          max_calls: 64
+          allowed_tools: [question, bash, grep, glob, read_contains, read_range, webfetch, skill]
+          timeout_seconds: 900
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: tool_result
+              assistant:
+                ref: decision
+              requested:
+                ref: decision.tool_calls
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: choose
+
+    - id: complete
+      when: phase == "act" && decision.complete == true
+      actions:
+        - kind: set
+          values:
+            phase: summarize
+
+    - id: summarize
+      when: phase == "summarize"
+      actions:
+        - kind: set
+          values:
+            bench:
+              object:
+                completed:
+                  literal: true
+                final_success:
+                  literal: true
+                assistant:
+                  ref: decision
+                experiments:
+                  literal: []
+                recommendation:
+                  literal: See assistant answer and trace evidence for benchmark recommendation.
+                rationale:
+                  literal: Benchmark analysis completed by AIR bench-agent; trace contains commands, metrics extraction, and recommendation evidence.
+            phase: done
+
+    - id: done
+      when: phase == "done"
+      actions:
+        - kind: return
+          output: bench

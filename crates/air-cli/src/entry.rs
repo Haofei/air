@@ -3,7 +3,8 @@ use crate::project::{
 };
 use crate::review_agent::{explain_review_agent, run_review_agent, ReviewOptions};
 use crate::skill::{
-    prepare_skill_composition, route_skills_value_for_task, run_skill_auto, SkillAutoRunOptions,
+    prepare_skill_composition, prepare_skill_composition_for_executor, route_skills_value_for_task,
+    run_skill_auto, SkillAutoRunOptions,
 };
 use anyhow::{bail, Result};
 use clap::ValueEnum;
@@ -17,6 +18,7 @@ pub(crate) enum EntryMode {
     Code,
     Project,
     Review,
+    Bench,
 }
 
 #[derive(Debug)]
@@ -46,6 +48,7 @@ enum EntryExecutor {
     Code,
     Project,
     Review,
+    Bench,
 }
 
 pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
@@ -129,6 +132,22 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
             println!("{}", serde_json::to_string_pretty(&outputs)?);
             Ok(())
         }
+        EntryExecutor::Bench => run_skill_auto(SkillAutoRunOptions {
+            task: options.task,
+            top_k: options.top_k,
+            skills: options.skills,
+            executor_override: Some("bench-agent".to_string()),
+            profile_override: None,
+            model_config: options.model_config,
+            trace_out: options.trace_out,
+            trace_redact: options.trace_redact,
+            trace_raw: options.trace_raw,
+            log: options.log,
+            tool_config_override: options.tool_config,
+            artifact_out: options.artifact_out,
+            replay_artifact: options.replay_artifact,
+            replay_from: options.replay_from,
+        }),
     }
 }
 
@@ -167,9 +186,60 @@ fn explain_entry_task(options: &EntryTaskOptions, executor: EntryExecutor) -> Re
             &options.trace_out,
             &options.artifact_out,
         )?,
+        EntryExecutor::Bench => explain_executor_entry(options, "bench-agent", "bench")?,
     };
     println!("{}", serde_json::to_string_pretty(&explanation)?);
     Ok(())
+}
+
+fn explain_executor_entry(
+    options: &EntryTaskOptions,
+    executor_id: &str,
+    mode: &str,
+) -> Result<Value> {
+    let route = route_skills_value_for_task(&options.task, options.top_k.max(1))?;
+    let selected = route
+        .get("instructions")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|card| card.get("host").and_then(Value::as_str) == Some(executor_id))
+        .filter_map(|card| card.get("id").and_then(Value::as_str))
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let selected = merge_skill_ids(&selected, &options.skills);
+    let prepared = prepare_skill_composition_for_executor(executor_id, &selected)?;
+    let composition = prepared
+        .artifact_extra
+        .get("skill_composition")
+        .cloned()
+        .unwrap_or(Value::Null);
+    Ok(json!({
+        "task": options.task,
+        "executor": executor_id,
+        "mode": mode,
+        "route": route,
+        "forced_skills": options.skills,
+        "selected_instruction_skills": selected,
+        "profile": prepared.profile,
+        "tool_config": prepared.tool_config,
+        "composition": composition,
+        "model_config": options.model_config,
+        "trace_out": options.trace_out,
+        "artifact_out": options.artifact_out,
+        "permissions": {
+            "file.read": "allowed through bounded read/search tools",
+            "file.write": "denied by the bench-agent skill; use isolated temp workdirs for generated benchmark artifacts",
+            "shell.unrestricted": "denied; shell is available only through configured benchmark/test command tools",
+            "network": "only configured tools such as webfetch can access network",
+        },
+        "verdict": {
+            "requires_patch": false,
+            "requires_verification": false,
+            "requires_no_workspace_writes": true,
+            "success_source": "runtime-derived artifact verdict plus benchmark report, not model-claimed edit success",
+        }
+    }))
 }
 
 fn explain_code_entry(options: &EntryTaskOptions) -> Result<Value> {
@@ -240,9 +310,12 @@ fn select_entry_executor(task: &str, mode: EntryMode) -> EntryExecutor {
         EntryMode::Code => EntryExecutor::Code,
         EntryMode::Project => EntryExecutor::Project,
         EntryMode::Review => EntryExecutor::Review,
+        EntryMode::Bench => EntryExecutor::Bench,
         EntryMode::Auto => {
             if task_looks_like_review(task) {
                 EntryExecutor::Review
+            } else if task_looks_like_benchmark(task) {
+                EntryExecutor::Bench
             } else if task_looks_project_sized(task) {
                 EntryExecutor::Project
             } else {
@@ -250,6 +323,38 @@ fn select_entry_executor(task: &str, mode: EntryMode) -> EntryExecutor {
             }
         }
     }
+}
+
+fn task_looks_like_benchmark(task: &str) -> bool {
+    let task = task.to_ascii_lowercase();
+    let benchmark_markers = [
+        "benchmark",
+        "bench ",
+        "bench:",
+        "bench-",
+        "compare tools",
+        "compare tool",
+        "compare profiles",
+        "compare profile",
+        "request size",
+        "request bytes",
+        "trace metrics",
+        "model calls",
+        "tool calls",
+        "evaluate tool",
+        "eval tool",
+        "baseline vs",
+        "vs grep",
+        "vs lsp",
+        "vs read",
+        "semble",
+        "基线",
+        "对比",
+        "请求大小",
+        "模型调用",
+        "工具调用",
+    ];
+    benchmark_markers.iter().any(|marker| task.contains(marker))
 }
 
 fn task_looks_like_review(task: &str) -> bool {
@@ -353,6 +458,21 @@ mod tests {
     }
 
     #[test]
+    fn auto_routes_benchmark_tasks_to_bench_executor() {
+        assert_eq!(
+            select_entry_executor(
+                "compare Semble vs grep on a medium refactor and report request size",
+                EntryMode::Auto
+            ),
+            EntryExecutor::Bench
+        );
+        assert_eq!(
+            select_entry_executor("对比 grep 和 lsp 的请求大小", EntryMode::Auto),
+            EntryExecutor::Bench
+        );
+    }
+
+    #[test]
     fn explicit_mode_overrides_auto_routing() {
         assert_eq!(
             select_entry_executor("refactor the whole crate", EntryMode::Code),
@@ -365,6 +485,10 @@ mod tests {
         assert_eq!(
             select_entry_executor("small rename", EntryMode::Review),
             EntryExecutor::Review
+        );
+        assert_eq!(
+            select_entry_executor("small rename", EntryMode::Bench),
+            EntryExecutor::Bench
         );
     }
 }

@@ -1,0 +1,53 @@
+schema: air.skill.v1
+id: bench-agent
+mode: executor
+version: 0.1.0
+description: AIR executor for comparing agent/tool/profile variants with trace metrics and recommendation reports.
+
+source:
+  type: local
+
+instructions:
+  files:
+    - SKILL.md
+
+capabilities:
+  allow:
+    - file.read
+    - code.read
+    - code.test
+  deny:
+    - file.write
+    - shell.unrestricted
+    - secrets.read
+
+tools:
+  config: tools.json
+
+workflow:
+  profile: bench.air-profile.yaml
+
+routing:
+  summary: Compare AIR agent/tool/profile variants, run controlled benchmark experiments, and analyze trace request-size/cost metrics.
+  triggers:
+    - benchmark
+    - bench
+    - compare tools
+    - compare profiles
+    - request size
+    - trace metrics
+    - model calls
+    - tool calls
+    - evaluate tool
+    - tool evaluation
+    - Semble
+    - grep
+    - LSP
+  task_types:
+    - benchmark
+    - evaluation
+
+verification:
+  mode: benchmark_analysis
+  require_patch: false
+  forbid_workspace_changes: true

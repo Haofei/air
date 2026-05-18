@@ -65,6 +65,7 @@ pub(crate) struct CommandParameterRule {
 pub(crate) enum CommandParameterAllow {
     Identifier,
     Path,
+    Text,
     #[default]
     SafeArg,
 }

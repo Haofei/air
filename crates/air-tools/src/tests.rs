@@ -5824,6 +5824,84 @@ fn command_run_renders_constrained_template_parameters() {
 }
 
 #[test]
+fn command_run_accepts_bounded_text_template_parameters() {
+    let dir = temp_dir("air-tools-command-run-text-parameters");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test": {
+                  "kind": "command_run",
+                  "capability": "code.read",
+                  "cwd": ".",
+                  "commands": {
+                    "echo_query": ["node", "-e", "console.log(process.argv[1])", "{{ query }}"]
+                  },
+                  "parameters": {
+                    "query": {
+                      "allow": "text",
+                      "max_chars": 80
+                    }
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool(
+            "test",
+            &json!({"command": "echo_query", "query": "code agent run success verdict"}),
+        )
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert!(output["log"]
+        .as_str()
+        .unwrap()
+        .contains("code agent run success verdict"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn command_run_accepts_numeric_template_parameters_when_allowed() {
+    let dir = temp_dir("air-tools-command-run-numeric-parameters");
+    let config_path = write_config(
+        &dir,
+        r#"{
+              "tools": {
+                "test": {
+                  "kind": "command_run",
+                  "capability": "code.read",
+                  "cwd": ".",
+                  "commands": {
+                    "echo_limit": ["node", "-e", "console.log(process.argv[1])", "{{ top_k }}"]
+                  },
+                  "parameters": {
+                    "top_k": {
+                      "values": ["3", "5", "10"]
+                    }
+                  },
+                  "timeout_seconds": 10
+                }
+              }
+            }"#,
+    );
+    let mut tools = ConfigTools::from_file(config_path).unwrap();
+
+    let output = tools
+        .call_tool("test", &json!({"command": "echo_limit", "top_k": 10}))
+        .unwrap();
+
+    assert_eq!(output["success"], json!(true));
+    assert_eq!(output["argv"][3], json!("10"));
+    assert!(output["log"].as_str().unwrap().contains("10"));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn command_run_accepts_nested_args_template_parameters() {
     let dir = temp_dir("air-tools-command-run-nested-args");
     let config_path = write_config(

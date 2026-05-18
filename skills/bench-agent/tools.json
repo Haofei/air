@@ -1,0 +1,55 @@
+{
+  "tools": {
+    "glob": {
+      "kind": "repo_files",
+      "capability": "code.read",
+      "repo_dir": "../..",
+      "max_files": 100
+    },
+    "question": {
+      "kind": "local_reflection",
+      "capability": "code.read"
+    },
+    "read_range": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 51200
+    },
+    "read_contains": {
+      "kind": "file_read",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_bytes": 51200
+    },
+    "grep": {
+      "kind": "file_search",
+      "capability": "file.read",
+      "base_dir": "../..",
+      "max_matches": 100,
+      "max_context_lines": 2,
+      "max_line_chars": 2000,
+      "max_bytes": 51200
+    },
+    "bash": {
+      "kind": "bash",
+      "capability": "code.test",
+      "cwd": "../..",
+      "timeout_seconds": 900,
+      "max_bytes": 131072,
+      "truncation_direction": "tail"
+    },
+    "webfetch": {
+      "kind": "web_fetch",
+      "capability": "code.read",
+      "timeout_seconds": 120,
+      "max_bytes": 51200
+    },
+    "skill": {
+      "kind": "skill",
+      "capability": "code.read",
+      "root_dir": "../..",
+      "max_bytes": 65536
+    }
+  }
+}

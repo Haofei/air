@@ -241,6 +241,29 @@ cargo run -p air-cli -- bench skill tdd-workflow --suite suite.json --compare-no
 
 Benchmarks produce JSON run artifacts and optional Markdown reports with per-task pass/fail, model calls, tool calls, and failure reasons. Code-run artifacts are cached by input fingerprint and replayed on subsequent runs.
 
+## Improve Loop
+
+AIR can mine existing run artifacts and benchmark outputs for failed runs, group
+them into findings, and suggest regression fixtures before any self-improvement
+patch is attempted:
+
+```bash
+cargo run -p air-cli -- improve
+
+cargo run -p air-cli -- improve next
+cargo run -p air-cli -- improve check IMP-001
+cargo run -p air-cli -- improve promote IMP-001
+
+cargo run -p air-cli -- improve \
+  --from target/generated/code-agent-bench/<run-id> \
+  --write-regressions
+```
+
+The default output is `.air/improve/latest/` with `observations.json`,
+`findings.json`, `suggested_regressions.json`, and `report.md`. This command is
+read-only with respect to AIR source code; it only turns real failures into
+evidence that can be promoted into benchmarks.
+
 ## CodeRunVerdict
 
 Every code agent run produces a `CodeRunVerdict` — a structured pass/fail derived from trace events:
@@ -363,6 +386,7 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | `mcp list/explain/audit` | Inspect MCP tool governance before runs |
 | `bench code` | Benchmark code agent on a suite |
 | `bench skill` | Benchmark with skill preload, optional no-skill comparison |
+| `improve` | Mine artifacts/bench runs for failures and suggested regressions |
 | `dev` | Advanced IR/runtime tools for AIR development |
 
 Lower-level IR commands live under `air dev` (`dev validate-plan`, `dev make-plan`, `dev run-plan`, `dev resume-plan`, `dev replay`, and `dev run-module`). The public workflow should start from `air run`.

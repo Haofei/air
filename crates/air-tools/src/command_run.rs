@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::Read;
@@ -398,8 +399,8 @@ fn render_command_arg(
             ))
         })?;
         let value = required_command_parameter_input_string(tool_name, input, parameter)?;
-        validate_command_parameter_value(tool_name, parameter, value, rule)?;
-        rendered.push_str(value);
+        validate_command_parameter_value(tool_name, parameter, &value, rule)?;
+        rendered.push_str(&value);
         rest = &after_start[end + 2..];
     }
     rendered.push_str(rest);
@@ -427,24 +428,37 @@ fn required_command_parameter_input_string<'a>(
     tool_name: &str,
     input: &'a Value,
     field: &str,
-) -> Result<&'a str, RuntimeError> {
+) -> Result<Cow<'a, str>, RuntimeError> {
     if let Some(value) = input.get(field) {
-        return value.as_str().ok_or_else(|| {
-            RuntimeError::Provider(format!("tool {tool_name} input.{field} must be a string"))
-        });
+        return command_parameter_value_to_string(tool_name, value, &format!("input.{field}"));
     }
     for alias in ["args", "arguments"] {
         if let Some(value) = input.get(alias).and_then(|args| args.get(field)) {
-            return value.as_str().ok_or_else(|| {
-                RuntimeError::Provider(format!(
-                    "tool {tool_name} input.{alias}.{field} must be a string"
-                ))
-            });
+            return command_parameter_value_to_string(
+                tool_name,
+                value,
+                &format!("input.{alias}.{field}"),
+            );
         }
     }
     Err(RuntimeError::Provider(format!(
         "tool {tool_name} input.{field} must be a string"
     )))
+}
+
+fn command_parameter_value_to_string<'a>(
+    tool_name: &str,
+    value: &'a Value,
+    label: &str,
+) -> Result<Cow<'a, str>, RuntimeError> {
+    match value {
+        Value::String(value) => Ok(Cow::Borrowed(value)),
+        Value::Number(value) => Ok(Cow::Owned(value.to_string())),
+        Value::Bool(value) => Ok(Cow::Owned(value.to_string())),
+        _ => Err(RuntimeError::Provider(format!(
+            "tool {tool_name} {label} must be a string, number, or boolean"
+        ))),
+    }
 }
 
 pub(super) fn validate_command_parameter_value(
@@ -483,6 +497,9 @@ pub(super) fn validate_command_parameter_value(
                     ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | '/' | ':')
                 })
         }
+        CommandParameterAllow::Text => value
+            .chars()
+            .all(|ch| !ch.is_control() || matches!(ch, '\t')),
         CommandParameterAllow::SafeArg => value.chars().all(|ch| {
             ch.is_ascii_alphanumeric()
                 || matches!(ch, '_' | '-' | '.' | '/' | ':' | '+' | '=' | '@')

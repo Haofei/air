@@ -1,0 +1,25 @@
+plan:
+  name: bench-agent
+  version: 0.1.0
+description: "Benchmark-analysis agent loop."
+
+requires:
+  capabilities: [file.read, code.read, code.test]
+
+nodes:
+  - id: bench
+    module: bench.agent@0.1.0
+
+entry: bench
+
+connect:
+  - from: $input.task
+    to: bench.task
+
+outputs:
+  bench: bench.bench
+
+decisions:
+  - id: choose-bench-agent
+    rationale: "Run the AIR benchmark-analysis executor."
+    selected: [bench]
