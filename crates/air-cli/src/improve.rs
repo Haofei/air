@@ -1,3 +1,4 @@
+use crate::regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,9 +23,19 @@ pub(crate) struct ImproveOptions {
 pub(crate) enum ImproveAction {
     Report,
     Next,
-    Check { finding: String },
-    Promote { finding: String },
-    Fix { finding: Option<String> },
+    Check {
+        finding: String,
+    },
+    Promote {
+        finding: String,
+    },
+    Fix {
+        finding: Option<String>,
+    },
+    Evaluate {
+        finding: String,
+        report: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Serialize)]
@@ -80,6 +91,33 @@ struct ImproveFixOutput {
     finding: Option<String>,
     message: String,
     next_command: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct ImproveEvaluateOutput {
+    schema: &'static str,
+    finding: String,
+    decision: String,
+    regression: RegressionRunReport,
+    tests: ImproveTestGate,
+    guard: ImproveGuardGate,
+    score_delta: i32,
+    eval_json: String,
+    eval_report: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ImproveTestGate {
+    command: Vec<String>,
+    passed: bool,
+    status: Option<i32>,
+}
+
+#[derive(Debug, Serialize)]
+struct ImproveGuardGate {
+    passed: bool,
+    warnings: Vec<String>,
+    blocked: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +328,9 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
         }
         ImproveAction::Fix { finding } => {
             return prepare_fix(finding.as_deref(), &findings, &statuses);
+        }
+        ImproveAction::Evaluate { finding, report } => {
+            return evaluate_finding(finding, report.as_deref(), &out_dir, &roots);
         }
         ImproveAction::Next => {
             let next_action = choose_next_action(&findings, &observations, &statuses);
@@ -1147,6 +1188,215 @@ fn prepare_fix(
     Ok(())
 }
 
+fn evaluate_finding(
+    finding: &str,
+    report: Option<&Path>,
+    out_dir: &Path,
+    roots: &[PathBuf],
+) -> Result<()> {
+    let eval_dir = out_dir.join("evaluations").join(finding);
+    fs::create_dir_all(&eval_dir).with_context(|| format!("create {}", eval_dir.display()))?;
+    let regression = run_regression_suite(RegressionRunConfig {
+        finding: Some(finding.to_string()),
+        file: None,
+        all: false,
+        from: roots.to_vec(),
+        out_dir: eval_dir.join("regression"),
+    })?;
+    let tests = run_evaluate_tests()?;
+    let guard = run_improve_guard()?;
+    let hard_gates_passed = regression.failed == 0 && tests.passed && guard.blocked.is_empty();
+    let decision = if hard_gates_passed {
+        "accept_candidate"
+    } else if guard.blocked.is_empty() {
+        "reject_candidate"
+    } else {
+        "needs_review"
+    };
+    let score_delta = evaluate_score_delta(&regression, &tests, &guard);
+    let eval_json = eval_dir.join("eval.json");
+    let eval_report = report
+        .map(|path| path.to_path_buf())
+        .unwrap_or_else(|| eval_dir.join("eval.md"));
+    let output = ImproveEvaluateOutput {
+        schema: "air.improve_evaluate.v1",
+        finding: finding.to_string(),
+        decision: decision.to_string(),
+        regression,
+        tests,
+        guard,
+        score_delta,
+        eval_json: eval_json.display().to_string(),
+        eval_report: eval_report.display().to_string(),
+    };
+    write_json(&eval_json, &output)?;
+    write_evaluate_report(&eval_report, &output)?;
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+fn run_evaluate_tests() -> Result<ImproveTestGate> {
+    let command = vec![
+        "cargo".to_string(),
+        "test".to_string(),
+        "-p".to_string(),
+        "air-cli".to_string(),
+        "improve".to_string(),
+    ];
+    let status = Command::new("cargo")
+        .args(&command[1..])
+        .status()
+        .context("run cargo test -p air-cli improve")?;
+    Ok(ImproveTestGate {
+        command,
+        passed: status.success(),
+        status: status.code(),
+    })
+}
+
+fn run_improve_guard() -> Result<ImproveGuardGate> {
+    let output = Command::new("git")
+        .args(["diff", "--name-status", "--"])
+        .output()
+        .context("run git diff --name-status")?;
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut warnings = Vec::new();
+    let mut blocked = Vec::new();
+    for line in text.lines() {
+        let mut parts = line.split_whitespace();
+        let status = parts.next().unwrap_or_default();
+        let path = parts.next_back().unwrap_or_default();
+        if status.starts_with('D') && is_protected_eval_path(path) {
+            blocked.push(format!("deleted protected evaluation file: {path}"));
+        }
+        if status.starts_with('M') && path.contains("benches/") {
+            warnings.push(format!("modified benchmark file: {path}"));
+        }
+        if status.starts_with('M') && path.ends_with("skills.lock") {
+            blocked.push("modified skills.lock trust state".to_string());
+        }
+    }
+
+    let diff = Command::new("git")
+        .args(["diff", "--unified=0", "--"])
+        .output()
+        .context("run git diff")?;
+    let diff_text = String::from_utf8_lossy(&diff.stdout);
+    for line in diff_text.lines().filter(|line| line.starts_with('+')) {
+        let added = line.trim_start_matches('+');
+        let trimmed = added.trim_start();
+        if trimmed.starts_with("+++") {
+            continue;
+        }
+        if disables_required_verification(trimmed) {
+            blocked.push("added require_verification: false".to_string());
+        }
+        if exposes_sensitive_capability(trimmed, "shell.unrestricted") {
+            warnings.push("changed shell.unrestricted capability text".to_string());
+        }
+        if exposes_sensitive_capability(trimmed, "secrets.read") {
+            warnings.push("changed secrets.read capability text".to_string());
+        }
+    }
+    blocked.sort();
+    blocked.dedup();
+    warnings.sort();
+    warnings.dedup();
+    Ok(ImproveGuardGate {
+        passed: blocked.is_empty(),
+        warnings,
+        blocked,
+    })
+}
+
+fn disables_required_verification(line: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    lowered.starts_with("require_verification: false")
+        || lowered.starts_with("require_verification = false")
+        || lowered.starts_with("\"require_verification\": false")
+        || lowered.starts_with("'require_verification': false")
+}
+
+fn exposes_sensitive_capability(line: &str, capability: &str) -> bool {
+    let lowered = line.to_ascii_lowercase();
+    if lowered.contains("deny") {
+        return false;
+    }
+    lowered.starts_with(&format!("- {capability}"))
+        || lowered.starts_with(capability)
+        || lowered.starts_with(&format!("\"{capability}\""))
+        || lowered.starts_with(&format!("'{capability}'"))
+}
+
+fn is_protected_eval_path(path: &str) -> bool {
+    path.contains("benches/")
+        || path.contains("regressions/")
+        || path.ends_with("skills.lock")
+        || path.ends_with("code_artifact.rs")
+}
+
+fn evaluate_score_delta(
+    regression: &RegressionRunReport,
+    tests: &ImproveTestGate,
+    guard: &ImproveGuardGate,
+) -> i32 {
+    let mut score = 0;
+    if regression.failed == 0 {
+        score += 100;
+    } else {
+        score -= 100 * regression.failed as i32;
+    }
+    if tests.passed {
+        score += 40;
+    } else {
+        score -= 80;
+    }
+    score -= 120 * guard.blocked.len() as i32;
+    score -= 10 * guard.warnings.len() as i32;
+    score
+}
+
+fn write_evaluate_report(path: &Path, output: &ImproveEvaluateOutput) -> Result<()> {
+    let mut out = String::new();
+    out.push_str("# AIR Improve Evaluation\n\n");
+    out.push_str(&format!("- finding: `{}`\n", output.finding));
+    out.push_str(&format!("- decision: `{}`\n", output.decision));
+    out.push_str(&format!("- score_delta: `{}`\n\n", output.score_delta));
+    out.push_str("## Hard Gates\n\n");
+    out.push_str(&format!(
+        "- regression: `{}/{}` passed\n",
+        output.regression.passed, output.regression.total
+    ));
+    out.push_str(&format!("- tests: `{}`\n", output.tests.passed));
+    out.push_str(&format!("- guard: `{}`\n\n", output.guard.passed));
+    out.push_str("## Regression Results\n\n");
+    out.push_str("| Regression | Kind | Status | Pass | Message |\n");
+    out.push_str("|---|---|---|---:|---|\n");
+    for result in &output.regression.results {
+        out.push_str(&format!(
+            "| {} | {} | {} | {} | {} |\n",
+            md_cell(&result.id),
+            md_cell(&result.kind),
+            md_cell(&result.status),
+            if result.passed { "yes" } else { "no" },
+            md_cell(&result.message)
+        ));
+    }
+    if !output.guard.blocked.is_empty() {
+        out.push_str("\n## Blocked\n\n");
+        for item in &output.guard.blocked {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    if !output.guard.warnings.is_empty() {
+        out.push_str("\n## Warnings\n\n");
+        for item in &output.guard.warnings {
+            out.push_str(&format!("- {}\n", item));
+        }
+    }
+    fs::write(path, out).with_context(|| format!("write {}", path.display()))
+}
+
 fn count_failed_bench_tasks(path: &Path) -> Result<usize> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let run: BenchRunLite =
@@ -1480,5 +1730,42 @@ mod tests {
         assert_eq!(inferred, Some(suite_path.display().to_string()));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn improve_guard_patterns_ignore_their_own_string_literals() {
+        assert!(!disables_required_verification(
+            "if added.contains(\"require_verification: false\") {"
+        ));
+        assert!(disables_required_verification(
+            "require_verification: false"
+        ));
+        assert!(disables_required_verification(
+            "\"require_verification\": false"
+        ));
+
+        assert!(!exposes_sensitive_capability(
+            "warnings.push(\"changed shell.unrestricted capability text\".to_string());",
+            "shell.unrestricted"
+        ));
+        assert!(exposes_sensitive_capability(
+            "- shell.unrestricted",
+            "shell.unrestricted"
+        ));
+        assert!(!exposes_sensitive_capability(
+            "- shell.unrestricted # deny",
+            "shell.unrestricted"
+        ));
+    }
+
+    #[test]
+    fn protected_eval_paths_match_relative_paths() {
+        assert!(is_protected_eval_path(
+            "skills/code-agent/benches/rust-small/suite.json"
+        ));
+        assert!(is_protected_eval_path(
+            "skills/code-agent/benches/regressions/imp-001.json"
+        ));
+        assert!(is_protected_eval_path("skills.lock"));
     }
 }

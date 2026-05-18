@@ -253,6 +253,8 @@ cargo run -p air-cli -- improve
 cargo run -p air-cli -- improve next
 cargo run -p air-cli -- improve check IMP-001
 cargo run -p air-cli -- improve promote IMP-001
+cargo run -p air-cli -- regression run IMP-001
+cargo run -p air-cli -- improve evaluate IMP-001
 
 cargo run -p air-cli -- improve \
   --from target/generated/code-agent-bench/<run-id> \
@@ -263,6 +265,11 @@ The default output is `.air/improve/latest/` with `observations.json`,
 `findings.json`, `suggested_regressions.json`, and `report.md`. This command is
 read-only with respect to AIR source code; it only turns real failures into
 evidence that can be promoted into benchmarks.
+
+Promoted regressions become executable gates through `air regression run`.
+`air improve evaluate` runs the promoted regression, an improve-focused test
+gate, and deterministic anti-reward-hacking checks before returning
+`accept_candidate`, `reject_candidate`, or `needs_review`.
 
 ## CodeRunVerdict
 
@@ -387,6 +394,7 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | `bench code` | Benchmark code agent on a suite |
 | `bench skill` | Benchmark with skill preload, optional no-skill comparison |
 | `improve` | Mine artifacts/bench runs for failures and suggested regressions |
+| `regression run` | Execute promoted AIR regression candidates |
 | `dev` | Advanced IR/runtime tools for AIR development |
 
 Lower-level IR commands live under `air dev` (`dev validate-plan`, `dev make-plan`, `dev run-plan`, `dev resume-plan`, `dev replay`, and `dev run-module`). The public workflow should start from `air run`.

@@ -11,6 +11,7 @@ mod models;
 mod planner;
 mod profile;
 mod project;
+mod regression;
 mod review_agent;
 mod run_plan;
 mod skill;
@@ -35,6 +36,7 @@ use crate::project::{
     BenchProjectOptions, ProjectPlanOptions, ProjectRunOptions, ProjectStatusOptions,
     ProjectVerifyOptions,
 };
+use crate::regression::{run_regression_command, RegressionRunOptions};
 use crate::run_plan::{
     observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
@@ -130,6 +132,11 @@ enum Command {
         /// Write one suggested regression JSON file per finding.
         #[arg(long, global = true)]
         write_regressions: bool,
+    },
+    /// Run promoted AIR regression candidates.
+    Regression {
+        #[command(subcommand)]
+        command: RegressionCommand,
     },
     /// Inspect and audit MCP tools declared in AIR tool configs.
     Mcp {
@@ -448,6 +455,40 @@ enum ImproveCommand {
     Fix {
         /// Optional finding id. Defaults to the highest-priority finding.
         finding: Option<String>,
+    },
+    /// Evaluate the current candidate patch against regressions and hard gates.
+    Evaluate {
+        /// Finding id such as IMP-001.
+        finding: String,
+
+        /// Optional markdown report path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum RegressionCommand {
+    /// Run one or more promoted regressions.
+    Run {
+        /// Finding id such as IMP-001. Omit with --all to run every regression.
+        finding: Option<String>,
+
+        /// Run all regression JSON files.
+        #[arg(long)]
+        all: bool,
+
+        /// Run a specific regression JSON file.
+        #[arg(long)]
+        file: Option<PathBuf>,
+
+        /// Artifact, benchmark, or generated output roots used by regression checks.
+        #[arg(long = "from")]
+        from: Vec<PathBuf>,
+
+        /// Output directory for regression run artifacts.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
     },
 }
 
@@ -900,6 +941,21 @@ fn main() -> Result<()> {
             out_dir,
             write_regressions,
         }),
+        Command::Regression { command } => match command {
+            RegressionCommand::Run {
+                finding,
+                all,
+                file,
+                from,
+                out_dir,
+            } => run_regression_command(RegressionRunOptions {
+                finding,
+                file,
+                all,
+                from,
+                out_dir,
+            }),
+        },
         Command::Dev { command } => run_dev_command(command),
         Command::Project { command } => match command {
             ProjectCommand::Plan {
@@ -972,6 +1028,9 @@ fn improve_action(command: Option<ImproveCommand>) -> ImproveAction {
         Some(ImproveCommand::Check { finding }) => ImproveAction::Check { finding },
         Some(ImproveCommand::Promote { finding }) => ImproveAction::Promote { finding },
         Some(ImproveCommand::Fix { finding }) => ImproveAction::Fix { finding },
+        Some(ImproveCommand::Evaluate { finding, report }) => {
+            ImproveAction::Evaluate { finding, report }
+        }
     }
 }
 
