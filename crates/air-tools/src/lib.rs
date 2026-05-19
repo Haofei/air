@@ -649,11 +649,32 @@ impl ConfigTools {
     }
 
     fn example() -> Self {
-        let config: ToolConfigFile = serde_json::from_str(include_str!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/simple-helpdesk/tools.json"
-        )))
-        .expect("examples/simple-helpdesk/tools.json must be a valid AIR tool config");
+        let config: ToolConfigFile = serde_json::from_value(json!({
+            "tools": {
+                "docs.search": {
+                    "kind": "local_docs_search",
+                    "capability": "retrieval.local",
+                    "documents": [
+                        {
+                            "id": "kb-password-reset",
+                            "title": "Reset your password",
+                            "content": "Users can reset a password from the sign-in page by selecting Forgot password, entering the account email, and following the reset link. Reset links expire after 30 minutes."
+                        },
+                        {
+                            "id": "kb-lost-email-access",
+                            "title": "Account recovery when email is unavailable",
+                            "content": "If a user no longer has access to the account email, support must verify identity with the last invoice id and the last four digits of the payment method before changing the email address."
+                        },
+                        {
+                            "id": "kb-billing-upgrade",
+                            "title": "Billing after subscription upgrade",
+                            "content": "After an upgrade, a prorated charge may appear immediately. Duplicate charges should be escalated to billing support with invoice ids."
+                        }
+                    ]
+                }
+            }
+        }))
+        .expect("built-in example AIR tool config must be valid");
         Self {
             tools: config.tools,
             approvals: config.approvals,
@@ -1281,7 +1302,7 @@ impl ToolProvider for ConfigTools {
 
     fn request_approval(
         &mut self,
-        module: &air_core::AirModule,
+        module: &str,
         approval_for: &[String],
         _state: &Value,
     ) -> Result<ApprovalDecision, RuntimeError> {
@@ -1291,13 +1312,13 @@ impl ToolProvider for ConfigTools {
         for capability in approval_for {
             let Some(decision) = self.approvals.get(capability) else {
                 return Err(RuntimeError::ApprovalRequired {
-                    module: module.agent.name.clone(),
+                    module: module.to_string(),
                     capabilities: approval_for.to_vec(),
                 });
             };
             if !decision.approved {
                 return Err(RuntimeError::ApprovalDenied {
-                    module: module.agent.name.clone(),
+                    module: module.to_string(),
                     capabilities: approval_for.to_vec(),
                     reason: decision
                         .reason

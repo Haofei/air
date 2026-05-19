@@ -1,4 +1,5 @@
-plan: bench.air-plan.yaml
-store: module-store.air-store.yaml
+kind: native_loop
+native_loop: bench
+capabilities: [file.read, code.read, code.test]
 model_config: ../../examples/local-openai-compatible.json
 tool_config: tools.json

@@ -3514,7 +3514,7 @@ fn subagent_tool_runs_isolated_command_with_input_file() {
 }
 
 #[test]
-fn subagent_tool_extracts_air_final_answer_from_run_plan_json() {
+fn subagent_tool_extracts_air_final_answer_from_json() {
     let dir = temp_dir("air-tools-subagent-json");
     let config_path = write_config(
         &dir,

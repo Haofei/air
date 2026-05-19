@@ -14,20 +14,16 @@ air-advisory = { path = "../air-advisory" }
 air-audit = { path = "../air-audit" }
 air-backend-openai = { path = "../air-backend-openai" }
 air-code-artifact = { path = "../air-code-artifact" }
-air-core = { path = "../air-core" }
 air-dream = { path = "../air-dream" }
 air-eval = { path = "../air-eval" }
 air-improve = { path = "../air-improve" }
 air-memory = { path = "../air-memory" }
 air-regression = { path = "../air-regression" }
-air-linker = { path = "../air-linker" }
-air-parser = { path = "../air-parser" }
 air-runtime = { path = "../air-runtime" }
 air-schemas = { path = "../air-schemas" }
 air-skill = { path = "../air-skill" }
 air-skill-runtime = { path = "../air-skill-runtime" }
 air-tools = { path = "../air-tools" }
-air-verify = { path = "../air-verify" }
 anyhow.workspace = true
 clap.workspace = true
 serde.workspace = true

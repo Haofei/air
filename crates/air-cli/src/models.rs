@@ -433,20 +433,9 @@ fn safe_fixture_file_path(base_dir: &Path, path: &str) -> Result<PathBuf> {
     Ok(candidate)
 }
 
-pub(crate) fn call_openai_model(
-    model_config: PathBuf,
-    model_alias: &str,
-    input: &Value,
-) -> Result<Value> {
-    let config = air_backend_openai::parse_config_file(model_config)?;
-    let mut models = OpenAiCompatibleModelProvider::new(config)?;
-    Ok(models.call_model(model_alias, input)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use air_core::{StateAction, TypeSpec, Workflow};
     use std::collections::BTreeSet;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -614,7 +603,10 @@ mod tests {
             root.join("examples/local-openai-compatible.json"),
         )
         .unwrap();
-        let requirements = code_agent_model_output_requirements(&root);
+        let requirements = BTreeMap::from([(
+            "code_edit_decider".to_string(),
+            BTreeSet::from(["complete".to_string(), "tool_calls".to_string()]),
+        )]);
         assert_eq!(
             requirements
                 .get("code_edit_decider")
@@ -675,44 +667,5 @@ mod tests {
                 && !edit_prompt.contains("complete=true"),
             "code_edit_decider prompt should not expose AIR's outer completion protocol in native tool mode"
         );
-    }
-
-    fn code_agent_model_output_requirements(root: &Path) -> BTreeMap<String, BTreeSet<String>> {
-        let mut requirements = BTreeMap::<String, BTreeSet<String>>::new();
-        for relative in ["skills/code-agent/code-edit-loop.air.yaml"] {
-            let module = air_parser::parse_air_file(root.join(relative)).unwrap();
-            for (alias, required) in model_output_required_keys_by_alias(&module) {
-                requirements.entry(alias).or_default().extend(required);
-            }
-        }
-        requirements
-    }
-
-    fn model_output_required_keys_by_alias(
-        module: &air_core::AirModule,
-    ) -> BTreeMap<String, BTreeSet<String>> {
-        let mut by_alias = BTreeMap::<String, BTreeSet<String>>::new();
-        let Workflow::StateMachine(workflow) = &module.workflow else {
-            return by_alias;
-        };
-        for rule in &workflow.rules {
-            for action in &rule.actions {
-                let StateAction::ModelCall { model, output, .. } = action else {
-                    continue;
-                };
-                let required = state_field_required_keys(module, output);
-                if !required.is_empty() {
-                    by_alias.entry(model.clone()).or_default().extend(required);
-                }
-            }
-        }
-        by_alias
-    }
-
-    fn state_field_required_keys(module: &air_core::AirModule, output: &str) -> BTreeSet<String> {
-        match module.state.get(output) {
-            Some(TypeSpec::Detailed(schema)) => schema.required.iter().cloned().collect(),
-            _ => BTreeSet::new(),
-        }
     }
 }

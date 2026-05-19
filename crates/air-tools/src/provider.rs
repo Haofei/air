@@ -68,7 +68,7 @@ impl ToolProvider for ToolProviderChoice {
 
     fn request_approval(
         &mut self,
-        module: &air_core::AirModule,
+        module: &str,
         approval_for: &[String],
         state: &Value,
     ) -> Result<ApprovalDecision, RuntimeError> {

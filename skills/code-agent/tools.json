@@ -76,9 +76,9 @@
           "command": [
             "{air_exe}",
             "dev",
-            "run-plan",
-            "--profile",
-            "{config_dir}/explore.air-profile.yaml",
+            "native-loop",
+            "--kind",
+            "explore",
             "--input",
             "{input_file}",
             "--model-config",

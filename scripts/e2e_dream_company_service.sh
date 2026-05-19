@@ -22,10 +22,9 @@ fi
 cargo build -q -p air-cli
 
 rm -rf "$SCENARIO"
-mkdir -p "$SCENARIO/skills" "$SCENARIO/modules" "$SCENARIO/company-service/src" \
+mkdir -p "$SCENARIO/skills" "$SCENARIO/company-service/src" \
   "$SCENARIO/company-service/test" "$SCENARIO/target/generated/code-runs" "$SCENARIO/.air"
 cp -R "$ROOT/skills/code-agent" "$SCENARIO/skills/code-agent"
-cp -R "$ROOT/modules/std" "$SCENARIO/modules/std"
 
 cat > "$SCENARIO/company-service/src/billing.js" <<'JS'
 function addCents(a, b) {

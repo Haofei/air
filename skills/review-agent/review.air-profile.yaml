@@ -1,4 +1,5 @@
-plan: review.air-plan.yaml
-store: module-store.air-store.yaml
+kind: native_loop
+native_loop: review
+capabilities: [file.read, code.read, gitlab.read, gitlab.graphql.read]
 model_config: ../../examples/local-openai-compatible.json
 tool_config: tools.json

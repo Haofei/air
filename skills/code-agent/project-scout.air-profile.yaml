@@ -1,5 +1,5 @@
-plan: project-scout.air-plan.yaml
-store: module-store.air-store.yaml
-input_file: edit.input.json
+kind: native_loop
+native_loop: project-scout
+capabilities: [file.read, code.read]
 model_config: ../../examples/local-openai-compatible.json
 tool_config: tools.explore.json

@@ -136,17 +136,24 @@ pub struct SkillUpgradeOptions {
 }
 
 #[derive(Debug, Deserialize)]
-struct RunPlanProfile {
-    plan: PathBuf,
-    store: PathBuf,
+struct NativeLoopProfile {
+    #[serde(default)]
+    plan: Option<PathBuf>,
+    #[serde(default)]
+    store: Option<PathBuf>,
     #[serde(default)]
     tool_config: Option<PathBuf>,
+    #[serde(default)]
+    capabilities: Vec<String>,
+    #[serde(default)]
+    native_loop: Option<String>,
 }
 
 #[derive(Debug)]
 struct CodeExplainMetadata {
-    plan: PathBuf,
-    store: PathBuf,
+    plan: Option<PathBuf>,
+    store: Option<PathBuf>,
+    native_loop: Option<String>,
     capabilities: Vec<String>,
     read_only: bool,
     writes_workspace: bool,
@@ -1773,7 +1780,7 @@ fn effective_tool_config_path(skill: &ResolvedSkill, profile: &Path) -> Result<O
     if let Some(tool_config) = skill.tool_config_path() {
         return Ok(Some(tool_config));
     }
-    let profile_config = read_run_plan_profile(&profile.to_path_buf())?;
+    let profile_config = read_native_loop_profile(&profile.to_path_buf())?;
     Ok(profile_config
         .tool_config
         .map(|path| resolve_profile_path(profile, &path)))
@@ -2078,8 +2085,9 @@ fn code_profile_explain(
         "skill": skill_id,
         "will_run": false,
         "profile": path_ref_to_input_string(profile),
-        "plan": path_ref_to_input_string(&metadata.plan),
-        "store": path_ref_to_input_string(&metadata.store),
+        "plan": metadata.plan.as_ref().map(|path| path_ref_to_input_string(path)),
+        "store": metadata.store.as_ref().map(|path| path_ref_to_input_string(path)),
+        "native_loop": metadata.native_loop,
         "capabilities": metadata.capabilities,
         "read_only": metadata.read_only,
         "writes_workspace": metadata.writes_workspace,
@@ -2089,11 +2097,28 @@ fn code_profile_explain(
 
 fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
     let profile_path = profile.to_path_buf();
-    let profile = read_run_plan_profile(&profile_path)?;
-    let plan_path = resolve_profile_path(&profile_path, &profile.plan);
-    let store_path = resolve_profile_path(&profile_path, &profile.store);
-    let plan = air_linker::parse_run_plan_file(&plan_path)?;
-    let mut capabilities = plan.requires.capabilities;
+    let profile = read_native_loop_profile(&profile_path)?;
+    if profile.plan.is_some() || profile.store.is_some() {
+        anyhow::bail!(
+            "legacy plan/store profile {} is no longer supported; use native_loop and capabilities",
+            profile_path.display()
+        );
+    }
+    let plan_path = profile
+        .plan
+        .as_ref()
+        .map(|plan| resolve_profile_path(&profile_path, plan));
+    let store_path = profile
+        .store
+        .as_ref()
+        .map(|store| resolve_profile_path(&profile_path, store));
+    let mut capabilities = profile.capabilities;
+    if capabilities.is_empty() {
+        anyhow::bail!(
+            "native profile {} must declare capabilities when plan is omitted",
+            profile_path.display()
+        );
+    }
     capabilities.sort();
     capabilities.dedup();
     let writes_workspace = capabilities
@@ -2102,17 +2127,22 @@ fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
     Ok(CodeExplainMetadata {
         plan: plan_path,
         store: store_path,
+        native_loop: profile.native_loop,
         capabilities,
         read_only: !writes_workspace,
         writes_workspace,
     })
 }
 
-fn read_run_plan_profile(path: &PathBuf) -> Result<RunPlanProfile> {
+fn read_native_loop_profile(path: &PathBuf) -> Result<NativeLoopProfile> {
     let source = fs::read_to_string(path)
-        .with_context(|| format!("failed to read run profile {}", path.display()))?;
-    serde_yaml::from_str(&source)
-        .with_context(|| format!("failed to parse run profile YAML {}", path.display()))
+        .with_context(|| format!("failed to read native loop profile {}", path.display()))?;
+    serde_yaml::from_str(&source).with_context(|| {
+        format!(
+            "failed to parse native loop profile YAML {}",
+            path.display()
+        )
+    })
 }
 
 fn resolve_profile_path(profile_path: &Path, path: &PathBuf) -> PathBuf {

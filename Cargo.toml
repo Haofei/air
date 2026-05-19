@@ -5,21 +5,17 @@ members = [
     "crates/air-backend-openai",
     "crates/air-cli",
     "crates/air-code-artifact",
-    "crates/air-core",
     "crates/air-dream",
     "crates/air-eval",
     "crates/air-improve",
     "crates/air-memory",
     "crates/air-regression",
-    "crates/air-linker",
-    "crates/air-parser",
     "crates/air-runtime",
     "crates/air-schemas",
     "crates/air-skill",
     "crates/air-skill-runtime",
     "crates/air-tools-core",
     "crates/air-tools",
-    "crates/air-verify",
 ]
 resolver = "2"
 

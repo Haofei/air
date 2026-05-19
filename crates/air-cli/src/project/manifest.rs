@@ -8,8 +8,6 @@ pub(super) const PROJECT_SCHEMA: &str = air_schemas::PROJECT;
 pub(super) const PROJECT_STATE_SCHEMA: &str = air_schemas::PROJECT_STATE;
 pub(super) const DEFAULT_PROJECT_FILE: &str = "air-project.yaml";
 pub(super) const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
-pub(super) const DEFAULT_PROJECT_SCOUT_PROFILE: &str =
-    "skills/code-agent/project-scout.air-profile.yaml";
 pub(super) const DEFAULT_MODEL_CONFIG: &str = "examples/local-openai-compatible.json";
 pub(super) const DEFAULT_TOOL_CONFIG: &str = "skills/code-agent/tools.json";
 pub(super) const DEFAULT_ARTIFACT_DIR: &str = ".air/project";

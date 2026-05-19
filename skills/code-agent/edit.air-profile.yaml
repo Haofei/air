@@ -1,5 +1,5 @@
-plan: code-edit.air-plan.yaml
-store: module-store.air-store.yaml
-input_file: edit.input.json
+kind: native_loop
+native_loop: code-edit
+capabilities: [file.read, file.write, code.read, code.test]
 model_config: ../../examples/local-openai-compatible.json
 tool_config: tools.json

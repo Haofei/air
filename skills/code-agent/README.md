@@ -23,8 +23,8 @@ cargo run -p air-cli -- skill audit code-agent
 
 ## Loop
 
-`code-edit-loop.air.yaml` is wired by `code-edit.air-plan.yaml` and
-`edit.air-profile.yaml`.
+The default `edit.air-profile.yaml` selects the native Rust `code-edit` loop.
+There is no YAML state-machine executor in the product path.
 
 ```text
 init -> choose -> act -> choose -> ... -> summarize -> done
@@ -50,11 +50,11 @@ OpenCode-style terminal workflow instead of exposing AIR-specific git wrappers.
 If verification fails, the result goes back into the next model turn as ordinary
 tool output.
 
-`task` launches a separate non-mutating AIR exploration loop through
-`explore.air-profile.yaml`. Use it for broad investigation that would otherwise
-fill the main edit loop context. Each subagent call writes its own child
-trace/output under `.air/subagents/` and returns those paths in the parent trace
-so the handoff stays concise without losing auditability.
+`task` launches a separate non-mutating native exploration loop through
+`air dev native-loop --kind explore`. Use it for broad investigation that would
+otherwise fill the main edit loop context. Each subagent call writes its own
+child trace/output under `.air/subagents/` and returns those paths in the parent
+trace so the handoff stays concise without losing auditability.
 
 `tools.json` uses the same OpenCode-style tool names against the current repository.
 
@@ -74,7 +74,7 @@ cargo run -p air-cli -- run "refactor a small helper and run tests" \
 cargo test --workspace code_agent
 ```
 
-The workspace tests validate the minimal profile, check the OpenCode-style
+The workspace tests validate the native profile, check the OpenCode-style
 default tool surface, and run a deterministic edit fixture.
 
 The skill also carries its own benchmark suites under `benches/`:

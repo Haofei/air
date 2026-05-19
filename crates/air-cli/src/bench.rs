@@ -700,7 +700,6 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
         let explore_tool_config = task_dir.join("tools.explore.json");
         fs::write(&explore_tool_config, default_bench_explore_tool_config())?;
         Some(BenchSubagentPaths {
-            repo_root: context.repo_root.to_path_buf(),
             explore_tool_config,
         })
     } else {
@@ -1488,7 +1487,6 @@ fn ensure_bench_gitignore(workdir: &Path) -> Result<()> {
 }
 
 struct BenchSubagentPaths {
-    repo_root: PathBuf,
     explore_tool_config: PathBuf,
 }
 
@@ -1507,9 +1505,9 @@ fn default_bench_tool_config(
                     "command": [
                         "{air_exe}",
                         "dev",
-                        "run-plan",
-                        "--profile",
-                        paths.repo_root.join("skills/code-agent/explore.air-profile.yaml"),
+                        "native-loop",
+                        "--kind",
+                        "explore",
                         "--input",
                         "{input_file}",
                         "--model-config",
@@ -1876,7 +1874,6 @@ mod tests {
     #[test]
     fn subagent_bench_tool_config_records_child_trace() {
         let paths = BenchSubagentPaths {
-            repo_root: PathBuf::from("/repo"),
             explore_tool_config: PathBuf::from("/run/tools.explore.json"),
         };
         let config: Value = serde_json::from_str(&default_bench_tool_config(

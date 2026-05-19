@@ -56,20 +56,16 @@ dependencies = [
  "air-audit",
  "air-backend-openai",
  "air-code-artifact",
- "air-core",
  "air-dream",
  "air-eval",
  "air-improve",
- "air-linker",
  "air-memory",
- "air-parser",
  "air-regression",
  "air-runtime",
  "air-schemas",
  "air-skill",
  "air-skill-runtime",
  "air-tools",
- "air-verify",
  "anyhow",
  "clap",
  "dotenvy",
@@ -88,14 +84,6 @@ dependencies = [
  "air-schemas",
  "anyhow",
  "ring",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "air-core"
-version = "0.1.0"
-dependencies = [
  "serde",
  "serde_json",
 ]
@@ -145,20 +133,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "air-linker"
-version = "0.1.0"
-dependencies = [
- "air-core",
- "air-parser",
- "air-runtime",
- "air-verify",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "air-memory"
 version = "0.1.0"
 dependencies = [
@@ -170,16 +144,6 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
-]
-
-[[package]]
-name = "air-parser"
-version = "0.1.0"
-dependencies = [
- "air-core",
- "serde_json",
- "serde_yaml",
- "thiserror 1.0.69",
 ]
 
 [[package]]
@@ -196,9 +160,6 @@ dependencies = [
 name = "air-runtime"
 version = "0.1.0"
 dependencies = [
- "air-core",
- "air-parser",
- "air-verify",
  "serde",
  "serde_json",
  "thiserror 1.0.69",
@@ -214,7 +175,6 @@ version = "0.1.0"
 dependencies = [
  "air-advisory",
  "air-code-artifact",
- "air-linker",
  "air-runtime",
  "air-schemas",
  "air-skill-runtime",
@@ -240,7 +200,6 @@ dependencies = [
 name = "air-tools"
 version = "0.1.0"
 dependencies = [
- "air-core",
  "air-runtime",
  "air-skill-runtime",
  "air-tools-core",
@@ -261,16 +220,6 @@ dependencies = [
  "globset",
  "serde",
  "serde_json",
-]
-
-[[package]]
-name = "air-verify"
-version = "0.1.0"
-dependencies = [
- "air-core",
- "air-parser",
- "serde_json",
- "serde_yaml",
 ]
 
 [[package]]

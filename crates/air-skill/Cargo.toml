@@ -11,7 +11,6 @@ path = "src/lib.rs"
 [dependencies]
 air-advisory = { path = "../air-advisory" }
 air-code-artifact = { path = "../air-code-artifact" }
-air-linker = { path = "../air-linker" }
 air-runtime = { path = "../air-runtime" }
 air-schemas = { path = "../air-schemas" }
 air-skill-runtime = { path = "../air-skill-runtime" }

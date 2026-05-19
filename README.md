@@ -2,7 +2,7 @@
 
 **Bounded code agents with auditable traces, composable skills, and runtime-enforced safety.**
 
-AIR is a Rust runtime for coding agents that optimizes for **what you can verify after the agent runs**, not for how much freedom the agent has during execution. Agents are declarative state machines in `.air.yaml`; the VM enforces tool constraints, verification gates, and context budgets; traces record everything that happened.
+AIR is a Rust runtime for coding agents that optimizes for **what you can verify after the agent runs**, not for how much freedom the agent has during execution. The product executor is a native Rust loop selected by skill profiles; it enforces tool boundaries, verification gates, workspace-change checks, and trace capture directly in typed Rust code.
 
 ## Why AIR
 
@@ -14,25 +14,23 @@ The core insight: **context window is scarce, model self-assessment is unreliabl
 | Agent reads entire files, blows context | `read_range` / `read_contains` — bounded reads only, no unscoped access |
 | Verification commands silently edit files | Workspace snapshots detect file changes; verification that mutates workspace does not count as passed |
 | One agent must handle everything | Skill routing picks the right instruction set per task; skills compose on one executor |
-| Tool permissions are hints to the model | `allowed_tools` on `tool_batch_dispatch` is enforced at runtime, not in the prompt |
+| Tool permissions are hints to the model | Native loop tool sets are enforced before each tool call, not left to prompt compliance |
 | Long runs are opaque | JSONL traces, code-run artifacts, sub-agent trace/output, markdown bench reports |
 
 ## Status
 
-AIR is a local compiler/runtime prototype. The native Rust VM is the reference runtime.
+AIR is a local native-loop runtime prototype.
 
 | Feature | Status |
 | --- | --- |
-| Typed state-machine AIR modules | Supported |
-| Bounded tool dispatch with runtime-enforced `allowed_tools` | Supported |
+| Native Rust code-edit/explore/project-scout/review/bench loops | Supported |
+| Bounded tool dispatch with runtime-enforced loop tool sets | Supported |
 | `CodeRunVerdict` — trace-derived pass/fail/verification/patch/constraints | Supported |
 | Skill routing, composition, and instruction/executor separation | Supported |
 | Workspace change detection (bash/command snapshots) | Supported |
 | Project orchestrator with per-task DAG, worktree isolation, skills, constraints | Supported |
 | Sub-agent observability (`.air/subagents/` trace + output) | Supported |
 | Benchmark suite with `--report` markdown output and skill comparison | Supported |
-| `_air` runtime namespace protection | Supported |
-| RunPlan module composition, dynamic fan-out/fan-in, checkpoint/resume | Supported |
 | Trace redaction and sensitive-field policy | Supported |
 
 ## Quick Start
@@ -643,101 +641,20 @@ This replaces trusting the model's self-reported `final_success`. If the trace s
 
 The `task` tool launches isolated exploration sub-agents. Each sub-agent writes its own trace, output, and artifacts under `.air/subagents/task-{timestamp}/`. The parent trace records child paths and metrics (model calls, tool calls, errors) without embedding the full child output, keeping the parent context compact.
 
-## Low-Level AIR Module (Advanced)
+## Native Loops
 
-Most users should start from skills. AIR modules are the lower-level typed IR that executor skills and advanced workflows compile to or run directly:
-
-```yaml
-agent:
-  name: helpdesk-rag-agent
-  version: 0.1.0
-
-inputs:
-  question: string
-
-outputs:
-  answer:
-    type: object
-    required: [answer, citations, escalation_required]
-
-requires:
-  capabilities: [retrieval.local]
-
-tools:
-  - name: docs.search
-    capability: retrieval.local
-
-workflow:
-  kind: state_machine
-  initial: init
-  max_steps: 8
-  rules:
-    - id: retrieve
-      when: phase == "retrieve"
-      actions:
-        - kind: tool_call
-          tool: docs.search
-          input: { object: { query: { ref: question } } }
-          output: retrieved
-        - kind: set
-          values: { phase: answer }
-
-    - id: answer
-      when: phase == "answer"
-      actions:
-        - kind: model_call
-          model: rag_answerer
-          input: { object: { question: { ref: question }, retrieved: { ref: retrieved } } }
-          output: answer
-        - kind: set
-          values: { phase: done }
-```
-
-## RunPlan Composition
-
-A RunPlan links modules into an application:
-
-```yaml
-plan:
-  name: simple-helpdesk
-  version: 0.1.0
-
-requires:
-  capabilities: [retrieval.local]
-
-nodes:
-  - id: helpdesk
-    module: helpdesk.rag@0.1.0
-
-entry: helpdesk
-
-connect:
-  - from: $input.question
-    to: helpdesk.question
-
-outputs:
-  answer: helpdesk.answer
-```
-
-Module-level `workflow.kind: dag` is a linkable composition contract for the
-verifier and system/linker layer. The native VM executes `state_machine`
-modules directly; DAG execution should be materialized as a RunPlan or
-AirSystem. `air verify` emits warning `AIR029` when a module declares a DAG so
-that this boundary is visible before runtime.
+AIR's product path is native Rust loops. The default coding executor is selected
+by `skills/code-agent/edit.air-profile.yaml` and runs the typed Rust `code-edit`
+loop:
 
 ```bash
-cargo run -p air-cli -- dev validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml
-cargo run -p air-cli -- dev run-plan --profile examples/simple-helpdesk/profile.air-profile.yaml --log
+cargo run -p air-cli -- run "fix the failing add function and retest" --mode code
 ```
 
-## Deep Research
-
-Deep research demonstrates multi-agent workflows with clarification, dynamic fan-out/fan-in, nested fan-out, parallel execution, checkpoint/resume, and JIT hot-path specialization:
-
-```bash
-cargo run -p air-cli -- dev validate-plan --profile examples/deep-research/profile.air-profile.yaml
-cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml --parallel
-```
+Read-only exploration, review, bench, and project-scout use the same native loop
+runner with different tool boundaries. The old linker/state-machine
+stack was removed because the skill-centered product is easier to reason about
+when the agent loop is ordinary Rust.
 
 ## CLI Surface
 
@@ -758,11 +675,10 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | Experimental | `self ...` | Create, generate, capture, and compare candidate improvements |
 | Experimental | `eval ...` | Pin and verify evaluation corpus integrity |
 | Experimental | `project ...` | Bounded multi-task project orchestration |
-| Experimental | `dev ...` | Advanced AIR IR/runtime tools |
+| Experimental | `dev replay` | Inspect trace output and aggregate trace stats |
 
-Lower-level IR commands live under `air dev` (`dev validate-plan`,
-`dev make-plan`, `dev run-plan`, `dev resume-plan`, `dev replay`, and
-`dev run-module`). The public workflow should start from `air run`.
+The public workflow should start from `air run`; `air dev native-loop` exists
+for deterministic harnesses and sub-agent launchers.
 
 ## Verification
 
@@ -772,15 +688,9 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
-## Documentation
-
-- [AIR User Guide](docs/user_guide.md)
-- [Condition DSL](docs/condition_dsl.md)
-- [Open Deep Research Migration Notes](docs/open_deep_research_migration.md)
-
 ## Roadmap
 
-- [ ] **Whole-program compilation (merge + flatten).** Flatten a multi-module plan into a single state machine with unified state schema, resolved field names, and merged policies. Analogous to LLVM LTO: separate compilation for development, whole-program compilation for output.
+- [ ] **Native loop hardening.** Keep code-edit/explore/project-scout/review/bench as typed Rust loops with direct tests for transitions, verification gates, and tool boundaries.
 - [ ] **Skill registry and governance.** A publish/install system for sharing audited AIR skill packages with capability, route, benchmark, and provenance metadata.
 - [ ] **Schema conformance testing.** A lightweight test harness that calls real LLMs but only validates output structure against the declared AIR schema — no assertion on specific content.
 - [ ] **Multi-executor skill routing.** Support multiple executor skills (not just `code-agent`) so the router can choose between entirely different agent architectures.

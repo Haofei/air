@@ -1,6 +1,6 @@
 use crate::code_agent::{run_code_agent, CodeOptions};
 use crate::models::ModelProviderChoice;
-use crate::run_plan::{run_plan_capture, RunPlanOptions};
+use crate::native_loop::run_native_project_scout;
 use crate::skill::{
     prepare_skill_composition, resolve_skill_run_metadata, route_skills_value_for_task,
 };
@@ -114,32 +114,14 @@ fn project_explorer_handoff(goal: &str, repo_root: &Path, model_config: &Path) -
     if let Some(parent) = trace_path.parent() {
         fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
-    let mut input = serde_json::Map::new();
-    input.insert(
-        "task".to_string(),
-        Value::String(project_scout_prompt(goal)),
-    );
-    let profile = repo_root.join(DEFAULT_PROJECT_SCOUT_PROFILE);
+    let tool_config = repo_root.join("skills/code-agent/tools.explore.json");
     let output = with_current_dir(repo_root, || {
-        run_plan_capture(RunPlanOptions {
-            plan: None,
-            profile: Some(profile),
-            store: None,
-            input: None,
-            input_values: Some(input),
-            model_config: Some(model_config.to_path_buf()),
-            trace_out: Some(trace_path.clone()),
-            trace_redact: false,
-            trace_raw: true,
-            state_out: None,
-            checkpoint_out: None,
-            jit_cache: None,
-            parallel: false,
-            log: false,
-            example_tools: false,
-            tool_config: None,
-            model_replay: None,
-        })
+        run_native_project_scout(
+            project_scout_prompt(goal),
+            model_config.to_path_buf(),
+            tool_config,
+            trace_path.clone(),
+        )
     })
     .context("run project scout")?;
     Ok(project_explorer_handoff_value(&trace_path, &output))
@@ -1831,18 +1813,18 @@ mod tests {
         };
         let task = ProjectTask {
             id: "task_001".to_string(),
-            goal: "change parser".to_string(),
+            goal: "change native loop".to_string(),
             depends_on: Vec::new(),
             skills: vec!["tdd-workflow".to_string()],
-            allowed_files: vec!["crates/air-parser/**".to_string()],
+            allowed_files: vec!["crates/air-cli/src/native_loop.rs".to_string()],
             forbidden_files: vec!["target/**".to_string()],
             verification: vec![ProjectVerificationCommand {
-                command: "cargo test -p air-parser".to_string(),
+                command: "cargo test -p air-cli native_loop".to_string(),
                 description: None,
             }],
             success_conditions: ProjectSuccessConditions {
-                required_changed_files: vec!["crates/air-parser/src/lib.rs".to_string()],
-                required_diff_contains: vec!["parse_helper".to_string()],
+                required_changed_files: vec!["crates/air-cli/src/native_loop.rs".to_string()],
+                required_diff_contains: vec!["VerificationStatus".to_string()],
             },
             max_changed_files: None,
             max_diff_lines: None,
@@ -1852,9 +1834,9 @@ mod tests {
         assert!(prompt.contains("Project goal: ship feature"));
         assert!(prompt.contains("tdd-workflow"));
         assert!(prompt.contains("Only modify files allowed by this task"));
-        assert!(prompt.contains("crates/air-parser/**"));
-        assert!(prompt.contains("cargo test -p air-parser"));
-        assert!(prompt.contains("parse_helper"));
+        assert!(prompt.contains("crates/air-cli/src/native_loop.rs"));
+        assert!(prompt.contains("cargo test -p air-cli native_loop"));
+        assert!(prompt.contains("VerificationStatus"));
     }
 
     #[test]
