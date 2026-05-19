@@ -3282,6 +3282,18 @@ fn code_agent_self_tools_validate_project_paths() {
     assert_eq!(tools.tool_capability("todowrite"), Some("code.read"));
     assert_eq!(tools.tool_capability("todoread"), Some("code.read"));
     assert_eq!(tools.tool_capability("skill"), Some("code.read"));
+    let edit_info = tools.tool_runtime_info("edit").unwrap();
+    assert_eq!(edit_info.permission_profile, "workspace_write");
+    assert!(edit_info.mutates_workspace);
+    assert!(!edit_info.accepts_empty_input);
+    assert_eq!(edit_info.output_policy, "diff_summary_with_artifact_refs");
+
+    let read_info = tools.tool_runtime_info("read_range").unwrap();
+    assert_eq!(read_info.permission_profile, "read_only");
+    assert!(read_info.parallel_safe);
+
+    let todoread_info = tools.tool_runtime_info("todoread").unwrap();
+    assert!(todoread_info.accepts_empty_input);
 
     let error = tools
         .call_tool("bash", &json!({"description": "missing command"}))

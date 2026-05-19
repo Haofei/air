@@ -242,6 +242,8 @@ fn compact_tool_result_context(object: &Map<String, Value>) -> Value {
         "tool",
         "status",
         "error_code",
+        "error_kind",
+        "recoverable",
         "permission",
         "message",
         "_air_tool_call_id",
@@ -323,6 +325,7 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
         "full_log_path",
         "full_output_path",
         "truncation_hint",
+        "artifactized",
         "content_format",
         "unscoped_read",
         "changed_files",
@@ -343,6 +346,12 @@ fn compact_tool_output_context(object: &Map<String, Value>) -> Value {
             "artifact_refs".to_string(),
             compact_artifact_refs(artifacts),
         );
+    }
+    if object.get("full_log_path").is_some()
+        || object.get("full_output_path").is_some()
+        || object.get("artifacts").is_some()
+    {
+        compact.insert("artifactized".to_string(), Value::Bool(true));
     }
     if compact.is_empty() {
         compact_model_context_value(&Value::Object(object.clone()))
@@ -395,8 +404,16 @@ fn compact_subagent_output_context(object: &Map<String, Value>) -> Value {
         "truncation_hint",
         "title",
         "subagent_type",
+        "child_trace_path",
+        "child_output_path",
     ] {
         copy_context_field(&mut compact, object, field);
+    }
+    if let Some(job) = object.get("job") {
+        compact.insert("job".to_string(), compact_model_context_value(job));
+    }
+    if let Some(metrics) = object.get("metrics") {
+        compact.insert("metrics".to_string(), compact_model_context_value(metrics));
     }
     if let Some(output) = object.get("output").and_then(Value::as_str) {
         compact.insert(

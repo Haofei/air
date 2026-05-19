@@ -1,5 +1,5 @@
 use crate::ConfigTools;
-use air_runtime::{ApprovalDecision, RuntimeError, ToolProvider};
+use air_runtime::{ApprovalDecision, RuntimeError, ToolProvider, ToolRuntimeInfo};
 use anyhow::Result;
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -14,6 +14,18 @@ impl ToolProvider for EchoTools {
             "tool": name,
             "input": input
         }))
+    }
+
+    fn tool_runtime_info(&self, name: &str) -> Option<ToolRuntimeInfo> {
+        Some(ToolRuntimeInfo {
+            capability: None,
+            permission_profile: "echo".to_string(),
+            mutates_workspace: false,
+            network_access: false,
+            accepts_empty_input: name == "todoread",
+            parallel_safe: true,
+            output_policy: "compact_for_model".to_string(),
+        })
     }
 }
 
@@ -63,6 +75,13 @@ impl ToolProvider for ToolProviderChoice {
         match self {
             ToolProviderChoice::Echo(provider) => provider.tool_capability(name),
             ToolProviderChoice::Config(provider) => provider.tool_capability(name),
+        }
+    }
+
+    fn tool_runtime_info(&self, name: &str) -> Option<ToolRuntimeInfo> {
+        match self {
+            ToolProviderChoice::Echo(provider) => provider.tool_runtime_info(name),
+            ToolProviderChoice::Config(provider) => provider.tool_runtime_info(name),
         }
     }
 

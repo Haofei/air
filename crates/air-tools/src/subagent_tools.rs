@@ -102,6 +102,10 @@ pub(super) fn call_subagent_tool(
         .iter()
         .map(|part| render_subagent_arg(name, part, input, &run_paths, config_dir))
         .collect::<Result<Vec<_>, _>>()?;
+    let started_at_unix_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis())
+        .unwrap_or(0);
     let mut output = run_command_argv(
         name,
         subagent_type,
@@ -117,6 +121,19 @@ pub(super) fn call_subagent_tool(
     persist_subagent_output(name, &run_paths.output_file, &output)?;
     if let Some(object) = output.as_object_mut() {
         normalize_subagent_command_output(object);
+        let status = if object
+            .get("success")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+        {
+            "completed"
+        } else {
+            "failed"
+        };
+        let trace_metrics = run_paths
+            .trace_file
+            .exists()
+            .then(|| subagent_trace_metrics(&run_paths.trace_file));
         object.insert("title".to_string(), Value::String(description.to_string()));
         object.insert(
             "subagent_type".to_string(),
@@ -133,6 +150,28 @@ pub(super) fn call_subagent_tool(
         object.insert(
             "child_output_path".to_string(),
             Value::String(run_paths.output_file.display().to_string()),
+        );
+        object.insert(
+            "job".to_string(),
+            json!({
+                "id": run_paths
+                    .dir
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("subagent")
+                    .to_string(),
+                "status": status,
+                "subagent_type": subagent_type,
+                "timeout_seconds": options.timeout_seconds,
+                "started_at_unix_ms": started_at_unix_ms,
+                "command": argv,
+                "input_file": run_paths.input_file.display().to_string(),
+                "output_file": run_paths.output_file.display().to_string(),
+                "trace_file": run_paths.trace_file.display().to_string(),
+                "artifact_dir": run_paths.artifact_dir.display().to_string(),
+                "handoff_contract": profile.output_contract.is_some(),
+                "metrics": trace_metrics,
+            }),
         );
         if run_paths.trace_file.exists() {
             object.insert(

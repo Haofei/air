@@ -1,6 +1,7 @@
 use air_backend_openai::{OpenAiCompatibleConfig, OpenAiCompatibleModelProvider};
 use air_runtime::{
-    read_trace_jsonl, ModelProvider, ModelRequestStats, RuntimeError, TraceEvent, TraceStatus,
+    read_trace_jsonl, ModelProvider, ModelRequestStats, ModelRuntimeInfo, RuntimeError, TraceEvent,
+    TraceStatus,
 };
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -19,6 +20,13 @@ impl ModelProvider for EchoModels {
             "model": name,
             "input": input
         }))
+    }
+
+    fn model_runtime_info(&self, _name: &str) -> Option<ModelRuntimeInfo> {
+        Some(ModelRuntimeInfo {
+            provider: "echo".to_string(),
+            ..ModelRuntimeInfo::default()
+        })
     }
 }
 
@@ -56,6 +64,13 @@ impl ModelProvider for FixtureModels {
                 Ok(value)
             }
         }
+    }
+
+    fn model_runtime_info(&self, _name: &str) -> Option<ModelRuntimeInfo> {
+        Some(ModelRuntimeInfo {
+            provider: "fixture".to_string(),
+            ..ModelRuntimeInfo::default()
+        })
     }
 }
 
@@ -183,6 +198,15 @@ impl ModelProvider for ModelProviderChoice {
             ModelProviderChoice::Replay(provider) => provider.take_last_request_stats(),
         }
     }
+
+    fn model_runtime_info(&self, name: &str) -> Option<ModelRuntimeInfo> {
+        match self {
+            ModelProviderChoice::Echo(provider) => provider.model_runtime_info(name),
+            ModelProviderChoice::Fixture(provider) => provider.model_runtime_info(name),
+            ModelProviderChoice::OpenAi(provider) => provider.model_runtime_info(name),
+            ModelProviderChoice::Replay(provider) => provider.model_runtime_info(name),
+        }
+    }
 }
 
 impl ModelProvider for ReplayModels {
@@ -231,6 +255,10 @@ impl ModelProvider for ReplayModels {
 
     fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
         self.last_request_stats.take()
+    }
+
+    fn model_runtime_info(&self, name: &str) -> Option<ModelRuntimeInfo> {
+        self.live.model_runtime_info(name)
     }
 }
 

@@ -2801,8 +2801,38 @@ mod tests {
                 "glob",
                 "read_contains",
                 "read_range",
-                "edit"
+                "edit",
+                "task"
             ])
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["runtime"]["max_steps"],
+            json!(220)
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["edit_progress"]["verification_status"],
+            json!("unknown")
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["completion_policy"]["requires_edit"],
+            json!(true)
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["runtime"]["remaining_steps"],
+            json!(219)
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["context_policy"]["builder"],
+            json!("air.native.model_context.v1")
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["tool_capabilities"]["edit"]
+                ["permission_profile"],
+            json!("workspace_write")
+        );
+        assert_eq!(
+            first_decider.input.as_ref().unwrap()["model_runtime"]["strict_tool_schema"],
+            json!(false)
         );
 
         let _ = fs::remove_file(trace_path);

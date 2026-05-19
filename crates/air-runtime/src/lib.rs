@@ -39,6 +39,75 @@ pub struct ApprovalDecision {
     pub metadata: Option<Value>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolRuntimeInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capability: Option<String>,
+    pub permission_profile: String,
+    pub mutates_workspace: bool,
+    pub network_access: bool,
+    pub accepts_empty_input: bool,
+    pub parallel_safe: bool,
+    pub output_policy: String,
+}
+
+impl ToolRuntimeInfo {
+    pub fn generic(capability: Option<&str>) -> Self {
+        Self {
+            capability: capability.map(str::to_string),
+            permission_profile: capability
+                .map(permission_profile_from_capability)
+                .unwrap_or("unknown")
+                .to_string(),
+            mutates_workspace: capability
+                .is_some_and(|value| value.contains("write") || value.contains("edit")),
+            network_access: capability.is_some_and(|value| value.contains("network")),
+            accepts_empty_input: false,
+            parallel_safe: false,
+            output_policy: "compact_for_model".to_string(),
+        }
+    }
+}
+
+fn permission_profile_from_capability(capability: &str) -> &'static str {
+    if capability.contains("write") || capability.contains("edit") {
+        "workspace_write"
+    } else if capability.contains("test") || capability.contains("exec") {
+        "command_exec"
+    } else if capability.contains("network") || capability.contains("web") {
+        "network"
+    } else if capability.contains("read") {
+        "read_only"
+    } else {
+        "custom"
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ModelRuntimeInfo {
+    pub provider: String,
+    pub native_tool_calls: bool,
+    pub strict_tool_schema: bool,
+    pub parallel_tool_calls: bool,
+    pub stable_stream_tool_indices: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_context_bytes: Option<usize>,
+}
+
+impl Default for ModelRuntimeInfo {
+    fn default() -> Self {
+        Self {
+            provider: "unknown".to_string(),
+            native_tool_calls: false,
+            strict_tool_schema: false,
+            parallel_tool_calls: false,
+            stable_stream_tool_indices: true,
+            max_context_bytes: None,
+        }
+    }
+}
+
 impl ApprovalDecision {
     pub fn approved(approver: impl Into<String>, reason: impl Into<String>) -> Self {
         Self {
@@ -75,6 +144,11 @@ pub trait ToolProvider {
         None
     }
 
+    fn tool_runtime_info(&self, name: &str) -> Option<ToolRuntimeInfo> {
+        self.tool_capability(name)
+            .map(|capability| ToolRuntimeInfo::generic(Some(capability)))
+    }
+
     fn request_approval(
         &mut self,
         module: &str,
@@ -101,6 +175,10 @@ pub trait ModelProvider {
     }
 
     fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
+        None
+    }
+
+    fn model_runtime_info(&self, _name: &str) -> Option<ModelRuntimeInfo> {
         None
     }
 }

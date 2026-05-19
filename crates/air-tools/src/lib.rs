@@ -1,4 +1,4 @@
-use air_runtime::{ApprovalDecision, RuntimeError, ToolProvider};
+use air_runtime::{ApprovalDecision, RuntimeError, ToolProvider, ToolRuntimeInfo};
 use air_tools_core::json_template::{render_json_template, render_json_template_value};
 use air_tools_core::text::{bytes_to_limited_text, merge_line_ranges, numbered_line_range};
 use air_tools_core::TruncationDirection;
@@ -580,6 +580,84 @@ impl ToolConfig {
             | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
+    }
+
+    fn runtime_info(&self) -> ToolRuntimeInfo {
+        let capability = self.capability().map(str::to_string);
+        let mut info = ToolRuntimeInfo::generic(self.capability());
+        info.capability = capability;
+        match self {
+            ToolConfig::LocalDocsSearch { .. }
+            | ToolConfig::LocalReflection { .. }
+            | ToolConfig::FileRead { .. }
+            | ToolConfig::FileReadMany { .. }
+            | ToolConfig::FileSearch { .. }
+            | ToolConfig::RepoFiles { .. }
+            | ToolConfig::RepoSearch { .. }
+            | ToolConfig::RepoContext { .. }
+            | ToolConfig::RepoSymbols { .. }
+            | ToolConfig::RepoReferences { .. }
+            | ToolConfig::RustAnalyzerReferences { .. }
+            | ToolConfig::RustAnalyzerDiagnostics { .. }
+            | ToolConfig::RustAnalyzer { .. }
+            | ToolConfig::Skill { .. }
+            | ToolConfig::ArtifactValidate { .. } => {
+                info.permission_profile = "read_only".to_string();
+                info.parallel_safe = true;
+            }
+            ToolConfig::HttpJson { .. }
+            | ToolConfig::WebFetch { .. }
+            | ToolConfig::Mcp { .. }
+            | ToolConfig::PlaywrightSearch { .. }
+            | ToolConfig::PlaywrightPageAudit { .. } => {
+                info.permission_profile = "network".to_string();
+                info.network_access = true;
+                info.parallel_safe = false;
+            }
+            ToolConfig::FileWrite { .. }
+            | ToolConfig::FileEdit { .. }
+            | ToolConfig::ApplyPatch { .. } => {
+                info.permission_profile = "workspace_write".to_string();
+                info.mutates_workspace = true;
+                info.parallel_safe = false;
+            }
+            ToolConfig::Bash { .. } | ToolConfig::CommandRun { .. } => {
+                info.permission_profile = "command_exec".to_string();
+                info.mutates_workspace = true;
+                info.parallel_safe = false;
+            }
+            ToolConfig::TodoWrite { .. } => {
+                info.permission_profile = "agent_state".to_string();
+                info.parallel_safe = false;
+            }
+            ToolConfig::ContextMeasure { .. } | ToolConfig::Subagent { .. } => {
+                info.permission_profile = "agent_runtime".to_string();
+                info.parallel_safe = false;
+            }
+        }
+        info.accepts_empty_input = matches!(self, ToolConfig::LocalReflection { .. });
+        info.output_policy = match self {
+            ToolConfig::Bash { .. } | ToolConfig::CommandRun { .. } => {
+                "head_tail_with_full_log_artifact".to_string()
+            }
+            ToolConfig::FileRead { .. }
+            | ToolConfig::FileReadMany { .. }
+            | ToolConfig::FileSearch { .. }
+            | ToolConfig::RepoSearch { .. }
+            | ToolConfig::RepoContext { .. }
+            | ToolConfig::WebFetch { .. }
+            | ToolConfig::Mcp { .. }
+            | ToolConfig::PlaywrightSearch { .. }
+            | ToolConfig::PlaywrightPageAudit { .. } => {
+                "bounded_preview_with_artifact_refs".to_string()
+            }
+            ToolConfig::FileWrite { .. }
+            | ToolConfig::FileEdit { .. }
+            | ToolConfig::ApplyPatch { .. } => "diff_summary_with_artifact_refs".to_string(),
+            ToolConfig::Subagent { .. } => "handoff_summary_with_child_trace".to_string(),
+            _ => "compact_for_model".to_string(),
+        };
+        info
     }
 }
 
@@ -1298,6 +1376,10 @@ impl ToolProvider for ConfigTools {
             | ToolConfig::Bash { capability, .. }
             | ToolConfig::CommandRun { capability, .. } => capability.as_deref(),
         }
+    }
+
+    fn tool_runtime_info(&self, name: &str) -> Option<ToolRuntimeInfo> {
+        self.tools.get(name).map(ToolConfig::runtime_info)
     }
 
     fn request_approval(

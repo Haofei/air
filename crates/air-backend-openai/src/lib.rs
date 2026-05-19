@@ -1,6 +1,6 @@
 use air_runtime::{
     sanitize_trace_text, truncate_middle_context_string, ModelProvider, ModelRequestStats,
-    RuntimeError, TraceWriteOptions,
+    ModelRuntimeInfo, RuntimeError, TraceWriteOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -16,9 +16,9 @@ const DEFAULT_OPENAI_API_KEY_ENV: &str = "OPENAI_API_KEY";
 const DEFAULT_OPENAI_BASE_URL_ENV: &str = "OPENAI_BASE_URL";
 const DEFAULT_OPENAI_MODEL_ENV: &str = "OPENAI_MODEL";
 const OPENCODE_QWEN_PROMPT_MARKER: &str = "opencode:qwen";
-const OPENCODE_QWEN_PROMPT: &str = r##"You are OpenCode, the best coding agent on the planet.
+const OPENCODE_QWEN_PROMPT: &str = r##"You are AIR, a pragmatic software engineering agent running in a CLI.
 
-You are an interactive CLI tool that helps users with software engineering tasks. Use the instructions below and the tools available to you to assist the user.
+Use the available tools to inspect, edit, and verify the user's software task. Prefer direct progress over asking questions; ask only when repository context cannot resolve an ambiguity safely.
 
 ## Editing constraints
 - Default to ASCII when editing or creating files. Only introduce non-ASCII or other Unicode characters when there is a clear justification and the file already uses them.
@@ -26,6 +26,9 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Try to use apply_patch for single file edits when that tool is available, but it is fine to explore other options to make the edit if it does not work well. Do not use apply_patch for changes that are auto-generated (i.e. generating package.json or running a lint or format command like gofmt) or when scripting is more efficient (such as search and replacing a string across a codebase).
 
 ## Tool usage
+- Tool descriptions include an Input signature. Treat that signature as the source of truth for required and optional arguments.
+- Every tool call must be immediately executable. For tools that list required parameters, provide complete, concrete arguments. Never call a tool that has required parameters with `{}` or missing required fields. Tool calls are not placeholders, TODOs, reservations, or intent signals.
+- Only use `{}` for a tool whose Input signature is exactly `tool(args: {})`. If you do not know every required argument for a tool, use Grep, Glob, Read, or LSP to gather missing information first.
 - Prefer locator tools before inspecting file spans:
   - Use Grep to search file contents, Glob to find files by name, and LSP to inspect known symbols/references.
   - Use Glob first when you only know a file path or name; it reports line counts and byte sizes without loading contents.
@@ -34,8 +37,6 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - Use Task for open-ended codebase exploration that would otherwise require multiple rounds of searching and span inspection.
 - Use Bash for terminal operations (git, bun, builds, tests, running scripts).
 - Run tool calls in parallel when neither call needs the other's output; otherwise run sequentially.
-- Every tool call must be immediately executable. For tools that list required parameters, provide complete, concrete arguments. Never call a tool that has required parameters with `{}` or missing required fields. Tool calls are not placeholders, TODOs, reservations, or intent signals.
-- Only use `{}` for a tool whose schema or description explicitly says it takes no parameters. If you do not know every required argument for a tool, do not call that tool. Use Grep, Glob, Read, or LSP to gather missing information first.
 - For Edit, only call the tool when filePath, exact oldString, and newString are all known. oldString must be copied from observed file content. Do not emit speculative or placeholder Edit calls. Only batch edits when every edit is fully specified.
 
 ## Git and workspace hygiene
@@ -48,16 +49,8 @@ You are an interactive CLI tool that helps users with software engineering tasks
 - **NEVER** use destructive commands like `git reset --hard` or `git checkout --` unless specifically requested or approved by the user.
 
 ## Frontend tasks
-When doing frontend design tasks, avoid collapsing into bland, generic layouts.
-Aim for interfaces that feel intentional and deliberate.
-- Typography: Use expressive, purposeful fonts and avoid default stacks (Inter, Roboto, Arial, system).
-- Color & Look: Choose a clear visual direction; define CSS variables; avoid purple-on-white defaults. No purple bias or dark mode bias.
-- Motion: Use a few meaningful animations (page-load, staggered reveals) instead of generic micro-motions.
-- Background: Don't rely on flat, single-color backgrounds; use gradients, shapes, or subtle patterns to build atmosphere.
-- Overall: Avoid boilerplate layouts and interchangeable UI patterns. Vary themes, type families, and visual languages across outputs.
-- Ensure the page loads properly on both desktop and mobile.
-
-Exception: If working within an existing website or design system, preserve the established patterns, structure, and visual language.
+- Preserve the application's existing design system, component patterns, and visual language unless the user explicitly asks for a redesign.
+- Build the actual usable interface first, not a marketing shell. Verify meaningful frontend changes on desktop and mobile when a local app can run.
 
 ## Presenting your work and final message
 
@@ -373,6 +366,21 @@ impl ModelProvider for OpenAiCompatibleModelProvider {
     fn take_last_request_stats(&mut self) -> Option<ModelRequestStats> {
         self.last_request_stats.take()
     }
+
+    fn model_runtime_info(&self, name: &str) -> Option<ModelRuntimeInfo> {
+        let model_config = self.config.models.get(name)?;
+        let native_tool_calls = model_config.native_tool_calls == Some(true);
+        Some(ModelRuntimeInfo {
+            provider: "openai-compatible".to_string(),
+            native_tool_calls,
+            strict_tool_schema: native_tool_calls,
+            parallel_tool_calls: true,
+            // Some compatible providers omit `index` on continuation chunks, so
+            // AIR keeps stream assembly tolerant and surfaces this in context.
+            stable_stream_tool_indices: false,
+            max_context_bytes: None,
+        })
+    }
 }
 
 fn provider_error(error: impl std::fmt::Display) -> RuntimeError {
@@ -511,6 +519,7 @@ where
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls: BTreeMap<usize, StreamToolCall> = BTreeMap::new();
+    let mut last_tool_call_index: Option<usize> = None;
 
     for line in lines {
         let line = line.map_err(provider_error)?;
@@ -546,7 +555,13 @@ where
                 .into_iter()
                 .flatten()
             {
-                let index = call.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                let index = call
+                    .get("index")
+                    .and_then(Value::as_u64)
+                    .map(|index| index as usize)
+                    .or(last_tool_call_index)
+                    .unwrap_or(0);
+                last_tool_call_index = Some(index);
                 let entry = tool_calls.entry(index).or_default();
                 if let Some(id) = call.get("id").and_then(Value::as_str) {
                     entry.id.push_str(id);
@@ -911,14 +926,20 @@ fn attach_native_tool_calls(
         let safe_name = safe_openai_tool_name(&original_name, &mut used_names);
         tool_name_map.insert(safe_name.clone(), original_name.clone());
         let schema = tool_schemas.and_then(|schemas| schemas.get(&original_name));
+        let parameters = native_tool_parameters(&original_name, schema);
+        let description =
+            native_tool_description(&original_name, &safe_name, schema, input, &parameters);
+        let parameters = if opencode_style {
+            openai_strict_tool_parameters(parameters)
+        } else {
+            parameters
+        };
         let mut function = json!({
             "name": safe_name,
-            "description": native_tool_description(&original_name, schema, input),
-            "parameters": native_tool_parameters(&original_name, schema)
+            "description": description,
+            "parameters": parameters
         });
-        if !opencode_style {
-            function["strict"] = json!(false);
-        }
+        function["strict"] = json!(opencode_style);
         tools.push(json!({
             "type": "function",
             "function": function
@@ -938,6 +959,129 @@ fn attach_native_tool_calls(
     body.insert("tool_choice".to_string(), json!("auto"));
 
     Ok(tool_name_map)
+}
+
+fn openai_strict_tool_parameters(mut parameters: Value) -> Value {
+    normalize_openai_strict_schema(&mut parameters);
+    parameters
+}
+
+fn normalize_openai_strict_schema(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+
+    object.remove("$schema");
+    object.remove("default");
+    object.remove("ref");
+    object.remove("$ref");
+
+    if object.get("type").and_then(Value::as_str) == Some("object")
+        || object.get("properties").is_some()
+    {
+        object
+            .entry("additionalProperties".to_string())
+            .or_insert(Value::Bool(false));
+        object.insert("additionalProperties".to_string(), Value::Bool(false));
+
+        let original_required_names = object
+            .get("required")
+            .and_then(Value::as_array)
+            .map(|required| {
+                required
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let originally_required = original_required_names
+            .iter()
+            .cloned()
+            .collect::<std::collections::BTreeSet<_>>();
+
+        let mut property_names = Vec::new();
+        if let Some(properties) = object.get_mut("properties").and_then(Value::as_object_mut) {
+            property_names.extend(
+                original_required_names
+                    .into_iter()
+                    .filter(|name| properties.contains_key(name)),
+            );
+            let mut optional_names = properties
+                .keys()
+                .filter(|name| !originally_required.contains(*name))
+                .cloned()
+                .collect::<Vec<_>>();
+            optional_names.sort();
+            property_names.extend(optional_names);
+
+            for (name, property) in properties {
+                normalize_openai_strict_schema(property);
+                if !originally_required.contains(name) {
+                    make_schema_nullable(property);
+                }
+            }
+        } else {
+            property_names = object
+                .get("required")
+                .and_then(Value::as_array)
+                .map(|required| {
+                    required
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(str::to_string)
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
+        object.insert(
+            "required".to_string(),
+            Value::Array(property_names.into_iter().map(Value::String).collect()),
+        );
+    }
+
+    if let Some(items) = object.get_mut("items") {
+        normalize_openai_strict_schema(items);
+    }
+    for key in ["anyOf", "oneOf", "allOf"] {
+        if let Some(items) = object.get_mut(key).and_then(Value::as_array_mut) {
+            for item in items {
+                normalize_openai_strict_schema(item);
+            }
+        }
+    }
+}
+
+fn make_schema_nullable(schema: &mut Value) {
+    let Some(object) = schema.as_object_mut() else {
+        return;
+    };
+    match object.get_mut("type") {
+        Some(Value::String(kind)) if kind != "null" => {
+            let kind = std::mem::take(kind);
+            object.insert(
+                "type".to_string(),
+                Value::Array(vec![Value::String(kind), Value::String("null".to_string())]),
+            );
+        }
+        Some(Value::Array(kinds)) => {
+            if !kinds.iter().any(|kind| kind.as_str() == Some("null")) {
+                kinds.push(Value::String("null".to_string()));
+            }
+        }
+        Some(_) => {}
+        None => {
+            object.insert(
+                "type".to_string(),
+                json!(["string", "number", "boolean", "object", "array", "null"]),
+            );
+        }
+    }
+    if let Some(values) = object.get_mut("enum").and_then(Value::as_array_mut) {
+        if !values.iter().any(Value::is_null) {
+            values.push(Value::Null);
+        }
+    }
 }
 
 fn opencode_uses_apply_patch(mode: Option<OpenCodeToolMode>, model_name: &str) -> bool {
@@ -1020,45 +1164,265 @@ fn safe_openai_tool_name(original: &str, used_names: &mut BTreeMap<String, usize
     name
 }
 
-fn native_tool_description(original_name: &str, schema: Option<&Value>, input: &Value) -> String {
-    match original_name {
-        "question" => return opencode_question_description(),
-        "glob" => return opencode_glob_description(),
-        "read_range" => return opencode_read_range_description(),
-        "read_contains" => return opencode_read_contains_description(),
-        "grep" => return opencode_grep_description(),
-        "edit" => return opencode_edit_description(),
-        "write" => return opencode_write_description(),
-        "apply_patch" => return opencode_apply_patch_description(),
-        "task" => return opencode_task_description(),
-        "webfetch" => return opencode_webfetch_description(),
-        "lsp" => return opencode_lsp_description(),
-        "bash" => return opencode_bash_description(),
-        "todowrite" => return opencode_todowrite_description(),
-        "todoread" => return "Use this tool to read your todo list".to_string(),
-        "skill" => return opencode_skill_description(input.get("available_skills")),
-        "gitlab_mr" => {
-            return "Fetch GitLab merge request metadata. Parse project_id and merge_request_iid from a GitLab MR URL such as https://host/group/project/-/merge_requests/23532 where project_id is group/project and merge_request_iid is 23532.".to_string();
+fn native_tool_description(
+    original_name: &str,
+    signature_name: &str,
+    schema: Option<&Value>,
+    input: &Value,
+    parameters: &Value,
+) -> String {
+    let description = match original_name {
+        "question" => opencode_question_description(),
+        "glob" => opencode_glob_description(),
+        "read_range" => opencode_read_range_description(),
+        "read_contains" => opencode_read_contains_description(),
+        "grep" => opencode_grep_description(),
+        "edit" => opencode_edit_description(),
+        "write" => opencode_write_description(),
+        "apply_patch" => opencode_apply_patch_description(),
+        "task" => opencode_task_description(),
+        "webfetch" => opencode_webfetch_description(),
+        "lsp" => opencode_lsp_description(),
+        "bash" => opencode_bash_description(),
+        "todowrite" => opencode_todowrite_description(),
+        "todoread" => "Use this tool to read your todo list".to_string(),
+        "skill" => opencode_skill_description(input.get("available_skills")),
+        "gitlab_mr" => "Fetch GitLab merge request metadata. Parse project_id and merge_request_iid from a GitLab MR URL such as https://host/group/project/-/merge_requests/23532 where project_id is group/project and merge_request_iid is 23532.".to_string(),
+        "gitlab_mr_files" => "List files changed by a GitLab merge request. Use project_id and merge_request_iid parsed from the MR URL.".to_string(),
+        "gitlab_mr_diffs" => "Fetch GitLab merge request diffs for code review. Use project_id and merge_request_iid parsed from the MR URL.".to_string(),
+        _ => {
+            let Some(schema) = schema else {
+                return append_native_tool_signature(
+                    format!("Tool {original_name}"),
+                    signature_name,
+                    parameters,
+                );
+            };
+            let mut parts = vec![format!("Tool {original_name}")];
+            if let Some(required) = schema.get("required") {
+                parts.push(format!("required: {}", compact_json(required)));
+            }
+            if let Some(optional) = schema.get("optional") {
+                parts.push(format!("optional: {}", compact_json(optional)));
+            }
+            parts.join("; ")
         }
-        "gitlab_mr_files" => {
-            return "List files changed by a GitLab merge request. Use project_id and merge_request_iid parsed from the MR URL.".to_string();
-        }
-        "gitlab_mr_diffs" => {
-            return "Fetch GitLab merge request diffs for code review. Use project_id and merge_request_iid parsed from the MR URL.".to_string();
-        }
-        _ => {}
-    }
-    let Some(schema) = schema else {
-        return format!("Tool {original_name}");
     };
-    let mut parts = vec![format!("Tool {original_name}")];
-    if let Some(required) = schema.get("required") {
-        parts.push(format!("required: {}", compact_json(required)));
+    append_native_tool_signature(description, signature_name, parameters)
+}
+
+fn append_native_tool_signature(
+    mut description: String,
+    original_name: &str,
+    parameters: &Value,
+) -> String {
+    let Some(signature) = native_tool_signature(original_name, parameters) else {
+        return description;
+    };
+    description.push_str("\n\nInput signature:\n```ts\n");
+    description.push_str(&signature);
+    description.push_str("\n```");
+    description
+}
+
+fn native_tool_signature(original_name: &str, parameters: &Value) -> Option<String> {
+    let properties = parameters.get("properties").and_then(Value::as_object)?;
+    let required = parameters
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if properties.is_empty() {
+        return Some(format!("{original_name}(args: {{}})"));
     }
-    if let Some(optional) = schema.get("optional") {
-        parts.push(format!("optional: {}", compact_json(optional)));
+
+    let mut lines = vec![format!("{original_name}(args: {{")];
+    for (name, property_schema) in properties {
+        let optional = !required.iter().any(|required_name| required_name == name);
+        let suffix = if optional { "?" } else { "" };
+        lines.push(format!(
+            "  {}{}: {};",
+            typescript_property_name(name),
+            suffix,
+            json_schema_typescript_type(property_schema)
+        ));
     }
-    parts.join("; ")
+    lines.push("})".to_string());
+    Some(lines.join("\n"))
+}
+
+fn typescript_property_name(name: &str) -> String {
+    if name.chars().enumerate().all(|(index, character)| {
+        if index == 0 {
+            character == '_' || character.is_ascii_alphabetic()
+        } else {
+            character == '_' || character.is_ascii_alphanumeric()
+        }
+    }) {
+        return name.to_string();
+    }
+    format!("{name:?}")
+}
+
+fn json_schema_typescript_type(schema: &Value) -> String {
+    if let Some(value) = schema.get("const") {
+        return json_value_typescript_literal(value);
+    }
+    if let Some(items) = schema.get("enum").and_then(Value::as_array) {
+        let variants = items
+            .iter()
+            .map(json_value_typescript_literal)
+            .collect::<Vec<_>>();
+        if !variants.is_empty() {
+            return variants.join(" | ");
+        }
+    }
+    for key in ["anyOf", "oneOf"] {
+        if let Some(variants) = schema.get(key).and_then(Value::as_array) {
+            let rendered = variants
+                .iter()
+                .map(json_schema_typescript_type)
+                .collect::<Vec<_>>();
+            if !rendered.is_empty() {
+                return rendered.join(" | ");
+            }
+        }
+    }
+    if let Some(variants) = schema.get("allOf").and_then(Value::as_array) {
+        let rendered = variants
+            .iter()
+            .map(json_schema_typescript_type)
+            .collect::<Vec<_>>();
+        if !rendered.is_empty() {
+            return rendered.join(" & ");
+        }
+    }
+    if let Some(types) = schema.get("type").and_then(Value::as_array) {
+        let variants = types
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|schema_type| json_schema_named_typescript_type(schema_type, schema))
+            .collect::<Vec<_>>();
+        if !variants.is_empty() {
+            return variants.join(" | ");
+        }
+    }
+    if let Some(schema_type) = schema.get("type").and_then(Value::as_str) {
+        return json_schema_named_typescript_type(schema_type, schema);
+    }
+    if schema.get("properties").is_some()
+        || schema.get("required").is_some()
+        || schema.get("additionalProperties").is_some()
+    {
+        return json_schema_object_typescript_type(schema);
+    }
+    if schema.get("items").is_some() || schema.get("prefixItems").is_some() {
+        return json_schema_array_typescript_type(schema);
+    }
+    "unknown".to_string()
+}
+
+fn json_schema_named_typescript_type(schema_type: &str, schema: &Value) -> String {
+    match schema_type {
+        "string" => "string".to_string(),
+        "number" | "integer" => "number".to_string(),
+        "boolean" => "boolean".to_string(),
+        "null" => "null".to_string(),
+        "array" => json_schema_array_typescript_type(schema),
+        "object" => json_schema_object_typescript_type(schema),
+        _ => "unknown".to_string(),
+    }
+}
+
+fn json_schema_array_typescript_type(schema: &Value) -> String {
+    if let Some(items) = schema.get("prefixItems").and_then(Value::as_array) {
+        let item_types = items
+            .iter()
+            .map(json_schema_typescript_type)
+            .collect::<Vec<_>>();
+        if !item_types.is_empty() {
+            return format!("[{}]", item_types.join(", "));
+        }
+    }
+    let item_type = schema
+        .get("items")
+        .map(json_schema_typescript_type)
+        .unwrap_or_else(|| "unknown".to_string());
+    format!("Array<{item_type}>")
+}
+
+fn json_schema_object_typescript_type(schema: &Value) -> String {
+    let Some(schema_object) = schema.as_object() else {
+        return "Record<string, unknown>".to_string();
+    };
+    let properties = schema_object
+        .get("properties")
+        .and_then(Value::as_object)
+        .cloned()
+        .unwrap_or_default();
+    let required = schema_object
+        .get("required")
+        .and_then(Value::as_array)
+        .map(|items| items.iter().filter_map(Value::as_str).collect::<Vec<_>>())
+        .unwrap_or_default();
+    let mut property_entries = properties.iter().collect::<Vec<_>>();
+    property_entries.sort_unstable_by_key(|(name, _)| *name);
+
+    let mut lines = Vec::new();
+    for (name, property_schema) in property_entries {
+        if let Some(description) = property_schema.get("description").and_then(Value::as_str) {
+            for line in description
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+            {
+                lines.push(format!("  // {line}"));
+            }
+        }
+        let suffix = if required.iter().any(|required_name| required_name == name) {
+            ""
+        } else {
+            "?"
+        };
+        lines.push(format!(
+            "  {}{}: {};",
+            typescript_property_name(name),
+            suffix,
+            json_schema_typescript_type(property_schema)
+        ));
+    }
+    append_additional_properties_type(schema_object, &properties, &mut lines);
+    if lines.is_empty() {
+        return "{}".to_string();
+    }
+    format!("{{\n{}\n}}", lines.join("\n"))
+}
+
+fn append_additional_properties_type(
+    schema_object: &Map<String, Value>,
+    properties: &Map<String, Value>,
+    lines: &mut Vec<String>,
+) {
+    match schema_object.get("additionalProperties") {
+        Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => lines.push("  [key: string]: unknown;".to_string()),
+        Some(value) => lines.push(format!(
+            "  [key: string]: {};",
+            json_schema_typescript_type(value)
+        )),
+        None if properties.is_empty() => lines.push("  [key: string]: unknown;".to_string()),
+        None => {}
+    }
+}
+
+fn json_value_typescript_literal(value: &Value) -> String {
+    match value {
+        Value::String(value) => format!("{value:?}"),
+        Value::Number(number) => number.to_string(),
+        Value::Bool(value) => value.to_string(),
+        Value::Null => "null".to_string(),
+        _ => "unknown".to_string(),
+    }
 }
 
 fn opencode_bash_description() -> String {
@@ -1940,6 +2304,10 @@ fn input_to_native_tool_messages_with_names(
                 .get("input")
                 .cloned()
                 .unwrap_or_else(|| json!({}));
+            let arguments = normalize_native_tool_arguments(arguments);
+            if validate_native_tool_arguments(tool, &arguments).is_err() {
+                continue;
+            }
 
             tool_calls.push(json!({
                 "id": call_id,
@@ -2663,53 +3031,16 @@ fn parse_native_tool_calls(
     }
 
     let mut normalized_calls = Vec::new();
+    let mut invalid_calls = Vec::new();
     for call in tool_calls {
-        let Some(safe_name) = call.pointer("/function/name").and_then(Value::as_str) else {
-            continue;
-        };
-        let repaired_name = if tool_name_map.contains_key(safe_name) {
-            safe_name.to_string()
-        } else {
-            safe_name.to_ascii_lowercase()
-        };
-        let original_name = tool_name_map.get(&repaired_name).cloned().ok_or_else(|| {
-            RuntimeError::Provider(format!(
-                "model returned undeclared native tool call {safe_name}"
-            ))
-        })?;
-        let arguments = call
-            .pointer("/function/arguments")
-            .and_then(Value::as_str)
-            .ok_or_else(|| {
-                RuntimeError::Provider(format!(
-                    "missing native tool call arguments for {original_name}"
-                ))
-            })?;
-        if arguments.trim().is_empty() {
-            return Err(RuntimeError::Provider(format!(
-                "empty native tool call arguments for {original_name}"
-            )));
+        match parse_one_native_tool_call(call, tool_name_map) {
+            Ok(normalized_call) => normalized_calls.push(normalized_call),
+            Err(error) => {
+                invalid_calls.push(invalid_native_tool_call_summary(call, &error.to_string()));
+            }
         }
-        let input: Value = serde_json::from_str(arguments).map_err(|error| {
-            RuntimeError::Provider(format!(
-                "invalid native tool call arguments for {original_name}: {error}"
-            ))
-        })?;
-        let input = normalize_native_tool_arguments(input);
-        validate_native_tool_arguments(&original_name, &input)?;
-        let mut normalized_call = Map::new();
-        normalized_call.insert("tool".to_string(), Value::String(original_name));
-        normalized_call.insert("input".to_string(), input);
-        normalized_call.insert("_air_tool_name".to_string(), Value::String(repaired_name));
-        if let Some(call_id) = call.get("id").and_then(Value::as_str) {
-            normalized_call.insert(
-                "_air_tool_call_id".to_string(),
-                Value::String(call_id.to_string()),
-            );
-        }
-        normalized_calls.push(Value::Object(normalized_call));
     }
-    if normalized_calls.is_empty() {
+    if normalized_calls.is_empty() && invalid_calls.is_empty() {
         return Err(RuntimeError::Provider(
             "native tool call response did not contain function tool calls".to_string(),
         ));
@@ -2718,11 +3049,90 @@ fn parse_native_tool_calls(
     let mut decision = Map::new();
     decision.insert("complete".to_string(), Value::Bool(false));
     decision.insert("tool_calls".to_string(), Value::Array(normalized_calls));
+    if !invalid_calls.is_empty() {
+        decision.insert(
+            "_air_invalid_tool_calls".to_string(),
+            Value::Array(invalid_calls),
+        );
+    }
     if let Some(assistant) = native_assistant_metadata(response) {
         decision.insert("_air_assistant".to_string(), assistant);
     }
 
     Ok(Some(Value::Object(decision)))
+}
+
+fn parse_one_native_tool_call(
+    call: &Value,
+    tool_name_map: &BTreeMap<String, String>,
+) -> Result<Value, RuntimeError> {
+    let safe_name = call
+        .pointer("/function/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RuntimeError::Provider("native tool call is missing name".to_string()))?;
+    let repaired_name = if tool_name_map.contains_key(safe_name) {
+        safe_name.to_string()
+    } else {
+        safe_name.to_ascii_lowercase()
+    };
+    let original_name = tool_name_map.get(&repaired_name).cloned().ok_or_else(|| {
+        RuntimeError::Provider(format!(
+            "model returned undeclared native tool call {safe_name}"
+        ))
+    })?;
+    let arguments = call
+        .pointer("/function/arguments")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            RuntimeError::Provider(format!(
+                "missing native tool call arguments for {original_name}"
+            ))
+        })?;
+    if arguments.trim().is_empty() {
+        return Err(RuntimeError::Provider(format!(
+            "empty native tool call arguments for {original_name}"
+        )));
+    }
+    let input: Value = serde_json::from_str(arguments).map_err(|error| {
+        RuntimeError::Provider(format!(
+            "invalid native tool call arguments for {original_name}: {error}"
+        ))
+    })?;
+    let input = normalize_native_tool_arguments(input);
+    validate_native_tool_arguments(&original_name, &input)?;
+
+    let mut normalized_call = Map::new();
+    normalized_call.insert("tool".to_string(), Value::String(original_name));
+    normalized_call.insert("input".to_string(), input);
+    normalized_call.insert("_air_tool_name".to_string(), Value::String(repaired_name));
+    if let Some(call_id) = call.get("id").and_then(Value::as_str) {
+        normalized_call.insert(
+            "_air_tool_call_id".to_string(),
+            Value::String(call_id.to_string()),
+        );
+    }
+    Ok(Value::Object(normalized_call))
+}
+
+fn invalid_native_tool_call_summary(call: &Value, error: &str) -> Value {
+    let mut summary = Map::new();
+    summary.insert("error".to_string(), Value::String(error.to_string()));
+    if let Some(call_id) = call.get("id").and_then(Value::as_str) {
+        summary.insert(
+            "tool_call_id".to_string(),
+            Value::String(call_id.to_string()),
+        );
+    }
+    if let Some(name) = call.pointer("/function/name").and_then(Value::as_str) {
+        summary.insert("name".to_string(), Value::String(name.to_string()));
+    }
+    if let Some(arguments) = call.pointer("/function/arguments").and_then(Value::as_str) {
+        summary.insert(
+            "arguments".to_string(),
+            Value::String(truncate_text(arguments, 2048)),
+        );
+    }
+    Value::Object(summary)
 }
 
 fn validate_native_tool_arguments(tool: &str, input: &Value) -> Result<(), RuntimeError> {
@@ -2771,7 +3181,7 @@ fn native_tool_required_fields(tool: &str) -> &'static [&'static str] {
         "bash" => &["command", "description"],
         "todowrite" => &["todos"],
         "skill" => &["name"],
-        "gitlab_mr_read" => &["project_id", "merge_request_iid"],
+        "gitlab_mr" | "gitlab_mr_files" | "gitlab_mr_diffs" => &["project_id", "merge_request_iid"],
         _ => &[],
     }
 }
@@ -2821,7 +3231,13 @@ fn normalize_native_tool_arguments(value: Value) -> Value {
         Value::Object(values) => Value::Object(
             values
                 .into_iter()
-                .map(|(key, value)| (key, normalize_native_tool_arguments(value)))
+                .filter_map(|(key, value)| {
+                    if value.is_null() {
+                        None
+                    } else {
+                        Some((key, normalize_native_tool_arguments(value)))
+                    }
+                })
                 .collect(),
         ),
         other => other,
@@ -3542,6 +3958,78 @@ mod tests {
     }
 
     #[test]
+    fn native_tool_descriptions_include_schema_derived_signatures() {
+        let parameters = native_tool_parameters("edit", None);
+        let description = native_tool_description("edit", "edit", None, &json!({}), &parameters);
+
+        assert!(description.contains("Input signature:"), "{description}");
+        assert!(description.contains("edit(args: {"), "{description}");
+        assert!(description.contains("filePath: string;"), "{description}");
+        assert!(description.contains("oldString: string;"), "{description}");
+        assert!(description.contains("newString: string;"), "{description}");
+        assert!(
+            description.contains("replaceAll?: boolean;"),
+            "{description}"
+        );
+    }
+
+    #[test]
+    fn no_argument_native_tools_are_explicitly_marked() {
+        let parameters = native_tool_parameters("todoread", None);
+        let description =
+            native_tool_description("todoread", "todoread", None, &json!({}), &parameters);
+
+        assert!(description.contains("todoread(args: {})"), "{description}");
+    }
+
+    #[test]
+    fn schema_typescript_renderer_handles_nested_schema_features() {
+        let rendered = json_schema_typescript_type(&json!({
+            "type": "object",
+            "properties": {
+                "mode": {
+                    "description": "operation mode",
+                    "oneOf": [
+                        {"const": "fast"},
+                        {"const": "safe"}
+                    ]
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "path": {"type": "string"},
+                            "score": {"type": ["number", "null"]}
+                        },
+                        "required": ["path"],
+                        "additionalProperties": false
+                    }
+                },
+                "tuple": {
+                    "prefixItems": [
+                        {"type": "string"},
+                        {"type": "integer"}
+                    ]
+                }
+            },
+            "required": ["mode"],
+            "additionalProperties": false
+        }));
+
+        assert!(rendered.contains("// operation mode"), "{rendered}");
+        assert!(
+            rendered.contains("mode: \"fast\" | \"safe\";"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("items?: Array<{"), "{rendered}");
+        assert!(rendered.contains("path: string;"), "{rendered}");
+        assert!(rendered.contains("score?: number | null;"), "{rendered}");
+        assert!(rendered.contains("tuple?: [string, number];"), "{rendered}");
+        assert!(!rendered.contains("[key: string]"), "{rendered}");
+    }
+
+    #[test]
     fn opencode_style_native_tool_calls_use_streaming_like_opencode() {
         let config = OpenAiModelConfig {
             base_url: Some("https://configured.example/v1".to_string()),
@@ -3788,7 +4276,12 @@ mod tests {
         assert!(system.contains("Use Glob first when you only know a file path"));
         assert!(system.contains("offset+limit"));
         assert!(system.contains("Never call a tool that has required parameters with `{}`"));
-        assert!(system.contains("Only use `{}` for a tool whose schema or description explicitly says it takes no parameters"));
+        assert!(
+            system.contains(
+                "Only use `{}` for a tool whose Input signature is exactly `tool(args: {})`"
+            ),
+            "{system}"
+        );
         assert!(system.contains("Tool calls are not placeholders"));
         assert!(system.contains(
             "only call the tool when filePath, exact oldString, and newString are all known"
@@ -3983,7 +4476,7 @@ mod tests {
         );
         assert_eq!(
             read_contains["function"]["parameters"]["required"],
-            json!(["file", "contains", "context_lines"])
+            json!(["file", "contains", "context_lines", "occurrence"])
         );
         assert_eq!(
             read_range["function"]["parameters"]["additionalProperties"],
@@ -3993,9 +4486,10 @@ mod tests {
             read_contains["function"]["parameters"]["additionalProperties"],
             json!(false)
         );
-        assert!(
-            read_range["function"].get("strict").is_none(),
-            "OpenCode-style tool schemas should not include the OpenAI strict extension"
+        assert_eq!(read_range["function"]["strict"], json!(true));
+        assert_eq!(
+            read_contains["function"]["parameters"]["properties"]["occurrence"]["type"],
+            json!(["number", "null"])
         );
     }
 
@@ -4050,6 +4544,11 @@ mod tests {
                 }],
                 "result": [{
                     "tool": "edit",
+                    "input": {
+                        "filePath": "src/lib.rs",
+                        "oldString": "old",
+                        "newString": "new"
+                    },
                     "status": "ok",
                     "_air_tool_name": "edit",
                     "_air_tool_call_id": "call_edit_1",
@@ -4070,6 +4569,65 @@ mod tests {
             assistant["reasoning_content"],
             json!("I found the exact helper and can patch it now.")
         );
+    }
+
+    #[test]
+    fn native_opencode_history_drops_invalid_empty_tool_calls() {
+        let config = OpenAiModelConfig {
+            base_url: Some("https://configured.example/v1".to_string()),
+            base_url_env: None,
+            api_key_env: Some("OPENAI_API_KEY".to_string()),
+            model: "glm-5.1".to_string(),
+            model_env: None,
+            temperature: None,
+            request_timeout_seconds: None,
+            system_prompt: Some(OPENCODE_QWEN_PROMPT_MARKER.to_string()),
+            json_mode: None,
+            response_format: None,
+            extra_body: None,
+            native_tool_calls: Some(true),
+            opencode_tool_mode: None,
+            trace_provider_io: None,
+        };
+        let input = json!({
+            "task": "edit the helper",
+            "allowed_tools": ["edit"],
+            "observations": [{
+                "action": "tool_result",
+                "assistant": {
+                    "tool_calls": [{
+                        "tool": "edit",
+                        "input": {},
+                        "_air_tool_name": "edit",
+                        "_air_tool_call_id": "call_empty_edit"
+                    }]
+                },
+                "requested": [{
+                    "tool": "edit",
+                    "input": {},
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_empty_edit"
+                }],
+                "result": [{
+                    "tool": "edit",
+                    "input": {},
+                    "status": "error",
+                    "_air_tool_name": "edit",
+                    "_air_tool_call_id": "call_empty_edit",
+                    "error": "missing filePath/oldString/newString"
+                }]
+            }]
+        });
+
+        let request = build_chat_completion_body(&config, "glm-5.1".to_string(), &input).unwrap();
+        let messages = request.body["messages"].as_array().unwrap();
+
+        assert!(!messages
+            .iter()
+            .any(|message| message.get("role").and_then(Value::as_str) == Some("assistant")));
+        assert!(!messages
+            .iter()
+            .any(|message| message.get("role").and_then(Value::as_str) == Some("tool")));
     }
 
     #[test]
@@ -4325,12 +4883,20 @@ mod tests {
                 "action": "tool_batch_dispatch",
                 "requested": [{
                     "tool": "task",
-                    "input": {"description": "Inspect helper", "subagent_type": "explore"}
+                    "input": {
+                        "description": "Inspect helper",
+                        "prompt": "Inspect helper implementation.",
+                        "subagent_type": "explore"
+                    }
                 }],
                 "result": [{
                     "tool": "task",
                     "status": "ok",
-                    "input": {"description": "Inspect helper", "subagent_type": "explore"},
+                    "input": {
+                        "description": "Inspect helper",
+                        "prompt": "Inspect helper implementation.",
+                        "subagent_type": "explore"
+                    },
                     "output": {
                         "output": "target file: crates/air-tools/src/subagent_tools.rs\nnext action: read lines 80-115",
                         "subagent_type": "explore",
@@ -4358,14 +4924,22 @@ mod tests {
                 "action": "tool_batch_dispatch",
                 "requested": [{
                     "tool": "task",
-                    "input": {"description": "Inspect helper", "subagent_type": "explore"}
+                    "input": {
+                        "description": "Inspect helper",
+                        "prompt": "Inspect helper implementation.",
+                        "subagent_type": "explore"
+                    }
                 }],
                 "result": [{
                     "_air_tool_call_id": "call_task_1",
                     "_air_tool_name": "task",
                     "tool": "task",
                     "status": "ok",
-                    "input": {"description": "Inspect helper", "subagent_type": "explore"},
+                    "input": {
+                        "description": "Inspect helper",
+                        "prompt": "Inspect helper implementation.",
+                        "subagent_type": "explore"
+                    },
                     "output": {
                         "output": "Findings:\n- crates/air-tools/src/subagent_tools.rs:135-147 `normalize_subagent_command_output` - raw log lookup lives here\nNext action:\n- read crates/air-tools/src/subagent_tools.rs lines 131-150",
                         "subagent_type": "explore",
@@ -4428,19 +5002,32 @@ mod tests {
                     },
                     "tool_calls": [{
                         "tool": "edit",
-                        "input": {"filePath": "src/lib.rs"},
+                        "input": {
+                            "filePath": "src/lib.rs",
+                            "oldString": "fn caller() {}",
+                            "newString": "fn caller() { helper(); }"
+                        },
                         "_air_tool_name": "edit",
                         "_air_tool_call_id": "call_edit_1"
                     }]
                 },
                 "requested": [{
                     "tool": "edit",
-                    "input": {"filePath": "src/lib.rs"},
+                    "input": {
+                        "filePath": "src/lib.rs",
+                        "oldString": "fn caller() {}",
+                        "newString": "fn caller() { helper(); }"
+                    },
                     "_air_tool_name": "edit",
                     "_air_tool_call_id": "call_edit_1"
                 }],
                 "result": [{
                     "tool": "edit",
+                    "input": {
+                        "filePath": "src/lib.rs",
+                        "oldString": "fn caller() {}",
+                        "newString": "fn caller() { helper(); }"
+                    },
                     "status": "ok",
                     "_air_tool_name": "edit",
                     "_air_tool_call_id": "call_edit_1",
@@ -4512,6 +5099,7 @@ mod tests {
                 }],
                 "result": [{
                     "tool": "apply_patch",
+                    "input": {"patchText": "*** Begin Patch\n*** End Patch"},
                     "status": "ok",
                     "_air_tool_name": "apply_patch",
                     "_air_tool_call_id": "call_patch_1",
@@ -4932,11 +5520,11 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_calls_reject_missing_arguments() {
+    fn native_tool_calls_surface_missing_arguments() {
         let mut tool_name_map = BTreeMap::new();
         tool_name_map.insert("edit".to_string(), "edit".to_string());
 
-        let error = parse_chat_completion_content(
+        let value = parse_chat_completion_content(
             &json!({
                 "choices": [{
                     "message": {
@@ -4952,22 +5540,25 @@ mod tests {
             }),
             &tool_name_map,
         )
-        .unwrap_err();
+        .unwrap();
 
+        assert_eq!(value["complete"], json!(false));
+        assert_eq!(value["tool_calls"], json!([]));
+        let message = value["_air_invalid_tool_calls"][0]["error"]
+            .as_str()
+            .unwrap();
         assert!(
-            error
-                .to_string()
-                .contains("missing native tool call arguments for edit"),
-            "{error}"
+            message.contains("missing native tool call arguments for edit"),
+            "{message}"
         );
     }
 
     #[test]
-    fn native_tool_calls_reject_empty_required_arguments() {
+    fn native_tool_calls_surface_empty_required_arguments() {
         let mut tool_name_map = BTreeMap::new();
         tool_name_map.insert("edit".to_string(), "edit".to_string());
 
-        let error = parse_chat_completion_content(
+        let value = parse_chat_completion_content(
             &json!({
                 "choices": [{
                     "message": {
@@ -4984,9 +5575,13 @@ mod tests {
             }),
             &tool_name_map,
         )
-        .unwrap_err();
+        .unwrap();
 
-        let message = error.to_string();
+        assert_eq!(value["complete"], json!(false));
+        assert_eq!(value["tool_calls"], json!([]));
+        let message = value["_air_invalid_tool_calls"][0]["error"]
+            .as_str()
+            .unwrap();
         assert!(
             message.contains("malformed native tool call for edit"),
             "{message}"
@@ -5001,11 +5596,11 @@ mod tests {
     }
 
     #[test]
-    fn native_tool_calls_reject_missing_required_arguments() {
+    fn native_tool_calls_surface_missing_required_arguments() {
         let mut tool_name_map = BTreeMap::new();
         tool_name_map.insert("edit".to_string(), "edit".to_string());
 
-        let error = parse_chat_completion_content(
+        let value = parse_chat_completion_content(
             &json!({
                 "choices": [{
                     "message": {
@@ -5022,9 +5617,13 @@ mod tests {
             }),
             &tool_name_map,
         )
-        .unwrap_err();
+        .unwrap();
 
-        let message = error.to_string();
+        assert_eq!(value["complete"], json!(false));
+        assert_eq!(value["tool_calls"], json!([]));
+        let message = value["_air_invalid_tool_calls"][0]["error"]
+            .as_str()
+            .unwrap();
         assert!(
             message.contains("malformed native tool call for edit"),
             "{message}"
@@ -5033,6 +5632,88 @@ mod tests {
             message.contains("oldString") && message.contains("newString"),
             "{message}"
         );
+    }
+
+    #[test]
+    fn native_tool_calls_validate_gitlab_tool_required_arguments() {
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("gitlab_mr".to_string(), "gitlab_mr".to_string());
+
+        let value = parse_chat_completion_content(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "id": "call_gitlab_1",
+                            "type": "function",
+                            "function": {
+                                "name": "gitlab_mr",
+                                "arguments": "{}"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            &tool_name_map,
+        )
+        .unwrap();
+
+        assert_eq!(value["tool_calls"], json!([]));
+        let message = value["_air_invalid_tool_calls"][0]["error"]
+            .as_str()
+            .unwrap();
+        assert!(message.contains("project_id"), "{message}");
+        assert!(message.contains("merge_request_iid"), "{message}");
+    }
+
+    #[test]
+    fn native_tool_calls_filter_invalid_calls_when_valid_calls_exist() {
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("edit".to_string(), "edit".to_string());
+
+        let value = parse_chat_completion_content(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "tool_calls": [
+                            {
+                                "id": "call_edit_valid",
+                                "type": "function",
+                                "function": {
+                                    "name": "edit",
+                                    "arguments": "{\"filePath\":\"src/lib.rs\",\"oldString\":\"old\",\"newString\":\"new\",\"replaceAll\":null}"
+                                }
+                            },
+                            {
+                                "id": "call_edit_empty",
+                                "type": "function",
+                                "function": {
+                                    "name": "edit",
+                                    "arguments": "{}"
+                                }
+                            }
+                        ]
+                    }
+                }]
+            }),
+            &tool_name_map,
+        )
+        .unwrap();
+
+        assert_eq!(value["tool_calls"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            value["tool_calls"][0]["_air_tool_call_id"],
+            "call_edit_valid"
+        );
+        assert!(value["tool_calls"][0]["input"].get("replaceAll").is_none());
+        assert_eq!(
+            value["_air_invalid_tool_calls"][0]["tool_call_id"],
+            json!("call_edit_empty")
+        );
+        assert!(value["_air_invalid_tool_calls"][0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("empty arguments {}"));
     }
 
     #[test]
@@ -5061,6 +5742,35 @@ data: [DONE]
                 "oldString": "old",
                 "newString": "new"
             })
+        );
+    }
+
+    #[test]
+    fn streaming_tool_call_chunks_without_index_continue_last_call() {
+        let response = parse_chat_completion_stream(
+            r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_glob","type":"function","function":{"name":"glob","arguments":"{\"pattern\":\"*.rs\"}"}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"index":1,"id":"call_read","type":"function","function":{"name":"read_range","arguments":"{\"file\":\"src/lib.rs\","}}]}}]}
+
+data: {"choices":[{"delta":{"tool_calls":[{"function":{"arguments":"\"offset\":0,\"limit\":20}"}}]}}]}
+
+data: [DONE]
+"#,
+        )
+        .unwrap();
+        let calls = response
+            .pointer("/choices/0/message/tool_calls")
+            .and_then(Value::as_array)
+            .unwrap();
+
+        assert_eq!(calls.len(), 2);
+        assert_eq!(
+            calls[0]["function"]["arguments"],
+            json!("{\"pattern\":\"*.rs\"}")
+        );
+        assert_eq!(
+            calls[1]["function"]["arguments"],
+            json!("{\"file\":\"src/lib.rs\",\"offset\":0,\"limit\":20}")
         );
     }
 

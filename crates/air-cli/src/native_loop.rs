@@ -2,11 +2,12 @@ use crate::models::{ModelProviderChoice, ModelReplayOptions};
 use crate::tools::ToolProviderChoice;
 use crate::trace_io::{observe_event_with_trace_file, write_trace};
 use air_runtime::{
-    system_return_event, take_last_within_bytes_value, ModelProvider, RuntimeError, ToolProvider,
-    TraceEvent, TraceStatus,
+    compact_model_context_value, system_return_event, take_last_within_bytes_value, ModelProvider,
+    RuntimeError, ToolProvider, TraceEvent, TraceStatus,
 };
 use anyhow::{Context, Result};
 use serde_json::{json, Map, Value};
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -167,6 +168,7 @@ impl NativeLoopSpec {
                     "read_contains",
                     "read_range",
                     "edit",
+                    "task",
                 ],
                 verify_allowed_tools: &["bash"],
                 bootstrap_skills: true,
@@ -329,6 +331,36 @@ struct EditProgress {
     verification_status: VerificationStatus,
     verification_failed_count: u8,
     patch_seen: bool,
+    changed_files: BTreeSet<String>,
+    verification_commands: Vec<String>,
+    last_tool_error: Option<Value>,
+}
+
+impl EditProgress {
+    fn as_value(&self) -> Value {
+        json!({
+            "verification_status": verification_status_value(self.verification_status),
+            "verification_failed_count": self.verification_failed_count,
+            "patch_seen": self.patch_seen,
+            "changed_files": self.changed_files.iter().cloned().collect::<Vec<_>>(),
+            "verification_commands": self.verification_commands.iter().rev().take(4).cloned().collect::<Vec<_>>(),
+            "last_tool_error": self.last_tool_error,
+        })
+    }
+
+    fn record_summary(&mut self, summary: &ToolBatchSummary) {
+        for path in &summary.changed_files {
+            self.changed_files.insert(path.clone());
+        }
+        for command in &summary.verification_commands {
+            if !self.verification_commands.contains(command) {
+                self.verification_commands.push(command.clone());
+            }
+        }
+        if let Some(error) = summary.tool_errors.first() {
+            self.last_tool_error = Some(error.clone());
+        }
+    }
 }
 
 impl Default for EditProgress {
@@ -337,6 +369,9 @@ impl Default for EditProgress {
             verification_status: VerificationStatus::Unknown,
             verification_failed_count: 0,
             patch_seen: false,
+            changed_files: BTreeSet::new(),
+            verification_commands: Vec::new(),
+            last_tool_error: None,
         }
     }
 }
@@ -353,6 +388,163 @@ struct ToolCall {
     raw: Value,
     tool: String,
     input: Value,
+}
+
+struct ModelContextBuilder {
+    input: Map<String, Value>,
+}
+
+impl ModelContextBuilder {
+    fn for_native_loop(
+        runner: &NativeLoopRunner<'_>,
+        memory: &RunMemory,
+        verification_gate: bool,
+    ) -> Self {
+        let allowed_tools = if verification_gate {
+            runner.spec.verify_allowed_tools
+        } else {
+            runner.spec.allowed_tools
+        };
+        let observation_bytes = if verification_gate {
+            30_000
+        } else {
+            runner.spec.observation_bytes
+        };
+        let mut input = Map::new();
+        input.insert("task".to_string(), Value::String(runner.task.clone()));
+        input.insert("runtime".to_string(), runner.runtime_context());
+        input.insert(
+            "environment_context".to_string(),
+            runner.environment_context(),
+        );
+        input.insert(
+            "completion_policy".to_string(),
+            runner.completion_policy(memory, verification_gate),
+        );
+        input.insert(
+            "model_runtime".to_string(),
+            serde_json::to_value(
+                runner
+                    .models
+                    .model_runtime_info(runner.spec.model_name)
+                    .unwrap_or_default(),
+            )
+            .unwrap_or_else(|_| json!({})),
+        );
+        input.insert(
+            "context_policy".to_string(),
+            Self::context_policy(observation_bytes),
+        );
+        input.insert(
+            "protected_facts".to_string(),
+            Self::protected_facts(runner, memory, verification_gate),
+        );
+        input.insert(
+            "observations".to_string(),
+            compact_observations(&memory.history, observation_bytes),
+        );
+        if !memory.available_skills.is_null() {
+            input.insert(
+                "available_skills".to_string(),
+                memory.available_skills.clone(),
+            );
+        }
+        input.insert(
+            "allowed_tools".to_string(),
+            Value::Array(
+                allowed_tools
+                    .iter()
+                    .map(|tool| Value::String((*tool).to_string()))
+                    .collect(),
+            ),
+        );
+        input.insert(
+            "tool_capabilities".to_string(),
+            runner.tool_capabilities(allowed_tools),
+        );
+        if runner.spec.completion == CompletionMode::Review {
+            input.insert(
+                "review_mode".to_string(),
+                Value::String(
+                    "Read-only review: use evidence tools only; do not edit files, run tests, or post remote comments."
+                        .to_string(),
+                ),
+            );
+        }
+        if runner.spec.completion == CompletionMode::Bench {
+            input.insert(
+                "bench_mode".to_string(),
+                Value::String(
+                    "Benchmark-analysis mode: run controlled experiments in isolated temp workdirs, collect trace metrics, and recommend default/optional/reject. Keep the source workspace unchanged."
+                        .to_string(),
+                ),
+            );
+        }
+        if verification_gate {
+            input.insert(
+                "verification_gate".to_string(),
+                json!({
+                    "required": true,
+                    "instruction": "Run exactly one real verification command such as cargo test, cargo check, cargo clippy, npm test, pytest, or another test/check/lint command. Do not inspect files, grep, print source, or run exploratory commands in the verification gate."
+                }),
+            );
+        } else if runner.spec.completion == CompletionMode::Edit {
+            input.insert("edit_progress".to_string(), memory.edit.as_value());
+            input.insert(
+                "verification_status".to_string(),
+                Value::String(
+                    verification_status_value(memory.edit.verification_status).to_string(),
+                ),
+            );
+        }
+        Self { input }
+    }
+
+    fn context_policy(observation_bytes: usize) -> Value {
+        json!({
+            "builder": "air.native.model_context.v1",
+            "observation_bytes": observation_bytes,
+            "history_normalization": {
+                "pairs_tool_calls_with_outputs": true,
+                "drops_orphan_tool_outputs": true,
+                "inserts_synthetic_aborted_outputs": true,
+                "removes_invalid_tool_call_few_shots": true,
+                "compacts_tool_outputs_for_model": true
+            },
+            "protected_keys": [
+                "task",
+                "runtime",
+                "environment_context",
+                "completion_policy",
+                "protected_facts",
+                "tool_capabilities",
+                "edit_progress"
+            ]
+        })
+    }
+
+    fn protected_facts(
+        runner: &NativeLoopRunner<'_>,
+        memory: &RunMemory,
+        verification_gate: bool,
+    ) -> Value {
+        json!({
+            "task": runner.task.clone(),
+            "mode": runner.spec.completion.output_key(),
+            "verification_gate": verification_gate,
+            "requires_edit": runner.requires_edit,
+            "edit_ledger": memory.edit.as_value(),
+            "last_feedback": memory.history.iter().rev().find(|item| {
+                item.get("action")
+                    .and_then(Value::as_str)
+                    .is_some_and(|action| action.ends_with("required") || action.contains("error") || action.contains("failed"))
+            }).cloned().unwrap_or(Value::Null),
+        })
+    }
+
+    fn build(self) -> Value {
+        Value::Object(self.input)
+    }
 }
 
 impl NativeLoopRunner<'_> {
@@ -382,52 +574,51 @@ impl NativeLoopRunner<'_> {
 
             let decision = self.call_decider(&memory, false)?;
             memory.last_decision = decision.raw.clone();
-            if decision.complete.is_none() {
-                memory.push_feedback(
-                    "malformed_decision",
-                    "The prior decision was missing complete/tool_calls. Return valid structured output before tool execution.",
-                );
-                continue;
-            }
-            if decision.tool_calls.is_none() {
-                memory.push_feedback(
-                    "malformed_decision",
-                    "The prior decision was missing tool_calls. Return valid structured output before tool execution.",
-                );
-                continue;
-            }
-
-            if decision.complete == Some(true) {
-                match self.spec.completion {
-                    CompletionMode::Edit => {
-                        if self.edit_can_finish(&mut memory)? {
-                            return self.finish(&memory);
-                        }
-                        continue;
+            let action = model_turn_action(decision);
+            match action {
+                ModelTurnAction::RespondToModel { action, result } => {
+                    memory.push_feedback(action, result);
+                    continue;
+                }
+                ModelTurnAction::Complete => {
+                    if let Some(output) = self.handle_completion(&mut memory)? {
+                        return Ok(output);
                     }
-                    CompletionMode::Result => {
-                        let result = json!({
-                            "answer": assistant_content(&decision.raw),
-                            "decision": decision.raw,
-                        });
-                        return self.finish_with_output(result);
+                    continue;
+                }
+                ModelTurnAction::DispatchTools(calls) => {
+                    let summary = self.run_tool_calls(
+                        &mut memory,
+                        &calls,
+                        self.spec.allowed_tools,
+                        self.spec.dispatch_max_calls,
+                    )?;
+                    if self.spec.completion == CompletionMode::Edit
+                        && update_edit_progress_from_tools(&mut memory, &summary)
+                    {
+                        return self.finish(&memory);
                     }
-                    CompletionMode::Review | CompletionMode::Bench => return self.finish(&memory),
                 }
             }
+        }
+    }
 
-            let calls = decision.tool_calls.unwrap_or_default();
-            let summary = self.run_tool_calls(
-                &mut memory,
-                &calls,
-                self.spec.allowed_tools,
-                self.spec.dispatch_max_calls,
-            )?;
-            if self.spec.completion == CompletionMode::Edit
-                && update_edit_progress_from_tools(&mut memory, &summary)
-            {
-                return self.finish(&memory);
+    fn handle_completion(&mut self, memory: &mut RunMemory) -> Result<Option<Value>> {
+        match self.spec.completion {
+            CompletionMode::Edit => {
+                if self.edit_can_finish(memory)? {
+                    return self.finish(memory).map(Some);
+                }
+                Ok(None)
             }
+            CompletionMode::Result => {
+                let result = json!({
+                    "answer": assistant_content(&memory.last_decision),
+                    "decision": memory.last_decision,
+                });
+                self.finish_with_output(result).map(Some)
+            }
+            CompletionMode::Review | CompletionMode::Bench => self.finish(memory).map(Some),
         }
     }
 
@@ -488,21 +679,27 @@ impl NativeLoopRunner<'_> {
 
         let decision = self.call_decider(memory, true)?;
         memory.last_decision = decision.raw.clone();
-        if decision.complete.is_none() || decision.tool_calls.is_none() {
-            memory.push_feedback(
-                "malformed_decision",
-                "The verification decision was missing complete/tool_calls. Return exactly one bash verification command.",
-            );
-            return Ok(None);
+        match verification_turn_action(decision) {
+            ModelTurnAction::RespondToModel { action, result } => {
+                memory.push_feedback(action, result);
+                Ok(None)
+            }
+            ModelTurnAction::Complete => {
+                memory.push_feedback(
+                    "verification_required",
+                    "Return exactly one bash verification command before completing.",
+                );
+                Ok(None)
+            }
+            ModelTurnAction::DispatchTools(calls) => self
+                .run_tool_calls(
+                    memory,
+                    &calls,
+                    self.spec.verify_allowed_tools,
+                    self.spec.dispatch_max_calls,
+                )
+                .map(Some),
         }
-        let calls = decision.tool_calls.unwrap_or_default();
-        self.run_tool_calls(
-            memory,
-            &calls,
-            self.spec.verify_allowed_tools,
-            self.spec.dispatch_max_calls,
-        )
-        .map(Some)
     }
 
     fn run_tool_calls(
@@ -587,73 +784,8 @@ impl NativeLoopRunner<'_> {
     }
 
     fn call_decider(&mut self, memory: &RunMemory, verification_gate: bool) -> Result<Decision> {
-        let mut input = Map::new();
-        input.insert("task".to_string(), Value::String(self.task.clone()));
-        if self.spec.completion == CompletionMode::Review {
-            input.insert(
-                "review_mode".to_string(),
-                Value::String(
-                    "Read-only review: use evidence tools only; do not edit files, run tests, or post remote comments."
-                        .to_string(),
-                ),
-            );
-        }
-        if self.spec.completion == CompletionMode::Bench {
-            input.insert(
-                "bench_mode".to_string(),
-                Value::String(
-                    "Benchmark-analysis mode: run controlled experiments in isolated temp workdirs, collect trace metrics, and recommend default/optional/reject. Keep the source workspace unchanged."
-                        .to_string(),
-                ),
-            );
-        }
-        input.insert(
-            "observations".to_string(),
-            compact_observations(
-                &memory.history,
-                if verification_gate {
-                    30_000
-                } else {
-                    self.spec.observation_bytes
-                },
-            ),
-        );
-        if !memory.available_skills.is_null() {
-            input.insert(
-                "available_skills".to_string(),
-                memory.available_skills.clone(),
-            );
-        }
-        input.insert(
-            "allowed_tools".to_string(),
-            Value::Array(
-                if verification_gate {
-                    self.spec.verify_allowed_tools
-                } else {
-                    self.spec.allowed_tools
-                }
-                .iter()
-                .map(|tool| Value::String((*tool).to_string()))
-                .collect(),
-            ),
-        );
-        if verification_gate {
-            input.insert(
-                "verification_gate".to_string(),
-                json!({
-                    "required": true,
-                    "instruction": "Run exactly one real verification command such as cargo test, cargo check, cargo clippy, npm test, pytest, or another test/check/lint command. Do not inspect files, grep, print source, or run exploratory commands in the verification gate."
-                }),
-            );
-        } else if self.spec.completion == CompletionMode::Edit {
-            input.insert(
-                "verification_status".to_string(),
-                Value::String(
-                    verification_status_value(memory.edit.verification_status).to_string(),
-                ),
-            );
-        }
-        let output = self.call_model(self.spec.model_name, Value::Object(input), "model")?;
+        let input = ModelContextBuilder::for_native_loop(self, memory, verification_gate).build();
+        let output = self.call_model(self.spec.model_name, input, "model")?;
         Ok(parse_decision(output))
     }
 
@@ -746,6 +878,10 @@ impl NativeLoopRunner<'_> {
                 Ok(output)
             }
             Err(error) => {
+                if let Some(object) = meta.as_object_mut() {
+                    object.insert("error_kind".to_string(), json!("fatal"));
+                    object.insert("recoverable".to_string(), json!(false));
+                }
                 self.emit(TraceEvent {
                     agent: self.spec.agent.to_string(),
                     step: self.step,
@@ -948,8 +1084,8 @@ impl NativeLoopRunner<'_> {
                 "initial_success": true,
                 "final_success": memory.edit.verification_status == VerificationStatus::Passed,
                 "patch_applied": memory.edit.patch_seen,
-                "changed_files": [],
-                "workspace_changed_files": [],
+                "changed_files": memory.edit.changed_files.iter().cloned().collect::<Vec<_>>(),
+                "workspace_changed_files": memory.edit.changed_files.iter().cloned().collect::<Vec<_>>(),
                 "preexisting_changed_files": [],
                 "workspace_diff": {
                     "provider": "native-rust-loop",
@@ -958,6 +1094,7 @@ impl NativeLoopRunner<'_> {
                 "rationale": "Completed by AIR native Rust code loop.",
                 "assistant": memory.last_decision,
                 "verification_status": verification_status_value(memory.edit.verification_status),
+                "edit_ledger": memory.edit.as_value(),
                 "observations": compact_observations(&memory.history, self.spec.observation_bytes),
             }),
             CompletionMode::Review => json!({
@@ -988,6 +1125,20 @@ impl NativeLoopRunner<'_> {
         let mut outputs = Map::new();
         outputs.insert(self.spec.completion.output_key().to_string(), output);
         let outputs = Value::Object(outputs.clone());
+        let health = native_loop_trace_health(&self.trace);
+        self.emit(TraceEvent {
+            agent: "$system".to_string(),
+            step: self.step,
+            rule: "audit".to_string(),
+            action: "trace_health".to_string(),
+            input: None,
+            output: Some(health),
+            meta: Some(json!({
+                "schema": "air.native_trace_health.v1",
+            })),
+            status: TraceStatus::Ok,
+            error: None,
+        });
         let return_event =
             system_return_event(outputs.clone().as_object().cloned().unwrap_or_default());
         self.emit(return_event);
@@ -1002,7 +1153,59 @@ impl NativeLoopRunner<'_> {
         json!({
             "step": self.step,
             "max_steps": self.spec.max_steps,
+            "remaining_steps": self.spec.max_steps.saturating_sub(self.step),
             "is_last_action_step": self.step.saturating_add(1) >= self.spec.max_steps,
+        })
+    }
+
+    fn environment_context(&self) -> Value {
+        json!({
+            "cwd": std::env::current_dir()
+                .map(|path| path.display().to_string())
+                .unwrap_or_else(|_| ".".to_string()),
+            "shell": std::env::var("SHELL").unwrap_or_default(),
+            "os": std::env::consts::OS,
+            "arch": std::env::consts::ARCH,
+            "path_separator": std::path::MAIN_SEPARATOR.to_string(),
+        })
+    }
+
+    fn tool_capabilities(&self, allowed_tools: &[&str]) -> Value {
+        let mut tools = Map::new();
+        for tool in allowed_tools {
+            let info = self
+                .tools
+                .tool_runtime_info(tool)
+                .unwrap_or_else(|| air_runtime::ToolRuntimeInfo::generic(None));
+            let mut value = serde_json::to_value(info).unwrap_or_else(|_| json!({}));
+            if let Some(object) = value.as_object_mut() {
+                object.insert("allowed".to_string(), Value::Bool(true));
+                object.insert("name".to_string(), Value::String((*tool).to_string()));
+            }
+            tools.insert((*tool).to_string(), value);
+        }
+        Value::Object(tools)
+    }
+
+    fn completion_policy(&self, memory: &RunMemory, verification_gate: bool) -> Value {
+        let can_finish_edit = memory.edit.verification_status == VerificationStatus::Passed
+            && (!self.requires_edit || memory.edit.patch_seen);
+        json!({
+            "mode": self.spec.completion.output_key(),
+            "verification_gate": verification_gate,
+            "requires_edit": self.spec.completion == CompletionMode::Edit && self.requires_edit,
+            "requires_verification": self.spec.completion == CompletionMode::Edit,
+            "can_finish_now": match self.spec.completion {
+                CompletionMode::Edit => can_finish_edit,
+                CompletionMode::Result | CompletionMode::Review | CompletionMode::Bench => true,
+            },
+            "finish_requirements": match self.spec.completion {
+                CompletionMode::Edit => json!({
+                    "verification_status": "passed",
+                    "patch_seen": if self.requires_edit { "required" } else { "not_required" },
+                }),
+                _ => json!({}),
+            },
         })
     }
 
@@ -1031,10 +1234,13 @@ struct ToolBatchSummary {
     error_count: usize,
     any_workspace_change: bool,
     workspace_change_tools: Vec<String>,
+    changed_files: Vec<String>,
     any_verification_passed: bool,
     any_verification_failed: bool,
     verification_tools: Vec<String>,
+    verification_commands: Vec<String>,
     verification_status_update: VerificationStatusUpdate,
+    tool_errors: Vec<Value>,
 }
 
 impl ToolBatchSummary {
@@ -1044,9 +1250,12 @@ impl ToolBatchSummary {
             "error_count": self.error_count,
             "any_workspace_change": self.any_workspace_change,
             "workspace_change_tools": self.workspace_change_tools,
+            "changed_files": self.changed_files,
             "any_verification_passed": self.any_verification_passed,
             "any_verification_failed": self.any_verification_failed,
             "verification_tools": self.verification_tools,
+            "verification_commands": self.verification_commands,
+            "tool_errors": self.tool_errors,
             "verification_status_update": match self.verification_status_update {
                 VerificationStatusUpdate::Unchanged => "unchanged",
                 VerificationStatusUpdate::Unknown => "unknown",
@@ -1063,14 +1272,18 @@ fn summarize_tool_batch(results: &[Value]) -> ToolBatchSummary {
         error_count: 0,
         any_workspace_change: false,
         workspace_change_tools: Vec::new(),
+        changed_files: Vec::new(),
         any_verification_passed: false,
         any_verification_failed: false,
         verification_tools: Vec::new(),
+        verification_commands: Vec::new(),
         verification_status_update: VerificationStatusUpdate::Unchanged,
+        tool_errors: Vec::new(),
     };
     for item in results {
         if item.get("status").and_then(Value::as_str) == Some("error") {
             summary.error_count += 1;
+            summary.tool_errors.push(tool_error_detail(item));
         }
         let tool = item.get("tool").and_then(Value::as_str).unwrap_or_default();
         let output = item.get("output").unwrap_or(&Value::Null);
@@ -1081,6 +1294,7 @@ fn summarize_tool_batch(results: &[Value]) -> ToolBatchSummary {
         {
             summary.any_workspace_change = true;
             summary.workspace_change_tools.push(tool.to_string());
+            collect_changed_files(output, &mut summary.changed_files);
             summary.verification_status_update = VerificationStatusUpdate::Unknown;
         }
         if output
@@ -1089,6 +1303,15 @@ fn summarize_tool_batch(results: &[Value]) -> ToolBatchSummary {
             .unwrap_or(false)
         {
             summary.verification_tools.push(tool.to_string());
+            if let Some(command) = item
+                .get("input")
+                .and_then(|input| input.get("command"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|command| !command.is_empty())
+            {
+                push_unique(&mut summary.verification_commands, command.to_string());
+            }
             let verification_success = output
                 .get("success")
                 .and_then(Value::as_bool)
@@ -1109,16 +1332,97 @@ fn summarize_tool_batch(results: &[Value]) -> ToolBatchSummary {
     summary
 }
 
+fn collect_changed_files(output: &Value, changed_files: &mut Vec<String>) {
+    if let Some(path) = output
+        .get("path")
+        .and_then(Value::as_str)
+        .filter(|path| !path.trim().is_empty())
+    {
+        push_unique(changed_files, path.to_string());
+    }
+    for key in ["changed_files", "workspace_changed_files", "files"] {
+        if let Some(items) = output.get(key).and_then(Value::as_array) {
+            for item in items {
+                if let Some(path) = item.as_str() {
+                    push_unique(changed_files, path.to_string());
+                } else if let Some(path) = item.get("path").and_then(Value::as_str) {
+                    push_unique(changed_files, path.to_string());
+                }
+            }
+        }
+    }
+    if let Some(snippets) = output.get("post_edit_snippets").and_then(Value::as_array) {
+        for snippet in snippets {
+            if let Some(path) = snippet.get("path").and_then(Value::as_str) {
+                push_unique(changed_files, path.to_string());
+            }
+        }
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) {
+    if !values.iter().any(|existing| existing == &value) {
+        values.push(value);
+    }
+}
+
+fn tool_error_detail(item: &Value) -> Value {
+    let tool = item.get("tool").and_then(Value::as_str).unwrap_or("tool");
+    let output = item.get("output").unwrap_or(&Value::Null);
+    let error = item
+        .get("error")
+        .and_then(Value::as_str)
+        .or_else(|| output.get("error").and_then(Value::as_str))
+        .or_else(|| output.get("message").and_then(Value::as_str))
+        .unwrap_or("tool call failed");
+    let error_code = item
+        .get("error_code")
+        .filter(|value| !value.is_null())
+        .cloned()
+        .or_else(|| output.get("error_code").cloned())
+        .or_else(|| output.get("permission").cloned());
+    let error_kind = item
+        .get("error_kind")
+        .and_then(Value::as_str)
+        .unwrap_or("recoverable");
+    let mut detail = Map::new();
+    detail.insert("tool".to_string(), Value::String(tool.to_string()));
+    detail.insert("error".to_string(), Value::String(error.to_string()));
+    detail.insert(
+        "error_kind".to_string(),
+        Value::String(error_kind.to_string()),
+    );
+    detail.insert(
+        "recoverable".to_string(),
+        Value::Bool(
+            item.get("recoverable")
+                .and_then(Value::as_bool)
+                .unwrap_or(true),
+        ),
+    );
+    if let Some(error_code) = error_code {
+        detail.insert("error_code".to_string(), error_code);
+    }
+    if let Some(input) = item.get("input") {
+        detail.insert("input".to_string(), input.clone());
+    }
+    Value::Object(detail)
+}
+
 fn update_edit_progress_from_tools(memory: &mut RunMemory, summary: &ToolBatchSummary) -> bool {
     if summary.error_count > 0
         && summary.verification_status_update != VerificationStatusUpdate::Failed
     {
-        memory.push_feedback(
-            "tool_error",
-            "One or more requested tool calls failed. Inspect the observed errors and choose the next valid action.",
-        );
+        memory.push_feedback("tool_error", tool_error_feedback(summary));
     }
     apply_edit_summary(memory, summary)
+}
+
+fn tool_error_feedback(summary: &ToolBatchSummary) -> Value {
+    json!({
+        "message": "One or more requested tool calls failed. Fix the first listed error before retrying; do not repeat the same invalid call.",
+        "failed_tool_calls": summary.tool_errors.iter().take(3).cloned().collect::<Vec<_>>(),
+    })
 }
 
 fn apply_verification_gate(memory: &mut RunMemory, summary: &ToolBatchSummary) -> bool {
@@ -1146,6 +1450,7 @@ fn apply_verification_gate(memory: &mut RunMemory, summary: &ToolBatchSummary) -
 }
 
 fn apply_edit_summary(memory: &mut RunMemory, summary: &ToolBatchSummary) -> bool {
+    memory.edit.record_summary(summary);
     match summary.verification_status_update {
         VerificationStatusUpdate::Passed => {
             memory.edit.verification_status = VerificationStatus::Passed;
@@ -1176,6 +1481,110 @@ fn apply_edit_summary(memory: &mut RunMemory, summary: &ToolBatchSummary) -> boo
         VerificationStatusUpdate::Unchanged => {}
     }
     false
+}
+
+enum ModelTurnAction {
+    RespondToModel { action: &'static str, result: Value },
+    Complete,
+    DispatchTools(Vec<ToolCall>),
+}
+
+fn model_turn_action(decision: Decision) -> ModelTurnAction {
+    if let Some(feedback) = invalid_tool_call_feedback(&decision.raw) {
+        return ModelTurnAction::RespondToModel {
+            action: "malformed_tool_call",
+            result: feedback,
+        };
+    }
+    if decision.complete.is_none() {
+        return ModelTurnAction::RespondToModel {
+            action: "malformed_decision",
+            result: Value::String(
+                "The prior decision was missing complete/tool_calls. Return valid structured output before tool execution."
+                    .to_string(),
+            ),
+        };
+    }
+    let Some(calls) = decision.tool_calls else {
+        return ModelTurnAction::RespondToModel {
+            action: "malformed_decision",
+            result: Value::String(
+                "The prior decision was missing tool_calls. Return valid structured output before tool execution."
+                    .to_string(),
+            ),
+        };
+    };
+    if decision.complete == Some(true) {
+        return ModelTurnAction::Complete;
+    }
+    if calls.is_empty() {
+        return ModelTurnAction::RespondToModel {
+            action: "malformed_decision",
+            result: Value::String(
+                "The prior decision set complete=false but did not request any tool calls. Request concrete tool calls, or set complete=true with a final answer."
+                    .to_string(),
+            ),
+        };
+    }
+    ModelTurnAction::DispatchTools(calls)
+}
+
+fn verification_turn_action(decision: Decision) -> ModelTurnAction {
+    if let Some(feedback) = invalid_tool_call_feedback(&decision.raw) {
+        return ModelTurnAction::RespondToModel {
+            action: "malformed_tool_call",
+            result: feedback,
+        };
+    }
+    if decision.complete.is_none() || decision.tool_calls.is_none() {
+        return ModelTurnAction::RespondToModel {
+            action: "malformed_decision",
+            result: Value::String(
+                "The verification decision was missing complete/tool_calls. Return exactly one bash verification command."
+                    .to_string(),
+            ),
+        };
+    }
+    let calls = decision.tool_calls.unwrap_or_default();
+    if calls.is_empty() {
+        return ModelTurnAction::RespondToModel {
+            action: "verification_required",
+            result: Value::String(
+                "Return exactly one bash verification command before completing.".to_string(),
+            ),
+        };
+    }
+    ModelTurnAction::DispatchTools(calls)
+}
+
+fn invalid_tool_call_feedback(decision: &Value) -> Option<Value> {
+    let invalid_calls = decision
+        .get("_air_invalid_tool_calls")
+        .and_then(Value::as_array)?;
+    let valid_count = decision
+        .get("tool_calls")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if invalid_calls.is_empty() || valid_count > 0 {
+        return None;
+    }
+
+    let errors = invalid_calls
+        .iter()
+        .take(4)
+        .map(|call| {
+            json!({
+                "tool": call.get("name").and_then(Value::as_str).unwrap_or("unknown"),
+                "arguments": call.get("arguments").and_then(Value::as_str).unwrap_or(""),
+                "error": call.get("error").and_then(Value::as_str).unwrap_or("invalid native tool call"),
+            })
+        })
+        .collect::<Vec<_>>();
+
+    Some(json!({
+        "message": "The previous assistant response contained only malformed tool calls, so no tool was executed. Retry with complete, concrete arguments for every required field; tool calls cannot be placeholders.",
+        "invalid_tool_calls": errors,
+    }))
 }
 
 fn parse_decision(value: Value) -> Decision {
@@ -1229,6 +1638,8 @@ fn tool_batch_error_observation(tool: &str, input: &Value, error: &str) -> Value
         "input": input,
         "status": "error",
         "error_code": "runtime_error",
+        "error_kind": "recoverable",
+        "recoverable": true,
         "error": error,
         "output": Value::Null,
     })
@@ -1240,6 +1651,8 @@ fn tool_batch_level_error_observation(calls: &[ToolCall], error: &str) -> Value 
         "input": Value::Array(calls.iter().map(|call| call.raw.clone()).collect()),
         "status": "error",
         "error_code": "batch_error",
+        "error_kind": "recoverable",
+        "recoverable": true,
         "error": error,
         "output": Value::Null,
     })
@@ -1264,8 +1677,177 @@ fn assistant_content(decision: &Value) -> String {
 }
 
 fn compact_observations(observations: &[Value], max_bytes: usize) -> Value {
-    let value = Value::Array(observations.to_vec());
+    let value = Value::Array(normalize_history_for_model(observations));
     take_last_within_bytes_value(&value, max_bytes).unwrap_or(value)
+}
+
+fn normalize_history_for_model(observations: &[Value]) -> Vec<Value> {
+    observations
+        .iter()
+        .map(normalize_observation_for_model)
+        .collect()
+}
+
+fn normalize_observation_for_model(observation: &Value) -> Value {
+    let Some(object) = observation.as_object() else {
+        return compact_model_context_value(observation);
+    };
+    let mut normalized = object.clone();
+    let mut normalization_meta = None;
+    if let (Some(requested), Some(results)) = (
+        normalized
+            .get("requested")
+            .and_then(Value::as_array)
+            .cloned(),
+        normalized.get("result").and_then(Value::as_array).cloned(),
+    ) {
+        let requested_len = requested.len();
+        let mut normalized_results = Vec::with_capacity(requested_len);
+        let mut orphan_outputs = results.len().saturating_sub(requested_len);
+        let mut inserted_outputs = 0usize;
+        for (index, request) in requested.iter().enumerate() {
+            let result = results.get(index);
+            if result.is_some_and(|result| tool_result_matches_request(result, request)) {
+                normalized_results.push(compact_model_context_value(result.unwrap()));
+            } else {
+                if result.is_some() {
+                    orphan_outputs += 1;
+                }
+                normalized_results.push(aborted_tool_output_for_request(request));
+                inserted_outputs += 1;
+            }
+        }
+        normalized.insert("requested".to_string(), Value::Array(requested));
+        normalized.insert("result".to_string(), Value::Array(normalized_results));
+        if inserted_outputs > 0 || orphan_outputs > 0 {
+            normalization_meta = Some(json!({
+                "inserted_aborted_outputs": inserted_outputs,
+                "removed_orphan_outputs": orphan_outputs,
+            }));
+        }
+    }
+    let mut compacted = compact_model_context_value(&Value::Object(normalized));
+    if let (Some(meta), Some(object)) = (normalization_meta, compacted.as_object_mut()) {
+        object.insert("_air_history_normalized".to_string(), meta);
+    }
+    compacted
+}
+
+fn tool_result_matches_request(result: &Value, request: &Value) -> bool {
+    let Some(request_tool) = request.get("tool").and_then(Value::as_str) else {
+        return true;
+    };
+    result
+        .get("tool")
+        .and_then(Value::as_str)
+        .is_none_or(|result_tool| result_tool == request_tool)
+}
+
+fn aborted_tool_output_for_request(request: &Value) -> Value {
+    let tool = request
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or("tool");
+    let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
+    json!({
+        "tool": tool,
+        "input": input,
+        "status": "error",
+        "error_code": "aborted",
+        "error_kind": "recoverable",
+        "recoverable": true,
+        "error": "tool output missing from history; treating the call as aborted",
+        "output": Value::Null,
+    })
+}
+
+fn native_loop_trace_health(events: &[TraceEvent]) -> Value {
+    let mut model_calls = 0usize;
+    let mut invalid_tool_calls = 0usize;
+    let mut orphan_tool_outputs = 0usize;
+    let mut inserted_aborted_outputs = 0usize;
+    let mut empty_tool_call_inputs = 0usize;
+    for event in events {
+        if event.action == "model_call" {
+            model_calls += 1;
+            if let Some(invalid) = event
+                .output
+                .as_ref()
+                .and_then(|output| output.get("_air_invalid_tool_calls"))
+                .and_then(Value::as_array)
+            {
+                invalid_tool_calls += invalid.len();
+            }
+            if let Some(observations) = event
+                .input
+                .as_ref()
+                .and_then(|input| input.get("observations"))
+                .and_then(Value::as_array)
+            {
+                for observation in observations {
+                    let Some(object) = observation.as_object() else {
+                        continue;
+                    };
+                    inserted_aborted_outputs += object
+                        .get("_air_history_normalized")
+                        .and_then(|meta| meta.get("inserted_aborted_outputs"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    orphan_tool_outputs += object
+                        .get("_air_history_normalized")
+                        .and_then(|meta| meta.get("removed_orphan_outputs"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0) as usize;
+                    if let Some(requested) = object.get("requested").and_then(Value::as_array) {
+                        empty_tool_call_inputs += requested
+                            .iter()
+                            .filter(|request| has_empty_placeholder_input(request))
+                            .count();
+                    }
+                }
+            }
+        }
+        if event.action == "tool_batch_dispatch" {
+            let requested = event
+                .input
+                .as_ref()
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            let returned = event
+                .output
+                .as_ref()
+                .and_then(Value::as_array)
+                .map_or(0, Vec::len);
+            if returned > requested {
+                orphan_tool_outputs += returned - requested;
+            }
+        }
+    }
+    let issue_count = invalid_tool_calls
+        + orphan_tool_outputs
+        + inserted_aborted_outputs
+        + empty_tool_call_inputs;
+    json!({
+        "model_calls": model_calls,
+        "invalid_tool_calls": invalid_tool_calls,
+        "orphan_tool_outputs": orphan_tool_outputs,
+        "inserted_aborted_outputs": inserted_aborted_outputs,
+        "empty_tool_call_inputs": empty_tool_call_inputs,
+        "issue_count": issue_count,
+        "healthy": issue_count == 0,
+    })
+}
+
+fn has_empty_placeholder_input(request: &Value) -> bool {
+    let tool = request
+        .get("tool")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let input_is_empty = request
+        .get("input")
+        .and_then(Value::as_object)
+        .is_some_and(|object| object.is_empty());
+    input_is_empty && !matches!(tool, "todoread")
 }
 
 struct EnvVarGuard {
@@ -1334,12 +1916,302 @@ mod tests {
     }
 
     #[test]
+    fn tool_batch_summary_keeps_actionable_error_details() {
+        let summary = summarize_tool_batch(&[json!({
+            "tool": "edit",
+            "status": "error",
+            "input": {
+                "filePath": "src/lib.rs",
+                "oldString": "old",
+                "newString": "new"
+            },
+            "error": "oldString not found in content",
+            "output": {
+                "error_code": "edit_failed"
+            }
+        })]);
+
+        assert_eq!(summary.error_count, 1);
+        assert_eq!(summary.tool_errors[0]["tool"], json!("edit"));
+        assert_eq!(
+            summary.tool_errors[0]["error"],
+            json!("oldString not found in content")
+        );
+        assert_eq!(summary.tool_errors[0]["error_code"], json!("edit_failed"));
+        assert_eq!(summary.tool_errors[0]["error_kind"], json!("recoverable"));
+        assert_eq!(summary.tool_errors[0]["recoverable"], json!(true));
+
+        let feedback = tool_error_feedback(&summary);
+        assert!(feedback["message"]
+            .as_str()
+            .unwrap()
+            .contains("Fix the first listed error"));
+        assert_eq!(feedback["failed_tool_calls"][0]["tool"], json!("edit"));
+    }
+
+    #[test]
+    fn edit_progress_is_structured_for_model_input() {
+        let progress = EditProgress {
+            verification_status: VerificationStatus::Failed,
+            verification_failed_count: 1,
+            patch_seen: true,
+            changed_files: BTreeSet::from(["src/lib.rs".to_string()]),
+            verification_commands: vec!["cargo test".to_string()],
+            last_tool_error: Some(json!({"tool": "edit", "error": "oldString not found"})),
+        };
+
+        let value = progress.as_value();
+        assert_eq!(value["verification_status"], json!("failed"));
+        assert_eq!(value["verification_failed_count"], json!(1));
+        assert_eq!(value["patch_seen"], json!(true));
+        assert_eq!(value["changed_files"], json!(["src/lib.rs"]));
+        assert_eq!(value["verification_commands"], json!(["cargo test"]));
+        assert_eq!(value["last_tool_error"]["tool"], json!("edit"));
+    }
+
+    #[test]
+    fn completion_policy_exposes_finish_requirements() {
+        let mut models = ModelProviderChoice::echo();
+        let mut tools = ToolProviderChoice::from_config(None, false).unwrap();
+        let runner = NativeLoopRunner {
+            spec: NativeLoopSpec::for_kind(NativeLoopKind::CodeEdit),
+            task: "fix bug".to_string(),
+            verification_command: String::new(),
+            requires_edit: true,
+            models: &mut models,
+            tools: &mut tools,
+            trace_out: None,
+            trace_redact: true,
+            log: false,
+            trace: Vec::new(),
+            step: 3,
+        };
+        let mut memory = RunMemory::default();
+        memory.edit.verification_status = VerificationStatus::Passed;
+
+        let policy = runner.completion_policy(&memory, false);
+        assert_eq!(policy["requires_edit"], json!(true));
+        assert_eq!(policy["requires_verification"], json!(true));
+        assert_eq!(policy["can_finish_now"], json!(false));
+        assert_eq!(
+            policy["finish_requirements"]["patch_seen"],
+            json!("required")
+        );
+
+        memory.edit.patch_seen = true;
+        assert_eq!(
+            runner.completion_policy(&memory, false)["can_finish_now"],
+            json!(true)
+        );
+        assert_eq!(runner.runtime_context()["remaining_steps"], json!(217));
+        assert_eq!(
+            runner.environment_context()["os"],
+            json!(std::env::consts::OS)
+        );
+
+        let model_input = ModelContextBuilder::for_native_loop(&runner, &memory, false).build();
+        assert_eq!(
+            model_input["context_policy"]["builder"],
+            json!("air.native.model_context.v1")
+        );
+        assert_eq!(model_input["model_runtime"]["provider"], json!("echo"));
+        assert_eq!(
+            model_input["protected_facts"]["edit_ledger"]["patch_seen"],
+            json!(true)
+        );
+        assert_eq!(
+            model_input["tool_capabilities"]["edit"]["permission_profile"],
+            json!("echo")
+        );
+    }
+
+    #[test]
+    fn model_history_normalizer_pairs_calls_and_outputs() {
+        let normalized = normalize_history_for_model(&[json!({
+            "action": "tool_result",
+            "requested": [
+                {"tool": "grep", "input": {"pattern": "needle"}},
+                {"tool": "read_range", "input": {"file": "src/lib.rs", "offset": 0, "limit": 20}}
+            ],
+            "result": [{
+                "tool": "grep",
+                "status": "ok",
+                "input": {"pattern": "needle"},
+                "output": {
+                    "matches": ["x"],
+                    "large": "line\n".repeat(10_000)
+                }
+            }, {
+                "tool": "orphan",
+                "status": "ok",
+                "output": {"unused": true}
+            }]
+        })]);
+
+        let observation = &normalized[0];
+        let results = observation["result"].as_array().unwrap();
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0]["tool"], json!("grep"));
+        assert_eq!(results[1]["tool"], json!("read_range"));
+        assert_eq!(results[1]["status"], json!("error"));
+        assert_eq!(results[1]["error_code"], json!("aborted"));
+        assert_eq!(
+            observation["_air_history_normalized"]["inserted_aborted_outputs"],
+            json!(1)
+        );
+        assert_eq!(
+            observation["_air_history_normalized"]["removed_orphan_outputs"],
+            json!(1)
+        );
+    }
+
+    #[test]
+    fn tool_batch_summary_records_edit_ledger_facts() {
+        let summary = summarize_tool_batch(&[
+            json!({
+                "tool": "edit",
+                "status": "ok",
+                "output": {
+                    "workspace_changed": true,
+                    "path": "src/lib.rs",
+                    "post_edit_snippets": [{"path": "src/lib.rs"}]
+                }
+            }),
+            json!({
+                "tool": "bash",
+                "status": "ok",
+                "input": {"command": "cargo test"},
+                "output": {
+                    "verification": true,
+                    "success": true,
+                    "workspace_changed": false
+                }
+            }),
+        ]);
+        let mut memory = RunMemory::default();
+
+        assert!(!apply_edit_summary(&mut memory, &summary));
+        assert!(memory.edit.changed_files.contains("src/lib.rs"));
+        assert_eq!(memory.edit.verification_commands, vec!["cargo test"]);
+        assert_eq!(memory.edit.verification_status, VerificationStatus::Passed);
+    }
+
+    #[test]
+    fn native_trace_health_flags_context_pollution() {
+        let event = TraceEvent {
+            agent: "code".to_string(),
+            step: 1,
+            rule: "model".to_string(),
+            action: "model_call".to_string(),
+            input: Some(json!({
+                "observations": [{
+                    "action": "tool_result",
+                    "requested": [{"tool": "edit", "input": {}}],
+                    "_air_history_normalized": {
+                        "inserted_aborted_outputs": 1,
+                        "removed_orphan_outputs": 1
+                    }
+                }]
+            })),
+            output: Some(json!({
+                "complete": false,
+                "tool_calls": [],
+                "_air_invalid_tool_calls": [{"name": "edit", "arguments": "{}"}]
+            })),
+            meta: None,
+            status: TraceStatus::Ok,
+            error: None,
+        };
+
+        let health = native_loop_trace_health(&[event]);
+        assert_eq!(health["healthy"], json!(false));
+        assert_eq!(health["invalid_tool_calls"], json!(1));
+        assert_eq!(health["empty_tool_call_inputs"], json!(1));
+        assert_eq!(health["inserted_aborted_outputs"], json!(1));
+        assert_eq!(health["orphan_tool_outputs"], json!(1));
+    }
+
+    #[test]
     fn code_edit_spec_has_native_allowed_tool_boundary() {
         let spec = NativeLoopSpec::for_kind(NativeLoopKind::CodeEdit);
         assert_eq!(spec.completion.output_key(), "edit");
         assert!(spec.allowed_tools.contains(&"edit"));
+        assert!(spec.allowed_tools.contains(&"task"));
         assert!(!spec.allowed_tools.contains(&"todowrite"));
         assert!(!spec.allowed_tools.contains(&"todoread"));
         assert_eq!(spec.verify_allowed_tools, &["bash"]);
+    }
+
+    #[test]
+    fn invalid_tool_call_feedback_only_when_no_valid_calls_exist() {
+        let feedback = invalid_tool_call_feedback(&json!({
+            "complete": false,
+            "tool_calls": [],
+            "_air_invalid_tool_calls": [{
+                "name": "edit",
+                "arguments": "{}",
+                "error": "malformed native tool call for edit: empty arguments {}"
+            }]
+        }))
+        .expect("all-invalid tool calls should produce feedback");
+
+        assert_eq!(feedback["invalid_tool_calls"][0]["tool"], json!("edit"));
+        assert!(feedback["message"]
+            .as_str()
+            .unwrap()
+            .contains("no tool was executed"));
+
+        assert!(invalid_tool_call_feedback(&json!({
+            "complete": false,
+            "tool_calls": [{"tool": "edit", "input": {"filePath": "src/lib.rs", "oldString": "old", "newString": "new"}}],
+            "_air_invalid_tool_calls": [{
+                "name": "edit",
+                "arguments": "{}",
+                "error": "malformed native tool call for edit: empty arguments {}"
+            }]
+        }))
+        .is_none());
+    }
+
+    #[test]
+    fn model_turn_action_matches_codex_follow_up_shape() {
+        let malformed = Decision {
+            raw: json!({
+                "complete": false,
+                "tool_calls": [],
+                "_air_invalid_tool_calls": [{
+                    "name": "edit",
+                    "arguments": "{}",
+                    "error": "malformed native tool call for edit: empty arguments {}"
+                }]
+            }),
+            complete: Some(false),
+            tool_calls: Some(Vec::new()),
+        };
+        match model_turn_action(malformed) {
+            ModelTurnAction::RespondToModel { action, result } => {
+                assert_eq!(action, "malformed_tool_call");
+                assert!(result["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("no tool was executed"));
+            }
+            _ => panic!("malformed tool calls should be model-visible feedback"),
+        }
+
+        let tool_call = ToolCall {
+            raw: json!({"tool": "bash", "input": {"command": "pwd"}}),
+            tool: "bash".to_string(),
+            input: json!({"command": "pwd"}),
+        };
+        let valid = Decision {
+            raw: json!({"complete": false, "tool_calls": [tool_call.raw.clone()]}),
+            complete: Some(false),
+            tool_calls: Some(vec![tool_call]),
+        };
+        match model_turn_action(valid) {
+            ModelTurnAction::DispatchTools(calls) => assert_eq!(calls.len(), 1),
+            _ => panic!("valid tool calls should dispatch"),
+        }
     }
 }
