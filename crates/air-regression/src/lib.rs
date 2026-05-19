@@ -8,45 +8,45 @@ use std::process::Command;
 const DEFAULT_REGRESSION_DIR: &str = "skills/code-agent/benches/regressions";
 const DEFAULT_IMPROVE_FROM: &str = "target/generated";
 
-pub(crate) struct RegressionRunOptions {
-    pub(crate) finding: Option<String>,
-    pub(crate) file: Option<PathBuf>,
-    pub(crate) all: bool,
-    pub(crate) from: Vec<PathBuf>,
-    pub(crate) out_dir: Option<PathBuf>,
+pub struct RegressionRunOptions {
+    pub finding: Option<String>,
+    pub file: Option<PathBuf>,
+    pub all: bool,
+    pub from: Vec<PathBuf>,
+    pub out_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct RegressionRunConfig {
-    pub(crate) finding: Option<String>,
-    pub(crate) file: Option<PathBuf>,
-    pub(crate) all: bool,
-    pub(crate) from: Vec<PathBuf>,
-    pub(crate) out_dir: PathBuf,
+pub struct RegressionRunConfig {
+    pub finding: Option<String>,
+    pub file: Option<PathBuf>,
+    pub all: bool,
+    pub from: Vec<PathBuf>,
+    pub out_dir: PathBuf,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct RegressionRunReport {
-    pub(crate) schema: &'static str,
-    pub(crate) total: usize,
-    pub(crate) passed: usize,
-    pub(crate) failed: usize,
-    pub(crate) results: Vec<RegressionResult>,
+pub struct RegressionRunReport {
+    pub schema: &'static str,
+    pub total: usize,
+    pub passed: usize,
+    pub failed: usize,
+    pub results: Vec<RegressionResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct RegressionResult {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) category: Option<String>,
-    pub(crate) path: String,
-    pub(crate) passed: bool,
-    pub(crate) status: String,
-    pub(crate) message: String,
+pub struct RegressionResult {
+    pub id: String,
+    pub kind: String,
+    pub category: Option<String>,
+    pub path: String,
+    pub passed: bool,
+    pub status: String,
+    pub message: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) command: Vec<String>,
+    pub command: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) report: Option<String>,
+    pub report: Option<String>,
 }
 
 struct RegressionStatus {
@@ -73,7 +73,7 @@ struct FindingStatus {
     message: String,
 }
 
-pub(crate) fn run_regression_command(options: RegressionRunOptions) -> Result<()> {
+pub fn run_regression_command(options: RegressionRunOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let out_dir = absolutize(
         &cwd,
@@ -99,7 +99,7 @@ pub(crate) fn run_regression_command(options: RegressionRunOptions) -> Result<()
     Ok(())
 }
 
-pub(crate) fn run_regression_suite(config: RegressionRunConfig) -> Result<RegressionRunReport> {
+pub fn run_regression_suite(config: RegressionRunConfig) -> Result<RegressionRunReport> {
     fs::create_dir_all(&config.out_dir)
         .with_context(|| format!("create {}", config.out_dir.display()))?;
     let files = resolve_regression_files(&config)?;

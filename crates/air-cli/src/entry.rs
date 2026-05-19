@@ -1,5 +1,4 @@
-use crate::llm_advisory::{cached_llm_advisory, llm_advisory_disabled, CachedLlmAdvisoryOptions};
-use crate::memory::MemoryPackOutput;
+use crate::models::ModelProviderChoice;
 use crate::project::{
     default_project_file, project_plan_capture, project_run_capture, ProjectPlanOptions,
     ProjectRunOptions,
@@ -9,6 +8,10 @@ use crate::skill::{
     prepare_skill_composition, prepare_skill_composition_for_executor, route_skills_value_for_task,
     run_skill_auto_capture, SkillAutoRunOptions,
 };
+use air_advisory::{
+    cached_llm_advisory, is_disabled as llm_advisory_disabled, CachedLlmAdvisoryOptions,
+};
+use air_memory::MemoryPackOutput;
 use anyhow::{bail, Result};
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
@@ -614,16 +617,28 @@ fn select_entry_executor_advisory(
         allowed_executors: ["code", "review", "project", "bench"],
         instruction: "Return the best executor for this task. Use code for ordinary coding edits, review only for code/diff/PR review, project only for multi-step project planning, and bench only for benchmark execution or comparison.",
     };
+    let mut provider = match ModelProviderChoice::open_advisory(model_config) {
+        Ok(provider) => provider,
+        Err(error) => {
+            return Ok(EntryExecutorSelection {
+                status: format!(
+                    "llm_advisory_failed_low_confidence: {}",
+                    truncate_for_status(&error.to_string(), 180)
+                ),
+                ..deterministic_selection
+            });
+        }
+    };
     let result = cached_llm_advisory(
         CachedLlmAdvisoryOptions {
             cache_root: Path::new(".air/memory/cache"),
             out_file: None,
             purpose: "task-router",
             model_alias: TASK_ROUTER_MODEL,
-            model_config,
             request: &request,
             generated_at_unix: unix_now(),
         },
+        &mut provider,
         validate_task_router_output,
     );
     match result {

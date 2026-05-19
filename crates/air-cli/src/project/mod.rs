@@ -1,12 +1,12 @@
 use crate::code_agent::{run_code_agent, CodeOptions};
-use crate::code_artifact::{
-    build_code_run_artifact, read_code_run_artifact, write_code_run_artifact, CodeRunDescriptor,
-    FailureCategory, FailureReason, WorkspaceSnapshot,
-};
 use crate::models::ModelProviderChoice;
 use crate::run_plan::{run_plan_capture, RunPlanOptions};
 use crate::skill::{
     prepare_skill_composition, resolve_skill_run_metadata, route_skills_value_for_task,
+};
+use air_code_artifact::{
+    build_code_run_artifact, read_code_run_artifact, write_code_run_artifact, CodeRunDescriptor,
+    FailureCategory, FailureReason, WorkspaceSnapshot,
 };
 use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
@@ -973,7 +973,7 @@ fn run_project_task(
         tool_config: Some(tool_config),
         artifact_out: Some(artifact_dir.clone()),
         artifact_extra,
-        verdict_constraints: crate::code_artifact::CodeRunVerdictConstraints::code_edit(),
+        verdict_constraints: air_code_artifact::CodeRunVerdictConstraints::code_edit(),
         replay_artifact: None,
         replay_from: None,
     });

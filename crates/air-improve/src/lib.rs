@@ -1,7 +1,9 @@
-use crate::eval_manifest::check_default_eval_manifest_if_present;
-use crate::llm_advisory::{cached_llm_advisory, llm_advisory_disabled, CachedLlmAdvisoryOptions};
-use crate::regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
-use air_runtime::read_trace_jsonl;
+use air_advisory::{
+    cached_llm_advisory, is_disabled as llm_advisory_disabled, CachedLlmAdvisoryOptions,
+};
+use air_eval::check_default_eval_manifest_if_present;
+use air_regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
+use air_runtime::{read_trace_jsonl, ModelProvider};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -11,21 +13,25 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const IMPROVE_OBSERVATIONS_SCHEMA: &str = "air.improve_observations.v1";
-const IMPROVE_FINDINGS_SCHEMA: &str = "air.improve_findings.v1";
-const IMPROVE_REGRESSIONS_SCHEMA: &str = "air.improve_suggested_regressions.v1";
+const IMPROVE_OBSERVATIONS_SCHEMA: &str = air_schemas::IMPROVE_OBSERVATIONS;
+const IMPROVE_FINDINGS_SCHEMA: &str = air_schemas::IMPROVE_FINDINGS;
+const IMPROVE_REGRESSIONS_SCHEMA: &str = air_schemas::IMPROVE_SUGGESTED_REGRESSIONS;
 const DEFAULT_CHECK_SUITE: &str = "skills/code-agent/benches/rust-small/suite.json";
 const FAILURE_CLASSIFIER_MODEL: &str = "failure_classifier";
 
-pub(crate) struct ImproveOptions {
-    pub(crate) action: ImproveAction,
-    pub(crate) from: Vec<PathBuf>,
-    pub(crate) out_dir: Option<PathBuf>,
-    pub(crate) write_regressions: bool,
-    pub(crate) model_config: Option<PathBuf>,
+pub struct ImproveOptions {
+    pub action: ImproveAction,
+    pub from: Vec<PathBuf>,
+    pub out_dir: Option<PathBuf>,
+    pub write_regressions: bool,
+    pub emit_stdout: bool,
+    /// Optional pre-built provider for LLM-advisory failure classification.
+    /// `None` means deterministic-only — observations stay in their
+    /// regex-inferred categories.
+    pub advisory_provider: Option<Box<dyn ModelProvider>>,
 }
 
-pub(crate) enum ImproveAction {
+pub enum ImproveAction {
     Report,
     Next,
     Check {
@@ -312,7 +318,7 @@ struct BenchSuiteTaskProbe {
     id: String,
 }
 
-pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
+pub fn run_improve(mut options: ImproveOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let roots = if options.from.is_empty() {
         vec![cwd.join("target/generated")]
@@ -351,7 +357,7 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
     }
     renumber_observations(&mut observations);
     let advisory =
-        apply_failure_classifier_advisory(options.model_config.as_deref(), &mut observations);
+        apply_failure_classifier_advisory(&mut options.advisory_provider, &mut observations);
 
     let findings = mine_findings(&observations);
     let regressions = suggest_regressions(&findings);
@@ -443,14 +449,16 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
         }
         ImproveAction::Next => {
             let next_action = choose_next_action(&findings, &observations, &statuses);
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&json!({
-                    "schema": "air.improve_next.v1",
-                    "report": report_path.display().to_string(),
-                    "next_action": next_action,
-                }))?
-            );
+            if options.emit_stdout {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&json!({
+                        "schema": "air.improve_next.v1",
+                        "report": report_path.display().to_string(),
+                        "next_action": next_action,
+                    }))?
+                );
+            }
             return Ok(());
         }
         ImproveAction::Report => {}
@@ -471,7 +479,9 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
         next_action: choose_next_action(&findings, &observations, &statuses),
         failure_classifier_status: advisory.status,
     };
-    println!("{}", serde_json::to_string_pretty(&output)?);
+    if options.emit_stdout {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    }
     Ok(())
 }
 
@@ -1058,14 +1068,14 @@ fn infer_category_from_text(text: &str) -> String {
 }
 
 fn apply_failure_classifier_advisory(
-    model_config: Option<&Path>,
+    provider: &mut Option<Box<dyn ModelProvider>>,
     observations: &mut [ImproveObservation],
 ) -> FailureClassifierRun {
     let mut summaries = Vec::new();
     let mut errors = Vec::new();
     let cache_root = Path::new(".air/memory/cache");
     let mut candidates = 0usize;
-    if model_config.is_none() || llm_advisory_disabled() {
+    if provider.is_none() || llm_advisory_disabled() {
         let status = if llm_advisory_disabled() {
             "needs_llm_advisory_disabled"
         } else {
@@ -1085,7 +1095,7 @@ fn apply_failure_classifier_advisory(
             errors,
         };
     }
-    let model_config = model_config.expect("checked above");
+    let provider: &mut dyn ModelProvider = &mut **provider.as_mut().expect("checked above");
     for observation in observations.iter_mut() {
         if !matches!(
             observation.category.as_str(),
@@ -1130,10 +1140,10 @@ fn apply_failure_classifier_advisory(
                 out_file: None,
                 purpose: "failure-classifier",
                 model_alias: FAILURE_CLASSIFIER_MODEL,
-                model_config,
                 request: &request,
                 generated_at_unix: unix_now(),
             },
+            &mut *provider,
             |output| validate_failure_classifier_output(&request, output),
         );
         let advisory = match result {

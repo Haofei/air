@@ -1,0 +1,20 @@
+[package]
+name = "air-improve"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+air-advisory = { path = "../air-advisory" }
+air-code-artifact = { path = "../air-code-artifact" }
+air-eval = { path = "../air-eval" }
+air-regression = { path = "../air-regression" }
+air-runtime = { path = "../air-runtime" }
+air-schemas = { path = "../air-schemas" }
+anyhow.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true

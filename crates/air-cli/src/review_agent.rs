@@ -58,7 +58,7 @@ pub(crate) fn run_review_agent(options: ReviewOptions) -> Result<Value> {
         tool_config: options.tool_config.or_else(|| prepared.tool_config.clone()),
         artifact_out: options.artifact_out,
         artifact_extra,
-        verdict_constraints: crate::code_artifact::CodeRunVerdictConstraints::review(),
+        verdict_constraints: air_code_artifact::CodeRunVerdictConstraints::review(),
         replay_artifact: options.replay_artifact,
         replay_from: options.replay_from,
     })

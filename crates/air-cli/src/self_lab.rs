@@ -1,5 +1,6 @@
-use crate::llm_advisory::{cached_llm_advisory, CachedLlmAdvisoryOptions};
-use crate::regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
+use crate::models::ModelProviderChoice;
+use air_advisory::{cached_llm_advisory, CachedLlmAdvisoryOptions};
+use air_regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -676,7 +677,7 @@ fn candidate_judge_advisory(
         ));
     }
     let request = json!({
-        "schema": "air.candidate_judge_request.v1",
+        "schema": air_schemas::CANDIDATE_JUDGE_REQUEST,
         "finding": finding,
         "candidates": accepted.iter().map(|score| json!({
             "id": score.id,
@@ -697,18 +698,19 @@ fn candidate_judge_advisory(
         .iter()
         .map(|score| score.id.clone())
         .collect::<BTreeSet<_>>();
-    cached_llm_advisory(
+    let mut provider = ModelProviderChoice::open_advisory(model_config)?;
+    Ok(cached_llm_advisory(
         CachedLlmAdvisoryOptions {
             cache_root: Path::new(".air/memory/cache"),
             out_file: None,
             purpose: "candidate-judge",
             model_alias: CANDIDATE_JUDGE_MODEL,
-            model_config,
             request: &request,
             generated_at_unix: unix_now(),
         },
+        &mut provider,
         |output| validate_candidate_judge_output(output, &allowed),
-    )
+    )?)
 }
 
 fn validate_candidate_judge_output(

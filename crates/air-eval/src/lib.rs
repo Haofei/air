@@ -1,4 +1,4 @@
-use crate::code_artifact::{path_content_identity, sha256_hex};
+use air_code_artifact::{path_content_identity, sha256_hex};
 use anyhow::{Context, Result};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use serde::{Deserialize, Serialize};
@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const DEFAULT_EVAL_MANIFEST: &str = ".air/evals/manifest.json";
+pub const DEFAULT_EVAL_MANIFEST: &str = ".air/evals/manifest.json";
 
 const DEFAULT_PROTECTED: &[&str] = &[
     ".air/evals/**",
@@ -19,13 +19,13 @@ const DEFAULT_PROTECTED: &[&str] = &[
 
 const DEFAULT_INCLUDES: &[&str] = &["skills/code-agent/benches", "skills.lock"];
 
-pub(crate) struct EvalManifestOptions {
-    pub(crate) out: Option<PathBuf>,
-    pub(crate) include: Vec<PathBuf>,
+pub struct EvalManifestOptions {
+    pub out: Option<PathBuf>,
+    pub include: Vec<PathBuf>,
 }
 
-pub(crate) struct EvalCheckOptions {
-    pub(crate) manifest: Option<PathBuf>,
+pub struct EvalCheckOptions {
+    pub manifest: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -52,17 +52,17 @@ struct EvalHoldout {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct EvalCheckReport {
-    pub(crate) schema: &'static str,
-    pub(crate) manifest: String,
-    pub(crate) passed: bool,
-    pub(crate) checked_files: usize,
-    pub(crate) missing: Vec<String>,
-    pub(crate) changed: Vec<String>,
-    pub(crate) protected_changed: Vec<String>,
+pub struct EvalCheckReport {
+    pub schema: &'static str,
+    pub manifest: String,
+    pub passed: bool,
+    pub checked_files: usize,
+    pub missing: Vec<String>,
+    pub changed: Vec<String>,
+    pub protected_changed: Vec<String>,
 }
 
-pub(crate) fn write_eval_manifest(options: EvalManifestOptions) -> Result<()> {
+pub fn write_eval_manifest(options: EvalManifestOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let out = absolutize(
         &cwd,
@@ -85,7 +85,7 @@ pub(crate) fn write_eval_manifest(options: EvalManifestOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn check_eval_manifest_command(options: EvalCheckOptions) -> Result<()> {
+pub fn check_eval_manifest_command(options: EvalCheckOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let manifest = absolutize(
         &cwd,
@@ -101,7 +101,7 @@ pub(crate) fn check_eval_manifest_command(options: EvalCheckOptions) -> Result<(
     Ok(())
 }
 
-pub(crate) fn check_default_eval_manifest_if_present() -> Result<Option<EvalCheckReport>> {
+pub fn check_default_eval_manifest_if_present() -> Result<Option<EvalCheckReport>> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let manifest = cwd.join(DEFAULT_EVAL_MANIFEST);
     if !manifest.exists() {

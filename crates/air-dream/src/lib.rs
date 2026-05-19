@@ -1,37 +1,42 @@
-use crate::code_artifact::sha256_hex;
-use crate::memory::{advance_memory, extract_memory, MemoryAdvanceOptions, MemoryExtractOptions};
-use crate::ops::{
-    append_jsonl_locked, run_current_air_stage, with_jsonl_lock, write_json_atomic, AirLayout,
+use air_audit::{audit_collect, AuditCollectOptions};
+use air_code_artifact::sha256_hex;
+use air_improve::{run_improve, ImproveAction, ImproveOptions};
+use air_memory::{
+    advance_memory, extract_memory, MemoryAdvanceOptions, MemoryExtractOptions,
+    MemorySkillCheckRunner,
 };
+use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const DREAM_SCHEMA: &str = "air.dream.v1";
-const DREAM_STATE_SCHEMA: &str = "air.dream_state.v1";
-const DREAM_WINDOW_SCHEMA: &str = "air.dream_window.v1";
-const DREAM_FINDING_RECORD_SCHEMA: &str = "air.dream_finding_record.v1";
-const DREAM_LEDGER_SCHEMA: &str = "air.dream_ledger_event.v1";
+const DREAM_SCHEMA: &str = air_schemas::DREAM;
+const DREAM_STATE_SCHEMA: &str = air_schemas::DREAM_STATE;
+const DREAM_WINDOW_SCHEMA: &str = air_schemas::DREAM_WINDOW;
+const DREAM_FINDING_RECORD_SCHEMA: &str = air_schemas::DREAM_FINDING_RECORD;
+const DREAM_LEDGER_SCHEMA: &str = air_schemas::DREAM_LEDGER_EVENT;
 const DREAM_OUTPUT_MARKER: &str = ".air-dream-output";
 const DREAM_CURSOR_OVERLAP_SECONDS: u64 = 300;
 const DREAM_FINDING_LIST_LIMIT: usize = 50;
 const DREAM_FINDINGS_COMPACT_BYTES: u64 = 1_048_576;
+const DEFAULT_LOCK_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum DreamMode {
+pub enum DreamMode {
     Micro,
     Deep,
     Evolution,
 }
 
 impl DreamMode {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Micro => "micro",
             Self::Deep => "deep",
@@ -40,35 +45,37 @@ impl DreamMode {
     }
 }
 
-pub(crate) struct DreamRunOptions {
-    pub(crate) from: Vec<PathBuf>,
-    pub(crate) since_unix: Option<u64>,
-    pub(crate) limit: Option<usize>,
-    pub(crate) out_dir: Option<PathBuf>,
-    pub(crate) write_regressions: bool,
-    pub(crate) full: bool,
-    pub(crate) mode: DreamMode,
-    pub(crate) experiment: bool,
-    pub(crate) top_findings: usize,
-    pub(crate) budget_seconds: Option<u64>,
-    pub(crate) candidates: usize,
-    pub(crate) advance: bool,
-    pub(crate) advance_limit: Option<usize>,
-    pub(crate) advance_timeout_seconds: Option<u64>,
-    pub(crate) model_config: Option<PathBuf>,
+pub struct DreamRunOptions {
+    pub from: Vec<PathBuf>,
+    pub since_unix: Option<u64>,
+    pub limit: Option<usize>,
+    pub out_dir: Option<PathBuf>,
+    pub write_regressions: bool,
+    pub full: bool,
+    pub mode: DreamMode,
+    pub experiment: bool,
+    pub top_findings: usize,
+    pub budget_seconds: Option<u64>,
+    pub candidates: usize,
+    pub advance: bool,
+    pub advance_limit: Option<usize>,
+    pub advance_timeout_seconds: Option<u64>,
+    pub memory_skill_runner: Option<Box<dyn MemorySkillCheckRunner>>,
+    pub improve_advisory_provider: Option<Box<dyn ModelProvider>>,
+    pub dream_synthesis_provider: Option<Box<dyn ModelProvider>>,
 }
 
-pub(crate) struct DreamStateOptions;
+pub struct DreamStateOptions;
 
-pub(crate) struct DreamFindingsListOptions {
-    pub(crate) status: Option<String>,
-    pub(crate) limit: Option<usize>,
+pub struct DreamFindingsListOptions {
+    pub status: Option<String>,
+    pub limit: Option<usize>,
 }
 
-pub(crate) struct DreamFindingUpdateOptions {
-    pub(crate) finding: String,
-    pub(crate) reason: Option<String>,
-    pub(crate) fixed_by: Option<String>,
+pub struct DreamFindingUpdateOptions {
+    pub finding: String,
+    pub reason: Option<String>,
+    pub fixed_by: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -300,7 +307,7 @@ struct DreamLedgerEvent {
     note: Option<String>,
 }
 
-pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
+pub fn run_dream(options: DreamRunOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let layout = AirLayout::new(cwd.clone());
     let started_at = unix_now();
@@ -418,28 +425,27 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         )?;
         write_micro_improve_outputs(&improve_dir, &improve_report, &improve_log)?;
     } else {
-        let mut audit_args = vec!["audit".to_string(), "collect".to_string()];
-        for root in &effective_audit_roots {
-            audit_args.push("--from".to_string());
-            audit_args.push(root.display().to_string());
-        }
-        audit_args.push("--out-dir".to_string());
-        audit_args.push(audit_dir.display().to_string());
-        audit_args.push("--report".to_string());
-        audit_args.push(audit_report.display().to_string());
-        run_air_stage(&cwd, &audit_args, &audit_log)?;
+        audit_collect(AuditCollectOptions {
+            from: effective_audit_roots.clone(),
+            out_dir: Some(audit_dir.clone()),
+            report: Some(audit_report.clone()),
+            since_unix: None,
+            limit: None,
+            emit_stdout: false,
+        })
+        .with_context(|| format!("dream audit stage failed; see {}", audit_log.display()))?;
+        write_in_process_stage_log(&audit_log, "audit collect", &audit_dir)?;
 
-        let mut improve_args = vec!["improve".to_string()];
-        for root in &effective_improve_roots {
-            improve_args.push("--from".to_string());
-            improve_args.push(root.display().to_string());
-        }
-        improve_args.push("--out-dir".to_string());
-        improve_args.push(improve_dir.display().to_string());
-        if options.write_regressions {
-            improve_args.push("--write-regressions".to_string());
-        }
-        run_air_stage(&cwd, &improve_args, &improve_log)?;
+        run_improve(ImproveOptions {
+            action: ImproveAction::Report,
+            from: effective_improve_roots.clone(),
+            out_dir: Some(improve_dir.clone()),
+            write_regressions: options.write_regressions,
+            emit_stdout: false,
+            advisory_provider: options.improve_advisory_provider,
+        })
+        .with_context(|| format!("dream improve stage failed; see {}", improve_log.display()))?;
+        write_in_process_stage_log(&improve_log, "improve report", &improve_dir)?;
         validate_dream_stage_outputs(&audit_dir, &improve_dir)?;
     }
 
@@ -462,7 +468,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         findings_file: findings_file.clone(),
         suggested_regressions_file: Some(improve_dir.join("suggested_regressions.json")),
         mode: options.mode.as_str().to_string(),
-        model_config: options.model_config.clone(),
+        dream_synthesis_provider: options.dream_synthesis_provider,
     })?;
     let memory_advance_out_dir = out_dir.join("memory-advance");
     let memory_advance = if options.advance && options.mode != DreamMode::Micro {
@@ -472,6 +478,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
             skill_bench: false,
             limit: options.advance_limit,
             timeout_seconds: options.advance_timeout_seconds,
+            skill_runner: options.memory_skill_runner,
         })?
     } else {
         let status = if options.mode == DreamMode::Micro {
@@ -479,7 +486,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         } else {
             "skipped"
         };
-        crate::memory::MemoryAdvanceOutput::skipped(&memory_advance_out_dir, status)?
+        air_memory::MemoryAdvanceOutput::skipped(&memory_advance_out_dir, status)?
     };
     let experiment = if options.experiment {
         run_dream_experiments(
@@ -640,7 +647,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn show_dream_state(_options: DreamStateOptions) -> Result<()> {
+pub fn show_dream_state(_options: DreamStateOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let state_file = AirLayout::new(cwd).dream_state_path();
     let state = read_dream_state(&state_file)?.unwrap_or_else(|| DreamState {
@@ -660,7 +667,7 @@ pub(crate) fn show_dream_state(_options: DreamStateOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn list_dream_findings(options: DreamFindingsListOptions) -> Result<()> {
+pub fn list_dream_findings(options: DreamFindingsListOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let findings_file = AirLayout::new(cwd).dream_findings_path();
     let mut findings = read_latest_finding_records(&findings_file)?;
@@ -688,29 +695,16 @@ pub(crate) fn list_dream_findings(options: DreamFindingsListOptions) -> Result<(
     Ok(())
 }
 
-pub(crate) fn open_dream_finding(options: DreamFindingUpdateOptions) -> Result<()> {
+pub fn open_dream_finding(options: DreamFindingUpdateOptions) -> Result<()> {
     update_dream_finding_status(options, "open")
 }
 
-pub(crate) fn resolve_dream_finding(options: DreamFindingUpdateOptions) -> Result<()> {
+pub fn resolve_dream_finding(options: DreamFindingUpdateOptions) -> Result<()> {
     update_dream_finding_status(options, "resolved")
 }
 
-pub(crate) fn dismiss_dream_finding(options: DreamFindingUpdateOptions) -> Result<()> {
+pub fn dismiss_dream_finding(options: DreamFindingUpdateOptions) -> Result<()> {
     update_dream_finding_status(options, "dismissed")
-}
-
-fn run_air_stage(cwd: &Path, args: &[String], log_path: &Path) -> Result<()> {
-    let output = run_current_air_stage(cwd, args, log_path, None)?;
-    if !output.success {
-        bail!(
-            "dream stage failed: air {} ({}); see {}",
-            args.join(" "),
-            output.status,
-            log_path.display()
-        );
-    }
-    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1102,6 +1096,20 @@ fn write_skipped_stage(report: &Path, log: &Path, reason: &str) -> Result<()> {
         .with_context(|| format!("write {}", report.display()))?;
     fs::write(log, format!("stage skipped: {reason}\n"))
         .with_context(|| format!("write {}", log.display()))
+}
+
+fn write_in_process_stage_log(log: &Path, stage: &str, out_dir: &Path) -> Result<()> {
+    if let Some(parent) = log.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::write(
+        log,
+        format!(
+            "stage completed in-process: {stage}\nout_dir: {}\n",
+            out_dir.display()
+        ),
+    )
+    .with_context(|| format!("write {}", log.display()))
 }
 
 fn write_micro_improve_outputs(improve_dir: &Path, report: &Path, log: &Path) -> Result<()> {
@@ -2641,5 +2649,307 @@ mod tests {
 
         assert_eq!(read_regression_kind(&regression).unwrap(), "skill_route");
         let _ = fs::remove_dir_all(root);
+    }
+}
+
+// Local filesystem/process helpers. Kept private to air-dream until orchestration is fully in-process.
+pub(crate) struct AirLayout {
+    cwd: PathBuf,
+}
+
+impl AirLayout {
+    pub(crate) fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self { cwd: cwd.into() }
+    }
+
+    pub(crate) fn dream_dir(&self) -> PathBuf {
+        self.cwd.join(".air/dream")
+    }
+
+    pub(crate) fn dream_findings_path(&self) -> PathBuf {
+        self.dream_dir().join("findings.jsonl")
+    }
+
+    pub(crate) fn dream_ledger_path(&self) -> PathBuf {
+        self.dream_dir().join("ledger.jsonl")
+    }
+
+    pub(crate) fn dream_state_path(&self) -> PathBuf {
+        self.dream_dir().join("state.json")
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct StageResult {
+    pub(crate) status: String,
+}
+
+pub(crate) fn run_current_air_stage(
+    cwd: &Path,
+    args: &[String],
+    log_path: &Path,
+    timeout: Option<Duration>,
+) -> Result<StageResult> {
+    let exe = std::env::current_exe().context("resolve current air executable")?;
+    if timeout.is_some_and(|timeout| timeout.is_zero()) {
+        write_stage_timeout_log(log_path, args, "timeout_before_start")?;
+        return Ok(StageResult {
+            status: "timeout_before_start".to_string(),
+        });
+    }
+    let mut command = Command::new(&exe);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("run {} {}", exe.display(), args.join(" ")))?;
+    let mut stdout_reader = child.stdout.take().map(read_child_stream);
+    let mut stderr_reader = child.stderr.take().map(read_child_stream);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().context("poll air child process")? {
+            let stdout = join_child_stream(stdout_reader.take(), "stdout")?;
+            let stderr = join_child_stream(stderr_reader.take(), "stderr")?;
+            write_stage_log(log_path, args, &stdout, &stderr)?;
+            return Ok(StageResult {
+                status: if status.success() {
+                    "completed".to_string()
+                } else {
+                    format!("failed_status_{:?}", status.code())
+                },
+            });
+        }
+        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+            terminate_child_gracefully(&mut child);
+            let _ = child.wait();
+            let stdout = join_child_stream(stdout_reader.take(), "stdout")?;
+            let stderr = join_child_stream(stderr_reader.take(), "stderr")?;
+            write_stage_log(log_path, args, &stdout, &stderr)?;
+            return Ok(StageResult {
+                status: "timeout".to_string(),
+            });
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+pub(crate) fn append_jsonl_locked<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    with_jsonl_lock(path, || {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", serde_json::to_string(value)?)
+            .with_context(|| format!("write {}", path.display()))
+    })
+}
+
+pub(crate) fn with_jsonl_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let _lock = FileLock::acquire(&lock_path(path), Duration::from_secs(30))?;
+    f()
+}
+
+pub(crate) fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = temp_sibling(path, "tmp");
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))
+}
+
+fn write_stage_log(log_path: &Path, args: &[String], stdout: &[u8], stderr: &[u8]) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let mut log = String::new();
+    log.push_str("$ air ");
+    log.push_str(&args.join(" "));
+    log.push_str("\n\n[stdout]\n");
+    log.push_str(&String::from_utf8_lossy(stdout));
+    log.push_str("\n\n[stderr]\n");
+    log.push_str(&String::from_utf8_lossy(stderr));
+    fs::write(log_path, log).with_context(|| format!("write {}", log_path.display()))
+}
+
+fn write_stage_timeout_log(log_path: &Path, args: &[String], status: &str) -> Result<()> {
+    if let Some(parent) = log_path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::write(
+        log_path,
+        format!("$ air {}\n\n[status]\n{status}\n", args.join(" ")),
+    )
+    .with_context(|| format!("write {}", log_path.display()))
+}
+
+fn terminate_child_gracefully(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        signal_child_process_group(child.id(), unix_process::SIGTERM);
+        for _ in 0..12 {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(250));
+        }
+        signal_child_process_group(child.id(), unix_process::SIGKILL);
+    }
+    let _ = child.kill();
+}
+
+fn configure_child_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(unix_process::set_current_process_group);
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_child_process_group(pid: u32, signal: std::os::raw::c_int) {
+    unix_process::signal_process_group(pid, signal);
+}
+
+#[cfg(unix)]
+mod unix_process {
+    use std::io;
+    use std::os::raw::c_int;
+
+    pub(crate) const SIGTERM: c_int = 15;
+    pub(crate) const SIGKILL: c_int = 9;
+
+    unsafe extern "C" {
+        fn kill(pid: c_int, sig: c_int) -> c_int;
+        fn setpgid(pid: c_int, pgid: c_int) -> c_int;
+    }
+
+    pub(crate) fn set_current_process_group() -> io::Result<()> {
+        let result = unsafe { setpgid(0, 0) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub(crate) fn signal_process_group(pid: u32, signal: c_int) {
+        let group = -(pid as c_int);
+        let _ = unsafe { kill(group, signal) };
+    }
+}
+
+fn read_child_stream<R: Read + Send + 'static>(
+    mut stream: R,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_child_stream(
+    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("air child {stream_name} reader panicked"))?
+        .with_context(|| format!("read air child {stream_name}"))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut lock = path.to_path_buf();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("jsonl");
+    lock.set_file_name(format!(".{name}.lock"));
+    lock
+}
+
+fn temp_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("air-file");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        ".{file_name}.{suffix}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+struct FileLock {
+    path: PathBuf,
+}
+
+impl FileLock {
+    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
+        let started = Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(_) => {
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(path, DEFAULT_LOCK_STALE_AFTER) {
+                        // TODO: replace this sentinel-file lock with an advisory fd lock.
+                        // This stale cleanup has a small stat-then-unlink TOCTOU window.
+                        let _ = fs::remove_file(path);
+                        continue;
+                    }
+                    if started.elapsed() >= timeout {
+                        anyhow::bail!("timed out waiting for lock {}", path.display());
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("create lock {}", path.display()));
+                }
+            }
+        }
+    }
+}
+
+fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|age| age >= stale_after)
+        .unwrap_or(false)
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }

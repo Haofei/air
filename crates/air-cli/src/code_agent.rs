@@ -1,14 +1,13 @@
-use crate::code_artifact::{
+use crate::models::ModelReplayOptions;
+use crate::run_plan::{run_plan_capture, RunPlanOptions};
+use air_code_artifact::{
     build_code_run_artifact, code_run_path_rewrites, code_run_trace_path, derive_code_run_verdict,
     git_changed_files, patch_code_output_with_workspace_delta, patch_trace_return,
     path_content_identity, replay_code_run_artifact, write_code_run_artifact, CodeRunDescriptor,
     CodeRunSkill, CodeRunVerdictConstraints, WorkspaceSnapshot,
 };
-use crate::models::ModelReplayOptions;
-use crate::profile::{read_run_plan_profile, resolve_profile_path};
-use crate::run_plan::{run_plan_capture, RunPlanOptions};
 use anyhow::{bail, Context, Result};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -223,26 +222,6 @@ fn implicit_code_trace_path() -> PathBuf {
     ))
 }
 
-pub(crate) fn code_profile_explain(
-    skill_id: &str,
-    profile: &Path,
-    input: &Map<String, Value>,
-) -> Result<Value> {
-    let metadata = explain_metadata_for_profile(profile)?;
-    Ok(json!({
-        "command": "run",
-        "skill": skill_id,
-        "will_run": false,
-        "profile": path_ref_to_input_string(profile),
-        "plan": path_ref_to_input_string(&metadata.plan),
-        "store": path_ref_to_input_string(&metadata.store),
-        "capabilities": metadata.capabilities,
-        "read_only": metadata.read_only,
-        "writes_workspace": metadata.writes_workspace,
-        "input": Value::Object(input.clone()),
-    }))
-}
-
 pub(crate) fn build_input(
     task: String,
     verification_command: Option<String>,
@@ -256,44 +235,11 @@ pub(crate) fn build_input(
     input
 }
 
-pub(crate) fn path_ref_to_input_string(path: &Path) -> String {
-    path.to_string_lossy().replace('\\', "/")
-}
-
-pub(crate) struct CodeExplainMetadata {
-    pub(crate) plan: PathBuf,
-    pub(crate) store: PathBuf,
-    pub(crate) capabilities: Vec<String>,
-    pub(crate) read_only: bool,
-    pub(crate) writes_workspace: bool,
-}
-
-pub(crate) fn explain_metadata_for_profile(profile: &Path) -> Result<CodeExplainMetadata> {
-    let profile_path = profile.to_path_buf();
-    let profile = read_run_plan_profile(&profile_path)?;
-    let plan_path = resolve_profile_path(&profile_path, &profile.plan);
-    let store_path = resolve_profile_path(&profile_path, &profile.store);
-    let plan = air_linker::parse_run_plan_file(&plan_path)?;
-    let mut capabilities = plan.requires.capabilities;
-    capabilities.sort();
-    capabilities.dedup();
-    let writes_workspace = capabilities
-        .iter()
-        .any(|capability| capability == "file.write");
-    Ok(CodeExplainMetadata {
-        plan: plan_path,
-        store: store_path,
-        capabilities,
-        read_only: !writes_workspace,
-        writes_workspace,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::code_artifact::WorkspaceDelta;
-    use serde_json::Value;
+    use air_code_artifact::WorkspaceDelta;
+    use serde_json::{json, Value};
     use std::fs;
 
     fn code_edit_loop_module() -> serde_yaml::Value {

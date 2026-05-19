@@ -1,11 +1,11 @@
-use crate::code_artifact::FailureReason;
+use air_code_artifact::FailureReason;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub(super) const PROJECT_SCHEMA: &str = "air.project.v1";
-pub(super) const PROJECT_STATE_SCHEMA: &str = "air.project_state.v1";
+pub(super) const PROJECT_SCHEMA: &str = air_schemas::PROJECT;
+pub(super) const PROJECT_STATE_SCHEMA: &str = air_schemas::PROJECT_STATE;
 pub(super) const DEFAULT_PROJECT_FILE: &str = "air-project.yaml";
 pub(super) const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
 pub(super) const DEFAULT_PROJECT_SCOUT_PROFILE: &str =

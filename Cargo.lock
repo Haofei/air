@@ -12,6 +12,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "air-advisory"
+version = "0.1.0"
+dependencies = [
+ "air-runtime",
+ "air-schemas",
+ "anyhow",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+]
+
+[[package]]
+name = "air-audit"
+version = "0.1.0"
+dependencies = [
+ "air-advisory",
+ "air-code-artifact",
+ "air-runtime",
+ "air-schemas",
+ "anyhow",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "air-backend-openai"
 version = "0.1.0"
 dependencies = [
@@ -26,11 +52,21 @@ dependencies = [
 name = "air-cli"
 version = "0.1.0"
 dependencies = [
+ "air-advisory",
+ "air-audit",
  "air-backend-openai",
+ "air-code-artifact",
  "air-core",
+ "air-dream",
+ "air-eval",
+ "air-improve",
  "air-linker",
+ "air-memory",
  "air-parser",
+ "air-regression",
  "air-runtime",
+ "air-schemas",
+ "air-skill",
  "air-skill-runtime",
  "air-tools",
  "air-verify",
@@ -45,9 +81,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "air-code-artifact"
+version = "0.1.0"
+dependencies = [
+ "air-runtime",
+ "air-schemas",
+ "anyhow",
+ "ring",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "air-core"
 version = "0.1.0"
 dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "air-dream"
+version = "0.1.0"
+dependencies = [
+ "air-advisory",
+ "air-audit",
+ "air-code-artifact",
+ "air-improve",
+ "air-memory",
+ "air-runtime",
+ "air-schemas",
+ "anyhow",
+ "clap",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "air-eval"
+version = "0.1.0"
+dependencies = [
+ "air-code-artifact",
+ "air-schemas",
+ "anyhow",
+ "globset",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "air-improve"
+version = "0.1.0"
+dependencies = [
+ "air-advisory",
+ "air-code-artifact",
+ "air-eval",
+ "air-regression",
+ "air-runtime",
+ "air-schemas",
+ "anyhow",
  "serde",
  "serde_json",
 ]
@@ -67,6 +159,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "air-memory"
+version = "0.1.0"
+dependencies = [
+ "air-advisory",
+ "air-code-artifact",
+ "air-runtime",
+ "air-schemas",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "air-parser"
 version = "0.1.0"
 dependencies = [
@@ -74,6 +180,16 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "thiserror 1.0.69",
+]
+
+[[package]]
+name = "air-regression"
+version = "0.1.0"
+dependencies = [
+ "air-schemas",
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -89,9 +205,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "air-schemas"
+version = "0.1.0"
+
+[[package]]
+name = "air-skill"
+version = "0.1.0"
+dependencies = [
+ "air-advisory",
+ "air-code-artifact",
+ "air-linker",
+ "air-runtime",
+ "air-schemas",
+ "air-skill-runtime",
+ "anyhow",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+]
+
+[[package]]
 name = "air-skill-runtime"
 version = "0.1.0"
 dependencies = [
+ "air-schemas",
  "anyhow",
  "ring",
  "serde",

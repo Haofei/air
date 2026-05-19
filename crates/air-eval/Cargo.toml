@@ -1,14 +1,17 @@
 [package]
-name = "air-skill-runtime"
+name = "air-eval"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
+air-code-artifact = { path = "../air-code-artifact" }
 air-schemas = { path = "../air-schemas" }
 anyhow.workspace = true
-serde.workspace = true
+globset.workspace = true
+serde = { workspace = true }
 serde_json.workspace = true
-serde_yaml.workspace = true
-ring = "0.17"

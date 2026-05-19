@@ -1,144 +1,173 @@
-use crate::code_artifact::sha256_hex;
-use crate::llm_advisory::{cached_llm_advisory, llm_advisory_disabled, CachedLlmAdvisoryOptions};
-use crate::ops::{
-    append_jsonl_locked, run_current_air_stage, with_jsonl_lock, write_json_atomic, AirLayout,
+#![allow(clippy::items_after_test_module)]
+
+use air_advisory::{
+    cached_llm_advisory, is_disabled as llm_advisory_disabled, CachedLlmAdvisoryOptions,
 };
+use air_code_artifact::sha256_hex;
+use air_runtime::ModelProvider;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs;
+use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-const MEMORY_SCHEMA: &str = "air.memory_card.v1";
-const EPISODE_SCHEMA: &str = "air.memory_episode.v1";
-const LEDGER_SCHEMA: &str = "air.memory_ledger_event.v1";
-const MEMORY_EXTRACT_SCHEMA: &str = "air.memory_extract.v1";
-const MEMORY_ADVANCE_SCHEMA: &str = "air.memory_advance.v1";
-const DREAM_IR_SCHEMA: &str = "air.dream_ir.v1";
-const GRAPH_EDGE_SCHEMA: &str = "air.experience_graph_edge.v1";
-const MEMORY_SCORECARD_SCHEMA: &str = "air.memory_scorecard_state.v1";
-const MEMORY_PROVIDER_EVENT_SCHEMA: &str = "air.memory_provider_event.v1";
-const MEMORY_PACK_SCHEMA: &str = "air.memory_pack.v1";
-const MEMORY_CONTEXT_RENDERER_VERSION: &str = "air.memory_context_renderer.v1";
+const MEMORY_SCHEMA: &str = air_schemas::MEMORY_CARD;
+const EPISODE_SCHEMA: &str = air_schemas::MEMORY_EPISODE;
+const LEDGER_SCHEMA: &str = air_schemas::MEMORY_LEDGER_EVENT;
+const MEMORY_EXTRACT_SCHEMA: &str = air_schemas::MEMORY_EXTRACT;
+const MEMORY_ADVANCE_SCHEMA: &str = air_schemas::MEMORY_ADVANCE;
+const DREAM_IR_SCHEMA: &str = air_schemas::DREAM_IR;
+const GRAPH_EDGE_SCHEMA: &str = air_schemas::EXPERIENCE_GRAPH_EDGE;
+const MEMORY_SCORECARD_SCHEMA: &str = air_schemas::MEMORY_SCORECARD_STATE;
+const MEMORY_PROVIDER_EVENT_SCHEMA: &str = air_schemas::MEMORY_PROVIDER_EVENT;
+const MEMORY_PACK_SCHEMA: &str = air_schemas::MEMORY_PACK;
+const MEMORY_CONTEXT_RENDERER_VERSION: &str = air_schemas::MEMORY_CONTEXT_RENDERER;
 const DREAM_SYNTHESIZER_MODEL: &str = "dream_synthesizer";
 const DEFAULT_MEMORY_DIR: &str = ".air/memory";
 const MEMORY_USAGE_COMPACT_BYTES: u64 = 1_048_576;
+const DEFAULT_LOCK_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
-pub(crate) struct MemoryExtractOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) out_dir: PathBuf,
-    pub(crate) window_manifest: PathBuf,
-    pub(crate) observations_file: PathBuf,
-    pub(crate) findings_file: PathBuf,
-    pub(crate) suggested_regressions_file: Option<PathBuf>,
-    pub(crate) mode: String,
-    pub(crate) model_config: Option<PathBuf>,
+pub struct MemoryExtractOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub out_dir: PathBuf,
+    pub window_manifest: PathBuf,
+    pub observations_file: PathBuf,
+    pub findings_file: PathBuf,
+    pub suggested_regressions_file: Option<PathBuf>,
+    pub mode: String,
+    pub dream_synthesis_provider: Option<Box<dyn ModelProvider>>,
 }
 
-pub(crate) struct MemoryListOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) kind: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) limit: Option<usize>,
+pub struct MemoryListOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<usize>,
 }
 
-pub(crate) struct MemorySearchOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) query: String,
-    pub(crate) kind: Option<String>,
-    pub(crate) status: Option<String>,
-    pub(crate) limit: Option<usize>,
+pub struct MemorySearchOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub query: String,
+    pub kind: Option<String>,
+    pub status: Option<String>,
+    pub limit: Option<usize>,
 }
 
-pub(crate) struct MemoryViewOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
-    pub(crate) evidence: bool,
+pub struct MemoryViewOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
+    pub evidence: bool,
 }
 
-pub(crate) struct MemorySkillDraftOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
-    pub(crate) out_dir: Option<PathBuf>,
+pub struct MemorySkillDraftOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
+    pub out_dir: Option<PathBuf>,
 }
 
-pub(crate) struct MemorySkillEvaluateOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
-    pub(crate) out_dir: Option<PathBuf>,
-    pub(crate) bench: bool,
+pub struct MemorySkillEvaluateOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
+    pub out_dir: Option<PathBuf>,
+    pub bench: bool,
+    pub skill_runner: Option<Box<dyn MemorySkillCheckRunner>>,
 }
 
-pub(crate) struct MemoryPolicyCheckOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
+pub struct MemoryPolicyCheckOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
 }
 
-pub(crate) struct MemoryPromoteOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
-    pub(crate) status: Option<String>,
+pub struct MemoryPromoteOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
+    pub status: Option<String>,
 }
 
-pub(crate) struct MemoryCausalEvalOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
-    pub(crate) outcome: String,
-    pub(crate) evidence: PathBuf,
-    pub(crate) note: Option<String>,
+pub struct MemoryCausalEvalOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
+    pub outcome: String,
+    pub evidence: PathBuf,
+    pub note: Option<String>,
 }
 
-pub(crate) struct MemoryRetireOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) id: String,
-    pub(crate) reason: Option<String>,
+pub struct MemoryRetireOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub id: String,
+    pub reason: Option<String>,
 }
 
-pub(crate) struct MemoryPackOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) task: String,
-    pub(crate) limit: Option<usize>,
-    pub(crate) include_evidence: bool,
-    pub(crate) record_usage: bool,
+pub struct MemoryPackOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub task: String,
+    pub limit: Option<usize>,
+    pub include_evidence: bool,
+    pub record_usage: bool,
 }
 
-pub(crate) struct MemoryHintOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) task: String,
-    pub(crate) limit: Option<usize>,
+pub struct MemoryHintOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub task: String,
+    pub limit: Option<usize>,
 }
 
-pub(crate) struct MemoryGraphOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) limit: Option<usize>,
+pub struct MemoryGraphOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub limit: Option<usize>,
 }
 
-pub(crate) struct MemoryScorecardOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) limit: Option<usize>,
+pub struct MemoryScorecardOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub limit: Option<usize>,
 }
 
-pub(crate) struct MemoryAdvanceOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) out_dir: Option<PathBuf>,
-    pub(crate) skill_bench: bool,
-    pub(crate) limit: Option<usize>,
-    pub(crate) timeout_seconds: Option<u64>,
+pub struct MemoryAdvanceOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub out_dir: Option<PathBuf>,
+    pub skill_bench: bool,
+    pub limit: Option<usize>,
+    pub timeout_seconds: Option<u64>,
+    pub skill_runner: Option<Box<dyn MemorySkillCheckRunner>>,
 }
 
-pub(crate) struct BrainOptions {
-    pub(crate) memory_dir: Option<PathBuf>,
-    pub(crate) dream_dir: Option<PathBuf>,
-    pub(crate) section: BrainSection,
-    pub(crate) limit: Option<usize>,
-    pub(crate) out: Option<PathBuf>,
-    pub(crate) json: bool,
+pub trait MemorySkillCheckRunner {
+    fn validate_skill(
+        &self,
+        draft_dir: &Path,
+        log_path: &Path,
+        timeout: Option<Duration>,
+    ) -> Result<StageCheck>;
+
+    fn audit_skill(
+        &self,
+        draft_dir: &Path,
+        log_path: &Path,
+        timeout: Option<Duration>,
+    ) -> Result<StageCheck>;
+
+    fn bench_skill(
+        &self,
+        draft_dir: &Path,
+        log_path: &Path,
+        timeout: Option<Duration>,
+    ) -> Result<StageCheck>;
 }
 
-pub(crate) enum BrainSection {
+pub struct BrainOptions {
+    pub memory_dir: Option<PathBuf>,
+    pub dream_dir: Option<PathBuf>,
+    pub section: BrainSection,
+    pub limit: Option<usize>,
+    pub out: Option<PathBuf>,
+    pub json: bool,
+}
+
+pub enum BrainSection {
     Summary,
     Memory,
     Skills,
@@ -150,26 +179,26 @@ pub(crate) enum BrainSection {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct MemoryExtractOutput {
-    pub(crate) schema: &'static str,
-    pub(crate) status: String,
+pub struct MemoryExtractOutput {
+    pub schema: &'static str,
+    pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) llm_synthesis_status: Option<String>,
+    pub llm_synthesis_status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) llm_synthesis_error_file: Option<String>,
-    pub(crate) memory_dir: String,
-    pub(crate) report: String,
-    pub(crate) episodes_written: usize,
-    pub(crate) cards_written: usize,
-    pub(crate) failure_candidates: usize,
-    pub(crate) procedure_candidates: usize,
-    pub(crate) routing_hints: usize,
-    pub(crate) concept_candidates: usize,
-    pub(crate) hypothesis_candidates: usize,
-    pub(crate) policy_candidates: usize,
-    pub(crate) graph_edges: usize,
-    pub(crate) dream_ir_file: String,
-    pub(crate) ledger_events: usize,
+    pub llm_synthesis_error_file: Option<String>,
+    pub memory_dir: String,
+    pub report: String,
+    pub episodes_written: usize,
+    pub cards_written: usize,
+    pub failure_candidates: usize,
+    pub procedure_candidates: usize,
+    pub routing_hints: usize,
+    pub concept_candidates: usize,
+    pub hypothesis_candidates: usize,
+    pub policy_candidates: usize,
+    pub graph_edges: usize,
+    pub dream_ir_file: String,
+    pub ledger_events: usize,
     cards: Vec<MemoryCardSummary>,
 }
 
@@ -249,22 +278,22 @@ struct MemoryPolicyRule {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct MemoryAdvanceOutput {
-    pub(crate) schema: &'static str,
-    pub(crate) status: String,
-    pub(crate) memory_dir: String,
-    pub(crate) out_dir: String,
-    pub(crate) promoted_memories: Vec<String>,
-    pub(crate) validated_memories: Vec<String>,
-    pub(crate) retired_memories: Vec<String>,
-    pub(crate) validated_skills: Vec<MemoryAdvanceSkill>,
-    pub(crate) routing_measurements: Vec<MemoryRoutingMeasurement>,
-    pub(crate) reviewed_guards: Vec<MemoryAdvanceGuard>,
-    pub(crate) next_commands: Vec<String>,
+pub struct MemoryAdvanceOutput {
+    pub schema: &'static str,
+    pub status: String,
+    pub memory_dir: String,
+    pub out_dir: String,
+    pub promoted_memories: Vec<String>,
+    pub validated_memories: Vec<String>,
+    pub retired_memories: Vec<String>,
+    pub validated_skills: Vec<MemoryAdvanceSkill>,
+    pub routing_measurements: Vec<MemoryRoutingMeasurement>,
+    pub reviewed_guards: Vec<MemoryAdvanceGuard>,
+    pub next_commands: Vec<String>,
 }
 
 impl MemoryAdvanceOutput {
-    pub(crate) fn skipped(out_dir: &Path, reason: &str) -> Result<Self> {
+    pub fn skipped(out_dir: &Path, reason: &str) -> Result<Self> {
         fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
         let output = Self {
             schema: MEMORY_ADVANCE_SCHEMA,
@@ -290,39 +319,39 @@ impl MemoryAdvanceOutput {
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct MemoryAdvanceSkill {
-    pub(crate) memory_id: String,
-    pub(crate) draft_dir: String,
-    pub(crate) status: String,
-    pub(crate) recommendation: String,
-    pub(crate) validate: String,
-    pub(crate) audit: String,
-    pub(crate) bench: Option<String>,
+pub struct MemoryAdvanceSkill {
+    pub memory_id: String,
+    pub draft_dir: String,
+    pub status: String,
+    pub recommendation: String,
+    pub validate: String,
+    pub audit: String,
+    pub bench: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct MemoryRoutingMeasurement {
-    pub(crate) memory_id: String,
-    pub(crate) kind: String,
-    pub(crate) status: String,
-    pub(crate) used: usize,
-    pub(crate) helped_candidate: usize,
-    pub(crate) hurt_candidate: usize,
-    pub(crate) helped: usize,
-    pub(crate) hurt: usize,
-    pub(crate) causal_helped: usize,
-    pub(crate) causal_hurt: usize,
-    pub(crate) help_rate: f64,
-    pub(crate) hurt_rate: f64,
-    pub(crate) decision: String,
+pub struct MemoryRoutingMeasurement {
+    pub memory_id: String,
+    pub kind: String,
+    pub status: String,
+    pub used: usize,
+    pub helped_candidate: usize,
+    pub hurt_candidate: usize,
+    pub helped: usize,
+    pub hurt: usize,
+    pub causal_helped: usize,
+    pub causal_hurt: usize,
+    pub help_rate: f64,
+    pub hurt_rate: f64,
+    pub decision: String,
 }
 
 #[derive(Debug, Serialize)]
-pub(crate) struct MemoryAdvanceGuard {
-    pub(crate) memory_id: String,
-    pub(crate) status: String,
-    pub(crate) proposal_file: String,
-    pub(crate) can_compile_deterministic_guard: bool,
+pub struct MemoryAdvanceGuard {
+    pub memory_id: String,
+    pub status: String,
+    pub proposal_file: String,
+    pub can_compile_deterministic_guard: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -478,55 +507,55 @@ struct BrainCandidateItem {
     next_action: String,
 }
 
-#[derive(Debug, Serialize)]
-struct StageCheck {
-    command: String,
-    status: String,
-    code: Option<i32>,
-    log: String,
+#[derive(Debug, Serialize, Clone)]
+pub struct StageCheck {
+    pub command: String,
+    pub status: String,
+    pub code: Option<i32>,
+    pub log: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub(crate) struct MemoryPackOutput {
-    pub(crate) schema: &'static str,
-    pub(crate) task: String,
-    pub(crate) memory_dir: String,
-    pub(crate) generated_at_unix: u64,
-    pub(crate) pack_hash: String,
-    pub(crate) safety: MemoryPromptSafetyReport,
-    pub(crate) cards: Vec<MemoryPackCard>,
-    pub(crate) context: String,
+pub struct MemoryPackOutput {
+    pub schema: &'static str,
+    pub task: String,
+    pub memory_dir: String,
+    pub generated_at_unix: u64,
+    pub pack_hash: String,
+    pub safety: MemoryPromptSafetyReport,
+    pub cards: Vec<MemoryPackCard>,
+    pub context: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub(crate) struct MemoryPackCard {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) title: String,
-    pub(crate) content: String,
-    pub(crate) content_hash: String,
-    pub(crate) triggers: Vec<String>,
-    pub(crate) confidence: f64,
-    pub(crate) impact: f64,
+pub struct MemoryPackCard {
+    pub id: String,
+    pub kind: String,
+    pub title: String,
+    pub content: String,
+    pub content_hash: String,
+    pub triggers: Vec<String>,
+    pub confidence: f64,
+    pub impact: f64,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) evidence: Vec<MemoryEvidence>,
+    pub evidence: Vec<MemoryEvidence>,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub(crate) struct MemoryRunHint {
-    pub(crate) available_promoted: usize,
-    pub(crate) reviewable_candidates: usize,
-    pub(crate) suggested_memory_ids: Vec<String>,
-    pub(crate) candidate_memory_ids: Vec<String>,
-    pub(crate) message: String,
-    pub(crate) next_commands: Vec<String>,
+pub struct MemoryRunHint {
+    pub available_promoted: usize,
+    pub reviewable_candidates: usize,
+    pub suggested_memory_ids: Vec<String>,
+    pub candidate_memory_ids: Vec<String>,
+    pub message: String,
+    pub next_commands: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
-pub(crate) struct MemoryPromptSafetyReport {
-    pub(crate) scanned: bool,
-    pub(crate) passed: bool,
-    pub(crate) violations: Vec<String>,
+pub struct MemoryPromptSafetyReport {
+    pub scanned: bool,
+    pub passed: bool,
+    pub violations: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -564,15 +593,15 @@ struct MemoryScope {
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub(crate) struct MemoryEvidence {
-    pub(crate) kind: String,
-    pub(crate) path: String,
+pub struct MemoryEvidence {
+    pub kind: String,
+    pub path: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) verdict: Option<String>,
+    pub verdict: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) fingerprint: Option<String>,
+    pub fingerprint: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) note: Option<String>,
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -717,16 +746,16 @@ struct SkillDraftResult {
 
 #[derive(Debug, Serialize, Clone)]
 struct MemoryCardSummary {
-    pub(crate) id: String,
-    pub(crate) kind: String,
-    pub(crate) status: String,
-    pub(crate) title: String,
-    pub(crate) confidence: f64,
-    pub(crate) impact: f64,
-    pub(crate) path: String,
+    pub id: String,
+    pub kind: String,
+    pub status: String,
+    pub title: String,
+    pub confidence: f64,
+    pub impact: f64,
+    pub path: String,
 }
 
-pub(crate) fn extract_memory(options: MemoryExtractOptions) -> Result<MemoryExtractOutput> {
+pub fn extract_memory(options: MemoryExtractOptions) -> Result<MemoryExtractOutput> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let now = unix_now();
     let memory_dir = absolutize(
@@ -774,7 +803,7 @@ pub(crate) fn extract_memory(options: MemoryExtractOptions) -> Result<MemoryExtr
             )?;
             llm_synthesis_status = Some("partial_needs_llm_disabled".to_string());
             llm_synthesis_error_file = Some(error_file.display().to_string());
-        } else if let Some(model_config) = options.model_config.as_ref() {
+        } else if let Some(mut provider) = options.dream_synthesis_provider {
             let advisory_result = synthesize_llm_dream_ir(
                 &memory_dir,
                 &out_dir,
@@ -784,7 +813,7 @@ pub(crate) fn extract_memory(options: MemoryExtractOptions) -> Result<MemoryExtr
                 &episodes,
                 now,
                 options.mode.as_str(),
-                model_config,
+                &mut *provider,
             );
             match advisory_result {
                 Ok(mut advisory_candidates) => {
@@ -921,7 +950,7 @@ pub(crate) fn extract_memory(options: MemoryExtractOptions) -> Result<MemoryExtr
     Ok(output)
 }
 
-pub(crate) fn list_memory(options: MemoryListOptions) -> Result<()> {
+pub fn list_memory(options: MemoryListOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = absolutize(
         &cwd,
@@ -946,7 +975,7 @@ pub(crate) fn list_memory(options: MemoryListOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn search_memory(options: MemorySearchOptions) -> Result<()> {
+pub fn search_memory(options: MemorySearchOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = absolutize(
         &cwd,
@@ -984,7 +1013,7 @@ pub(crate) fn search_memory(options: MemorySearchOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn view_memory(options: MemoryViewOptions) -> Result<()> {
+pub fn view_memory(options: MemoryViewOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = absolutize(
         &cwd,
@@ -1005,7 +1034,7 @@ pub(crate) fn view_memory(options: MemoryViewOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn draft_skill_from_memory(options: MemorySkillDraftOptions) -> Result<()> {
+pub fn draft_skill_from_memory(options: MemorySkillDraftOptions) -> Result<()> {
     let draft = create_skill_draft(options)?;
     let output = json!({
         "schema": "air.memory_skill_draft.v1",
@@ -1027,8 +1056,11 @@ pub(crate) fn draft_skill_from_memory(options: MemorySkillDraftOptions) -> Resul
     Ok(())
 }
 
-pub(crate) fn evaluate_memory_skill(options: MemorySkillEvaluateOptions) -> Result<()> {
+pub fn evaluate_memory_skill(options: MemorySkillEvaluateOptions) -> Result<()> {
     let bench = options.bench;
+    let skill_runner = options.skill_runner.as_deref().ok_or_else(|| {
+        anyhow::anyhow!("memory skill evaluation requires a MemorySkillCheckRunner")
+    })?;
     let draft = create_skill_draft(MemorySkillDraftOptions {
         memory_dir: options.memory_dir,
         id: options.id,
@@ -1036,33 +1068,11 @@ pub(crate) fn evaluate_memory_skill(options: MemorySkillEvaluateOptions) -> Resu
     })?;
     let log_dir = draft.draft_dir.join(".air-eval");
     fs::create_dir_all(&log_dir).with_context(|| format!("create {}", log_dir.display()))?;
-    let validate = run_air_check(
-        &[
-            "skill",
-            "validate",
-            draft.draft_dir.to_string_lossy().as_ref(),
-        ],
-        &log_dir.join("validate.log"),
-        None,
-    )?;
-    let audit = run_air_check(
-        &["skill", "audit", draft.draft_dir.to_string_lossy().as_ref()],
-        &log_dir.join("audit.log"),
-        None,
-    )?;
+    let validate =
+        skill_runner.validate_skill(&draft.draft_dir, &log_dir.join("validate.log"), None)?;
+    let audit = skill_runner.audit_skill(&draft.draft_dir, &log_dir.join("audit.log"), None)?;
     let bench_check = if bench {
-        Some(run_air_check(
-            &[
-                "bench",
-                "skill",
-                draft.draft_dir.to_string_lossy().as_ref(),
-                "--compare-no-skill",
-                "--limit",
-                "1",
-            ],
-            &log_dir.join("bench.log"),
-            None,
-        )?)
+        Some(skill_runner.bench_skill(&draft.draft_dir, &log_dir.join("bench.log"), None)?)
     } else {
         None
     };
@@ -1108,7 +1118,7 @@ pub(crate) fn evaluate_memory_skill(options: MemorySkillEvaluateOptions) -> Resu
     Ok(())
 }
 
-pub(crate) fn check_policy_candidate(options: MemoryPolicyCheckOptions) -> Result<()> {
+pub fn check_policy_candidate(options: MemoryPolicyCheckOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = absolutize(
         &cwd,
@@ -1239,7 +1249,7 @@ fn create_skill_draft(options: MemorySkillDraftOptions) -> Result<SkillDraftResu
     Ok(result)
 }
 
-pub(crate) fn promote_memory(options: MemoryPromoteOptions) -> Result<()> {
+pub fn promote_memory(options: MemoryPromoteOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let (mut card, path) = find_card(&memory_dir, &options.id)?;
@@ -1310,7 +1320,7 @@ pub(crate) fn promote_memory(options: MemoryPromoteOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn causal_eval_memory(options: MemoryCausalEvalOptions) -> Result<()> {
+pub fn causal_eval_memory(options: MemoryCausalEvalOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let (card, path) = find_card(&memory_dir, &options.id)?;
@@ -1364,7 +1374,7 @@ pub(crate) fn causal_eval_memory(options: MemoryCausalEvalOptions) -> Result<()>
     Ok(())
 }
 
-pub(crate) fn retire_memory(options: MemoryRetireOptions) -> Result<()> {
+pub fn retire_memory(options: MemoryRetireOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let (mut card, path) = find_card(&memory_dir, &options.id)?;
@@ -1393,13 +1403,13 @@ pub(crate) fn retire_memory(options: MemoryRetireOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn pack_memory_command(options: MemoryPackOptions) -> Result<()> {
+pub fn pack_memory_command(options: MemoryPackOptions) -> Result<()> {
     let pack = build_memory_pack(options)?;
     println!("{}", serde_json::to_string_pretty(&pack)?);
     Ok(())
 }
 
-pub(crate) fn show_memory_graph(options: MemoryGraphOptions) -> Result<()> {
+pub fn show_memory_graph(options: MemoryGraphOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let mut edges = read_jsonl_values(&memory_dir.join("graph.jsonl"))?;
@@ -1417,7 +1427,7 @@ pub(crate) fn show_memory_graph(options: MemoryGraphOptions) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn show_memory_scorecard(options: MemoryScorecardOptions) -> Result<()> {
+pub fn show_memory_scorecard(options: MemoryScorecardOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let stats = memory_usage_stats_for_dir(&memory_dir)?;
@@ -1474,7 +1484,7 @@ pub(crate) fn show_memory_scorecard(options: MemoryScorecardOptions) -> Result<(
     Ok(())
 }
 
-pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
+pub fn show_brain(options: BrainOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let layout = AirLayout::new(cwd.clone());
     let memory_dir = memory_dir(&cwd, options.memory_dir);
@@ -2103,7 +2113,7 @@ fn user_action_text(action: &str) -> String {
     }
 }
 
-pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdvanceOutput> {
+pub fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdvanceOutput> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let out_dir = absolutize(
@@ -2116,6 +2126,7 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
     let now = unix_now();
     let _ = reconcile_memory_usage(&memory_dir, now)?;
     let stats = memory_usage_stats_for_dir(&memory_dir)?;
+    let skill_runner = options.skill_runner.as_deref();
 
     let mut promoted_memories = Vec::new();
     let mut validated_memories = Vec::new();
@@ -2246,6 +2257,14 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
             && card.kind == "procedure"
             && card.promotion.can_compile_skill
         {
+            let Some(skill_runner) = skill_runner else {
+                next_commands.push(format!("air memory skill-evaluate {}", card.id));
+                did_work = true;
+                if did_work {
+                    touched += 1;
+                }
+                continue;
+            };
             let remaining = timeout.map(|timeout| timeout.saturating_sub(started.elapsed()));
             let skill = advance_skill_candidate(
                 &memory_dir,
@@ -2253,6 +2272,7 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
                 &out_dir,
                 options.skill_bench,
                 remaining,
+                skill_runner,
             )?;
             if skill.status == "validated_skill" {
                 validated_skills.push(skill);
@@ -2330,7 +2350,7 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
     Ok(output)
 }
 
-pub(crate) fn build_memory_pack(options: MemoryPackOptions) -> Result<MemoryPackOutput> {
+pub fn build_memory_pack(options: MemoryPackOptions) -> Result<MemoryPackOutput> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let generated_at_unix = unix_now();
@@ -2384,7 +2404,7 @@ pub(crate) fn build_memory_pack(options: MemoryPackOptions) -> Result<MemoryPack
     Ok(output)
 }
 
-pub(crate) fn build_memory_run_hint(options: MemoryHintOptions) -> Result<MemoryRunHint> {
+pub fn build_memory_run_hint(options: MemoryHintOptions) -> Result<MemoryRunHint> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let limit = options.limit.unwrap_or(5);
@@ -2883,21 +2903,21 @@ fn synthesize_llm_dream_ir(
     episodes: &[MemoryEpisode],
     now: u64,
     mode: &str,
-    model_config: &Path,
+    provider: &mut dyn ModelProvider,
 ) -> Result<Vec<DreamIrCandidate>> {
     let request = llm_dream_synthesis_request(findings, observations, episodes, mode);
-    cached_llm_advisory(
+    Ok(cached_llm_advisory(
         CachedLlmAdvisoryOptions {
             cache_root: &memory_dir.join("cache"),
             out_file: Some(&out_dir.join("llm_synthesis.json")),
             purpose: "dream-synthesis",
             model_alias: DREAM_SYNTHESIZER_MODEL,
-            model_config,
             request: &request,
             generated_at_unix: now,
         },
+        provider,
         |output| parse_llm_dream_candidates(id_scope, &output, episodes, mode),
-    )
+    )?)
 }
 
 fn write_llm_synthesis_error(out_dir: &Path, now: u64, error: &str) -> Result<PathBuf> {
@@ -3340,27 +3360,6 @@ fn record_memory_pack_usage(
     Ok(())
 }
 
-fn run_air_check(args: &[&str], log_path: &Path, timeout: Option<Duration>) -> Result<StageCheck> {
-    let cwd = std::env::current_dir().context("resolve current directory")?;
-    let args = args
-        .iter()
-        .map(|arg| (*arg).to_string())
-        .collect::<Vec<_>>();
-    let output = run_current_air_stage(&cwd, &args, log_path, timeout)?;
-    Ok(StageCheck {
-        command: format!("air {}", args.join(" ")),
-        status: if output.success {
-            "passed".to_string()
-        } else if output.status == "timeout" || output.status == "timeout_before_start" {
-            output.status
-        } else {
-            "failed".to_string()
-        },
-        code: output.code,
-        log: log_path.display().to_string(),
-    })
-}
-
 fn policy_affected_files(card: &MemoryCard) -> Vec<String> {
     policy_field_values(&card.content, "affected")
         .into_iter()
@@ -3473,6 +3472,7 @@ fn advance_skill_candidate(
     out_dir: &Path,
     bench: bool,
     timeout: Option<Duration>,
+    skill_runner: &dyn MemorySkillCheckRunner,
 ) -> Result<MemoryAdvanceSkill> {
     let draft_dir = out_dir.join("skills").join(slugify(&card.title));
     let draft = create_skill_draft(MemorySkillDraftOptions {
@@ -3482,33 +3482,11 @@ fn advance_skill_candidate(
     })?;
     let log_dir = draft.draft_dir.join(".air-eval");
     fs::create_dir_all(&log_dir).with_context(|| format!("create {}", log_dir.display()))?;
-    let validate = run_air_check(
-        &[
-            "skill",
-            "validate",
-            draft.draft_dir.to_string_lossy().as_ref(),
-        ],
-        &log_dir.join("validate.log"),
-        timeout,
-    )?;
-    let audit = run_air_check(
-        &["skill", "audit", draft.draft_dir.to_string_lossy().as_ref()],
-        &log_dir.join("audit.log"),
-        timeout,
-    )?;
+    let validate =
+        skill_runner.validate_skill(&draft.draft_dir, &log_dir.join("validate.log"), timeout)?;
+    let audit = skill_runner.audit_skill(&draft.draft_dir, &log_dir.join("audit.log"), timeout)?;
     let bench_check = if bench {
-        Some(run_air_check(
-            &[
-                "bench",
-                "skill",
-                draft.draft_dir.to_string_lossy().as_ref(),
-                "--compare-no-skill",
-                "--limit",
-                "1",
-            ],
-            &log_dir.join("bench.log"),
-            timeout,
-        )?)
+        Some(skill_runner.bench_skill(&draft.draft_dir, &log_dir.join("bench.log"), timeout)?)
     } else {
         None
     };
@@ -5793,6 +5771,7 @@ fn absolutize(cwd: &Path, path: PathBuf) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use air_runtime::{ModelProvider, RuntimeError};
 
     fn temp_root(name: &str) -> PathBuf {
         let root = std::env::temp_dir().join(format!(
@@ -5974,12 +5953,15 @@ mod tests {
         let root = temp_root("llm-synthesis");
         let out_dir = root.join("out");
         fs::create_dir_all(&out_dir).unwrap();
-        let model_config = root.join("models.json");
-        fs::write(
-            &model_config,
-            r#"{
-              "fixtures": {
-                "dream_synthesizer": {
+        struct StaticProvider(Value);
+
+        impl ModelProvider for StaticProvider {
+            fn call_model(&mut self, _name: &str, _input: &Value) -> Result<Value, RuntimeError> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let output = json!({
                   "candidates": [
                     {
                       "kind": "hypothesis_candidate",
@@ -6008,11 +5990,7 @@ mod tests {
                       "derived_from": ["ep-success"]
                     }
                   ]
-                }
-              }
-            }"#,
-        )
-        .unwrap();
+        });
         let episodes = vec![MemoryEpisode {
             schema: EPISODE_SCHEMA,
             id: "ep-success".to_string(),
@@ -6030,6 +6008,7 @@ mod tests {
             created_at: 1,
         }];
 
+        let mut provider = StaticProvider(output);
         let candidates = synthesize_llm_dream_ir(
             &root,
             &out_dir,
@@ -6039,7 +6018,7 @@ mod tests {
             &episodes,
             1_770_000_000,
             "evolution",
-            &model_config,
+            &mut provider,
         )
         .unwrap();
         assert_eq!(candidates.len(), 1);
@@ -6050,7 +6029,7 @@ mod tests {
             .all(|action| action.kind != "policy_candidate"));
         assert!(out_dir.join("llm_synthesis.json").exists());
 
-        fs::write(&model_config, r#"{ "fixtures": {} }"#).unwrap();
+        let mut unused_provider = StaticProvider(json!({ "candidates": [] }));
         let cached = synthesize_llm_dream_ir(
             &root,
             &out_dir,
@@ -6060,7 +6039,7 @@ mod tests {
             &episodes,
             1_770_000_001,
             "evolution",
-            &model_config,
+            &mut unused_provider,
         )
         .unwrap();
         assert_eq!(cached[0].name, "shared_response_builder_drift");
@@ -6412,6 +6391,7 @@ mod tests {
             skill_bench: false,
             limit: None,
             timeout_seconds: None,
+            skill_runner: None,
         })
         .unwrap();
 
@@ -6501,6 +6481,7 @@ mod tests {
             skill_bench: false,
             limit: None,
             timeout_seconds: None,
+            skill_runner: None,
         })
         .unwrap();
 
@@ -6696,6 +6677,7 @@ mod tests {
             skill_bench: false,
             limit: Some(1),
             timeout_seconds: None,
+            skill_runner: None,
         })
         .unwrap();
 
@@ -6936,5 +6918,135 @@ mod tests {
         assert!(provider_events.contains("memory_pack_built"));
         let _ = fs::remove_dir_all(root);
         let _ = fs::remove_dir_all(other_root);
+    }
+}
+
+// Local filesystem/process helpers. Kept private to air-memory until the store layer is split out.
+pub(crate) struct AirLayout {
+    cwd: PathBuf,
+}
+
+impl AirLayout {
+    pub(crate) fn new(cwd: impl Into<PathBuf>) -> Self {
+        Self { cwd: cwd.into() }
+    }
+
+    pub(crate) fn memory_dir(&self) -> PathBuf {
+        self.cwd.join(".air/memory")
+    }
+
+    pub(crate) fn dream_dir(&self) -> PathBuf {
+        self.cwd.join(".air/dream")
+    }
+}
+
+pub(crate) fn append_jsonl_locked<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    with_jsonl_lock(path, || {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .with_context(|| format!("open {}", path.display()))?;
+        writeln!(file, "{}", serde_json::to_string(value)?)
+            .with_context(|| format!("write {}", path.display()))
+    })
+}
+
+pub(crate) fn with_jsonl_lock<T>(path: &Path, f: impl FnOnce() -> Result<T>) -> Result<T> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let _lock = FileLock::acquire(&lock_path(path), Duration::from_secs(30))?;
+    f()
+}
+
+pub(crate) fn write_json_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    let tmp = temp_sibling(path, "tmp");
+    fs::write(&tmp, bytes).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))
+}
+
+fn lock_path(path: &Path) -> PathBuf {
+    let mut lock = path.to_path_buf();
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("jsonl");
+    lock.set_file_name(format!(".{name}.lock"));
+    lock
+}
+
+fn temp_sibling(path: &Path, suffix: &str) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("air-file");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    path.with_file_name(format!(
+        ".{file_name}.{suffix}-{}-{nanos}",
+        std::process::id()
+    ))
+}
+
+struct FileLock {
+    path: PathBuf,
+}
+
+impl FileLock {
+    fn acquire(path: &Path, timeout: Duration) -> Result<Self> {
+        let started = Instant::now();
+        loop {
+            match OpenOptions::new().write(true).create_new(true).open(path) {
+                Ok(_) => {
+                    return Ok(Self {
+                        path: path.to_path_buf(),
+                    });
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(path, DEFAULT_LOCK_STALE_AFTER) {
+                        // TODO: replace this sentinel-file lock with an advisory fd lock.
+                        // This stale cleanup has a small stat-then-unlink TOCTOU window.
+                        let _ = fs::remove_file(path);
+                        continue;
+                    }
+                    if started.elapsed() >= timeout {
+                        anyhow::bail!("timed out waiting for lock {}", path.display());
+                    }
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("create lock {}", path.display()));
+                }
+            }
+        }
+    }
+}
+
+fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|age| age >= stale_after)
+        .unwrap_or(false)
+}
+
+impl Drop for FileLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
     }
 }

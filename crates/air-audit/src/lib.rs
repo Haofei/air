@@ -1,6 +1,6 @@
-use crate::code_artifact::{read_code_run_artifact, CodeRunArtifact, CodeRunVerdict};
-use crate::llm_advisory::{cached_llm_advisory, CachedLlmAdvisoryOptions};
-use air_runtime::{read_trace_jsonl, TraceEvent, TraceStatus};
+use air_advisory::{cached_llm_advisory, CachedLlmAdvisoryOptions};
+use air_code_artifact::{read_code_run_artifact, CodeRunArtifact, CodeRunVerdict};
+use air_runtime::{read_trace_jsonl, ModelProvider, TraceEvent, TraceStatus};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -12,18 +12,29 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const AUDIT_DIAGNOSER_MODEL: &str = "audit_diagnoser";
 
-pub(crate) struct AuditRunOptions {
-    pub(crate) artifact_dir: PathBuf,
-    pub(crate) report: Option<PathBuf>,
-    pub(crate) model_config: Option<PathBuf>,
+/// Options for [`audit_run`].
+///
+/// To enable LLM-advisory diagnosis on the report, pass a constructed
+/// `ModelProvider` via `diagnose_provider`. Building the provider is the
+/// caller's responsibility so that this crate has no opinion about model
+/// config file formats.
+pub struct AuditRunOptions {
+    /// Path to the code-run artifact directory.
+    pub artifact_dir: PathBuf,
+    /// Optional output path for the Markdown report.
+    pub report: Option<PathBuf>,
+    /// Optional pre-built model provider for advisory diagnosis. `None`
+    /// means deterministic-only — no diagnosis section in the report.
+    pub diagnose_provider: Option<Box<dyn ModelProvider>>,
 }
 
-pub(crate) struct AuditCollectOptions {
-    pub(crate) from: Vec<PathBuf>,
-    pub(crate) out_dir: Option<PathBuf>,
-    pub(crate) report: Option<PathBuf>,
-    pub(crate) since_unix: Option<u64>,
-    pub(crate) limit: Option<usize>,
+pub struct AuditCollectOptions {
+    pub from: Vec<PathBuf>,
+    pub out_dir: Option<PathBuf>,
+    pub report: Option<PathBuf>,
+    pub since_unix: Option<u64>,
+    pub limit: Option<usize>,
+    pub emit_stdout: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -225,12 +236,12 @@ struct TraceAuditFacts {
     max_event_bytes: usize,
 }
 
-pub(crate) fn audit_run(options: AuditRunOptions) -> Result<()> {
+pub fn audit_run(options: AuditRunOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let artifact_dir = absolutize(&cwd, options.artifact_dir);
     let mut report = audit_code_run_artifact(&artifact_dir)?;
-    if let Some(model_config) = options.model_config.as_ref() {
-        match diagnose_audit_report(&report, model_config) {
+    if let Some(mut provider) = options.diagnose_provider {
+        match diagnose_audit_report(&report, &mut *provider) {
             Ok(diagnosis) => report.diagnosis = Some(diagnosis),
             Err(error) => eprintln!("[air audit] advisory diagnosis failed: {error}"),
         }
@@ -246,32 +257,36 @@ pub(crate) fn audit_run(options: AuditRunOptions) -> Result<()> {
     Ok(())
 }
 
-fn diagnose_audit_report(report: &AuditReport, model_config: &Path) -> Result<AuditDiagnosis> {
-    cached_llm_advisory(
+fn diagnose_audit_report(
+    report: &AuditReport,
+    provider: &mut dyn ModelProvider,
+) -> Result<AuditDiagnosis> {
+    let request = json!({
+        "schema": air_schemas::AUDIT_DIAGNOSIS_REQUEST,
+        "target": &report.target,
+        "verdict": &report.verdict,
+        "correctness": &report.correctness,
+        "safety": &report.safety,
+        "verification": &report.verification,
+        "tool_use": &report.tool_use,
+        "context": &report.context,
+        "cost": &report.cost,
+        "reward_hacking": &report.reward_hacking,
+        "findings": &report.findings,
+        "instruction": "Write 1-3 concise advisory sentences explaining likely failure causes. Cite only finding IDs and tool names present in this request.",
+    });
+    Ok(cached_llm_advisory(
         CachedLlmAdvisoryOptions {
             cache_root: Path::new(".air/memory/cache"),
             out_file: None,
             purpose: "audit-diagnosis",
             model_alias: AUDIT_DIAGNOSER_MODEL,
-            model_config,
-            request: &json!({
-                "schema": "air.audit_diagnosis_request.v1",
-                "target": &report.target,
-                "verdict": &report.verdict,
-                "correctness": &report.correctness,
-                "safety": &report.safety,
-                "verification": &report.verification,
-                "tool_use": &report.tool_use,
-                "context": &report.context,
-                "cost": &report.cost,
-                "reward_hacking": &report.reward_hacking,
-                "findings": &report.findings,
-                "instruction": "Write 1-3 concise advisory sentences explaining likely failure causes. Cite only finding IDs and tool names present in this request.",
-            }),
+            request: &request,
             generated_at_unix: unix_now(),
         },
+        provider,
         |output| validate_audit_diagnosis(report, output),
-    )
+    )?)
 }
 
 #[derive(Debug, Deserialize)]
@@ -321,7 +336,7 @@ fn validate_audit_diagnosis(report: &AuditReport, output: Value) -> Result<Audit
     })
 }
 
-pub(crate) fn audit_collect(options: AuditCollectOptions) -> Result<()> {
+pub fn audit_collect(options: AuditCollectOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let roots = if options.from.is_empty() {
         vec![cwd.join("target/generated")]
@@ -393,7 +408,9 @@ pub(crate) fn audit_collect(options: AuditCollectOptions) -> Result<()> {
         .map(|path| absolutize(&cwd, path))
         .unwrap_or_else(|| out_dir.join("report.md"));
     write_collection_markdown_report(&report_path, &collection)?;
-    println!("{}", serde_json::to_string_pretty(&collection)?);
+    if options.emit_stdout {
+        println!("{}", serde_json::to_string_pretty(&collection)?);
+    }
     Ok(())
 }
 

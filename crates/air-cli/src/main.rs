@@ -1,56 +1,27 @@
 use air_runtime::{system_return_event, Vm};
-mod audit;
 mod bench;
 mod code_agent;
-mod code_artifact;
 mod diagnostics;
-mod dream;
 mod entry;
-mod eval_manifest;
 mod explain;
-mod improve;
-mod llm_advisory;
 mod mcp;
-mod memory;
 mod models;
 mod ops;
 mod planner;
 mod profile;
 mod project;
-mod regression;
 mod review_agent;
 mod run_plan;
 mod self_lab;
 mod skill;
 mod tools;
-use crate::audit::{audit_collect, audit_run, AuditCollectOptions, AuditRunOptions};
 use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSkillOptions};
-use crate::code_artifact::write_timeout_code_run_artifact;
 use crate::diagnostics::emit_diagnostics;
-use crate::dream::{
-    dismiss_dream_finding, list_dream_findings, open_dream_finding, resolve_dream_finding,
-    run_dream, show_dream_state, DreamFindingUpdateOptions, DreamFindingsListOptions, DreamMode,
-    DreamRunOptions, DreamStateOptions,
-};
 use crate::entry::{run_entry_task, EntryMode, EntryTaskOptions};
-use crate::eval_manifest::{
-    check_eval_manifest_command, write_eval_manifest, EvalCheckOptions, EvalManifestOptions,
-};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
-use crate::improve::{run_improve, ImproveAction, ImproveOptions};
 use crate::mcp::{
     audit_mcp, call_mcp, explain_mcp, list_mcp, McpAuditOptions, McpCallOptions, McpExplainOptions,
     McpListOptions,
-};
-use crate::memory::{
-    advance_memory, build_memory_pack, build_memory_run_hint, causal_eval_memory,
-    check_policy_candidate, draft_skill_from_memory, evaluate_memory_skill, list_memory,
-    pack_memory_command, promote_memory, retire_memory, search_memory, show_brain,
-    show_memory_graph, show_memory_scorecard, view_memory, BrainOptions, BrainSection,
-    MemoryAdvanceOptions, MemoryCausalEvalOptions, MemoryGraphOptions, MemoryHintOptions,
-    MemoryListOptions, MemoryPackOptions, MemoryPolicyCheckOptions, MemoryPromoteOptions,
-    MemoryRetireOptions, MemoryScorecardOptions, MemorySearchOptions, MemorySkillDraftOptions,
-    MemorySkillEvaluateOptions, MemoryViewOptions,
 };
 use crate::models::ModelProviderChoice;
 use crate::ops::run_current_air_passthrough;
@@ -64,7 +35,6 @@ use crate::project::{
     BenchProjectOptions, ProjectPlanOptions, ProjectRunOptions, ProjectStatusOptions,
     ProjectVerifyOptions,
 };
-use crate::regression::{run_regression_command, RegressionRunOptions};
 use crate::run_plan::{
     observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
@@ -74,18 +44,43 @@ use crate::self_lab::{
     SelfFixOptions, SelfPrepareOptions,
 };
 use crate::skill::{
-    audit_skill, explain_skill, import_skill, list_skills, route_skill, upgrade_skill,
-    validate_skill, SkillRouteOptions, SkillUpgradeOptions,
+    audit_skill, audit_skill_value, explain_skill, import_skill, list_skills, route_skill,
+    upgrade_skill, validate_skill, validate_skill_value, SkillRouteOptions, SkillUpgradeOptions,
 };
 use crate::tools::ToolProviderChoice;
+use air_audit::{audit_collect, audit_run, AuditCollectOptions, AuditRunOptions};
+use air_code_artifact::write_timeout_code_run_artifact;
+use air_dream::{
+    dismiss_dream_finding, list_dream_findings, open_dream_finding, resolve_dream_finding,
+    run_dream, show_dream_state, DreamFindingUpdateOptions, DreamFindingsListOptions, DreamMode,
+    DreamRunOptions, DreamStateOptions,
+};
+use air_eval::{
+    check_eval_manifest_command, write_eval_manifest, EvalCheckOptions, EvalManifestOptions,
+};
+use air_improve::{run_improve, ImproveAction, ImproveOptions};
+use air_memory::{
+    advance_memory, build_memory_pack, build_memory_run_hint, causal_eval_memory,
+    check_policy_candidate, draft_skill_from_memory, evaluate_memory_skill, list_memory,
+    pack_memory_command, promote_memory, retire_memory, search_memory, show_brain,
+    show_memory_graph, show_memory_scorecard, view_memory, BrainOptions, BrainSection,
+    MemoryAdvanceOptions, MemoryCausalEvalOptions, MemoryGraphOptions, MemoryHintOptions,
+    MemoryListOptions, MemoryPackOptions, MemoryPolicyCheckOptions, MemoryPromoteOptions,
+    MemoryRetireOptions, MemoryScorecardOptions, MemorySearchOptions, MemorySkillCheckRunner,
+    MemorySkillDraftOptions, MemorySkillEvaluateOptions, MemoryViewOptions, StageCheck,
+};
+use air_regression::{run_regression_command, RegressionRunOptions};
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::Value;
 use std::ffi::OsString;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::process::{Command as ProcessCommand, Stdio};
 use std::time::Duration;
+use std::time::Instant;
 
 fn load_dotenv() {
     let _ = dotenvy::from_filename(".env");
@@ -116,6 +111,185 @@ fn parse_dream_candidates(value: &str) -> Result<usize, String> {
         return Err("value must be between 1 and 12".to_string());
     }
     Ok(parsed)
+}
+
+struct CliMemorySkillCheckRunner;
+
+impl CliMemorySkillCheckRunner {
+    fn run_json_check(
+        command: String,
+        log_path: &Path,
+        run: impl FnOnce() -> Result<Value>,
+    ) -> Result<StageCheck> {
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        match run() {
+            Ok(value) => {
+                fs::write(log_path, serde_json::to_vec_pretty(&value)?)
+                    .with_context(|| format!("write {}", log_path.display()))?;
+                Ok(StageCheck {
+                    command,
+                    status: "passed".to_string(),
+                    code: Some(0),
+                    log: log_path.display().to_string(),
+                })
+            }
+            Err(error) => {
+                fs::write(log_path, format!("{error:#}\n"))
+                    .with_context(|| format!("write {}", log_path.display()))?;
+                Ok(StageCheck {
+                    command,
+                    status: "failed".to_string(),
+                    code: Some(1),
+                    log: log_path.display().to_string(),
+                })
+            }
+        }
+    }
+
+    fn run_air_capture(
+        command_label: String,
+        args: &[&str],
+        log_path: &Path,
+        timeout: Option<Duration>,
+    ) -> Result<StageCheck> {
+        if let Some(parent) = log_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        let exe = std::env::current_exe().context("resolve current air executable")?;
+        let mut command = ProcessCommand::new(exe);
+        command
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = command
+            .spawn()
+            .with_context(|| format!("run {command_label}"))?;
+        let mut stdout_reader = child.stdout.take().map(read_child_stream);
+        let mut stderr_reader = child.stderr.take().map(read_child_stream);
+        let started = Instant::now();
+        let status = loop {
+            if let Some(status) = child.try_wait().context("poll memory skill child")? {
+                break status;
+            }
+            if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+                let _ = child.kill();
+                let _ = child.wait();
+                let stdout = join_child_stream(stdout_reader.take(), "stdout")?;
+                let stderr = join_child_stream(stderr_reader.take(), "stderr")?;
+                write_stage_log(log_path, &command_label, &stdout, &stderr, "timeout")?;
+                return Ok(StageCheck {
+                    command: command_label,
+                    status: "timeout".to_string(),
+                    code: None,
+                    log: log_path.display().to_string(),
+                });
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        };
+        let stdout = join_child_stream(stdout_reader.take(), "stdout")?;
+        let stderr = join_child_stream(stderr_reader.take(), "stderr")?;
+        let status_label = if status.success() { "passed" } else { "failed" };
+        write_stage_log(log_path, &command_label, &stdout, &stderr, status_label)?;
+        Ok(StageCheck {
+            command: command_label,
+            status: status_label.to_string(),
+            code: status.code(),
+            log: log_path.display().to_string(),
+        })
+    }
+}
+
+impl MemorySkillCheckRunner for CliMemorySkillCheckRunner {
+    fn validate_skill(
+        &self,
+        draft_dir: &Path,
+        log_path: &Path,
+        _timeout: Option<Duration>,
+    ) -> Result<StageCheck> {
+        let command = format!("air skill validate {}", draft_dir.display());
+        Self::run_json_check(command, log_path, || {
+            validate_skill_value(&draft_dir.display().to_string())
+        })
+    }
+
+    fn audit_skill(
+        &self,
+        draft_dir: &Path,
+        log_path: &Path,
+        _timeout: Option<Duration>,
+    ) -> Result<StageCheck> {
+        let command = format!("air skill audit {}", draft_dir.display());
+        Self::run_json_check(command, log_path, || {
+            audit_skill_value(&draft_dir.display().to_string(), false)
+        })
+    }
+
+    fn bench_skill(
+        &self,
+        draft_dir: &Path,
+        log_path: &Path,
+        timeout: Option<Duration>,
+    ) -> Result<StageCheck> {
+        let draft = draft_dir.to_string_lossy().to_string();
+        let command = format!("air bench skill {draft} --compare-no-skill --limit 1");
+        Self::run_air_capture(
+            command,
+            &[
+                "bench",
+                "skill",
+                draft.as_str(),
+                "--compare-no-skill",
+                "--limit",
+                "1",
+            ],
+            log_path,
+            timeout,
+        )
+    }
+}
+
+fn read_child_stream<R: Read + Send + 'static>(
+    mut stream: R,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_child_stream(
+    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("memory skill child {stream_name} reader panicked"))?
+        .with_context(|| format!("read memory skill child {stream_name}"))
+}
+
+fn write_stage_log(
+    log_path: &Path,
+    command: &str,
+    stdout: &[u8],
+    stderr: &[u8],
+    status: &str,
+) -> Result<()> {
+    let mut log = String::new();
+    log.push_str("$ ");
+    log.push_str(command);
+    log.push_str("\n\n[status]\n");
+    log.push_str(status);
+    log.push_str("\n\n[stdout]\n");
+    log.push_str(&String::from_utf8_lossy(stdout));
+    log.push_str("\n\n[stderr]\n");
+    log.push_str(&String::from_utf8_lossy(stderr));
+    fs::write(log_path, log).with_context(|| format!("write {}", log_path.display()))
 }
 
 fn apply_model_profile_env() {
@@ -251,6 +425,14 @@ impl AirCliConfig {
 
 fn option_or_config(option: Option<PathBuf>, fallback: Option<PathBuf>) -> Option<PathBuf> {
     option.or(fallback)
+}
+
+/// Convenience helper that builds an LLM-advisory provider for the CLI to pass
+/// into a library crate's option struct (e.g. `air-audit`).
+fn open_advisory_provider(model_config: &Path) -> Result<Box<dyn air_runtime::ModelProvider>> {
+    Ok(Box::new(crate::models::ModelProviderChoice::open_advisory(
+        model_config,
+    )?))
 }
 
 #[derive(Debug, Subcommand)]
@@ -1594,7 +1776,11 @@ fn main() -> Result<()> {
                 task,
                 top_k,
                 explain,
-                model_config: config.model_config(),
+                advisory_provider: config
+                    .model_config()
+                    .as_deref()
+                    .map(open_advisory_provider)
+                    .transpose()?,
             }),
             SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
         },
@@ -1605,7 +1791,11 @@ fn main() -> Result<()> {
             } => audit_run(AuditRunOptions {
                 artifact_dir,
                 report,
-                model_config: config.model_config(),
+                diagnose_provider: config
+                    .model_config()
+                    .as_deref()
+                    .map(open_advisory_provider)
+                    .transpose()?,
             }),
             AuditCommand::Collect {
                 from,
@@ -1619,6 +1809,7 @@ fn main() -> Result<()> {
                 report,
                 since_unix,
                 limit,
+                emit_stdout: true,
             }),
         },
         Command::Status { json } => show_status(json, &config),
@@ -1705,7 +1896,12 @@ fn main() -> Result<()> {
             from,
             out_dir,
             write_regressions,
-            model_config: config.model_config(),
+            emit_stdout: true,
+            advisory_provider: config
+                .model_config()
+                .as_deref()
+                .map(open_advisory_provider)
+                .transpose()?,
         }),
         Command::Regression { command } => match command {
             RegressionCommand::Run {
@@ -1746,7 +1942,28 @@ fn main() -> Result<()> {
                 write_regressions,
                 full,
                 mode,
-                model_config: config.model_config(),
+                improve_advisory_provider: if mode != DreamMode::Micro
+                    && !air_advisory::is_disabled()
+                {
+                    config
+                        .model_config()
+                        .as_ref()
+                        .map(|path| open_advisory_provider(path))
+                        .transpose()?
+                } else {
+                    None
+                },
+                dream_synthesis_provider: if mode != DreamMode::Micro
+                    && !air_advisory::is_disabled()
+                {
+                    config
+                        .model_config()
+                        .as_ref()
+                        .map(|path| open_advisory_provider(path))
+                        .transpose()?
+                } else {
+                    None
+                },
                 experiment,
                 top_findings,
                 budget_seconds,
@@ -1754,6 +1971,7 @@ fn main() -> Result<()> {
                 advance: !no_advance,
                 advance_limit: Some(advance_limit),
                 advance_timeout_seconds,
+                memory_skill_runner: Some(Box::new(CliMemorySkillCheckRunner)),
             }),
             DreamCommand::State => show_dream_state(DreamStateOptions),
             DreamCommand::Findings { command } => run_dream_findings_command(command),
@@ -1859,6 +2077,7 @@ fn main() -> Result<()> {
                     skill_bench,
                     limit,
                     timeout_seconds,
+                    skill_runner: Some(Box::new(CliMemorySkillCheckRunner)),
                 })?;
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 Ok(())
@@ -1882,6 +2101,7 @@ fn main() -> Result<()> {
                 id,
                 out_dir,
                 bench,
+                skill_runner: Some(Box::new(CliMemorySkillCheckRunner)),
             }),
             MemoryCommand::PolicyCheck { id, memory_dir } => {
                 check_policy_candidate(MemoryPolicyCheckOptions {
@@ -2412,7 +2632,7 @@ fn status_number(value: &Value, field: &str) -> f64 {
     value.get(field).and_then(Value::as_f64).unwrap_or_default()
 }
 
-fn attach_memory_hint(output: &mut Value, hint: crate::memory::MemoryRunHint) -> Result<()> {
+fn attach_memory_hint(output: &mut Value, hint: air_memory::MemoryRunHint) -> Result<()> {
     if let Some(memory) = output.get_mut("memory").and_then(Value::as_object_mut) {
         memory.insert("hint".to_string(), serde_json::to_value(hint)?);
     }

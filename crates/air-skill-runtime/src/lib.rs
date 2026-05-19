@@ -6,9 +6,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 pub const SKILL_MANIFEST: &str = "air-skill.yaml";
-pub const SKILL_SCHEMA: &str = "air.skill.v1";
+pub const SKILL_SCHEMA: &str = air_schemas::SKILL;
 pub const SKILLS_LOCK: &str = "skills.lock";
-pub const SKILLS_LOCK_SCHEMA: &str = "air.skills_lock.v1";
+pub const SKILLS_LOCK_SCHEMA: &str = air_schemas::SKILLS_LOCK;
 pub const DEFAULT_EXECUTOR_SKILL: &str = "code-agent";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,14 +1,18 @@
 [package]
-name = "air-skill-runtime"
+name = "air-advisory"
 version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[lib]
+path = "src/lib.rs"
+
 [dependencies]
+air-runtime = { path = "../air-runtime" }
 air-schemas = { path = "../air-schemas" }
 anyhow.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_yaml.workspace = true
 ring = "0.17"
+serde = { workspace = true }
+serde_json.workspace = true
+thiserror.workspace = true

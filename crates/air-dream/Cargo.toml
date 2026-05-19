@@ -1,0 +1,22 @@
+[package]
+name = "air-dream"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+air-advisory = { path = "../air-advisory" }
+air-audit = { path = "../air-audit" }
+air-code-artifact = { path = "../air-code-artifact" }
+air-improve = { path = "../air-improve" }
+air-memory = { path = "../air-memory" }
+air-runtime = { path = "../air-runtime" }
+air-schemas = { path = "../air-schemas" }
+anyhow.workspace = true
+clap.workspace = true
+serde = { workspace = true }
+serde_json.workspace = true

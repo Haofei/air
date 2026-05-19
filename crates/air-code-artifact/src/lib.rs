@@ -1,5 +1,7 @@
-use crate::run_plan::write_trace;
-use air_runtime::{read_trace_jsonl, system_return_event, TraceStatus};
+use air_runtime::{
+    read_trace_jsonl, system_return_event, write_trace_jsonl_with_options, TraceEvent, TraceStatus,
+    TraceWriteOptions,
+};
 use anyhow::{bail, Context, Result};
 use ring::digest;
 use serde::{Deserialize, Serialize};
@@ -10,85 +12,85 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-pub(crate) const CODE_RUN_ARTIFACT_SCHEMA: &str = "air.code_run_artifact.v1";
+pub const CODE_RUN_ARTIFACT_SCHEMA: &str = air_schemas::CODE_RUN_ARTIFACT;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CodeRunArtifact {
-    pub(crate) schema: String,
-    pub(crate) fingerprint: String,
-    pub(crate) task: String,
+pub struct CodeRunArtifact {
+    pub schema: String,
+    pub fingerprint: String,
+    pub task: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) skill: Option<CodeRunSkill>,
-    pub(crate) profile: String,
+    pub skill: Option<CodeRunSkill>,
+    pub profile: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) model_config: Option<String>,
+    pub model_config: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) tool_config: Option<String>,
-    pub(crate) mode: CodeRunMode,
-    pub(crate) snapshot: CodeRunSnapshot,
-    pub(crate) delta: WorkspaceDelta,
+    pub tool_config: Option<String>,
+    pub mode: CodeRunMode,
+    pub snapshot: CodeRunSnapshot,
+    pub delta: WorkspaceDelta,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) verdict: Option<CodeRunVerdict>,
-    pub(crate) files: CodeRunArtifactFiles,
+    pub verdict: Option<CodeRunVerdict>,
+    pub files: CodeRunArtifactFiles,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) failure_reason: Option<FailureReason>,
+    pub failure_reason: Option<FailureReason>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) extra: BTreeMap<String, Value>,
+    pub extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum CodeRunMode {
+pub enum CodeRunMode {
     Executed,
     Replayed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CodeRunSnapshot {
-    pub(crate) before: WorkspaceSnapshotSummary,
-    pub(crate) after: WorkspaceSnapshotSummary,
-    pub(crate) preexisting_changed_files: Vec<String>,
+pub struct CodeRunSnapshot {
+    pub before: WorkspaceSnapshotSummary,
+    pub after: WorkspaceSnapshotSummary,
+    pub preexisting_changed_files: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct CodeRunArtifactFiles {
-    pub(crate) output: String,
-    pub(crate) trace: String,
-    pub(crate) diff: String,
+pub struct CodeRunArtifactFiles {
+    pub output: String,
+    pub trace: String,
+    pub diff: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) subagents: Option<String>,
+    pub subagents: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct CodeRunSkill {
-    pub(crate) id: String,
+pub struct CodeRunSkill {
+    pub id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) version: Option<String>,
+    pub version: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) mode: Option<String>,
+    pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) source: Option<String>,
+    pub source: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) manifest: Option<String>,
+    pub manifest: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) manifest_sha256: Option<String>,
+    pub manifest_sha256: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) audit_risk: Option<String>,
+    pub audit_risk: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(crate) effective_capabilities: Vec<String>,
+    pub effective_capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct FailureReason {
-    pub(crate) category: FailureCategory,
-    pub(crate) message: String,
+pub struct FailureReason {
+    pub category: FailureCategory,
+    pub message: String,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(crate) details: BTreeMap<String, Value>,
+    pub details: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum FailureCategory {
+pub enum FailureCategory {
     AgentError,
     VerificationFailed,
     DiffConstraintFailed,
@@ -100,60 +102,60 @@ pub(crate) enum FailureCategory {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct WorkspaceSnapshot {
+pub struct WorkspaceSnapshot {
     files: BTreeMap<String, Vec<u8>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkspaceSnapshotSummary {
-    pub(crate) files: Vec<FileSnapshot>,
+pub struct WorkspaceSnapshotSummary {
+    pub files: Vec<FileSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct FileSnapshot {
-    pub(crate) path: String,
-    pub(crate) sha256: String,
-    pub(crate) bytes: usize,
+pub struct FileSnapshot {
+    pub path: String,
+    pub sha256: String,
+    pub bytes: usize,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct WorkspaceDelta {
-    pub(crate) changed_files: Vec<String>,
-    pub(crate) diff: String,
+pub struct WorkspaceDelta {
+    pub changed_files: Vec<String>,
+    pub diff: String,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-pub(crate) struct CodeRunVerdict {
-    pub(crate) patch_applied: bool,
-    pub(crate) verification_ran: bool,
-    pub(crate) verification_passed: bool,
-    pub(crate) changed_files: Vec<String>,
+pub struct CodeRunVerdict {
+    pub patch_applied: bool,
+    pub verification_ran: bool,
+    pub verification_passed: bool,
+    pub changed_files: Vec<String>,
     #[serde(default)]
-    pub(crate) workspace_clean_ok: bool,
-    pub(crate) allowed_files_ok: bool,
-    pub(crate) required_files_ok: bool,
-    pub(crate) forbidden_files_ok: bool,
-    pub(crate) required_diff_ok: bool,
-    pub(crate) max_diff_lines_ok: bool,
-    pub(crate) final_success: bool,
+    pub workspace_clean_ok: bool,
+    pub allowed_files_ok: bool,
+    pub required_files_ok: bool,
+    pub forbidden_files_ok: bool,
+    pub required_diff_ok: bool,
+    pub max_diff_lines_ok: bool,
+    pub final_success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) failure_reason: Option<FailureReason>,
+    pub failure_reason: Option<FailureReason>,
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct CodeRunVerdictConstraints {
-    pub(crate) require_patch: bool,
-    pub(crate) require_verification: bool,
-    pub(crate) forbid_workspace_changes: bool,
-    pub(crate) allowed_changed_files: Vec<String>,
-    pub(crate) required_changed_files: Vec<String>,
-    pub(crate) forbidden_changed_files: Vec<String>,
-    pub(crate) required_diff_contains: Vec<String>,
-    pub(crate) max_diff_lines: Option<usize>,
+pub struct CodeRunVerdictConstraints {
+    pub require_patch: bool,
+    pub require_verification: bool,
+    pub forbid_workspace_changes: bool,
+    pub allowed_changed_files: Vec<String>,
+    pub required_changed_files: Vec<String>,
+    pub forbidden_changed_files: Vec<String>,
+    pub required_diff_contains: Vec<String>,
+    pub max_diff_lines: Option<usize>,
 }
 
 impl CodeRunVerdictConstraints {
-    pub(crate) fn code_edit() -> Self {
+    pub fn code_edit() -> Self {
         Self {
             require_patch: true,
             require_verification: true,
@@ -161,7 +163,7 @@ impl CodeRunVerdictConstraints {
         }
     }
 
-    pub(crate) fn review() -> Self {
+    pub fn review() -> Self {
         Self {
             forbid_workspace_changes: true,
             ..Self::default()
@@ -170,13 +172,13 @@ impl CodeRunVerdictConstraints {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct CodeRunVerificationFacts {
-    pub(crate) verification_ran: bool,
-    pub(crate) verification_passed: bool,
+pub struct CodeRunVerificationFacts {
+    pub verification_ran: bool,
+    pub verification_passed: bool,
 }
 
 impl WorkspaceSnapshot {
-    pub(crate) fn capture(root: &Path) -> Result<Self> {
+    pub fn capture(root: &Path) -> Result<Self> {
         let mut files = BTreeMap::new();
         for relative in workspace_file_list(root)? {
             let path = root.join(&relative);
@@ -192,7 +194,7 @@ impl WorkspaceSnapshot {
         Ok(Self { files })
     }
 
-    pub(crate) fn delta(&self, after: &Self) -> Result<WorkspaceDelta> {
+    pub fn delta(&self, after: &Self) -> Result<WorkspaceDelta> {
         let changed_files = self
             .files
             .keys()
@@ -209,7 +211,7 @@ impl WorkspaceSnapshot {
         })
     }
 
-    pub(crate) fn summary(&self) -> WorkspaceSnapshotSummary {
+    pub fn summary(&self) -> WorkspaceSnapshotSummary {
         WorkspaceSnapshotSummary {
             files: self
                 .files
@@ -225,7 +227,7 @@ impl WorkspaceSnapshot {
 }
 
 impl WorkspaceSnapshotSummary {
-    pub(crate) fn matches_snapshot(&self, snapshot: &WorkspaceSnapshot) -> bool {
+    pub fn matches_snapshot(&self, snapshot: &WorkspaceSnapshot) -> bool {
         let actual = snapshot.summary();
         self.files.len() == actual.files.len()
             && self
@@ -236,7 +238,7 @@ impl WorkspaceSnapshotSummary {
     }
 }
 
-pub(crate) fn patch_code_output_with_workspace_delta(
+pub fn patch_code_output_with_workspace_delta(
     outputs: &mut Value,
     delta: &WorkspaceDelta,
     preexisting_changed_files: &[String],
@@ -289,7 +291,7 @@ pub(crate) fn patch_code_output_with_workspace_delta(
     }
 }
 
-pub(crate) fn derive_code_run_verdict(
+pub fn derive_code_run_verdict(
     outputs: &Value,
     delta: &WorkspaceDelta,
     trace_path: Option<&Path>,
@@ -301,7 +303,7 @@ pub(crate) fn derive_code_run_verdict(
     derive_code_run_verdict_from_facts(delta, facts, constraints)
 }
 
-pub(crate) fn derive_code_run_verdict_from_facts(
+pub fn derive_code_run_verdict_from_facts(
     delta: &WorkspaceDelta,
     facts: CodeRunVerificationFacts,
     constraints: &CodeRunVerdictConstraints,
@@ -408,7 +410,7 @@ fn verification_facts_from_output(outputs: &Value) -> CodeRunVerificationFacts {
     }
 }
 
-fn tool_name_from_trace_event(event: &air_runtime::TraceEvent) -> Option<String> {
+fn tool_name_from_trace_event(event: &TraceEvent) -> Option<String> {
     event
         .meta
         .as_ref()
@@ -518,7 +520,7 @@ fn code_diff_line_count(diff: &str) -> usize {
         .count()
 }
 
-pub(crate) fn patch_trace_return(path: &Path, outputs: &Value, trace_redact: bool) -> Result<()> {
+pub fn patch_trace_return(path: &Path, outputs: &Value, trace_redact: bool) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
@@ -538,10 +540,26 @@ pub(crate) fn patch_trace_return(path: &Path, outputs: &Value, trace_redact: boo
     } else {
         events.push(replacement);
     }
-    write_trace(path, &events, trace_redact)
+    write_trace_to(path, &events, trace_redact)
 }
 
-pub(crate) fn git_changed_files(root: &Path) -> Result<Vec<String>> {
+fn write_trace_to(path: &Path, trace: &[TraceEvent], redact: bool) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let options = if redact {
+        TraceWriteOptions::redacted()
+    } else {
+        TraceWriteOptions::raw()
+    };
+    write_trace_jsonl_with_options(path, trace, &options)?;
+    Ok(())
+}
+
+pub fn git_changed_files(root: &Path) -> Result<Vec<String>> {
     if !root.join(".git").exists() {
         return Ok(Vec::new());
     }
@@ -570,12 +588,12 @@ pub(crate) fn git_changed_files(root: &Path) -> Result<Vec<String>> {
     Ok(files.into_iter().collect())
 }
 
-pub(crate) fn path_content_identity(path: &Path) -> Result<String> {
+pub fn path_content_identity(path: &Path) -> Result<String> {
     let content = fs::read(path).with_context(|| format!("read {}", path.display()))?;
     Ok(format!("sha256:{}", sha256_hex(&content)))
 }
 
-pub(crate) fn build_code_run_artifact(
+pub fn build_code_run_artifact(
     descriptor: CodeRunDescriptor,
     before: &WorkspaceSnapshot,
     after: &WorkspaceSnapshot,
@@ -613,17 +631,17 @@ pub(crate) fn build_code_run_artifact(
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct CodeRunDescriptor {
-    pub(crate) task: String,
-    pub(crate) skill: Option<CodeRunSkill>,
-    pub(crate) profile: String,
-    pub(crate) model_config: Option<String>,
-    pub(crate) tool_config: Option<String>,
-    pub(crate) extra: BTreeMap<String, Value>,
+pub struct CodeRunDescriptor {
+    pub task: String,
+    pub skill: Option<CodeRunSkill>,
+    pub profile: String,
+    pub model_config: Option<String>,
+    pub tool_config: Option<String>,
+    pub extra: BTreeMap<String, Value>,
 }
 
 impl CodeRunDescriptor {
-    pub(crate) fn fingerprint(&self, before: &WorkspaceSnapshot) -> Result<String> {
+    pub fn fingerprint(&self, before: &WorkspaceSnapshot) -> Result<String> {
         let value = json!({
             "schema": "air.code_run_fingerprint.v1",
             "task": self.task,
@@ -638,7 +656,7 @@ impl CodeRunDescriptor {
     }
 }
 
-pub(crate) fn write_code_run_artifact(
+pub fn write_code_run_artifact(
     artifact_dir: &Path,
     artifact: &CodeRunArtifact,
     output: &Value,
@@ -699,14 +717,14 @@ pub(crate) fn write_code_run_artifact(
                         rewrite_subagent_paths(meta, &rewrites);
                     }
                 }
-                write_trace(&destination, &events, false)?;
+                write_trace_to(&destination, &events, false)?;
             }
         }
     }
     Ok(())
 }
 
-pub(crate) fn write_timeout_code_run_artifact(
+pub fn write_timeout_code_run_artifact(
     artifact_dir: &Path,
     task: &str,
     timeout_seconds: u64,
@@ -914,7 +932,7 @@ fn copy_dir_all(source: &Path, destination: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn read_code_run_artifact(artifact_dir: &Path) -> Result<CodeRunArtifact> {
+pub fn read_code_run_artifact(artifact_dir: &Path) -> Result<CodeRunArtifact> {
     let artifact_path = artifact_dir.join("artifact.json");
     serde_json::from_slice(
         &fs::read(&artifact_path).with_context(|| format!("read {}", artifact_path.display()))?,
@@ -922,12 +940,12 @@ pub(crate) fn read_code_run_artifact(artifact_dir: &Path) -> Result<CodeRunArtif
     .with_context(|| format!("parse {}", artifact_path.display()))
 }
 
-pub(crate) fn code_run_trace_path(artifact_dir: &Path) -> Result<PathBuf> {
+pub fn code_run_trace_path(artifact_dir: &Path) -> Result<PathBuf> {
     let artifact = read_code_run_artifact(artifact_dir)?;
     Ok(artifact_dir.join(&artifact.files.trace))
 }
 
-pub(crate) fn code_run_path_rewrites(
+pub fn code_run_path_rewrites(
     artifact_dir: &Path,
     current_root: &Path,
 ) -> Result<Vec<(String, String)>> {
@@ -960,7 +978,7 @@ pub(crate) fn code_run_path_rewrites(
     Ok(rewrites.into_iter().collect())
 }
 
-pub(crate) fn replay_code_run_artifact(artifact_dir: &Path, workdir: &Path) -> Result<Value> {
+pub fn replay_code_run_artifact(artifact_dir: &Path, workdir: &Path) -> Result<Value> {
     let artifact = read_code_run_artifact(artifact_dir)?;
     let before = WorkspaceSnapshot::capture(workdir)?;
     if !artifact.snapshot.before.matches_snapshot(&before) {
@@ -1110,7 +1128,7 @@ fn canonical_sha256<T: Serialize>(value: &T) -> Result<String> {
     Ok(format!("sha256:{}", sha256_hex(&encoded)))
 }
 
-pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
+pub fn sha256_hex(bytes: &[u8]) -> String {
     let digest = digest::digest(&digest::SHA256, bytes);
     digest
         .as_ref()

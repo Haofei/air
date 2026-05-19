@@ -116,6 +116,12 @@ impl ModelProviderChoice {
         Self::openai(config)
     }
 
+    /// Convenience entry point for advisory call sites: open the model config
+    /// without forcing provider-IO tracing.
+    pub(crate) fn open_advisory(model_config: &std::path::Path) -> Result<Self> {
+        Self::from_config_file_with_provider_io(model_config.to_path_buf(), false)
+    }
+
     pub(crate) fn with_replay_prefix(self, options: ModelReplayOptions) -> Result<Self> {
         let events = read_trace_jsonl(&options.trace).map_err(|error| {
             anyhow::anyhow!("read replay trace {}: {error}", options.trace.display())

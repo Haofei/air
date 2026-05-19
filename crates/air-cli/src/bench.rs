@@ -1,11 +1,11 @@
 use crate::code_agent::{run_code_agent, CodeOptions};
-use crate::code_artifact::{
+use crate::skill::{prepare_skill_composition, resolve_skill_run_metadata};
+use air_code_artifact::{
     derive_code_run_verdict_from_facts, path_content_identity, read_code_run_artifact,
     replay_code_run_artifact, CodeRunDescriptor, CodeRunMode, CodeRunSkill, CodeRunVerdict,
     CodeRunVerdictConstraints, CodeRunVerificationFacts, FailureCategory, FailureReason,
     WorkspaceDelta, WorkspaceSnapshot,
 };
-use crate::skill::{prepare_skill_composition, resolve_skill_run_metadata};
 use air_runtime::read_trace_jsonl;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
