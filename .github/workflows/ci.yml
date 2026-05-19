@@ -35,3 +35,28 @@ jobs:
 
       - name: Rust tests
         run: cargo test --workspace
+
+      - name: Dream multi-task E2E
+        run: scripts/e2e_dream_multi_task.sh
+
+      - name: Dream company-service E2E
+        run: scripts/e2e_dream_company_service.sh
+
+      - name: RustSec audit
+        uses: rustsec/audit-check@v2
+
+  cross-platform-tests:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust tests
+        run: cargo test --workspace

@@ -223,9 +223,19 @@ struct MemoryPolicyCheckOutput {
     policy: String,
     can_compile_deterministic_guard: bool,
     suggested_runtime_rule: String,
+    policy_rule: Option<MemoryPolicyRule>,
     affected_files: Vec<String>,
+    affected_runtime_components: Vec<String>,
     required_tests: Vec<String>,
+    evidence_hashes: Vec<String>,
     next_commands: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct MemoryPolicyRule {
+    rule_type: String,
+    scope: String,
+    deny_allow: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -700,10 +710,11 @@ pub(crate) fn extract_memory(options: MemoryExtractOptions) -> Result<MemoryExtr
 
     let repo = repo_identifier(&cwd);
     let episodes = merge_episodes(
-        build_episodes(&observations, now),
-        build_window_episodes(&window_inputs, now),
+        build_episodes(&repo, &observations, now),
+        build_window_episodes(&repo, &window_inputs, now),
     );
     let dream_ir = synthesize_dream_ir(
+        &repo,
         &findings,
         &observations,
         &episodes,
@@ -1017,28 +1028,37 @@ pub(crate) fn check_policy_candidate(options: MemoryPolicyCheckOptions) -> Resul
             card.kind
         );
     }
+    let policy_rule = parse_policy_rule(&card);
+    let affected_files = policy_affected_files(&card);
+    let affected_runtime_components = policy_affected_runtime_components(&card);
+    let evidence_hashes = policy_evidence_hashes(&card);
     let can_compile = card.promotion.can_policy
-        && !card.evidence.is_empty()
+        && policy_rule.is_some()
+        && !affected_runtime_components.is_empty()
+        && !affected_files.is_empty()
+        && !evidence_hashes.is_empty()
         && card.status != "retired"
         && !card.content.to_ascii_lowercase().contains("disable");
-    let affected_files = policy_affected_files(&card);
     let output = MemoryPolicyCheckOutput {
         schema: "air.memory_policy_check.v1",
         status: if can_compile {
             "candidate_checked".to_string()
         } else {
-            "needs_review".to_string()
+            "policy_idea".to_string()
         },
         memory_id: card.id.clone(),
         policy: card.title,
         can_compile_deterministic_guard: can_compile,
         suggested_runtime_rule: card.content,
+        policy_rule,
         affected_files,
+        affected_runtime_components,
         required_tests: vec![
             "cargo test -p air-cli improve::tests".to_string(),
             "cargo test -p air-cli memory::tests".to_string(),
             "air improve evaluate <finding> --candidate <candidate-dir>".to_string(),
         ],
+        evidence_hashes,
         next_commands: vec![
             format!("air memory view {} --evidence", card.id),
             "Implement as a deterministic guard in a normal reviewed patch; do not auto-apply from memory.".to_string(),
@@ -2010,7 +2030,7 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
             continue;
         }
 
-        if card.status == "candidate" && item.helped_confirmed > 0 {
+        if card.status == "candidate" && item.causal_helped > 0 {
             card.status = "validated".to_string();
             card.updated_at = now;
             write_card_snapshot(&path, &card)?;
@@ -2060,8 +2080,8 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
                 "avoid_or_retire"
             } else if item.causal_helped > 0 {
                 "measured_improvement"
-            } else if item.helped_confirmed > 0 {
-                "validated_correlation"
+            } else if item.helped_candidate > 0 {
+                "correlated_success_needs_causal_eval"
             } else {
                 "needs_causal_eval"
             };
@@ -2245,7 +2265,7 @@ pub(crate) fn build_memory_run_hint(options: MemoryHintOptions) -> Result<Memory
     })
 }
 
-fn build_episodes(observations: &[Value], now: u64) -> Vec<MemoryEpisode> {
+fn build_episodes(id_scope: &str, observations: &[Value], now: u64) -> Vec<MemoryEpisode> {
     observations
         .iter()
         .map(|observation| {
@@ -2271,7 +2291,7 @@ fn build_episodes(observations: &[Value], now: u64) -> Vec<MemoryEpisode> {
             );
             MemoryEpisode {
                 schema: EPISODE_SCHEMA,
-                id: memory_id("episode", &[&source_path, &category, &summary]),
+                id: memory_id("episode", id_scope, &[&source_path, &category, &summary]),
                 source_kind: string_field(observation, "source_kind")
                     .unwrap_or_else(|| "unknown".to_string()),
                 source_path,
@@ -2290,7 +2310,7 @@ fn build_episodes(observations: &[Value], now: u64) -> Vec<MemoryEpisode> {
         .collect()
 }
 
-fn build_window_episodes(window_inputs: &[Value], now: u64) -> Vec<MemoryEpisode> {
+fn build_window_episodes(id_scope: &str, window_inputs: &[Value], now: u64) -> Vec<MemoryEpisode> {
     let mut episodes = Vec::new();
     for input in window_inputs {
         let path = string_field(input, "path").unwrap_or_default();
@@ -2353,7 +2373,7 @@ fn build_window_episodes(window_inputs: &[Value], now: u64) -> Vec<MemoryEpisode
         );
         episodes.push(MemoryEpisode {
             schema: EPISODE_SCHEMA,
-            id: memory_id("episode", &[&path, &category, &summary]),
+            id: memory_id("episode", id_scope, &[&path, &category, &summary]),
             source_kind: string_field(input, "kind")
                 .unwrap_or_else(|| "code_run_artifact".to_string()),
             source_path: path.clone(),
@@ -2414,7 +2434,7 @@ fn build_memory_cards(
         };
         cards.push(MemoryCard {
             schema: MEMORY_SCHEMA.to_string(),
-            id: memory_id("failure", &[&id, &category, &summary]),
+            id: memory_id("failure", repo, &[&id, &category, &summary]),
             kind: "failure".to_string(),
             scope: scope.clone(),
             title: format!("{category}: {summary}"),
@@ -2437,11 +2457,13 @@ fn build_memory_cards(
                 requires_human_review: true,
             },
         });
-        if let Some(procedure) = procedure_for_category(&category, &summary, &scope, &evidence, now)
+        if let Some(procedure) =
+            procedure_for_category(repo, &category, &summary, &scope, &evidence, now)
         {
             cards.push(procedure);
         }
         if let Some(routing) = routing_for_observations(
+            repo,
             &category,
             &summary,
             &scope,
@@ -2456,6 +2478,7 @@ fn build_memory_cards(
 }
 
 fn synthesize_dream_ir(
+    id_scope: &str,
     findings: &[Value],
     observations: &[Value],
     episodes: &[MemoryEpisode],
@@ -2501,7 +2524,7 @@ fn synthesize_dream_ir(
                 .map(|episode| episode.id.clone())
                 .collect::<Vec<_>>();
             candidates.push(DreamIrCandidate {
-                id: memory_id("dream_ir", &["procedure_delta", category]),
+                id: memory_id("dream_ir", id_scope, &["procedure_delta", category]),
                 kind: "procedure_candidate".to_string(),
                 name: format!("{}_success_failure_delta", category.replace('-', "_")),
                 confidence: confidence_from_count(successes + failures),
@@ -2532,7 +2555,7 @@ fn synthesize_dream_ir(
         )
     }) {
         candidates.push(DreamIrCandidate {
-            id: memory_id("dream_ir", &["concept", "bounded_exploration"]),
+            id: memory_id("dream_ir", id_scope, &["concept", "bounded_exploration"]),
             kind: "concept_candidate".to_string(),
             name: "bounded_exploration".to_string(),
             confidence: confidence_from_count(episode_ids.len()),
@@ -2558,7 +2581,7 @@ fn synthesize_dream_ir(
         .any(|category| category == "verification_failed")
     {
         candidates.push(DreamIrCandidate {
-            id: memory_id("dream_ir", &["concept", "verification_first"]),
+            id: memory_id("dream_ir", id_scope, &["concept", "verification_first"]),
             kind: "concept_candidate".to_string(),
             name: "verification_first_completion".to_string(),
             confidence: confidence_from_count(episode_ids.len()),
@@ -2577,7 +2600,7 @@ fn synthesize_dream_ir(
         .any(|category| category == "diff_constraint_failed")
     {
         candidates.push(DreamIrCandidate {
-            id: memory_id("dream_ir", &["concept", "constraint_first_mutation"]),
+            id: memory_id("dream_ir", id_scope, &["concept", "constraint_first_mutation"]),
             kind: "concept_candidate".to_string(),
             name: "constraint_first_mutation".to_string(),
             confidence: confidence_from_count(episode_ids.len()),
@@ -2603,7 +2626,11 @@ fn synthesize_dream_ir(
         let unique_categories = categories.iter().collect::<BTreeSet<_>>();
         if domains.len() >= 2 || unique_categories.len() >= 2 {
             candidates.push(DreamIrCandidate {
-                id: memory_id("dream_ir", &["hypothesis", "cross_domain_control_loop"]),
+                id: memory_id(
+                    "dream_ir",
+                    id_scope,
+                    &["hypothesis", "cross_domain_control_loop"],
+                ),
                 kind: "hypothesis_candidate".to_string(),
                 name: "cross_domain_control_loop".to_string(),
                 confidence: (confidence_from_count(episode_ids.len()) * 0.7).clamp(0.0, 1.0),
@@ -2663,7 +2690,7 @@ fn build_synthesis_cards(
     for candidate in &dream_ir.candidates {
         cards.push(MemoryCard {
             schema: MEMORY_SCHEMA.to_string(),
-            id: memory_id("concept", &[&candidate.name, &candidate.description]),
+            id: memory_id("concept", repo, &[&candidate.name, &candidate.description]),
             kind: "concept".to_string(),
             scope: scope.clone(),
             title: candidate.name.replace('_', " "),
@@ -2688,7 +2715,7 @@ fn build_synthesis_cards(
         });
         cards.push(MemoryCard {
             schema: MEMORY_SCHEMA.to_string(),
-            id: memory_id("hypothesis", &[&candidate.name, &candidate.description]),
+            id: memory_id("hypothesis", repo, &[&candidate.name, &candidate.description]),
             kind: "hypothesis".to_string(),
             scope: scope.clone(),
             title: format!("Hypothesis: {}", candidate.name.replace('_', " ")),
@@ -2722,7 +2749,7 @@ fn build_synthesis_cards(
         }) {
             cards.push(MemoryCard {
                 schema: MEMORY_SCHEMA.to_string(),
-                id: memory_id("policy", &[&candidate.name, &action.name]),
+                id: memory_id("policy", repo, &[&candidate.name, &action.name]),
                 kind: "policy".to_string(),
                 scope: scope.clone(),
                 title: format!("Policy candidate: {}", action.name.replace('_', " ")),
@@ -2864,8 +2891,78 @@ fn run_air_check(args: &[&str], log_path: &Path, timeout: Option<Duration>) -> R
 }
 
 fn policy_affected_files(card: &MemoryCard) -> Vec<String> {
-    let _ = card;
-    Vec::new()
+    policy_field_values(&card.content, "affected")
+        .into_iter()
+        .chain(policy_field_values(&card.content, "affected_files"))
+        .filter(|value| {
+            value.starts_with("crates/")
+                || value.starts_with("skills/")
+                || value.starts_with(".air/")
+                || value == "skills.lock"
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn policy_affected_runtime_components(card: &MemoryCard) -> Vec<String> {
+    policy_field_values(&card.content, "affected_components")
+        .into_iter()
+        .chain(policy_field_values(&card.content, "component"))
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn parse_policy_rule(card: &MemoryCard) -> Option<MemoryPolicyRule> {
+    let rule_type = policy_field_value(&card.content, "rule_type")?;
+    let scope = policy_field_value(&card.content, "scope")?;
+    let deny_allow = policy_field_value(&card.content, "deny")
+        .map(|value| format!("deny:{value}"))
+        .or_else(|| {
+            policy_field_value(&card.content, "allow").map(|value| format!("allow:{value}"))
+        })?;
+    Some(MemoryPolicyRule {
+        rule_type,
+        scope,
+        deny_allow,
+    })
+}
+
+fn policy_evidence_hashes(card: &MemoryCard) -> Vec<String> {
+    card.evidence
+        .iter()
+        .map(|evidence| {
+            evidence
+                .fingerprint
+                .clone()
+                .unwrap_or_else(|| sha256_hex(evidence.path.as_bytes()))
+        })
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect()
+}
+
+fn policy_field_value(content: &str, field: &str) -> Option<String> {
+    policy_field_values(content, field).into_iter().next()
+}
+
+fn policy_field_values(content: &str, field: &str) -> Vec<String> {
+    let prefix = format!("{field}:");
+    content
+        .lines()
+        .map(str::trim)
+        .filter_map(|line| line.strip_prefix(&prefix))
+        .flat_map(|value| value.split(','))
+        .map(|value| {
+            value
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .to_string()
+        })
+        .filter(|value| !value.is_empty())
+        .collect()
 }
 
 fn advance_card_priority(card: &MemoryCard) -> u8 {
@@ -2884,11 +2981,7 @@ fn should_retire_from_advance(item: MemoryUsageStats) -> bool {
     let confirmed_help = item.helped_confirmed + item.causal_helped;
     let confirmed_hurt = item.hurt_confirmed + item.causal_hurt;
     let confirmed_total = confirmed_help + confirmed_hurt;
-    if confirmed_hurt > confirmed_help && confirmed_total >= 2 {
-        return true;
-    }
-    let evaluated = item.helped_candidate + item.hurt_candidate + item.neutral;
-    evaluated >= 10 && ratio(item.hurt_candidate, evaluated) >= 0.3
+    confirmed_hurt > confirmed_help && confirmed_total >= 2
 }
 
 fn has_routing_measurement_signal(item: MemoryUsageStats) -> bool {
@@ -3017,24 +3110,33 @@ fn write_policy_review(
     out_dir: &Path,
     now: u64,
 ) -> Result<MemoryAdvanceGuard> {
+    let policy_rule = parse_policy_rule(card);
+    let affected_files = policy_affected_files(card);
+    let affected_runtime_components = policy_affected_runtime_components(card);
+    let evidence_hashes = policy_evidence_hashes(card);
     let can_compile = card.promotion.can_policy
-        && !card.evidence.is_empty()
+        && policy_rule.is_some()
+        && !affected_runtime_components.is_empty()
+        && !affected_files.is_empty()
+        && !evidence_hashes.is_empty()
         && card.status != "retired"
         && !card.content.to_ascii_lowercase().contains("disable");
-    let affected_files = policy_affected_files(card);
     let proposal = serde_json::json!({
         "schema": "air.memory_guard_review.v1",
-        "status": if can_compile { "reviewed_guard_proposal" } else { "needs_review" },
+        "status": if can_compile { "reviewed_guard_proposal" } else { "policy_idea" },
         "memory_id": card.id,
         "policy": card.title,
         "can_compile_deterministic_guard": can_compile,
         "suggested_runtime_rule": card.content,
+        "policy_rule": policy_rule,
         "affected_files": affected_files,
+        "affected_runtime_components": affected_runtime_components,
         "required_tests": [
             "cargo test -p air-cli improve::tests",
             "cargo test -p air-cli memory::tests",
             "air improve evaluate <finding> --candidate <candidate-dir>"
         ],
+        "evidence_hashes": evidence_hashes,
         "human_gate": "Implement accepted policy as a normal reviewed patch; AIR does not auto-edit runtime guard code from memory.",
         "created_at": now
     });
@@ -4071,67 +4173,8 @@ fn append_memory_usage_outcomes(
 }
 
 fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
-    let usage_path = memory_dir.join("usage.jsonl");
     let stats = memory_usage_stats_for_dir(memory_dir)?;
     let mut events = 0;
-
-    for (memory_id, item) in stats.clone() {
-        let evaluated = item.helped_candidate + item.hurt_candidate + item.neutral;
-        if item.helped_confirmed == 0
-            && item.helped_candidate >= 3
-            && evaluated >= 3
-            && ratio(item.helped_candidate, evaluated) >= 0.67
-        {
-            append_jsonl(
-                &usage_path,
-                &MemoryUsageEvent {
-                    schema: "air.memory_usage.v1".to_string(),
-                    memory_id: memory_id.clone(),
-                    task: String::new(),
-                    outcome: "helped".to_string(),
-                    run_artifact: None,
-                    at_unix: now,
-                },
-            )?;
-            append_ledger(
-                memory_dir,
-                "memory_help_confirmed",
-                &memory_id,
-                "memory",
-                "",
-                now,
-            )?;
-            events += 2;
-        }
-        if item.hurt_confirmed == 0
-            && item.hurt_candidate >= 2
-            && evaluated >= 2
-            && ratio(item.hurt_candidate, evaluated) >= 0.6
-        {
-            append_jsonl(
-                &usage_path,
-                &MemoryUsageEvent {
-                    schema: "air.memory_usage.v1".to_string(),
-                    memory_id: memory_id.clone(),
-                    task: String::new(),
-                    outcome: "hurt".to_string(),
-                    run_artifact: None,
-                    at_unix: now,
-                },
-            )?;
-            append_ledger(
-                memory_dir,
-                "memory_hurt_confirmed",
-                &memory_id,
-                "memory",
-                "",
-                now,
-            )?;
-            events += 2;
-        }
-    }
-
-    let stats = memory_usage_stats_for_dir(memory_dir)?;
     for (mut card, path) in load_cards(memory_dir)? {
         let Some(item) = stats.get(&card.id).copied() else {
             continue;
@@ -4149,7 +4192,7 @@ fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
                 now,
             )?;
             events += 1;
-        } else if card.status == "candidate" && item.helped_confirmed > 0 {
+        } else if card.status == "candidate" && item.causal_helped > 0 {
             card.status = "validated".to_string();
             card.updated_at = now;
             write_card_snapshot(&path, &card)?;
@@ -4283,6 +4326,7 @@ fn failure_content(finding: &Value) -> String {
 }
 
 fn procedure_for_category(
+    id_scope: &str,
     category: &str,
     summary: &str,
     scope: &MemoryScope,
@@ -4324,7 +4368,7 @@ fn procedure_for_category(
     };
     Some(MemoryCard {
         schema: MEMORY_SCHEMA.to_string(),
-        id: memory_id("procedure", &[category, title, summary]),
+        id: memory_id("procedure", id_scope, &[category, title, summary]),
         kind: "procedure".to_string(),
         scope: scope.clone(),
         title: title.to_string(),
@@ -4350,6 +4394,7 @@ fn procedure_for_category(
 }
 
 fn routing_for_observations(
+    id_scope: &str,
     category: &str,
     summary: &str,
     scope: &MemoryScope,
@@ -4372,7 +4417,7 @@ fn routing_for_observations(
     };
     Some(MemoryCard {
         schema: MEMORY_SCHEMA.to_string(),
-        id: memory_id("routing", &[category, summary, &language_text]),
+        id: memory_id("routing", id_scope, &[category, summary, &language_text]),
         kind: "routing".to_string(),
         scope: scope.clone(),
         title: format!("Route {language_text} {category} tasks with extra caution"),
@@ -5106,14 +5151,16 @@ fn ratio(value: usize, total: usize) -> f64 {
     }
 }
 
-fn memory_id(kind: &str, parts: &[&str]) -> String {
+fn memory_id(kind: &str, id_scope: &str, parts: &[&str]) -> String {
     let mut input = kind.to_string();
+    input.push('\0');
+    input.push_str(id_scope);
     for part in parts {
         input.push('\0');
         input.push_str(part);
     }
     let hash = sha256_hex(input.as_bytes());
-    format!("mem_{}_{}", kind, &hash[..12])
+    format!("mem_{}_{}", kind, &hash[..20])
 }
 
 fn memory_dir(cwd: &Path, memory_dir: Option<PathBuf>) -> PathBuf {
@@ -5185,9 +5232,15 @@ mod tests {
             executor: Some("code-agent".to_string()),
             skill: None,
         };
-        let card =
-            procedure_for_category("verification_failed", "summary", &scope, &[], 1_770_000_000)
-                .unwrap();
+        let card = procedure_for_category(
+            "repo",
+            "verification_failed",
+            "summary",
+            &scope,
+            &[],
+            1_770_000_000,
+        )
+        .unwrap();
 
         assert_eq!(card.kind, "procedure");
         assert_eq!(card.status, "candidate");
@@ -5198,9 +5251,20 @@ mod tests {
 
     #[test]
     fn memory_ids_are_stable() {
+        let id = memory_id("failure", "repo", &["IMP-001", "verification_failed"]);
         assert_eq!(
-            memory_id("failure", &["IMP-001", "verification_failed"]),
-            memory_id("failure", &["IMP-001", "verification_failed"])
+            id,
+            memory_id("failure", "repo", &["IMP-001", "verification_failed"])
+        );
+        assert!(id.starts_with("mem_failure_"));
+        assert_eq!(id.trim_start_matches("mem_failure_").len(), 20);
+    }
+
+    #[test]
+    fn memory_ids_include_explicit_scope() {
+        assert_ne!(
+            memory_id("failure", "repo-a", &["IMP-001", "verification_failed"]),
+            memory_id("failure", "repo-b", &["IMP-001", "verification_failed"])
         );
     }
 
@@ -5221,8 +5285,15 @@ mod tests {
             "summary": "constraint failure",
             "observation_ids": ["OBS-001"]
         })];
-        let episodes = build_episodes(&observations, 1_770_000_000);
-        let ir = synthesize_dream_ir(&findings, &observations, &episodes, 1_770_000_000, "deep");
+        let episodes = build_episodes("repo", &observations, 1_770_000_000);
+        let ir = synthesize_dream_ir(
+            "repo",
+            &findings,
+            &observations,
+            &episodes,
+            1_770_000_000,
+            "deep",
+        );
 
         assert!(ir
             .candidates
@@ -5269,7 +5340,7 @@ mod tests {
                 created_at: 1,
             },
         ];
-        let ir = synthesize_dream_ir(&[], &[], &episodes, 1_770_000_000, "deep");
+        let ir = synthesize_dream_ir("repo", &[], &[], &episodes, 1_770_000_000, "deep");
 
         assert!(ir
             .candidates
@@ -5301,6 +5372,7 @@ mod tests {
         )
         .unwrap();
         let episodes = build_window_episodes(
+            "repo",
             &[json!({
                 "kind": "code_run_artifact",
                 "path": artifact.display().to_string(),
@@ -5364,7 +5436,7 @@ mod tests {
     }
 
     #[test]
-    fn usage_reconcile_validates_helpful_and_retires_harmful_memory() {
+    fn usage_reconcile_keeps_correlations_out_of_lifecycle() {
         let root = temp_root("reconcile");
         let scope = MemoryScope {
             level: "repo".to_string(),
@@ -5447,15 +5519,13 @@ mod tests {
 
         let (helpful, _) = find_card(&root, "mem_helpful").unwrap();
         let (harmful, _) = find_card(&root, "mem_harmful").unwrap();
-        assert_eq!(helpful.status, "validated");
-        assert_eq!(harmful.status, "retired");
+        assert_eq!(helpful.status, "candidate");
+        assert_eq!(harmful.status, "candidate");
         let usage = read_usage_events(&root.join("usage.jsonl")).unwrap();
-        assert!(usage
-            .iter()
-            .any(|event| event.memory_id == "mem_helpful" && event.outcome == "helped"));
-        assert!(usage
-            .iter()
-            .any(|event| event.memory_id == "mem_harmful" && event.outcome == "hurt"));
+        assert!(!usage.iter().any(|event| matches!(
+            event.outcome.as_str(),
+            "helped" | "hurt" | "causal_helped" | "causal_hurt"
+        )));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -5732,6 +5802,76 @@ mod tests {
 
         stats.causal_hurt = 4;
         assert!(should_retire_from_advance(stats));
+    }
+
+    #[test]
+    fn candidate_correlation_does_not_retire_without_causal_or_confirmed_harm() {
+        let stats = MemoryUsageStats {
+            hurt_candidate: 10,
+            ..Default::default()
+        };
+        assert!(!should_retire_from_advance(stats));
+    }
+
+    #[test]
+    fn policy_guard_requires_structured_rule_fields() {
+        let now = 1_770_000_000;
+        let scope = MemoryScope {
+            level: "repo".to_string(),
+            repo: Some("repo".to_string()),
+            executor: Some("code-agent".to_string()),
+            skill: None,
+        };
+        let mut card = MemoryCard {
+            schema: MEMORY_SCHEMA.to_string(),
+            id: "mem_policy".to_string(),
+            kind: "policy".to_string(),
+            scope,
+            title: "Policy candidate".to_string(),
+            content: "Require verification before success.".to_string(),
+            triggers: vec!["verification".to_string()],
+            evidence: vec![MemoryEvidence {
+                kind: "code_run_artifact".to_string(),
+                path: "artifact.json".to_string(),
+                verdict: Some("failure".to_string()),
+                fingerprint: Some("sha256:evidence".to_string()),
+                note: None,
+            }],
+            confidence: 0.7,
+            impact: 0.7,
+            stability: "medium".to_string(),
+            status: "candidate".to_string(),
+            created_at: now,
+            updated_at: now,
+            conflicts: Vec::new(),
+            promotion: MemoryPromotion {
+                can_prompt_inject: false,
+                can_route: false,
+                can_compile_skill: false,
+                can_regression: false,
+                can_policy: true,
+                requires_human_review: true,
+            },
+        };
+
+        assert!(parse_policy_rule(&card).is_none());
+        assert!(policy_affected_files(&card).is_empty());
+        card.content = [
+            "rule_type: verification_gate",
+            "scope: code_run_verdict",
+            "deny: success_without_verification",
+            "affected_components: code_artifact,audit",
+            "affected: crates/air-cli/src/code_artifact.rs,crates/air-cli/src/audit.rs",
+        ]
+        .join("\n");
+
+        assert_eq!(
+            parse_policy_rule(&card).unwrap().deny_allow,
+            "deny:success_without_verification"
+        );
+        assert_eq!(policy_affected_runtime_components(&card).len(), 2);
+        assert_eq!(policy_affected_files(&card).len(), 2);
+        assert_eq!(policy_evidence_hashes(&card), vec!["sha256:evidence"]);
     }
 
     #[test]

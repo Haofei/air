@@ -706,6 +706,76 @@ pub(crate) fn write_code_run_artifact(
     Ok(())
 }
 
+pub(crate) fn write_timeout_code_run_artifact(
+    artifact_dir: &Path,
+    task: &str,
+    timeout_seconds: u64,
+) -> Result<()> {
+    if artifact_dir.join("artifact.json").exists() {
+        return Ok(());
+    }
+    let before = WorkspaceSnapshot::default();
+    let descriptor = CodeRunDescriptor {
+        task: task.to_string(),
+        skill: None,
+        profile: "air-run-timeout-supervisor".to_string(),
+        model_config: None,
+        tool_config: None,
+        extra: BTreeMap::from([("timeout_seconds".to_string(), Value::from(timeout_seconds))]),
+    };
+    let failure_reason = FailureReason {
+        category: FailureCategory::Timeout,
+        message: format!("air run exceeded wall-clock timeout of {timeout_seconds} seconds"),
+        details: BTreeMap::from([("timeout_seconds".to_string(), Value::from(timeout_seconds))]),
+    };
+    let verdict = CodeRunVerdict {
+        patch_applied: false,
+        verification_ran: false,
+        verification_passed: false,
+        changed_files: Vec::new(),
+        workspace_clean_ok: true,
+        allowed_files_ok: true,
+        required_files_ok: false,
+        forbidden_files_ok: true,
+        required_diff_ok: false,
+        max_diff_lines_ok: true,
+        final_success: false,
+        failure_reason: Some(failure_reason.clone()),
+    };
+    let artifact = build_code_run_artifact(
+        descriptor,
+        &before,
+        &before,
+        WorkspaceDelta {
+            changed_files: Vec::new(),
+            diff: String::new(),
+        },
+        Vec::new(),
+        Some(failure_reason),
+        Some(verdict),
+    )?;
+    let output = json!({
+        "edit": {
+            "patch_applied": false,
+            "verification_ran": false,
+            "verification_passed": false,
+            "changed_files": [],
+            "final_success": false,
+            "failure_reason": {
+                "category": "timeout",
+                "message": format!("air run exceeded wall-clock timeout of {timeout_seconds} seconds")
+            }
+        }
+    });
+    write_code_run_artifact(artifact_dir, &artifact, &output, None)?;
+    fs::write(artifact_dir.join(&artifact.files.trace), b"").with_context(|| {
+        format!(
+            "write {}",
+            artifact_dir.join(&artifact.files.trace).display()
+        )
+    })
+}
+
 fn copy_subagent_artifacts_from_trace(
     trace_path: &Path,
     destination_root: &Path,
@@ -1290,6 +1360,35 @@ mod tests {
         assert!(copied_parent_trace.contains(&copied_child_output.display().to_string()));
         assert!(!copied_parent_trace.contains(&child_trace.display().to_string()));
 
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn timeout_artifact_records_timeout_verdict() {
+        let temp_dir = unique_temp_dir("air-code-artifact-timeout");
+        let artifact_dir = temp_dir.join("artifact");
+
+        write_timeout_code_run_artifact(&artifact_dir, "slow task", 1).unwrap();
+        let artifact = read_code_run_artifact(&artifact_dir).unwrap();
+
+        assert_eq!(artifact.task, "slow task");
+        assert_eq!(
+            artifact.failure_reason.as_ref().unwrap().category,
+            FailureCategory::Timeout
+        );
+        assert_eq!(
+            artifact
+                .verdict
+                .as_ref()
+                .unwrap()
+                .failure_reason
+                .as_ref()
+                .unwrap()
+                .category,
+            FailureCategory::Timeout
+        );
+        assert!(!artifact.verdict.as_ref().unwrap().final_success);
+        assert!(artifact_dir.join("trace.jsonl").exists());
         let _ = fs::remove_dir_all(temp_dir);
     }
 

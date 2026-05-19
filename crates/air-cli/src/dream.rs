@@ -1338,82 +1338,27 @@ fn read_latest_finding_records(path: &Path) -> Result<Vec<DreamFindingRecord>> {
 }
 
 fn append_finding_record(path: &Path, record: &DreamFindingRecord) -> Result<()> {
-    let _lock = FindingStoreLock::acquire(path)?;
-    append_jsonl(path, record)?;
-    if fs::metadata(path)
-        .map(|metadata| metadata.len())
-        .unwrap_or(0)
-        > DREAM_FINDINGS_COMPACT_BYTES
-    {
-        compact_finding_records(path)?;
-    }
-    Ok(())
-}
-
-struct FindingStoreLock {
-    path: PathBuf,
-}
-
-impl FindingStoreLock {
-    fn acquire(path: &Path) -> Result<Self> {
-        let lock_path = path.with_extension("jsonl.lock");
-        if let Some(parent) = lock_path.parent() {
-            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-        }
-        for _ in 0..50 {
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&lock_path)
-            {
-                Ok(_) => return Ok(Self { path: lock_path }),
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    remove_stale_finding_lock(&lock_path);
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                Err(error) => {
-                    return Err(error).with_context(|| format!("create {}", lock_path.display()));
-                }
-            }
-        }
-        bail!(
-            "timed out waiting for finding store lock {}",
-            lock_path.display()
-        )
-    }
-}
-
-impl Drop for FindingStoreLock {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
-    }
-}
-
-fn remove_stale_finding_lock(path: &Path) {
-    let Ok(metadata) = fs::metadata(path) else {
-        return;
-    };
-    let Ok(modified) = metadata.modified() else {
-        return;
-    };
-    let Ok(age) = SystemTime::now().duration_since(modified) else {
-        return;
-    };
-    if age > Duration::from_secs(300) {
-        let _ = fs::remove_file(path);
-    }
-}
-
-fn compact_finding_records(path: &Path) -> Result<()> {
     with_jsonl_lock(path, || {
-        let records = read_latest_finding_records(path)?;
-        let mut bytes = Vec::new();
-        for record in records {
-            bytes.extend_from_slice(serde_json::to_string(&record)?.as_bytes());
-            bytes.push(b'\n');
+        append_jsonl_unlocked(path, record)?;
+        if fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0)
+            > DREAM_FINDINGS_COMPACT_BYTES
+        {
+            compact_finding_records_unlocked(path)?;
         }
-        write_json_atomic(path, &bytes)
+        Ok(())
     })
+}
+
+fn compact_finding_records_unlocked(path: &Path) -> Result<()> {
+    let records = read_latest_finding_records(path)?;
+    let mut bytes = Vec::new();
+    for record in records {
+        bytes.extend_from_slice(serde_json::to_string(&record)?.as_bytes());
+        bytes.push(b'\n');
+    }
+    write_json_atomic(path, &bytes)
 }
 
 fn append_dream_ledger(
@@ -1441,6 +1386,20 @@ fn append_dream_ledger(
 
 fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     append_jsonl_locked(path, value)
+}
+
+fn append_jsonl_unlocked<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    use std::io::Write;
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .with_context(|| format!("open {}", path.display()))?;
+    writeln!(file, "{}", serde_json::to_string(value)?)
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {

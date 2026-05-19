@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
 use serde::Serialize;
 use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+const DEFAULT_LOCK_STALE_AFTER: Duration = Duration::from_secs(10 * 60);
 
 #[derive(Debug, Clone)]
 pub(crate) struct AirLayout {
@@ -59,20 +61,24 @@ pub(crate) fn run_current_air_stage(
             code: None,
         });
     }
-    let mut child = Command::new(&exe)
+    let mut command = Command::new(&exe);
+    command
         .args(args)
         .current_dir(cwd)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child_process_group(&mut command);
+    let mut child = command
         .spawn()
         .with_context(|| format!("run {} {}", exe.display(), args.join(" ")))?;
+    let mut stdout_reader = child.stdout.take().map(read_child_stream);
+    let mut stderr_reader = child.stderr.take().map(read_child_stream);
     let started = Instant::now();
     loop {
         if let Some(status) = child.try_wait().context("poll air child process")? {
-            let output = child
-                .wait_with_output()
-                .context("collect air child output")?;
-            write_stage_log(log_path, args, &output.stdout, &output.stderr)?;
+            let stdout = join_child_stream(stdout_reader.take(), "stdout")?;
+            let stderr = join_child_stream(stderr_reader.take(), "stderr")?;
+            write_stage_log(log_path, args, &stdout, &stderr)?;
             return Ok(StageResult {
                 status: if status.success() {
                     "completed".to_string()
@@ -85,10 +91,10 @@ pub(crate) fn run_current_air_stage(
         }
         if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
             terminate_child_gracefully(&mut child);
-            let output = child
-                .wait_with_output()
-                .context("collect timed out air child output")?;
-            write_stage_log(log_path, args, &output.stdout, &output.stderr)?;
+            let _ = child.wait();
+            let stdout = join_child_stream(stdout_reader.take(), "stdout")?;
+            let stderr = join_child_stream(stderr_reader.take(), "stderr")?;
+            write_stage_log(log_path, args, &stdout, &stderr)?;
             return Ok(StageResult {
                 status: "timeout".to_string(),
                 success: false,
@@ -96,6 +102,62 @@ pub(crate) fn run_current_air_stage(
             });
         }
         std::thread::sleep(Duration::from_millis(250));
+    }
+}
+
+pub(crate) fn run_current_air_passthrough(
+    cwd: &Path,
+    args: &[std::ffi::OsString],
+    timeout: Duration,
+) -> Result<StageResult> {
+    let exe = std::env::current_exe().context("resolve current air executable")?;
+    if timeout.is_zero() {
+        return Ok(StageResult {
+            status: "timeout_before_start".to_string(),
+            success: false,
+            code: None,
+        });
+    }
+    let mut command = Command::new(&exe);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .env("AIR_RUN_TIMEOUT_CHILD", "1");
+    configure_child_process_group(&mut command);
+    let mut child = command
+        .spawn()
+        .with_context(|| format!("run timed {} {:?}", exe.display(), args))?;
+    let mut stdout = child.stdout.take().map(passthrough_child_stream);
+    let mut stderr = child.stderr.take().map(passthrough_child_stderr);
+    let started = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().context("poll timed air child process")? {
+            join_passthrough_stream(stdout.take(), "stdout")?;
+            join_passthrough_stream(stderr.take(), "stderr")?;
+            return Ok(StageResult {
+                status: if status.success() {
+                    "completed".to_string()
+                } else {
+                    format!("failed_status_{:?}", status.code())
+                },
+                success: status.success(),
+                code: status.code(),
+            });
+        }
+        if started.elapsed() >= timeout {
+            terminate_child_gracefully(&mut child);
+            let _ = child.wait();
+            join_passthrough_stream(stdout.take(), "stdout")?;
+            join_passthrough_stream(stderr.take(), "stderr")?;
+            return Ok(StageResult {
+                status: "timeout".to_string(),
+                success: false,
+                code: None,
+            });
+        }
+        std::thread::sleep(Duration::from_millis(100));
     }
 }
 
@@ -160,18 +222,115 @@ fn write_stage_timeout_log(log_path: &Path, args: &[String], status: &str) -> Re
 fn terminate_child_gracefully(child: &mut Child) {
     #[cfg(unix)]
     {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(child.id().to_string())
-            .status();
+        signal_child_process_group(child.id(), unix_process::SIGTERM);
         for _ in 0..12 {
             if matches!(child.try_wait(), Ok(Some(_))) {
                 return;
             }
             std::thread::sleep(Duration::from_millis(250));
         }
+        signal_child_process_group(child.id(), unix_process::SIGKILL);
     }
     let _ = child.kill();
+}
+
+fn configure_child_process_group(command: &mut Command) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        unsafe {
+            command.pre_exec(|| unix_process::set_current_process_group());
+        }
+    }
+}
+
+#[cfg(unix)]
+fn signal_child_process_group(pid: u32, signal: std::os::raw::c_int) {
+    unix_process::signal_process_group(pid, signal);
+}
+
+#[cfg(unix)]
+mod unix_process {
+    use std::io;
+    use std::os::raw::c_int;
+
+    pub(crate) const SIGTERM: c_int = 15;
+    pub(crate) const SIGKILL: c_int = 9;
+
+    unsafe extern "C" {
+        fn kill(pid: c_int, sig: c_int) -> c_int;
+        fn setpgid(pid: c_int, pgid: c_int) -> c_int;
+    }
+
+    pub(crate) fn set_current_process_group() -> io::Result<()> {
+        let result = unsafe { setpgid(0, 0) };
+        if result == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+
+    pub(crate) fn signal_process_group(pid: u32, signal: c_int) {
+        let group = -(pid as c_int);
+        let _ = unsafe { kill(group, signal) };
+    }
+}
+
+fn read_child_stream<R: Read + Send + 'static>(
+    mut stream: R,
+) -> std::thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes)?;
+        Ok(bytes)
+    })
+}
+
+fn join_child_stream(
+    reader: Option<std::thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+    stream_name: &str,
+) -> Result<Vec<u8>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("air child {stream_name} reader panicked"))?
+        .with_context(|| format!("read air child {stream_name}"))
+}
+
+fn passthrough_child_stream<R: Read + Send + 'static>(
+    mut stream: R,
+) -> std::thread::JoinHandle<std::io::Result<()>> {
+    std::thread::spawn(move || {
+        let mut stdout = std::io::stdout().lock();
+        std::io::copy(&mut stream, &mut stdout)?;
+        stdout.flush()
+    })
+}
+
+fn passthrough_child_stderr<R: Read + Send + 'static>(
+    mut stream: R,
+) -> std::thread::JoinHandle<std::io::Result<()>> {
+    std::thread::spawn(move || {
+        let mut stderr = std::io::stderr().lock();
+        std::io::copy(&mut stream, &mut stderr)?;
+        stderr.flush()
+    })
+}
+
+fn join_passthrough_stream(
+    reader: Option<std::thread::JoinHandle<std::io::Result<()>>>,
+    stream_name: &str,
+) -> Result<()> {
+    let Some(reader) = reader else {
+        return Ok(());
+    };
+    reader
+        .join()
+        .map_err(|_| anyhow::anyhow!("timed air child {stream_name} reader panicked"))?
+        .with_context(|| format!("stream timed air child {stream_name}"))
 }
 
 fn lock_path(path: &Path) -> PathBuf {
@@ -214,6 +373,12 @@ impl FileLock {
                     });
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    if lock_is_stale(path, DEFAULT_LOCK_STALE_AFTER) {
+                        // TODO: replace this sentinel-file lock with an advisory fd lock.
+                        // This stale cleanup has a small stat-then-unlink TOCTOU window.
+                        let _ = fs::remove_file(path);
+                        continue;
+                    }
                     if started.elapsed() >= timeout {
                         anyhow::bail!("timed out waiting for lock {}", path.display());
                     }
@@ -225,6 +390,19 @@ impl FileLock {
             }
         }
     }
+}
+
+fn lock_is_stale(path: &Path, stale_after: Duration) -> bool {
+    let Ok(metadata) = fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    modified
+        .elapsed()
+        .map(|age| age >= stale_after)
+        .unwrap_or(false)
 }
 
 impl Drop for FileLock {

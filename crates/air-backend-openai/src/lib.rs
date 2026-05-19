@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::{BufRead, BufReader, Read};
 use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
@@ -485,19 +486,31 @@ fn send_chat_completion_request(
     }
 
     if body.get("stream").and_then(Value::as_bool) == Some(true) {
-        let text = response.text().map_err(provider_error)?;
-        return parse_chat_completion_stream(&text);
+        return parse_chat_completion_stream_reader(response);
     }
 
     response.json::<Value>().map_err(provider_error)
 }
 
+fn parse_chat_completion_stream_reader<R: Read>(reader: R) -> Result<Value, RuntimeError> {
+    parse_chat_completion_stream_lines(BufReader::new(reader).lines())
+}
+
+#[cfg(test)]
 fn parse_chat_completion_stream(text: &str) -> Result<Value, RuntimeError> {
+    parse_chat_completion_stream_lines(text.lines().map(|line| Ok(line.to_string())))
+}
+
+fn parse_chat_completion_stream_lines<I>(lines: I) -> Result<Value, RuntimeError>
+where
+    I: IntoIterator<Item = std::io::Result<String>>,
+{
     let mut content = String::new();
     let mut reasoning = String::new();
     let mut tool_calls: BTreeMap<usize, StreamToolCall> = BTreeMap::new();
 
-    for line in text.lines() {
+    for line in lines {
+        let line = line.map_err(provider_error)?;
         let line = line.trim();
         if !line.starts_with("data:") {
             continue;

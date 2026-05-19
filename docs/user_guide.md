@@ -30,6 +30,14 @@ Per-command flags override config values. Trace files are redacted by default;
 use `--trace raw` only for trusted local debugging, or `--trace off` to suppress
 trace writing even when a command path would otherwise provide `--trace-out`.
 
+`AIR_MODEL_PROFILE` can fill OpenAI-compatible defaults from
+`AIR_MODEL_<PROFILE>_{API_KEY,BASE_URL,MODEL}`, but explicit `OPENAI_API_KEY`,
+`OPENAI_BASE_URL`, and `OPENAI_MODEL` values win.
+
+`air run --timeout-seconds <n>` is enforced by running the task in a child AIR
+process. On timeout AIR terminates the child boundary instead of returning from
+the parent while model or tool work continues in the background.
+
 Host applications provide model, tool, and approval implementations through typed provider contracts.
 
 ## Company Adoption Flow
@@ -178,13 +186,14 @@ become prompt memory, skill routing, a skill package, or runtime policy until
 later validation gates promote it.
 
 After extraction, `dream run` invokes the same safe advancement pass exposed as
-`air memory advance`. This pass can validate candidate memory when scorecard
-evidence is confirmed, promote memory into future packs only after causal
-evidence from `air memory causal-eval`, retire confirmed harmful memory, draft
-and validate/audit untrusted skills from validated procedures, write routing
-scorecards, and write deterministic runtime-guard review proposals. It still
-does not pin memory, trust or import skill drafts, edit AIR runtime policy code,
-commit, or open PRs. Pass `--no-advance` for an observation-only Dream run.
+`air memory advance`. Correlated success/failure from ordinary runs is kept as
+dashboard evidence only. Causal or explicitly confirmed evidence can validate,
+promote, or retire memory; causal evidence from `air memory causal-eval` is
+required before memory enters future packs or procedure memory becomes a skill
+draft. The pass also writes routing scorecards and structured runtime-guard
+review proposals. It still does not pin memory, trust or import skill drafts,
+edit AIR runtime policy code, commit, or open PRs. Pass `--no-advance` for an
+observation-only Dream run.
 Micro mode skips advance automatically, and `--advance-limit` caps how many
 memory cards can be touched in one pass.
 
@@ -287,19 +296,20 @@ When `air run` uses promoted memories, AIR stores the selected memory pack in
 the code-run artifact. If the caller did not pass `--artifact-out`, AIR writes
 one under `target/generated/code-runs/memory-run-*` so the next Dream pass can
 read those success/failure episodes and append `helped_candidate` or
-`hurt_candidate` outcomes to `.air/memory/usage.jsonl`. Repeated positive
-evidence confirms `helped` and validates candidate memory. Promotion to
-`promoted` requires causal evidence recorded with `air memory causal-eval`,
-normally from a compare-no-memory, replay, or benchmark artifact; promotion to
-`pinned` remains a manual governance decision. Repeated negative evidence
-confirms `hurt` and auto-retires the memory so it stops being suggested. `air
-memory scorecard` summarizes which memories are actually useful before the team
-promotes, retires, or edits them.
+`hurt_candidate` outcomes to `.air/memory/usage.jsonl`. Those outcomes are only
+correlation: they cannot validate, promote, retire, or compile memory by
+themselves. Causal evidence recorded with `air memory causal-eval`, normally
+from a compare-no-memory, replay, or benchmark artifact, is required for
+promotion to `promoted`; promotion to `pinned` remains a manual governance
+decision. Confirmed or causal harm can retire memory so it stops being
+suggested. `air memory scorecard` summarizes which memories look useful before
+the team promotes, retires, or edits them.
 
 `memory policy-check` reviews a policy memory as a deterministic guard proposal:
-it reports likely affected runtime files, tests that should exist, and whether
-the candidate has enough evidence to compile into code. It never edits runtime
-guards automatically.
+it requires structured `rule_type`, `scope`, `deny`/`allow`, affected runtime
+components/files, and evidence hashes before reporting a reviewed guard
+proposal. Unstructured policy memories remain policy ideas. It never edits
+runtime guards automatically.
 
 Once `.air/evals/manifest.json` exists, `air improve evaluate` checks it
 automatically. This protects the loop from candidates that pass by editing
@@ -461,6 +471,11 @@ Key rules:
 - `requires.capabilities` must cover every static and dynamic module.
 - `halts` can stop a plan for clarification or approval-style flows.
 - `schedule.groups` can declare bounded parallel waves.
+
+Use module `workflow.kind: state_machine` for direct VM execution. Module
+`workflow.kind: dag` remains valid as a linkable composition contract for the
+verifier/system layer, but it is not native VM execution; `air verify` reports
+warning `AIR029` and DAGs should be run through a RunPlan or AirSystem.
 
 For deterministic shape changes, `connect.value` supports typed expression transforms such as
 object construction, arrays, counts, and coalescing. `coalesce` returns the first non-empty value;

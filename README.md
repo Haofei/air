@@ -57,6 +57,9 @@ AIR_MODEL_LOCAL_MODEL=qwen2.5-coder
 ```
 
 Use `--model-config` to point a command at another OpenAI-compatible provider config.
+If `OPENAI_API_KEY`, `OPENAI_BASE_URL`, or `OPENAI_MODEL` is already set, AIR
+keeps the explicit environment value and does not overwrite it from
+`AIR_MODEL_PROFILE`.
 
 AIR also reads optional local defaults from `.air/config.yaml`:
 
@@ -81,6 +84,9 @@ parts teams actually inspect:
 
 The default workflow is intentionally narrow: run a bounded coding task, check
 `air status`, then inspect what the agent has learned with `air brain`.
+`air run --timeout-seconds <n>` runs the task in a child `air` process so the
+wall-clock budget can terminate the whole run instead of leaving in-process
+model calls or tools alive.
 
 ## Skills
 
@@ -315,13 +321,14 @@ impact, lifecycle status, and promotion gates. Dream also writes
 and runtime-policy candidates are compiled into memory cards and graph edges.
 Candidate memory is not injected into prompts, used for routing, compiled into
 skills, or promoted into runtime policy until later validation gates approve it.
-`dream run` now runs `memory advance` by default: repeated negative scorecard
-evidence can retire memory, confirmed positive evidence can validate memory,
-causal evidence can promote memory into the compact runtime pack, procedure
-memory can be validated as an untrusted skill draft, routing outcomes are
-measured, and policy memory is written as a guard-review proposal. It still
-does not pin memory, import/trust generated skills, edit runtime guard code,
-commit, or open PRs. Pass `--no-advance` for an observation-only Dream run.
+`dream run` now runs `memory advance` by default. Correlated success/failure
+from ordinary runs is kept as dashboard evidence only. Causal or explicitly
+confirmed evidence can validate, promote, or retire memory; causal evidence is
+required before a memory can enter the compact runtime pack or become a skill
+draft. Routing outcomes are measured, and structured policy memory is written
+as a guard-review proposal. It still does not pin memory, import/trust
+generated skills, edit runtime guard code, commit, or open PRs. Pass
+`--no-advance` for an observation-only Dream run.
 Micro mode skips advance automatically. `--advance-limit` caps how many memory
 cards the pass can touch, and `--advance-timeout-seconds` gives the advance
 stage a wall-clock budget. `air run --timeout-seconds <n>` provides the same
@@ -396,15 +403,16 @@ which memories were used in the code-run artifact. If no `--artifact-out` is
 supplied, AIR writes one under `target/generated/code-runs/memory-run-*` so the
 next Dream pass can turn successful runs into `helped_candidate` events and
 failed runs into `hurt_candidate` events, visible through `air memory
-scorecard`. Repeated positive evidence confirms `helped` and validates
-candidate memory. Causal evidence recorded with `air memory causal-eval`,
-normally from compare-no-memory, replay, or benchmark output, lets `memory
-advance` promote memory into future packs. Repeated negative evidence confirms
-`hurt` and auto-retires the memory so it stops being suggested. Procedure
-memory can become a validated skill draft, but import/trust still requires
-manual review. Policy memories become deterministic-guard proposals under
-`memory-advance/guards/`; accepted guards are implemented as normal reviewed
-patches. If Dream was run without `--write-regressions`, its next
+scorecard`. These events are correlation only: they cannot validate, promote,
+retire, or compile memory by themselves. Causal evidence recorded with
+`air memory causal-eval`, normally from compare-no-memory, replay, or benchmark
+output, lets `memory advance` validate/promote useful memory or retire harmful
+memory. Procedure memory can become a validated skill draft only after causal
+evidence, but import/trust still requires manual review. Policy memories become
+deterministic-guard proposals under `memory-advance/guards/` only when they
+include structured `rule_type`, `scope`, `deny`/`allow`, affected runtime
+components/files, and evidence hashes; accepted guards are implemented as
+normal reviewed patches. If Dream was run without `--write-regressions`, its next
 commands first promote the selected regression and then point `self fix` at the
 promoted regression file under `skills/code-agent/benches/regressions/`.
 Deterministic gates remain the source of truth for promotion.
@@ -673,6 +681,12 @@ connect:
 outputs:
   answer: helpdesk.answer
 ```
+
+Module-level `workflow.kind: dag` is a linkable composition contract for the
+verifier and system/linker layer. The native VM executes `state_machine`
+modules directly; DAG execution should be materialized as a RunPlan or
+AirSystem. `air verify` emits warning `AIR029` when a module declares a DAG so
+that this boundary is visible before runtime.
 
 ```bash
 cargo run -p air-cli -- dev validate-plan --profile examples/simple-helpdesk/profile.air-profile.yaml

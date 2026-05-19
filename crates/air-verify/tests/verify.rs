@@ -482,6 +482,26 @@ fn rejects_dangerous_capability_without_approval_path() {
 }
 
 #[test]
+fn warns_that_dag_workflows_are_linkable_not_vm_native() {
+    let module = parse_air_yaml(LINKABLE_DAG);
+    let report = verify(&module);
+
+    assert!(
+        report.is_success(),
+        "expected success, got {:?}",
+        report.diagnostics
+    );
+    assert!(
+        report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "AIR029"),
+        "expected AIR029, got {:?}",
+        report.diagnostics
+    );
+}
+
+#[test]
 fn rejects_cycles_without_traversing_approval_paths_forever() {
     let module = parse_air_yaml(INVALID_CYCLE);
     let report = verify(&module);
@@ -620,6 +640,50 @@ workflow:
       kind: return
       output: deployment_id
   edges:
+    - from: deploy
+      to: done
+
+policy:
+  require_approval:
+    - production.deploy
+"#;
+
+const LINKABLE_DAG: &str = r#"
+agent:
+  name: linkable-dag
+  version: 0.1.0
+
+outputs:
+  deployment_id: string
+
+requires:
+  capabilities:
+    - production.deploy
+
+tools:
+  - name: deploy.production
+    capability: production.deploy
+
+workflow:
+  kind: dag
+  entry: approve
+  nodes:
+    - id: approve
+      kind: approval
+      approval_for:
+        - production.deploy
+    - id: deploy
+      kind: tool_call
+      tool: deploy.production
+      timeout_seconds: 60
+      retry:
+        max_attempts: 1
+    - id: done
+      kind: return
+      output: deployment_id
+  edges:
+    - from: approve
+      to: deploy
     - from: deploy
       to: done
 

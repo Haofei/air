@@ -154,6 +154,10 @@ impl Verifier {
     }
 
     fn verify_dag_workflow(&mut self, module: &AirModule, workflow: &DagWorkflow) {
+        self.warning(
+            "AIR029",
+            "workflow.kind=dag is a linkable composition contract; the native VM executes state_machine modules directly and DAGs through RunPlan/AirSystem orchestration",
+        );
         let mut nodes: BTreeMap<&str, &WorkflowNode> = BTreeMap::new();
         let mut duplicate_nodes = BTreeSet::new();
 
@@ -1097,6 +1101,10 @@ impl Verifier {
 
     fn error(&mut self, code: &'static str, message: impl Into<String>) {
         self.diagnostics.push(Diagnostic::error(code, message));
+    }
+
+    fn warning(&mut self, code: &'static str, message: impl Into<String>) {
+        self.diagnostics.push(Diagnostic::warning(code, message));
     }
 }
 

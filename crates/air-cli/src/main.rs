@@ -24,6 +24,7 @@ mod skill;
 mod tools;
 use crate::audit::{audit_collect, audit_run, AuditCollectOptions, AuditRunOptions};
 use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSkillOptions};
+use crate::code_artifact::write_timeout_code_run_artifact;
 use crate::diagnostics::emit_diagnostics;
 use crate::dream::{
     dismiss_dream_finding, list_dream_findings, open_dream_finding, resolve_dream_finding,
@@ -51,6 +52,7 @@ use crate::memory::{
     MemorySkillEvaluateOptions, MemoryViewOptions,
 };
 use crate::models::ModelProviderChoice;
+use crate::ops::run_current_air_passthrough;
 use crate::planner::{
     module_base_dir_for_modules, module_base_dir_for_store_path, plan_task, PlanOptions,
     ValidatePlanOptions,
@@ -79,8 +81,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 use serde_json::Value;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 fn load_dotenv() {
     let _ = dotenvy::from_filename(".env");
@@ -128,7 +132,7 @@ fn apply_model_profile_env() {
     ] {
         let source = format!("AIR_MODEL_{profile}_{suffix}");
         if let Ok(value) = std::env::var(source) {
-            if !value.trim().is_empty() {
+            if !value.trim().is_empty() && std::env::var_os(target).is_none() {
                 std::env::set_var(target, value);
             }
         }
@@ -1532,8 +1536,26 @@ enum ProjectCommand {
 
 fn main() -> Result<()> {
     load_dotenv();
+    let raw_args = std::env::args_os().collect::<Vec<_>>();
     let cli = Cli::parse();
     let config = AirCliConfig::load()?;
+
+    if let Command::Run {
+        timeout_seconds: Some(timeout_seconds),
+        target,
+        artifact_out,
+        ..
+    } = &cli.command
+    {
+        if std::env::var_os("AIR_RUN_TIMEOUT_CHILD").is_none() {
+            return run_current_air_with_timeout(
+                &raw_args,
+                target,
+                artifact_out.as_deref(),
+                *timeout_seconds,
+            );
+        }
+    }
 
     match cli.command {
         Command::Skill { command } => match command {
@@ -2072,6 +2094,80 @@ fn run_dream_findings_command(command: DreamFindingsCommand) -> Result<()> {
             })
         }
     }
+}
+
+fn run_current_air_with_timeout(
+    raw_args: &[OsString],
+    task: &str,
+    artifact_out: Option<&Path>,
+    timeout_seconds: u64,
+) -> Result<()> {
+    let args = strip_timeout_seconds(raw_args);
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let result = run_current_air_passthrough(&cwd, &args, Duration::from_secs(timeout_seconds))?;
+    if result.success {
+        return Ok(());
+    }
+    if result.status == "timeout" || result.status == "timeout_before_start" {
+        let artifact_dir = artifact_out
+            .map(|path| {
+                if path.is_absolute() {
+                    path.to_path_buf()
+                } else {
+                    cwd.join(path)
+                }
+            })
+            .unwrap_or_else(default_timeout_artifact_dir);
+        write_timeout_code_run_artifact(&artifact_dir, task, timeout_seconds)?;
+        anyhow::bail!("air run exceeded wall-clock timeout of {timeout_seconds} seconds");
+    }
+    match result.code {
+        Some(code) => std::process::exit(code),
+        None => anyhow::bail!("timed air run failed: {}", result.status),
+    }
+}
+
+fn default_timeout_artifact_dir() -> PathBuf {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    PathBuf::from("target")
+        .join("generated")
+        .join("code-runs")
+        .join(format!("timeout-run-{pid}-{nanos}"))
+}
+
+fn strip_timeout_seconds(raw_args: &[OsString]) -> Vec<OsString> {
+    if raw_args.get(1).is_none_or(|command| command != "run") {
+        return raw_args.iter().skip(1).cloned().collect();
+    }
+
+    let mut out = Vec::new();
+    let mut index = 1usize;
+    let mut stripped_timeout = false;
+    while index < raw_args.len() {
+        let arg = &raw_args[index];
+
+        if !stripped_timeout && arg == "--timeout-seconds" {
+            stripped_timeout = true;
+            index += if index + 1 < raw_args.len() { 2 } else { 1 };
+            continue;
+        }
+        if !stripped_timeout
+            && arg
+                .to_str()
+                .is_some_and(|value| value.starts_with("--timeout-seconds="))
+        {
+            stripped_timeout = true;
+            index += 1;
+            continue;
+        }
+        out.push(arg.clone());
+        index += 1;
+    }
+    out
 }
 
 fn show_status(json: bool, config: &AirCliConfig) -> Result<()> {
@@ -4993,5 +5089,45 @@ modules:
         assert_eq!(normalize_model_profile_key("glm"), "GLM");
         assert_eq!(normalize_model_profile_key("local-api"), "LOCAL_API");
         assert_eq!(normalize_model_profile_key(" local api "), "LOCAL_API");
+    }
+
+    #[test]
+    fn timeout_wrapper_strips_timeout_flag_before_child_run() {
+        let args = [
+            OsString::from("air"),
+            OsString::from("run"),
+            OsString::from("--timeout-seconds"),
+            OsString::from("5"),
+            OsString::from("fix bug"),
+            OsString::from("--timeout-seconds=9"),
+        ];
+        assert_eq!(
+            strip_timeout_seconds(&args),
+            vec![
+                OsString::from("run"),
+                OsString::from("fix bug"),
+                OsString::from("--timeout-seconds=9")
+            ]
+        );
+    }
+
+    #[test]
+    fn timeout_wrapper_only_strips_run_timeout_flag() {
+        let args = [
+            OsString::from("air"),
+            OsString::from("dream"),
+            OsString::from("run"),
+            OsString::from("--timeout-seconds"),
+            OsString::from("300"),
+        ];
+        assert_eq!(
+            strip_timeout_seconds(&args),
+            vec![
+                OsString::from("dream"),
+                OsString::from("run"),
+                OsString::from("--timeout-seconds"),
+                OsString::from("300")
+            ]
+        );
     }
 }

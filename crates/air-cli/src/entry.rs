@@ -13,8 +13,7 @@ use clap::ValueEnum;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::mpsc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum EntryMode {
@@ -60,17 +59,7 @@ enum EntryExecutor {
 }
 
 pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<Value> {
-    if let Some(timeout_seconds) = options.timeout_seconds {
-        let (tx, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let _ = tx.send(run_entry_task_inner(options));
-        });
-        return rx
-            .recv_timeout(Duration::from_secs(timeout_seconds))
-            .unwrap_or_else(|_| {
-                bail!("air run exceeded wall-clock timeout of {timeout_seconds} seconds")
-            });
-    }
+    let _ = options.timeout_seconds;
     run_entry_task_inner(options)
 }
 
@@ -517,10 +506,15 @@ fn select_entry_executor(task: &str, mode: EntryMode) -> EntryExecutor {
 fn task_looks_like_benchmark(task: &str) -> bool {
     let task = task.to_ascii_lowercase();
     let benchmark_markers = [
-        "benchmark",
         "bench ",
         "bench:",
         "bench-",
+        "run benchmark",
+        "run benchmarks",
+        "benchmark suite",
+        "benchmark agent",
+        "benchmark skill",
+        "benchmark profile",
         "compare tools",
         "compare tool",
         "compare profiles",
@@ -550,12 +544,23 @@ fn task_looks_like_benchmark(task: &str) -> bool {
 
 fn task_looks_like_review(task: &str) -> bool {
     let task = task.to_ascii_lowercase();
+    if contains_marker(&task, "review")
+        && (contains_marker(&task, "benchmark report")
+            || contains_marker(&task, "bench report")
+            || contains_marker(&task, "diff")
+            || contains_marker(&task, "pr")
+            || contains_marker(&task, "mr")
+            || contains_marker(&task, "pull request")
+            || contains_marker(&task, "merge request")
+            || task.contains("/merge_requests/")
+            || task.contains("/pull/"))
+    {
+        return true;
+    }
     let review_markers = [
         "code review",
         "review code",
         "review diff",
-        "review this",
-        "review the",
         "review this diff",
         "review this pr",
         "review this mr",
@@ -664,6 +669,13 @@ mod tests {
         );
         assert_eq!(
             select_entry_executor("Add a project field to the config", EntryMode::Auto),
+            EntryExecutor::Code
+        );
+        assert_eq!(
+            select_entry_executor(
+                "review this approach with a small refactor",
+                EntryMode::Auto
+            ),
             EntryExecutor::Code
         );
     }
