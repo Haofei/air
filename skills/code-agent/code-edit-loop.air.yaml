@@ -6,6 +6,7 @@ agent:
 inputs:
   task: string
   verification_command: string
+  requires_edit: boolean
 
 outputs:
   edit: &edit_output_schema
@@ -42,7 +43,7 @@ policy:
 state:
   phase:
     type: enum
-    enum: [init, choose, verify, act, verify_act, post_act, summarize, done]
+    enum: [init, bootstrap_approval, bootstrap, choose, verify, act, verify_act, post_act, summarize, done]
   observations:
     type: array
     items: object
@@ -143,8 +144,31 @@ workflow:
     - id: init
       when: phase == "init"
       actions:
+        - kind: set
+          values:
+            observations: []
+            observation_summary:
+              verification_status_update: unchanged
+              any_workspace_change: false
+              any_verification_passed: false
+              any_verification_failed: false
+            verification_status: unknown
+            verification_required: false
+            patch_seen: false
+            phase: bootstrap_approval
+
+    - id: bootstrap-approval
+      when: phase == "bootstrap_approval"
+      actions:
         - kind: approval
           approval_for: [file.write]
+        - kind: set
+          values:
+            phase: bootstrap
+
+    - id: bootstrap
+      when: phase == "bootstrap"
+      actions:
         - kind: tool_batch_dispatch
           input:
             array:
@@ -157,7 +181,7 @@ workflow:
                         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                           { git diff --name-only -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; git ls-files --others --exclude-standard -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; } | sort -u
                         else
-                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -not -path './node_modules/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -not -path './node_modules/*' -print | sed 's#^\./##' | sort
                         fi
                       description: Capture pre-existing workspace changes before editing
           output: preexisting_diff_result
@@ -177,19 +201,10 @@ workflow:
           timeout_seconds: 300
         - kind: set
           values:
-            observations: []
-            observation_summary:
-              verification_status_update: unchanged
-              any_workspace_change: false
-              any_verification_passed: false
-              any_verification_failed: false
-            verification_status: unknown
-            verification_required: false
-            patch_seen: false
             phase: choose
 
     - id: summarize-at-step-limit
-      when: phase != "init" && phase != "post_act" && phase != "summarize" && phase != "done" && _air.is_last_action_step == true
+      when: phase != "init" && phase != "bootstrap_approval" && phase != "bootstrap" && phase != "post_act" && phase != "summarize" && phase != "done" && _air.is_last_action_step == true
       actions:
         - kind: append
           target: observations
@@ -431,6 +446,53 @@ workflow:
           values:
             phase: verify
 
+    - id: verify-command-required
+      when: phase == "post_act" && verification_required == true && observation_summary.verification_status_update == "unchanged"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_required
+              result:
+                literal: Verify phase only accepts real test/check/lint commands. Exploratory bash commands are not verification.
+        - kind: set
+          values:
+            verification_required: false
+            phase: summarize
+
+    - id: verify-command-mutated-workspace
+      when: phase == "post_act" && verification_required == true && observation_summary.verification_status_update == "unknown"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_required
+              result:
+                literal: Verify phase cannot satisfy the gate with workspace-mutating commands. Run a non-mutating test/check/lint command.
+        - kind: set
+          values:
+            verification_required: false
+            phase: summarize
+
+    - id: tool-error-retry
+      when: phase == "post_act" && observation_summary.error_count > 0 && observation_summary.verification_status_update != "failed"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: malformed_tool_call
+              result:
+                literal: A requested tool call failed schema validation. Retry with complete tool arguments; for edit, include the target file and exact old/new content.
+        - kind: set
+          values:
+            phase: choose
+
     - id: verification-passed-after-patch
       when: phase == "post_act" && observation_summary.verification_status_update == "passed" && observation_summary.any_workspace_change == true
       actions:
@@ -448,21 +510,6 @@ workflow:
           values:
             verification_status: passed
             verification_required: false
-            phase: choose
-
-    - id: tool-error-retry
-      when: phase == "post_act" && observation_summary.error_count > 0
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: malformed_tool_call
-              result:
-                literal: A requested tool call failed schema validation. Retry with complete tool arguments; for edit, include the target file and exact old/new content.
-        - kind: set
-          values:
             phase: choose
 
     - id: verification-failed-again
@@ -492,7 +539,7 @@ workflow:
             phase: choose
 
     - id: verification-reset-after-write
-      when: phase == "post_act" && observation_summary.verification_status_update == "unknown"
+      when: phase == "post_act" && verification_required != true && observation_summary.verification_status_update == "unknown"
       actions:
         - kind: set
           values:
@@ -533,38 +580,6 @@ workflow:
             verification_required: true
             phase: verify
 
-    - id: verify-command-required
-      when: phase == "post_act" && verification_required == true && observation_summary.verification_status_update == "unchanged"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: verification_required
-              result:
-                literal: Verify phase only accepts real test/check/lint commands. Exploratory bash commands are not verification.
-        - kind: set
-          values:
-            verification_required: false
-            phase: summarize
-
-    - id: verify-command-mutated-workspace
-      when: phase == "post_act" && verification_required == true && observation_summary.verification_status_update == "unknown"
-      actions:
-        - kind: append
-          target: observations
-          value:
-            object:
-              action:
-                literal: verification_required
-              result:
-                literal: Verify phase cannot satisfy the gate with workspace-mutating commands. Run a non-mutating test/check/lint command.
-        - kind: set
-          values:
-            verification_required: false
-            phase: summarize
-
     - id: complete-verified
       when: phase == "act" && decision.complete == true && verification_status == "passed" && patch_seen == true
       actions:
@@ -573,7 +588,7 @@ workflow:
             phase: summarize
 
     - id: complete-verified-needs-patch
-      when: phase == "act" && decision.complete == true && verification_status == "passed" && patch_seen != true
+      when: phase == "act" && decision.complete == true && verification_status == "passed" && patch_seen != true && requires_edit == true
       actions:
         - kind: append
           target: observations
@@ -640,7 +655,7 @@ workflow:
                         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                           { git diff --name-only -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; git ls-files --others --exclude-standard -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; } | sort -u
                         else
-                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -not -path './node_modules/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -not -path './node_modules/*' -print | sed 's#^\./##' | sort
                         fi
                       description: List changed files including untracked files
           output: final_diff_result

@@ -584,7 +584,7 @@ pub fn explain_skill_value(reference: &str, profile_override: Option<PathBuf>) -
     validate_resolved_skill(&skill)?;
     let effective = effective_execution(&skill)?;
     let profile = profile_override.unwrap_or_else(|| effective.profile.clone());
-    let input = build_input("<task>".to_string(), None);
+    let input = build_input("<task>".to_string(), None, true);
     let mut explanation = code_profile_explain(&skill.manifest.id, &profile, &input)?;
     if let Some(object) = explanation.as_object_mut() {
         object.insert(
@@ -2034,13 +2034,18 @@ fn path_ref_to_input_string(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-fn build_input(task: String, verification_command: Option<String>) -> Map<String, Value> {
+fn build_input(
+    task: String,
+    verification_command: Option<String>,
+    requires_edit: bool,
+) -> Map<String, Value> {
     let mut input = Map::new();
     input.insert("task".to_string(), Value::String(task));
     input.insert(
         "verification_command".to_string(),
         Value::String(verification_command.unwrap_or_default()),
     );
+    input.insert("requires_edit".to_string(), Value::Bool(requires_edit));
     input
 }
 

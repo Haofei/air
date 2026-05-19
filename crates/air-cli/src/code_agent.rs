@@ -59,7 +59,12 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     }
 
     let profile = profile.unwrap_or_else(default_code_profile_path);
-    let input = build_input(task, verification_command);
+    let requires_edit = task_requires_edit(&task);
+    let input = build_input(task, verification_command, requires_edit);
+    let mut verdict_constraints = verdict_constraints;
+    if !requires_edit {
+        verdict_constraints.require_patch = false;
+    }
     let descriptor_task = artifact_task.unwrap_or_else(|| {
         input
             .get("task")
@@ -225,6 +230,7 @@ fn implicit_code_trace_path() -> PathBuf {
 pub(crate) fn build_input(
     task: String,
     verification_command: Option<String>,
+    requires_edit: bool,
 ) -> Map<String, Value> {
     let mut input = Map::new();
     input.insert("task".to_string(), Value::String(task));
@@ -232,7 +238,34 @@ pub(crate) fn build_input(
         "verification_command".to_string(),
         Value::String(verification_command.unwrap_or_default()),
     );
+    input.insert("requires_edit".to_string(), Value::Bool(requires_edit));
     input
+}
+
+fn task_requires_edit(task: &str) -> bool {
+    let normalized = task.to_ascii_lowercase();
+    let verification_only_markers = [
+        "run tests",
+        "run the tests",
+        "run cargo test",
+        "run npm test",
+        "run pytest",
+        "run verification",
+        "verify only",
+        "verify the build",
+        "check the build",
+        "check whether",
+        "does it build",
+        "without changing",
+        "without editing",
+        "do not change",
+        "don't change",
+        "no code changes",
+        "no changes",
+    ];
+    !verification_only_markers
+        .iter()
+        .any(|marker| normalized.contains(marker))
 }
 
 #[cfg(test)]
@@ -251,14 +284,17 @@ mod tests {
 
     #[test]
     fn code_input_is_just_the_task() {
-        let input = build_input("refactor a helper".to_string(), None);
+        let input = build_input("refactor a helper".to_string(), None, true);
 
-        assert_eq!(input.len(), 2);
+        assert_eq!(input.len(), 3);
         assert_eq!(
             input["task"],
             Value::String("refactor a helper".to_string())
         );
         assert_eq!(input["verification_command"], Value::String(String::new()));
+        assert_eq!(input["requires_edit"], Value::Bool(true));
+        assert!(!task_requires_edit("run tests without changing files"));
+        assert!(task_requires_edit("fix the parser failure"));
     }
 
     #[test]
@@ -283,6 +319,8 @@ mod tests {
             rules,
             vec![
                 "init",
+                "bootstrap-approval",
+                "bootstrap",
                 "summarize-at-step-limit",
                 "choose",
                 "verify-command",
@@ -293,16 +331,16 @@ mod tests {
                 "verify-act",
                 "verify-act-missing-complete-decision",
                 "verify-act-missing-tool-calls-decision",
+                "verify-command-required",
+                "verify-command-mutated-workspace",
+                "tool-error-retry",
                 "verification-passed-after-patch",
                 "verification-passed",
-                "tool-error-retry",
                 "verification-failed-again",
                 "verification-failed",
                 "verification-reset-after-write",
                 "complete-needs-verification",
                 "verify-complete-needs-command",
-                "verify-command-required",
-                "verify-command-mutated-workspace",
                 "complete-verified",
                 "complete-verified-needs-patch",
                 "summarize-post-act-at-step-limit",
@@ -406,7 +444,19 @@ mod tests {
         assert!(names_command.contains("git diff --name-only -- ."));
         assert!(names_command.contains("git ls-files --others --exclude-standard -- ."));
         assert!(names_command.contains("find . -type f"));
-        assert!(names_command.contains("shasum -a 256"));
+        assert!(names_command.contains("-print | sed 's#^\\./##' | sort"));
+        assert!(!names_command.contains("shasum -a 256"));
+
+        let bootstrap = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("bootstrap"))
+            .unwrap();
+        let baseline_command = bootstrap["actions"][0]["input"]["array"][0]["object"]["input"]
+            ["literal"]["command"]
+            .as_str()
+            .unwrap();
+        assert!(baseline_command.contains("-print | sed 's#^\\./##' | sort"));
+        assert!(!baseline_command.contains("shasum -a 256"));
     }
 
     #[test]
@@ -480,11 +530,34 @@ mod tests {
         assert!(reset_after_write["when"]
             .as_str()
             .unwrap()
+            .contains("verification_required != true"));
+        assert!(reset_after_write["when"]
+            .as_str()
+            .unwrap()
             .contains("verification_status_update == \"unknown\""));
         assert_eq!(
             reset_after_write["actions"][0]["values"]["verification_status"],
             serde_yaml::Value::String("unknown".to_string())
         );
+
+        let ids = rules
+            .iter()
+            .map(|rule| rule["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let tool_error = ids.iter().position(|id| *id == "tool-error-retry").unwrap();
+        let passed = ids
+            .iter()
+            .position(|id| *id == "verification-passed")
+            .unwrap();
+        assert!(tool_error < passed);
+        let tool_error_rule = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("tool-error-retry"))
+            .unwrap();
+        assert!(tool_error_rule["when"]
+            .as_str()
+            .unwrap()
+            .contains("verification_status_update != \"failed\""));
     }
 
     #[test]
@@ -492,6 +565,8 @@ mod tests {
         let module = code_edit_loop_module();
         let rules = module["workflow"]["rules"].as_sequence().unwrap();
         let phase_enum = module["state"]["phase"]["enum"].as_sequence().unwrap();
+        assert!(phase_enum.contains(&serde_yaml::Value::String("bootstrap_approval".to_string())));
+        assert!(phase_enum.contains(&serde_yaml::Value::String("bootstrap".to_string())));
         assert!(phase_enum.contains(&serde_yaml::Value::String("verify".to_string())));
         assert!(phase_enum.contains(&serde_yaml::Value::String("verify_act".to_string())));
 
@@ -581,6 +656,19 @@ mod tests {
             verify_command_mutated["actions"][1]["values"]["phase"],
             serde_yaml::Value::String("summarize".to_string())
         );
+        let ids = rules
+            .iter()
+            .map(|rule| rule["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        let mutated = ids
+            .iter()
+            .position(|id| *id == "verify-command-mutated-workspace")
+            .unwrap();
+        let reset = ids
+            .iter()
+            .position(|id| *id == "verification-reset-after-write")
+            .unwrap();
+        assert!(mutated < reset);
 
         let complete_verified = rules
             .iter()
@@ -601,6 +689,8 @@ mod tests {
             .unwrap();
         let condition = summarize_at_step_limit["when"].as_str().unwrap();
         assert!(condition.contains("phase != \"init\""));
+        assert!(condition.contains("phase != \"bootstrap_approval\""));
+        assert!(condition.contains("phase != \"bootstrap\""));
         assert!(condition.contains("phase != \"post_act\""));
         assert!(condition.contains("phase != \"summarize\""));
         assert!(condition.contains("phase != \"done\""));
@@ -644,6 +734,16 @@ mod tests {
         );
         let changed_files = &summarize["actions"][1]["values"]["edit"]["object"]["changed_files"];
         assert!(changed_files.get("line_difference").is_some());
+        let complete_needs_patch = module["workflow"]["rules"]
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("complete-verified-needs-patch"))
+            .unwrap();
+        assert!(complete_needs_patch["when"]
+            .as_str()
+            .unwrap()
+            .contains("requires_edit == true"));
         let preexisting =
             &summarize["actions"][1]["values"]["edit"]["object"]["preexisting_changed_files"];
         assert_eq!(
