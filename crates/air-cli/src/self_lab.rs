@@ -35,6 +35,7 @@ pub(crate) struct SelfFixOptions {
     pub(crate) model_config: Option<PathBuf>,
     pub(crate) regression_file: Option<PathBuf>,
     pub(crate) evaluate: bool,
+    pub(crate) keep_worktrees: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -85,6 +86,7 @@ struct SelfFixCandidateOutput {
     id: String,
     path: String,
     worktree: String,
+    worktree_kept: bool,
     patch: Option<String>,
     changed_files: Vec<String>,
     patch_bytes: usize,
@@ -139,6 +141,27 @@ struct CandidateScore {
 #[derive(Debug, Default)]
 struct SelfFixContext {
     sections: Vec<String>,
+}
+
+struct WorktreeGuard {
+    repo: PathBuf,
+    worktree: PathBuf,
+    keep: bool,
+}
+
+impl Drop for WorktreeGuard {
+    fn drop(&mut self) {
+        if self.keep {
+            return;
+        }
+        let Some(path) = self.worktree.to_str() else {
+            return;
+        };
+        let _ = Command::new("git")
+            .args(["worktree", "remove", "--force", path])
+            .current_dir(&self.repo)
+            .status();
+    }
 }
 
 impl SelfFixContext {
@@ -352,6 +375,11 @@ pub(crate) fn self_fix(options: SelfFixOptions) -> Result<()> {
             ],
         )
         .with_context(|| format!("create candidate worktree {}", worktree.display()))?;
+        let _worktree_guard = WorktreeGuard {
+            repo: cwd.clone(),
+            worktree: worktree.clone(),
+            keep: options.keep_worktrees,
+        };
         bootstrap_candidate_worktree(&cwd, &worktree, &candidate_dir)
             .with_context(|| format!("bootstrap candidate worktree {}", worktree.display()))?;
 
@@ -477,6 +505,7 @@ pub(crate) fn self_fix(options: SelfFixOptions) -> Result<()> {
             id,
             path: candidate_dir.display().to_string(),
             worktree: worktree.display().to_string(),
+            worktree_kept: options.keep_worktrees,
             patch: patch_path,
             changed_files,
             patch_bytes: diff.len(),

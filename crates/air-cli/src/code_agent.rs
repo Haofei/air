@@ -312,7 +312,9 @@ mod tests {
                 "complete-needs-verification",
                 "verify-complete-needs-command",
                 "verify-command-required",
+                "verify-command-mutated-workspace",
                 "complete-verified",
+                "summarize-post-act-at-step-limit",
                 "continue-after-act",
                 "summarize",
                 "done",
@@ -406,11 +408,15 @@ mod tests {
             .as_str()
             .unwrap();
 
+        assert!(diff_command.contains("git rev-parse --is-inside-work-tree"));
         assert!(diff_command.contains("git diff --no-index -- /dev/null"));
         assert!(diff_command.contains("git diff -- ."));
         assert!(diff_command.contains("git ls-files --others --exclude-standard -- ."));
+        assert!(diff_command.contains("AIR non-git workspace"));
+        assert!(names_command.contains("git rev-parse --is-inside-work-tree"));
         assert!(names_command.contains("git diff --name-only -- ."));
         assert!(names_command.contains("git ls-files --others --exclude-standard -- ."));
+        assert!(names_command.contains("find . -type f"));
     }
 
     #[test]
@@ -430,6 +436,7 @@ mod tests {
             act["actions"][2]["values"]["phase"],
             serde_yaml::Value::String("post_act".to_string())
         );
+        assert!(act["actions"][0].get("allowed_tools").is_some());
         assert_eq!(
             continue_after_act["actions"][0]["values"]["phase"],
             serde_yaml::Value::String("choose".to_string())
@@ -571,6 +578,20 @@ mod tests {
             serde_yaml::Value::String("summarize".to_string())
         );
 
+        let verify_command_mutated = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("verify-command-mutated-workspace"))
+            .unwrap();
+        let verify_command_mutated_condition = verify_command_mutated["when"].as_str().unwrap();
+        assert!(verify_command_mutated_condition.contains("verification_required == true"));
+        assert!(
+            verify_command_mutated_condition.contains("verification_status_update == \"unknown\"")
+        );
+        assert_eq!(
+            verify_command_mutated["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("summarize".to_string())
+        );
+
         let complete_verified = rules
             .iter()
             .find(|rule| rule["id"].as_str() == Some("complete-verified"))
@@ -578,6 +599,31 @@ mod tests {
         let complete_verified_condition = complete_verified["when"].as_str().unwrap();
         assert!(complete_verified_condition.contains("verification_status == \"passed\""));
         assert!(!complete_verified_condition.contains("patch_applied == true"));
+    }
+
+    #[test]
+    fn edit_loop_step_limit_intercepts_non_choose_phases() {
+        let module = code_edit_loop_module();
+        let rules = module["workflow"]["rules"].as_sequence().unwrap();
+        let summarize_at_step_limit = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("summarize-at-step-limit"))
+            .unwrap();
+        let condition = summarize_at_step_limit["when"].as_str().unwrap();
+        assert!(condition.contains("phase != \"init\""));
+        assert!(condition.contains("phase != \"post_act\""));
+        assert!(condition.contains("phase != \"summarize\""));
+        assert!(condition.contains("phase != \"done\""));
+        assert!(condition.contains("_air.is_last_action_step == true"));
+
+        let summarize_post_act = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("summarize-post-act-at-step-limit"))
+            .unwrap();
+        assert_eq!(
+            summarize_post_act["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("summarize".to_string())
+        );
     }
 
     #[test]

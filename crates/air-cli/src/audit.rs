@@ -1020,8 +1020,16 @@ fn is_protected_eval_or_trust_path(path: &str) -> bool {
         || path.starts_with("benches/")
         || path.contains("/regressions/")
         || path.starts_with("regressions/")
+        || path.starts_with(".air/evals/")
         || path.ends_with("skills.lock")
         || path.ends_with("air-skill.yaml")
+        || path.ends_with("audit.rs")
+        || path.ends_with("dream.rs")
+        || path.ends_with("improve.rs")
+        || path.ends_with("regression.rs")
+        || path.ends_with("self_lab.rs")
+        || path.ends_with("eval_manifest.rs")
+        || path.ends_with("code_artifact.rs")
 }
 
 fn diff_disables_required_verification(diff: &str) -> bool {

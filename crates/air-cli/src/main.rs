@@ -10,6 +10,7 @@ mod eval_manifest;
 mod explain;
 mod improve;
 mod mcp;
+mod memory;
 mod models;
 mod planner;
 mod profile;
@@ -23,7 +24,11 @@ mod tools;
 use crate::audit::{audit_collect, audit_run, AuditCollectOptions, AuditRunOptions};
 use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSkillOptions};
 use crate::diagnostics::emit_diagnostics;
-use crate::dream::{run_dream, show_dream_state, DreamRunOptions, DreamStateOptions};
+use crate::dream::{
+    dismiss_dream_finding, list_dream_findings, open_dream_finding, resolve_dream_finding,
+    run_dream, show_dream_state, DreamFindingUpdateOptions, DreamFindingsListOptions, DreamMode,
+    DreamRunOptions, DreamStateOptions,
+};
 use crate::entry::{run_entry_task, EntryMode, EntryTaskOptions};
 use crate::eval_manifest::{
     check_eval_manifest_command, write_eval_manifest, EvalCheckOptions, EvalManifestOptions,
@@ -33,6 +38,14 @@ use crate::improve::{run_improve, ImproveAction, ImproveOptions};
 use crate::mcp::{
     audit_mcp, call_mcp, explain_mcp, list_mcp, McpAuditOptions, McpCallOptions, McpExplainOptions,
     McpListOptions,
+};
+use crate::memory::{
+    build_memory_pack, build_memory_run_hint, check_policy_candidate, draft_skill_from_memory,
+    evaluate_memory_skill, list_memory, pack_memory_command, promote_memory, retire_memory,
+    search_memory, show_memory_graph, show_memory_scorecard, view_memory, MemoryGraphOptions,
+    MemoryHintOptions, MemoryListOptions, MemoryPackOptions, MemoryPolicyCheckOptions,
+    MemoryPromoteOptions, MemoryRetireOptions, MemoryScorecardOptions, MemorySearchOptions,
+    MemorySkillDraftOptions, MemorySkillEvaluateOptions, MemoryViewOptions,
 };
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -68,6 +81,16 @@ use std::path::PathBuf;
 fn load_dotenv() {
     let _ = dotenvy::from_filename(".env");
     apply_model_profile_env();
+}
+
+fn parse_nonzero_usize(value: &str) -> Result<usize, String> {
+    let parsed = value
+        .parse::<usize>()
+        .map_err(|error| format!("expected a positive integer: {error}"))?;
+    if parsed == 0 {
+        return Err("value must be greater than 0".to_string());
+    }
+    Ok(parsed)
 }
 
 fn apply_model_profile_env() {
@@ -161,6 +184,11 @@ enum Command {
         #[command(subcommand)]
         command: DreamCommand,
     },
+    /// Inspect evidence-backed Dream memory candidates.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
     /// Protect evaluation files with a content manifest.
     Eval {
         #[command(subcommand)]
@@ -198,7 +226,7 @@ enum Command {
         mode: EntryMode,
 
         /// Number of instruction skills to route into the host agent.
-        #[arg(long, default_value_t = 3, hide = true)]
+        #[arg(long, default_value_t = 3, value_parser = parse_nonzero_usize, hide = true)]
         top_k: usize,
 
         /// Additional instruction skills to preload. Accepts repeated flags or comma-separated ids.
@@ -264,6 +292,19 @@ enum Command {
         /// Deterministic verification command for code-agent verify phase.
         #[arg(long, hide = true)]
         verification_command: Option<String>,
+
+        /// Include promoted Dream memory in the task context. When --artifact-out is omitted,
+        /// AIR also writes an auditable run artifact under target/generated/code-runs/.
+        #[arg(long)]
+        memory: bool,
+
+        /// Memory directory for --memory.
+        #[arg(long, hide = true)]
+        memory_dir: Option<PathBuf>,
+
+        /// Maximum promoted memories to include with --memory.
+        #[arg(long, default_value_t = 5, hide = true)]
+        memory_limit: usize,
     },
 }
 
@@ -316,6 +357,18 @@ enum SkillCommand {
         /// Include deterministic routing score details.
         #[arg(long)]
         explain: bool,
+
+        /// Include promoted Dream memory pack in routing output.
+        #[arg(long)]
+        memory: bool,
+
+        /// Memory directory for --memory.
+        #[arg(long, hide = true)]
+        memory_dir: Option<PathBuf>,
+
+        /// Maximum promoted memories to include with --memory.
+        #[arg(long, default_value_t = 5, hide = true)]
+        memory_limit: usize,
     },
     /// Explain what a skill is allowed to do without running it.
     Explain {
@@ -446,6 +499,10 @@ enum SelfCommand {
         /// Evaluate each generated candidate in its isolated worktree.
         #[arg(long)]
         evaluate: bool,
+
+        /// Keep temporary candidate git worktrees for manual inspection.
+        #[arg(long)]
+        keep_worktrees: bool,
     },
     /// Compare candidate eval.json files.
     Compare {
@@ -486,8 +543,28 @@ enum DreamCommand {
         #[arg(long)]
         write_regressions: bool,
 
+        /// Memory synthesis depth: micro records episodes, deep mines patterns, evolution adds cross-domain proposals.
+        #[arg(long, value_enum, default_value = "deep")]
+        mode: DreamMode,
+
+        /// Run self-improvement experiments for the top findings after Dream mining.
+        #[arg(long, requires = "write_regressions")]
+        experiment: bool,
+
+        /// Number of findings to experiment on when --experiment is set.
+        #[arg(long, default_value_t = 1)]
+        top_findings: usize,
+
+        /// Maximum wall-clock seconds for all --experiment work.
+        #[arg(long)]
+        budget_seconds: Option<u64>,
+
+        /// Candidate patches per finding when --experiment is set.
+        #[arg(long, default_value_t = 1)]
+        candidates: usize,
+
         /// Run only artifacts newer than the previous Dream state. This is the default.
-        #[arg(long, conflicts_with = "full")]
+        #[arg(long, conflicts_with_all = ["full", "since_unix"])]
         incremental: bool,
 
         /// Ignore Dream state and scan the full requested roots.
@@ -496,6 +573,214 @@ enum DreamCommand {
     },
     /// Show the saved Dream incremental state.
     State,
+    /// Inspect or update persistent Dream findings.
+    Findings {
+        #[command(subcommand)]
+        command: DreamFindingsCommand,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DreamFindingsCommand {
+    /// List persistent findings.
+    List {
+        /// Filter by lifecycle status: open, resolved, or dismissed.
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum records to return.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Reopen a finding.
+    Open {
+        /// Finding id.
+        finding: String,
+
+        /// Human-readable reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Mark a finding resolved.
+    Resolve {
+        /// Finding id.
+        finding: String,
+
+        /// Human-readable reason.
+        #[arg(long)]
+        reason: Option<String>,
+
+        /// Candidate, PR, commit, or patch that fixed it.
+        #[arg(long)]
+        fixed_by: Option<String>,
+    },
+    /// Dismiss a finding.
+    Dismiss {
+        /// Finding id.
+        finding: String,
+
+        /// Human-readable reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum MemoryCommand {
+    /// List memory cards created by Dream.
+    List {
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Filter by memory kind such as failure, procedure, or routing.
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Filter by lifecycle status such as candidate or promoted.
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum cards to return.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Search memory cards.
+    Search {
+        /// Search query.
+        query: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Filter by memory kind such as failure, procedure, or routing.
+        #[arg(long)]
+        kind: Option<String>,
+
+        /// Filter by lifecycle status such as candidate or promoted.
+        #[arg(long)]
+        status: Option<String>,
+
+        /// Maximum cards to return.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// View one memory card.
+    View {
+        /// Memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Include evidence pointers in the output.
+        #[arg(long)]
+        evidence: bool,
+    },
+    /// Promote candidate memory after review.
+    Promote {
+        /// Memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Promotion status.
+        #[arg(long)]
+        status: Option<String>,
+    },
+    /// Retire stale or harmful memory.
+    Retire {
+        /// Memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Human-readable retirement reason.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Build a compact context pack from promoted memory for a task.
+    Pack {
+        /// Natural-language task.
+        task: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Maximum promoted memories to include.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Include evidence pointers in JSON output.
+        #[arg(long)]
+        evidence: bool,
+    },
+    /// Show experience graph edges produced by Dream synthesis.
+    Graph {
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Maximum graph edges to return.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Show helped/hurt usage scorecard for promoted memory.
+    Scorecard {
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Maximum rows to return.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
+    /// Draft an untrusted skill package from procedure memory.
+    SkillDraft {
+        /// Procedure memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Destination draft skill directory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    /// Draft and validate/audit a skill from procedure memory; benchmark is opt-in.
+    SkillEvaluate {
+        /// Procedure memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Destination draft skill directory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Also run a small benchmark comparison for this draft.
+        #[arg(long)]
+        bench: bool,
+    },
+    /// Check whether a policy memory can become a deterministic guard proposal.
+    PolicyCheck {
+        /// Policy memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -1062,7 +1347,23 @@ fn main() -> Result<()> {
                 task,
                 top_k,
                 explain,
+                memory,
+                memory_dir,
+                memory_limit,
             } => route_skill(SkillRouteOptions {
+                memory_pack: if memory {
+                    Some(serde_json::to_value(build_memory_pack(
+                        MemoryPackOptions {
+                            memory_dir,
+                            task: task.clone(),
+                            limit: Some(memory_limit),
+                            include_evidence: false,
+                            record_usage: false,
+                        },
+                    )?)?)
+                } else {
+                    None
+                },
                 task,
                 top_k,
                 explain,
@@ -1197,7 +1498,12 @@ fn main() -> Result<()> {
                 limit,
                 out_dir,
                 write_regressions,
-                incremental: _,
+                mode,
+                experiment,
+                top_findings,
+                budget_seconds,
+                candidates,
+                incremental,
                 full,
             } => run_dream(DreamRunOptions {
                 from,
@@ -1205,9 +1511,137 @@ fn main() -> Result<()> {
                 limit,
                 out_dir,
                 write_regressions,
+                incremental,
                 full,
+                mode,
+                experiment,
+                top_findings,
+                budget_seconds,
+                candidates,
             }),
             DreamCommand::State => show_dream_state(DreamStateOptions),
+            DreamCommand::Findings { command } => match command {
+                DreamFindingsCommand::List { status, limit } => {
+                    list_dream_findings(DreamFindingsListOptions { status, limit })
+                }
+                DreamFindingsCommand::Open { finding, reason } => {
+                    open_dream_finding(DreamFindingUpdateOptions {
+                        finding,
+                        reason,
+                        fixed_by: None,
+                    })
+                }
+                DreamFindingsCommand::Resolve {
+                    finding,
+                    reason,
+                    fixed_by,
+                } => resolve_dream_finding(DreamFindingUpdateOptions {
+                    finding,
+                    reason,
+                    fixed_by,
+                }),
+                DreamFindingsCommand::Dismiss { finding, reason } => {
+                    dismiss_dream_finding(DreamFindingUpdateOptions {
+                        finding,
+                        reason,
+                        fixed_by: None,
+                    })
+                }
+            },
+        },
+        Command::Memory { command } => match command {
+            MemoryCommand::List {
+                memory_dir,
+                kind,
+                status,
+                limit,
+            } => list_memory(MemoryListOptions {
+                memory_dir,
+                kind,
+                status,
+                limit,
+            }),
+            MemoryCommand::Search {
+                query,
+                memory_dir,
+                kind,
+                status,
+                limit,
+            } => search_memory(MemorySearchOptions {
+                memory_dir,
+                query,
+                kind,
+                status,
+                limit,
+            }),
+            MemoryCommand::View {
+                id,
+                memory_dir,
+                evidence,
+            } => view_memory(MemoryViewOptions {
+                memory_dir,
+                id,
+                evidence,
+            }),
+            MemoryCommand::Promote {
+                id,
+                memory_dir,
+                status,
+            } => promote_memory(MemoryPromoteOptions {
+                memory_dir,
+                id,
+                status,
+            }),
+            MemoryCommand::Retire {
+                id,
+                memory_dir,
+                reason,
+            } => retire_memory(MemoryRetireOptions {
+                memory_dir,
+                id,
+                reason,
+            }),
+            MemoryCommand::Pack {
+                task,
+                memory_dir,
+                limit,
+                evidence,
+            } => pack_memory_command(MemoryPackOptions {
+                memory_dir,
+                task,
+                limit,
+                include_evidence: evidence,
+                record_usage: false,
+            }),
+            MemoryCommand::Graph { memory_dir, limit } => {
+                show_memory_graph(MemoryGraphOptions { memory_dir, limit })
+            }
+            MemoryCommand::Scorecard { memory_dir, limit } => {
+                show_memory_scorecard(MemoryScorecardOptions { memory_dir, limit })
+            }
+            MemoryCommand::SkillDraft {
+                id,
+                memory_dir,
+                out_dir,
+            } => draft_skill_from_memory(MemorySkillDraftOptions {
+                memory_dir,
+                id,
+                out_dir,
+            }),
+            MemoryCommand::SkillEvaluate {
+                id,
+                memory_dir,
+                out_dir,
+                bench,
+            } => evaluate_memory_skill(MemorySkillEvaluateOptions {
+                memory_dir,
+                id,
+                out_dir,
+                bench,
+            }),
+            MemoryCommand::PolicyCheck { id, memory_dir } => {
+                check_policy_candidate(MemoryPolicyCheckOptions { memory_dir, id })
+            }
         },
         Command::Eval { command } => match command {
             EvalCommand::Manifest { out, include } => {
@@ -1246,6 +1680,7 @@ fn main() -> Result<()> {
                 model_config,
                 regression_file,
                 evaluate,
+                keep_worktrees,
             } => self_fix(SelfFixOptions {
                 finding,
                 candidates,
@@ -1256,6 +1691,7 @@ fn main() -> Result<()> {
                 model_config,
                 regression_file,
                 evaluate,
+                keep_worktrees,
             }),
             SelfCommand::Compare { finding, from, out } => {
                 self_compare(SelfCompareOptions { finding, from, out })
@@ -1304,28 +1740,66 @@ fn main() -> Result<()> {
             replay_artifact,
             replay_from,
             verification_command,
-        } => run_entry_task(EntryTaskOptions {
-            task: target,
-            mode,
-            top_k,
-            skills,
-            model_config,
-            trace_out,
-            trace_redact,
-            trace_raw,
-            log,
-            explain,
-            tool_config,
-            artifact_out,
-            replay_artifact,
-            replay_from,
-            verification_command,
-            project_file,
-            plan_only,
-            execute,
-            planner_model,
-        }),
+            memory,
+            memory_dir,
+            memory_limit,
+        } => {
+            let memory_hint = build_memory_run_hint(MemoryHintOptions {
+                memory_dir: memory_dir.clone(),
+                task: target.clone(),
+                limit: Some(memory_limit),
+            })?;
+            let memory_pack = if memory {
+                Some(build_memory_pack(MemoryPackOptions {
+                    memory_dir,
+                    task: target.clone(),
+                    limit: Some(memory_limit),
+                    include_evidence: false,
+                    record_usage: true,
+                })?)
+            } else {
+                None
+            };
+            let memory_context = memory_pack
+                .as_ref()
+                .map(|pack| pack.context.trim().to_string())
+                .filter(|context| !context.is_empty());
+            let output = run_entry_task(EntryTaskOptions {
+                task: target,
+                mode,
+                top_k,
+                skills,
+                model_config,
+                trace_out,
+                trace_redact,
+                trace_raw,
+                log,
+                explain,
+                tool_config,
+                artifact_out,
+                replay_artifact,
+                replay_from,
+                verification_command,
+                project_file,
+                plan_only,
+                execute,
+                planner_model,
+                memory_context,
+                memory_pack,
+            })?;
+            let mut output = output;
+            attach_memory_hint(&mut output, memory_hint)?;
+            println!("{}", serde_json::to_string_pretty(&output)?);
+            Ok(())
+        }
     }
+}
+
+fn attach_memory_hint(output: &mut Value, hint: crate::memory::MemoryRunHint) -> Result<()> {
+    if let Some(memory) = output.get_mut("memory").and_then(Value::as_object_mut) {
+        memory.insert("hint".to_string(), serde_json::to_value(hint)?);
+    }
+    Ok(())
 }
 
 fn improve_action(command: Option<ImproveCommand>) -> ImproveAction {
@@ -2524,6 +2998,12 @@ mod tests {
     }
 
     #[test]
+    fn run_rejects_zero_top_k() {
+        let err = Cli::try_parse_from(["air", "run", "fix bug", "--top-k", "0"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
     fn skill_help_exposes_lifecycle_not_execution_debug_commands() {
         let mut output = Vec::new();
         let mut command = <Cli as clap::CommandFactory>::command();
@@ -2562,6 +3042,7 @@ mod tests {
             "route",
             "fix a security vulnerability",
             "--explain",
+            "--memory",
         ])
         .unwrap();
 
@@ -2571,6 +3052,8 @@ mod tests {
                     task,
                     top_k,
                     explain,
+                    memory,
+                    ..
                 },
         } = cli.command
         else {
@@ -2580,6 +3063,7 @@ mod tests {
         assert_eq!(task, "fix a security vulnerability");
         assert_eq!(top_k, 3);
         assert!(explain);
+        assert!(memory);
     }
 
     #[test]
@@ -2698,7 +3182,6 @@ mod tests {
             "--out-dir",
             ".air/dream/nightly",
             "--write-regressions",
-            "--incremental",
         ])
         .unwrap();
 
@@ -2710,6 +3193,11 @@ mod tests {
                     limit,
                     out_dir,
                     write_regressions,
+                    mode,
+                    experiment,
+                    top_findings,
+                    budget_seconds,
+                    candidates,
                     incremental,
                     full,
                 },
@@ -2722,9 +3210,44 @@ mod tests {
         assert_eq!(since_unix, Some(1_770_000_000));
         assert_eq!(limit, Some(25));
         assert_eq!(out_dir, Some(PathBuf::from(".air/dream/nightly")));
+        assert_eq!(mode, DreamMode::Deep);
         assert!(write_regressions);
-        assert!(incremental);
+        assert!(!experiment);
+        assert_eq!(top_findings, 1);
+        assert_eq!(budget_seconds, None);
+        assert_eq!(candidates, 1);
+        assert!(!incremental);
         assert!(!full);
+    }
+
+    #[test]
+    fn dream_experiment_requires_written_regressions() {
+        let err = Cli::try_parse_from([
+            "air",
+            "dream",
+            "run",
+            "--from",
+            "target/generated",
+            "--experiment",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn dream_incremental_conflicts_with_explicit_since() {
+        let err = Cli::try_parse_from([
+            "air",
+            "dream",
+            "run",
+            "--from",
+            "target/generated",
+            "--since-unix",
+            "1770000000",
+            "--incremental",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 
     #[test]
@@ -2737,6 +3260,205 @@ mod tests {
         else {
             panic!("expected dream state command");
         };
+    }
+
+    #[test]
+    fn dream_findings_commands_parse() {
+        let list = Cli::try_parse_from([
+            "air", "dream", "findings", "list", "--status", "open", "--limit", "5",
+        ])
+        .unwrap();
+        let Command::Dream {
+            command:
+                DreamCommand::Findings {
+                    command: DreamFindingsCommand::List { status, limit },
+                },
+        } = list.command
+        else {
+            panic!("expected dream findings list command");
+        };
+        assert_eq!(status, Some("open".to_string()));
+        assert_eq!(limit, Some(5));
+
+        let resolve = Cli::try_parse_from([
+            "air",
+            "dream",
+            "findings",
+            "resolve",
+            "IMP-001",
+            "--fixed-by",
+            "cand-1",
+        ])
+        .unwrap();
+        let Command::Dream {
+            command:
+                DreamCommand::Findings {
+                    command:
+                        DreamFindingsCommand::Resolve {
+                            finding, fixed_by, ..
+                        },
+                },
+        } = resolve.command
+        else {
+            panic!("expected dream findings resolve command");
+        };
+        assert_eq!(finding, "IMP-001");
+        assert_eq!(fixed_by, Some("cand-1".to_string()));
+    }
+
+    #[test]
+    fn memory_commands_parse() {
+        let list = Cli::try_parse_from([
+            "air",
+            "memory",
+            "list",
+            "--kind",
+            "failure",
+            "--status",
+            "candidate",
+            "--limit",
+            "5",
+        ])
+        .unwrap();
+        let Command::Memory {
+            command:
+                MemoryCommand::List {
+                    kind,
+                    status,
+                    limit,
+                    ..
+                },
+        } = list.command
+        else {
+            panic!("expected memory list command");
+        };
+        assert_eq!(kind, Some("failure".to_string()));
+        assert_eq!(status, Some("candidate".to_string()));
+        assert_eq!(limit, Some(5));
+
+        let search = Cli::try_parse_from(["air", "memory", "search", "verification"]).unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Search { query, .. },
+        } = search.command
+        else {
+            panic!("expected memory search command");
+        };
+        assert_eq!(query, "verification");
+
+        let view = Cli::try_parse_from(["air", "memory", "view", "mem_failure_abc", "--evidence"])
+            .unwrap();
+        let Command::Memory {
+            command: MemoryCommand::View { id, evidence, .. },
+        } = view.command
+        else {
+            panic!("expected memory view command");
+        };
+        assert_eq!(id, "mem_failure_abc");
+        assert!(evidence);
+
+        let promote = Cli::try_parse_from(["air", "memory", "promote", "mem_failure_abc"]).unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Promote { id, .. },
+        } = promote.command
+        else {
+            panic!("expected memory promote command");
+        };
+        assert_eq!(id, "mem_failure_abc");
+
+        let pack =
+            Cli::try_parse_from(["air", "memory", "pack", "fix verification failure"]).unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Pack { task, .. },
+        } = pack.command
+        else {
+            panic!("expected memory pack command");
+        };
+        assert_eq!(task, "fix verification failure");
+
+        let graph = Cli::try_parse_from(["air", "memory", "graph", "--limit", "10"]).unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Graph { limit, .. },
+        } = graph.command
+        else {
+            panic!("expected memory graph command");
+        };
+        assert_eq!(limit, Some(10));
+
+        let scorecard =
+            Cli::try_parse_from(["air", "memory", "scorecard", "--limit", "10"]).unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Scorecard { limit, .. },
+        } = scorecard.command
+        else {
+            panic!("expected memory scorecard command");
+        };
+        assert_eq!(limit, Some(10));
+
+        let draft = Cli::try_parse_from([
+            "air",
+            "memory",
+            "skill-draft",
+            "mem_procedure_abc",
+            "--out-dir",
+            ".air/memory/drafts/skills/test",
+        ])
+        .unwrap();
+        let Command::Memory {
+            command: MemoryCommand::SkillDraft { id, out_dir, .. },
+        } = draft.command
+        else {
+            panic!("expected memory skill-draft command");
+        };
+        assert_eq!(id, "mem_procedure_abc");
+        assert_eq!(
+            out_dir,
+            Some(PathBuf::from(".air/memory/drafts/skills/test"))
+        );
+
+        let evaluate = Cli::try_parse_from([
+            "air",
+            "memory",
+            "skill-evaluate",
+            "mem_procedure_abc",
+            "--bench",
+        ])
+        .unwrap();
+        let Command::Memory {
+            command: MemoryCommand::SkillEvaluate { id, bench, .. },
+        } = evaluate.command
+        else {
+            panic!("expected memory skill-evaluate command");
+        };
+        assert_eq!(id, "mem_procedure_abc");
+        assert!(bench);
+
+        let policy =
+            Cli::try_parse_from(["air", "memory", "policy-check", "mem_policy_abc"]).unwrap();
+        let Command::Memory {
+            command: MemoryCommand::PolicyCheck { id, .. },
+        } = policy.command
+        else {
+            panic!("expected memory policy-check command");
+        };
+        assert_eq!(id, "mem_policy_abc");
+
+        let retire = Cli::try_parse_from([
+            "air",
+            "memory",
+            "retire",
+            "mem_failure_abc",
+            "--reason",
+            "stale",
+        ])
+        .unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Retire { id, reason, .. },
+        } = retire.command
+        else {
+            panic!("expected memory retire command");
+        };
+        assert_eq!(id, "mem_failure_abc");
+        assert_eq!(reason, Some("stale".to_string()));
     }
 
     #[test]
@@ -2895,6 +3617,7 @@ mod tests {
             "--regression-file",
             "target/generated/improve/suggested-regressions/imp-001.json",
             "--evaluate",
+            "--keep-worktrees",
         ])
         .unwrap();
         let Command::Self_ {
@@ -2909,6 +3632,7 @@ mod tests {
                     model_config,
                     regression_file,
                     evaluate,
+                    keep_worktrees,
                 },
         } = fix.command
         else {
@@ -2928,6 +3652,7 @@ mod tests {
             ))
         );
         assert!(evaluate);
+        assert!(keep_worktrees);
 
         let compare = Cli::try_parse_from([
             "air",
@@ -2961,6 +3686,7 @@ mod tests {
             "tdd-workflow",
             "--mode",
             "code",
+            "--memory",
             "--explain",
         ])
         .unwrap();
@@ -2971,6 +3697,7 @@ mod tests {
             skills,
             execute,
             explain,
+            memory,
             ..
         } = cli.command
         else {
@@ -2982,6 +3709,7 @@ mod tests {
         assert_eq!(skills, vec!["tdd-workflow"]);
         assert!(!execute);
         assert!(explain);
+        assert!(memory);
     }
 
     #[test]

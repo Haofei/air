@@ -7,7 +7,7 @@ use air_runtime::{
     read_trace_jsonl, replay_outputs, system_return_event, truncate_middle_context_string,
     write_trace_jsonl_with_options, TraceEvent, TraceStatus, TraceWriteOptions,
 };
-use anyhow::Result;
+use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
@@ -227,7 +227,7 @@ pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
             .as_ref()
             .and_then(|(_, profile)| profile.example_tools)
             .unwrap_or(false);
-    set_subagent_model_config_env(model_config.as_deref());
+    let _subagent_model_config_env = set_subagent_model_config_env(model_config.as_deref());
 
     run_plan_with_inputs_capture(
         plan,
@@ -249,11 +249,33 @@ pub(crate) fn run_plan_capture(options: RunPlanOptions) -> Result<Value> {
     )
 }
 
-fn set_subagent_model_config_env(model_config: Option<&Path>) {
-    let Some(model_config) = model_config else {
-        return;
-    };
-    std::env::set_var("AIR_CODE_MODEL_CONFIG", model_config.display().to_string());
+fn set_subagent_model_config_env(model_config: Option<&Path>) -> Option<EnvVarGuard> {
+    let model_config = model_config?;
+    let guard = EnvVarGuard::set("AIR_CODE_MODEL_CONFIG", model_config.display().to_string());
+    Some(guard)
+}
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: String) -> Self {
+        let previous = std::env::var_os(key);
+        std::env::set_var(key, value);
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        if let Some(previous) = &self.previous {
+            std::env::set_var(self.key, previous);
+        } else {
+            std::env::remove_var(self.key);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -300,7 +322,7 @@ pub(crate) fn run_plan_with_inputs_capture(
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
         emit_diagnostics(&report.diagnostics);
-        std::process::exit(1);
+        bail!("run-plan validation failed");
     }
 
     let observe = log || trace_out.is_some();
@@ -505,12 +527,12 @@ fn write_jit_cache(
     let identity_path = context.dir.join(format!("{}.identity.json", context.key));
     let meta_path = context.dir.join(format!("{}.meta.json", context.key));
     fs::create_dir_all(&context.dir)?;
-    fs::write(&plan_path, serde_yaml::to_string(&specialization.plan)?)?;
-    fs::write(
+    write_atomic(&plan_path, serde_yaml::to_string(&specialization.plan)?)?;
+    write_atomic(
         &identity_path,
         serde_json::to_string_pretty(&specialization.cache_identity)?,
     )?;
-    fs::write(
+    write_atomic(
         &meta_path,
         serde_json::to_string_pretty(&json!({
             "kind": "air.jit_cache_entry.v1",
@@ -526,6 +548,27 @@ fn write_jit_cache(
             plan_path.display()
         );
     }
+    Ok(())
+}
+
+fn write_atomic(path: &Path, contents: impl AsRef<[u8]>) -> Result<()> {
+    if let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    {
+        fs::create_dir_all(parent)?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("air-cache");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp_path = path.with_file_name(format!(".{file_name}.tmp-{}-{nanos}", std::process::id()));
+    fs::write(&temp_path, contents)?;
+    fs::rename(&temp_path, path)?;
     Ok(())
 }
 
@@ -743,7 +786,7 @@ pub(crate) fn resume_plan(options: ResumePlanOptions) -> Result<()> {
     let report = air_linker::validate_run_plan(&plan, &store, &base_dir);
     if !report.is_success() {
         emit_diagnostics(&report.diagnostics);
-        std::process::exit(1);
+        bail!("resume-plan validation failed");
     }
 
     let inputs = if let Some(input) = input {

@@ -52,6 +52,16 @@ fn project_defaults_for_manifest(
 }
 
 pub(crate) fn project_plan(options: ProjectPlanOptions) -> Result<()> {
+    let output = project_plan_capture(options)?;
+    if let Some(path) = output.get("project_file").and_then(Value::as_str) {
+        println!("project_file: {path}");
+    } else if let Some(manifest) = output.get("manifest") {
+        print!("{}", serde_yaml::to_string(manifest)?);
+    }
+    Ok(())
+}
+
+pub(crate) fn project_plan_capture(options: ProjectPlanOptions) -> Result<Value> {
     if options.goal.trim().is_empty() {
         bail!("air project plan goal must not be empty");
     }
@@ -80,7 +90,20 @@ pub(crate) fn project_plan(options: ProjectPlanOptions) -> Result<()> {
         validate_manifest(&manifest)?;
         manifest
     };
-    write_project_manifest(options.output.as_deref(), &manifest)
+    let project_name = manifest.project.name.clone();
+    let goal = manifest.project.goal.clone();
+    let project_file = write_project_manifest(options.output.as_deref(), &manifest)?;
+    let manifest_value = if project_file.is_none() {
+        json!(manifest)
+    } else {
+        Value::Null
+    };
+    Ok(json!({
+        "project": project_name,
+        "goal": goal,
+        "project_file": project_file,
+        "manifest": manifest_value,
+    }))
 }
 
 fn project_explorer_handoff(goal: &str, repo_root: &Path, model_config: &Path) -> Result<Value> {
@@ -183,7 +206,10 @@ fn project_template_manifest(goal: String, defaults: ProjectDefaults) -> Project
     }
 }
 
-fn write_project_manifest(output: Option<&Path>, manifest: &ProjectManifest) -> Result<()> {
+fn write_project_manifest(
+    output: Option<&Path>,
+    manifest: &ProjectManifest,
+) -> Result<Option<String>> {
     let yaml = serde_yaml::to_string(&manifest).context("serialize AIR project manifest")?;
     if let Some(output) = output {
         if let Some(parent) = output
@@ -193,14 +219,19 @@ fn write_project_manifest(output: Option<&Path>, manifest: &ProjectManifest) -> 
             fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
         }
         fs::write(output, yaml).with_context(|| format!("write {}", output.display()))?;
-        println!("project_file: {}", output.display());
+        Ok(Some(output.display().to_string()))
     } else {
-        print!("{yaml}");
+        Ok(None)
     }
-    Ok(())
 }
 
 pub(crate) fn project_run(options: ProjectRunOptions) -> Result<()> {
+    let output = project_run_capture(options)?;
+    println!("{}", serde_json::to_string_pretty(&output)?);
+    Ok(())
+}
+
+pub(crate) fn project_run_capture(options: ProjectRunOptions) -> Result<Value> {
     let context = ProjectContext::load(&options.file)?;
     let selected = selected_task_ids(&context.manifest, options.task.as_deref())?;
     let explicit_task = options.task.is_some();
@@ -230,15 +261,11 @@ pub(crate) fn project_run(options: ProjectRunOptions) -> Result<()> {
         }
     }
 
-    println!(
-        "{}",
-        serde_json::to_string_pretty(&ProjectRunOutput {
-            project: context.manifest.project.name,
-            state_path: context.state_path.display().to_string(),
-            tasks: outputs,
-        })?
-    );
-    Ok(())
+    Ok(serde_json::to_value(ProjectRunOutput {
+        project: context.manifest.project.name,
+        state_path: context.state_path.display().to_string(),
+        tasks: outputs,
+    })?)
 }
 
 pub(crate) fn project_status(options: ProjectStatusOptions) -> Result<()> {

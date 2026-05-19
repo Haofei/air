@@ -218,25 +218,39 @@ or over any artifact directory they want to review.
 
 ### Dream: offline optimization review
 
-Dream packages AIR's audit-first improvement loop as a periodic offline review:
-agents work during the day, then AIR reviews the traces and artifacts later.
-Dream does not trust model self-assessment and does not change source code by
-itself. It runs deterministic audit collection, mines findings and suggested
-regressions, writes a Dream report, and gives the platform team reviewable next
-commands.
+Dream packages AIR's audit-first improvement loop as a periodic offline
+experience compiler: agents work during the day, then AIR reviews the traces and
+artifacts later. Dream does not trust model self-assessment and does not change
+source code by itself. It runs deterministic audit collection, mines findings
+and suggested regressions, compiles evidence-backed memory candidates, writes a
+Dream report, and gives the platform team reviewable next commands.
 
 ```bash
 cargo run -p air-cli -- dream run \
   --from target/generated \
   --limit 100 \
+  --mode deep \
   --out-dir .air/dream/latest \
   --write-regressions
 ```
 
-`dream run` is incremental by default. It reads `.air/dream/state.json` and
-uses the previous successful Dream completion time as the next scan window. Use
+`dream run` is incremental by default. It reads `.air/dream/state.json`, uses
+the previous window's maximum input mtime minus a small overlap as the next scan
+cursor, and de-duplicates exact inputs already seen in the prior window. Use
 `--full` to ignore the saved state, or pass `--since-unix` to set an explicit
-window.
+window. The audit and improve stages are both derived from the same
+`window/window.json` manifest, so the report does not mix full-history audit
+with windowed improvement findings.
+
+Dream has three depths:
+
+- `--mode micro`: short consolidation. It selects the window and records
+  episode memory without running audit/improve mining or Dream IR.
+- `--mode deep`: the default. It runs full audit + improve + memory synthesis
+  and writes Dream IR concept, hypothesis, and policy candidates.
+- `--mode evolution`: deep mode plus conservative cross-domain proposals. Add
+  `--experiment --write-regressions` to run bounded self-fix experiments for
+  top findings; experiments still do not promote patches or open PRs.
 
 ```bash
 cargo run -p air-cli -- dream state
@@ -247,17 +261,99 @@ The output schema is `air.dream.v1`; the state schema is `air.dream_state.v1`.
 The Dream directory contains:
 
 - `dream.json` and `dream.md`: executive summary and next commands.
+- `window/window.json`: the exact artifact/run inputs selected for this Dream
+  window, including path, kind, mtime, and fingerprint.
 - `audit/`: deterministic audit collection and per-run audit reports.
 - `improve/`: observations, findings, suggested regressions, and report.
+- `memory/`: Dream memory extraction summary, Dream IR, and synthesis report
+  for this window.
 - `logs/`: captured stdout/stderr from the underlying audit and improve stages.
 - `.air/dream/state.json`: the persistent incremental cursor and last Dream
-  summary.
+  summary, including the last window's input fingerprints.
+- `.air/dream/findings.jsonl`: append-only persistent finding records with
+  first_seen, last_seen, recurrence_count, status, linked regressions,
+  linked candidates, and recurred_after_fix.
+- `.air/dream/ledger.jsonl`: append-only lifecycle events such as
+  finding_observed, finding_resolved, and experiment_ran.
+- `.air/memory/`: local long-term evidence store with `episodes.jsonl`,
+  `graph.jsonl`, `ledger.jsonl`, `usage.jsonl`, and candidate cards under
+  `cards/{failure,procedure,routing,concept,hypothesis,policy}`.
+
+Dream memory is deliberately conservative. It writes episode records and
+candidate failure/procedure/routing memories with source evidence, confidence,
+impact, lifecycle status, and promotion gates. Dream also writes
+`memory/dream_ir.json`, a deterministic synthesis IR whose concept, hypothesis,
+and runtime-policy candidates are compiled into memory cards and graph edges.
+Candidate memory is not injected into prompts, used for routing, compiled into
+skills, or promoted into runtime policy until later validation and human review
+gates approve it.
+
+```bash
+cargo run -p air-cli -- memory list --status candidate
+cargo run -p air-cli -- memory search verification --kind failure
+cargo run -p air-cli -- memory view mem_failure_... --evidence
+cargo run -p air-cli -- memory promote mem_procedure_...
+cargo run -p air-cli -- memory pack "fix a Rust verification failure"
+cargo run -p air-cli -- memory graph --limit 20
+cargo run -p air-cli -- memory scorecard
+cargo run -p air-cli -- memory skill-draft mem_procedure_...
+cargo run -p air-cli -- memory skill-evaluate mem_procedure_...
+cargo run -p air-cli -- memory policy-check mem_policy_...
+cargo run -p air-cli -- dream findings list --status open
+cargo run -p air-cli -- dream findings resolve IMP-001 --fixed-by cand-1
+```
 
 The safe follow-up is still explicit: promote/review regressions, run
 `air self fix ... --evaluate` only when a finding is worth fixing, compare
-candidates, and open a PR manually. Future memory systems can plug into Dream as
-another offline consolidation stage, but deterministic gates remain the source
-of truth for promotion.
+candidates, and open a PR manually. Dream can run that experiment chain only
+when explicitly requested:
+
+```bash
+cargo run -p air-cli -- dream run \
+  --mode evolution \
+  --from target/generated \
+  --write-regressions \
+  --experiment \
+  --top-findings 2 \
+  --budget-seconds 900
+```
+
+The experiment writes candidates under `.air/dream/latest/candidates/`, logs
+under `.air/dream/latest/logs/`, and linked candidate paths into the finding
+store. It still does not trust, promote, commit, or open a PR. Memory follow-up is similarly explicit:
+review candidate memories, promote only the ones that should guide future runs,
+then use `air run --memory` or `air skill route --memory` to include a compact
+pack of promoted memories. Turn repeated procedures into skill drafts only after
+validation, audit, and benchmark review. `air run --memory` records which
+memories were used in the code-run artifact; if no `--artifact-out` is supplied,
+AIR writes one under `target/generated/code-runs/memory-run-*` so the next Dream
+pass can turn successful runs into `helped_candidate` events and failed runs
+into `hurt_candidate` events, visible through `air memory scorecard`. Repeated
+positive evidence confirms `helped` and auto-validates candidate memory, but it
+does not pin or prompt-inject it. Repeated negative evidence confirms `hurt` and
+auto-retires the memory so it stops being suggested. Promote policy memories
+only as deterministic guards after `air memory policy-check` and a normal
+reviewed patch. If Dream was run without `--write-regressions`, its next
+commands first promote the selected regression and then point `self fix` at the
+promoted regression file under `skills/code-agent/benches/regressions/`.
+Deterministic gates remain the source of truth for promotion.
+
+`air run` emits a single stable JSON envelope for every executor:
+
+```json
+{
+  "schema": "air.run.v1",
+  "task": "...",
+  "requested_mode": "auto",
+  "executor": "code-agent | review-agent | bench-agent | project-agent",
+  "memory": { "enabled": true, "cards": 3 },
+  "output": {}
+}
+```
+
+Code, review, bench, and project results all live under `output`, so CI,
+dashboards, Dream ingest, and platform tools can parse one top-level shape
+instead of special-casing executor output.
 
 ## Project Workflows
 
@@ -379,7 +475,10 @@ candidate starts, then the captured patch is diffed only against that bootstrap
 commit. The generated task prompt includes the selected finding, regression
 fixture hints, benchmark task context, impact reason, and any rejected candidate
 feedback from earlier candidates in the same run; each candidate slot also
-records that prompt as `task.md`. Benchmark suites, fixtures, regressions, eval
+records that prompt as `task.md`. Temporary worktrees are removed automatically
+after AIR captures each candidate's patch, trace, artifact, and evaluation; pass
+`--keep-worktrees` only when you need manual worktree inspection. Benchmark
+suites, fixtures, regressions, eval
 manifests, and `skills.lock` are evidence/gates, not acceptable candidate fix
 targets.
 Use `--skill <skill-id>` when the candidate should improve a local skill package
@@ -526,7 +625,13 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | `skill route` | Route a task to matching skills |
 | `skill list/validate/explain/audit/import/upgrade` | Skill lifecycle management |
 | `audit run/collect` | Audit one code-run artifact or summarize many artifacts |
-| `dream run/state` | Incrementally audit recent runs, mine improvement findings, and inspect the Dream cursor |
+| `dream run/state` | Incrementally audit recent runs, mine improvement findings, compile memory candidates, and inspect the Dream cursor |
+| `dream findings` | List, reopen, resolve, or dismiss persistent Dream findings |
+| `memory list/search/view` | Inspect evidence-backed Dream memory cards |
+| `memory promote/retire/pack` | Manage memory lifecycle and build compact promoted-memory context |
+| `memory graph/scorecard` | Inspect Dream-derived experience graph edges and helped/hurt memory outcomes |
+| `memory skill-draft/skill-evaluate` | Compile a procedure memory into an untrusted skill draft and run validation/audit gates |
+| `memory policy-check` | Turn a policy memory into a reviewed deterministic-guard proposal, without applying it |
 | `eval manifest/check` | Pin and verify evaluation corpus integrity |
 | `self prepare/fix/capture/compare` | Create, generate, capture, and compare candidate improvements |
 | `mcp list/explain/audit` | Inspect MCP tool governance before runs |

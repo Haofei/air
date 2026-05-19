@@ -138,12 +138,14 @@ pub(crate) struct SkillAutoRunOptions {
     pub(crate) replay_artifact: Option<PathBuf>,
     pub(crate) replay_from: Option<usize>,
     pub(crate) verification_command: Option<String>,
+    pub(crate) memory_pack: Option<Value>,
 }
 
 pub(crate) struct SkillRouteOptions {
     pub(crate) task: String,
     pub(crate) top_k: usize,
     pub(crate) explain: bool,
+    pub(crate) memory_pack: Option<Value>,
 }
 
 pub(crate) struct SkillUpgradeOptions {
@@ -265,6 +267,7 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
             "selected": route.selected,
             "rejected": route.rejected,
             "candidates": route.candidates,
+            "memory_pack": options.memory_pack,
         }))
     } else {
         print_json(&json!({
@@ -272,6 +275,7 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
             "executor": route.executor,
             "instructions": route.instructions,
             "selected": route.selected,
+            "memory_pack": options.memory_pack,
         }))
     }
 }
@@ -468,7 +472,7 @@ pub(crate) fn explain_skill(reference: &str, profile_override: Option<PathBuf>) 
     print_json(&explanation)
 }
 
-pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
+pub(crate) fn run_skill_auto_capture(options: SkillAutoRunOptions) -> Result<Value> {
     let route = route_skills_for_task(&options.task, options.top_k)?;
     let executor_id = options
         .executor_override
@@ -488,6 +492,9 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
         options.task.clone()
     };
     let mut artifact_extra = prepared.artifact_extra.clone();
+    if let Some(memory_pack) = options.memory_pack {
+        artifact_extra.insert("memory_pack".to_string(), memory_pack);
+    }
     artifact_extra.insert(
         "skill_route".to_string(),
         json!({
@@ -500,7 +507,7 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
             "rejected": route.rejected,
         }),
     );
-    let outputs = run_code_agent(CodeOptions {
+    run_code_agent(CodeOptions {
         task,
         verification_command: options.verification_command,
         artifact_task: Some(options.task.clone()),
@@ -523,8 +530,7 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
         verdict_constraints: verdict_constraints_for_executor(&prepared.metadata.id),
         replay_artifact: options.replay_artifact,
         replay_from: options.replay_from,
-    })?;
-    print_json(&outputs)
+    })
 }
 
 pub(crate) fn verdict_constraints_for_executor(executor_id: &str) -> CodeRunVerdictConstraints {

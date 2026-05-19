@@ -188,7 +188,14 @@ fn is_eval_integrity_source(path: &str) -> bool {
     let file_name = normalized.rsplit('/').next().unwrap_or(normalized.as_str());
     matches!(
         file_name,
-        "bench.rs" | "regression.rs" | "improve.rs" | "code_artifact.rs"
+        "audit.rs"
+            | "bench.rs"
+            | "code_artifact.rs"
+            | "dream.rs"
+            | "eval_manifest.rs"
+            | "improve.rs"
+            | "regression.rs"
+            | "self_lab.rs"
     )
 }
 
@@ -284,24 +291,38 @@ fn git_changed_protected_paths(
     manifest_path: &Path,
     protected: &[String],
 ) -> Result<Vec<String>> {
-    let output = Command::new("git")
-        .args(["diff", "--name-only", "--"])
-        .current_dir(cwd)
-        .output()
-        .context("run git diff --name-only")?;
-    if !output.status.success() {
-        return Ok(Vec::new());
-    }
     let manifest_relative = relative_path(cwd, manifest_path);
     let protected = protected_globset(protected)?;
     let mut changed = Vec::new();
-    for line in String::from_utf8_lossy(&output.stdout).lines() {
-        let path = line.trim().replace('\\', "/");
-        if path.is_empty() {
-            continue;
-        }
+    for path in git_changed_paths(cwd)? {
         if manifest_relative.as_deref() == Some(path.as_str()) || protected.is_match(&path) {
             changed.push(path);
+        }
+    }
+    changed.sort();
+    changed.dedup();
+    Ok(changed)
+}
+
+fn git_changed_paths(cwd: &Path) -> Result<Vec<String>> {
+    let mut changed = Vec::new();
+    for args in [
+        &["diff", "--name-only", "HEAD", "--"][..],
+        &["ls-files", "--others", "--exclude-standard"][..],
+    ] {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .output()
+            .with_context(|| format!("run git {}", args.join(" ")))?;
+        if !output.status.success() {
+            continue;
+        }
+        for line in String::from_utf8_lossy(&output.stdout).lines() {
+            let path = line.trim().replace('\\', "/");
+            if !path.is_empty() {
+                changed.push(path);
+            }
         }
     }
     changed.sort();

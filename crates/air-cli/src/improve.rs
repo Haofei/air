@@ -1367,9 +1367,9 @@ fn summarize_regression_gate(regression: &RegressionRunReport) -> RegressionGate
 
 fn run_improve_guard() -> Result<ImproveGuardGate> {
     let output = Command::new("git")
-        .args(["diff", "--name-status", "--"])
+        .args(["diff", "--name-status", "HEAD", "--"])
         .output()
-        .context("run git diff --name-status")?;
+        .context("run git diff --name-status HEAD")?;
     let text = String::from_utf8_lossy(&output.stdout);
     let mut warnings = Vec::new();
     let mut blocked = Vec::new();
@@ -1387,11 +1387,43 @@ fn run_improve_guard() -> Result<ImproveGuardGate> {
             blocked.push("modified skills.lock trust state".to_string());
         }
     }
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .output()
+        .context("run git ls-files --others")?;
+    for line in String::from_utf8_lossy(&untracked.stdout).lines() {
+        let path = line.trim();
+        if path.is_empty() {
+            continue;
+        }
+        if is_protected_eval_path(path) {
+            blocked.push(format!("added untracked protected evaluation file: {path}"));
+        }
+        if let Ok(text) = std::fs::read_to_string(path) {
+            for trimmed in text.lines().map(str::trim_start) {
+                if disables_required_verification(trimmed) {
+                    blocked.push(format!(
+                        "untracked file adds require_verification: false: {path}"
+                    ));
+                }
+                if exposes_sensitive_capability(trimmed, "shell.unrestricted") {
+                    warnings.push(format!(
+                        "untracked file changes shell.unrestricted capability text: {path}"
+                    ));
+                }
+                if exposes_sensitive_capability(trimmed, "secrets.read") {
+                    warnings.push(format!(
+                        "untracked file changes secrets.read capability text: {path}"
+                    ));
+                }
+            }
+        }
+    }
 
     let diff = Command::new("git")
-        .args(["diff", "--unified=0", "--"])
+        .args(["diff", "--unified=0", "HEAD", "--"])
         .output()
-        .context("run git diff")?;
+        .context("run git diff HEAD")?;
     let diff_text = String::from_utf8_lossy(&diff.stdout);
     for line in diff_text.lines().filter(|line| line.starts_with('+')) {
         let added = line.trim_start_matches('+');
@@ -1455,7 +1487,15 @@ fn exposes_sensitive_capability(line: &str, capability: &str) -> bool {
 fn is_protected_eval_path(path: &str) -> bool {
     path.contains("benches/")
         || path.contains("regressions/")
+        || path.starts_with(".air/evals/")
         || path.ends_with("skills.lock")
+        || path.ends_with("air-skill.yaml")
+        || path.ends_with("audit.rs")
+        || path.ends_with("dream.rs")
+        || path.ends_with("improve.rs")
+        || path.ends_with("regression.rs")
+        || path.ends_with("self_lab.rs")
+        || path.ends_with("eval_manifest.rs")
         || path.ends_with("code_artifact.rs")
 }
 

@@ -43,6 +43,7 @@ cargo run -p air-cli -- audit collect \
 cargo run -p air-cli -- dream run \
   --from target/generated \
   --limit 100 \
+  --mode deep \
   --out-dir .air/dream/latest \
   --write-regressions
 
@@ -66,6 +67,23 @@ This separation keeps model freedom behind deterministic evidence: every useful
 run should leave a trace, artifact, verification result, and audit report that
 can be reviewed without trusting the model's self-assessment.
 
+`air run` always prints one JSON envelope:
+
+```json
+{
+  "schema": "air.run.v1",
+  "task": "...",
+  "requested_mode": "auto",
+  "executor": "code-agent | review-agent | bench-agent | project-agent",
+  "memory": { "enabled": true, "cards": 3 },
+  "output": {}
+}
+```
+
+The executor-specific result lives under `output`. This keeps the developer
+entrypoint stable for CI, dashboards, Dream ingest, and platform tooling even as
+AIR routes to different executors.
+
 The review window is operational, not hard-coded. A team can collect runs every
 day, every release, every incident review, or after enough new artifacts have
 accumulated. The collection report is the platform team's starting point: top
@@ -75,15 +93,140 @@ PR is opened.
 
 `air dream run` is the productized version of that review window. It is
 incremental by default: AIR reads `.air/dream/state.json`, uses the previous
-successful Dream completion time as the next scan cursor, and updates the state
-only after the Dream run succeeds. Use `--full` to ignore the saved cursor, or
-`--since-unix` to force a specific window. It writes
-`.air/dream/latest/dream.json` and `.air/dream/latest/dream.md`, plus `audit/`,
-`improve/`, and `logs/` subdirectories. Dream is intentionally offline and
-review-first: it audits recent artifacts, mines findings, optionally writes
-suggested regression JSON files, and prints next commands. It does not modify
-source code, open PRs, or trust generated patches without the normal
-regression/test/guard/candidate comparison gates.
+window's maximum input mtime minus an overlap as the next scan cursor,
+de-duplicates exact inputs already seen in the prior window, and updates the
+state only after the Dream run succeeds. Use `--full` to ignore the saved
+cursor, or `--since-unix` to force a specific window. It writes
+`.air/dream/latest/dream.json`, `.air/dream/latest/dream.md`, and
+`.air/dream/latest/window/window.json`, plus `audit/`, `improve/`, `memory/`,
+and `logs/` subdirectories. Dream is intentionally offline and review-first: it
+audits recent artifacts, mines findings, optionally writes suggested regression
+JSON files, compiles evidence-backed memory candidates, and prints next
+commands. It does not modify source code, open PRs, inject memory into prompts,
+or trust generated patches without the normal regression/test/guard/candidate
+comparison gates.
+
+`micro`, `deep`, and `evolution` have distinct cost/behavior profiles. `micro`
+selects the window and records episode memory only; it skips audit/improve
+mining and Dream IR. `deep` is the default full audit + improve + memory
+synthesis pass. `evolution` adds conservative cross-domain proposals and can run
+bounded experiments only when explicitly requested with `--experiment`.
+
+Dream memory is a local experience ladder, not a chat transcript. It writes
+success and failure episodes, deterministic Dream IR synthesis, graph edges,
+usage outcomes, and candidate memory cards under
+`.air/memory/`:
+
+```text
+.air/memory/
+  episodes.jsonl
+  graph.jsonl
+  ledger.jsonl
+  usage.jsonl
+  cards/
+    failure/
+    procedure/
+    routing/
+    concept/
+    hypothesis/
+    policy/
+```
+
+Dream also keeps persistent finding state under `.air/dream/`:
+
+```text
+.air/dream/
+  findings.jsonl
+  ledger.jsonl
+  state.json
+```
+
+`findings.jsonl` is append-only and stores the latest lifecycle snapshot for
+each finding: first seen, last seen, recurrence count, open/resolved/dismissed
+status, linked regressions/candidates, and whether a resolved finding recurred.
+`ledger.jsonl` records lifecycle events such as `finding_observed`,
+`finding_resolved`, and `experiment_ran`.
+
+Every card has source evidence, scope, confidence, impact, lifecycle status, and
+promotion gates. Candidate memory can be searched and reviewed, but it cannot
+become prompt memory, skill routing, a skill package, or runtime policy until
+later validation gates promote it.
+
+`dream run` also writes `.air/dream/latest/memory/dream_ir.json`. This is the
+first Deep Dream layer: AIR deterministically recombines multiple episodes and
+findings into concept, hypothesis, procedure, and policy candidates. The IR is a
+proposal surface, not an authority; its products still go through memory
+promotion, benchmark/regression checks, skill audit, and human review.
+
+Choose the Dream depth explicitly when needed:
+
+```bash
+cargo run -p air-cli -- dream run --mode micro --from target/generated
+cargo run -p air-cli -- dream run --mode deep --from target/generated
+cargo run -p air-cli -- dream run --mode evolution --from target/generated
+```
+
+Run bounded experiments only as an explicit step:
+
+```bash
+cargo run -p air-cli -- dream run \
+  --mode evolution \
+  --from target/generated \
+  --write-regressions \
+  --experiment \
+  --top-findings 2 \
+  --budget-seconds 900
+```
+
+This chains into `self fix --evaluate` and `self compare` for the selected
+findings, writes candidates under `.air/dream/latest/candidates/`, and links
+the candidate paths back to `.air/dream/findings.jsonl`. It does not promote,
+commit, trust, or open PRs.
+
+```bash
+cargo run -p air-cli -- memory list --status candidate
+cargo run -p air-cli -- memory search verification --kind failure
+cargo run -p air-cli -- memory view mem_failure_... --evidence
+cargo run -p air-cli -- memory promote mem_procedure_...
+cargo run -p air-cli -- memory pack "fix a Rust verification failure"
+cargo run -p air-cli -- memory graph --limit 20
+cargo run -p air-cli -- memory scorecard
+cargo run -p air-cli -- run "fix a Rust verification failure" --memory
+cargo run -p air-cli -- skill route "fix a Rust verification failure" --memory
+cargo run -p air-cli -- memory skill-draft mem_procedure_...
+cargo run -p air-cli -- memory skill-evaluate mem_procedure_...
+cargo run -p air-cli -- memory policy-check mem_policy_...
+cargo run -p air-cli -- dream findings list --status open
+cargo run -p air-cli -- dream findings resolve IMP-001 --fixed-by cand-1
+cargo run -p air-cli -- dream findings dismiss IMP-002 --reason "duplicate"
+```
+
+Only promoted or pinned memory enters a pack. Candidate memory from Dream is
+reviewable evidence, not runtime guidance. `air memory retire` marks stale or
+harmful cards as retired so they are ignored by future packs.
+
+`memory skill-draft` writes an untrusted skill package under
+`.air/memory/drafts/skills/<name>/` with `SKILL.md` and `evidence.json`. It does
+not trust or route the skill. `memory skill-evaluate` is the one-command gate
+for draft generation plus skill validation and skill audit; pass `--bench` when
+you are ready to spend the benchmark run. The output still recommends a manual
+review/import step instead of auto-promoting the skill.
+
+When `air run --memory` uses promoted memories, AIR stores the selected memory
+pack in the code-run artifact. If the caller did not pass `--artifact-out`, AIR
+writes one under `target/generated/code-runs/memory-run-*` so the next Dream
+pass can read those success/failure episodes and append `helped_candidate` or
+`hurt_candidate` outcomes to `.air/memory/usage.jsonl`. Repeated positive
+evidence confirms `helped` and auto-validates candidate memory, but it does not
+pin or prompt-inject it. Repeated negative evidence confirms `hurt` and
+auto-retires the memory so it stops being suggested. `air memory scorecard`
+summarizes which memories are actually useful before the team promotes, retires,
+or edits them.
+
+`memory policy-check` reviews a policy memory as a deterministic guard proposal:
+it reports likely affected runtime files, tests that should exist, and whether
+the candidate has enough evidence to compile into code. It never edits runtime
+guards automatically.
 
 Once `.air/evals/manifest.json` exists, `air improve evaluate` checks it
 automatically. This protects the loop from candidates that pass by editing
@@ -714,22 +857,34 @@ together and writes a single platform report:
 cargo run -p air-cli -- dream run \
   --from target/generated \
   --limit 100 \
+  --mode deep \
   --out-dir .air/dream/latest \
   --write-regressions
 ```
 
 Dream's output schema is `air.dream.v1`; the saved cursor schema is
-`air.dream_state.v1` and can be inspected with:
+`air.dream_state.v1`. Each run also writes an `air.dream_window.v1` manifest at
+`window/window.json`. Audit collection, improve mining, and memory extraction
+are all driven from that same selected input set, so an incremental Dream run
+does not combine a full-history audit report with only recent improvement
+findings. The saved state cursor uses the window's maximum input mtime with
+overlap and fingerprint dedupe, which is safer than advancing to the Dream
+completion timestamp.
+
+Inspect state with:
 
 ```bash
 cargo run -p air-cli -- dream state
 ```
 
 Treat Dream as the night-cycle consolidation layer: current Dream reports turn
-traces into findings and regression candidates; future memory systems can add
-another consolidation stage for durable team/project memories without changing
-the promotion rule. Source changes still go through explicit candidate patches,
-evaluation, compare, and manual PR review.
+traces into persistent findings, regression candidates, candidate memories,
+usage scorecards, skill drafts, policy proposals, and optional bounded
+experiments. Source changes still go through explicit candidate patches,
+evaluation, compare, and manual PR review. Memory changes follow the same
+principle: episode/failure/procedure cards can be written from evidence, but
+procedure-to-skill and memory-to-policy promotion require validation,
+benchmark/regression evidence, and review.
 
 ## 11. Eval Integrity
 
@@ -784,9 +939,12 @@ fixtures, regressions, eval manifests, and `skills.lock` are evidence/gates, not
 acceptable candidate fix targets. Use `--skill <skill-id>` for local skill
 improvements such as prompt, profile, tool policy, docs, tests, or regressions.
 AIR does not modify external MCP servers; it can improve the local AIR layer
-that routes, constrains, audits, and benchmarks those MCP tools. Use `self
-capture` when a human or another agent produced the candidate in the current
-workspace. After each candidate is evaluated with `air improve evaluate`,
+that routes, constrains, audits, and benchmarks those MCP tools. Temporary
+candidate worktrees are removed automatically after AIR captures the durable
+patch/artifact/trace/eval outputs; pass `--keep-worktrees` for manual
+inspection. Use `self capture` when a human or another agent produced the
+candidate in the current workspace. After each candidate is evaluated with
+`air improve evaluate`,
 save its JSON output as
 `.air/candidates/IMP-001/cand-N/eval.json`, then compare them:
 
@@ -797,8 +955,10 @@ cargo run -p air-cli -- self compare IMP-001 \
 
 The comparison ranks accepted candidates above `needs_review`, then rejected
 candidates, and writes a scorecard with patch path, changed-file count,
-regression, test, guard, blocked, and warning counts. Promotion remains a PR
-step rather than an automatic write to main.
+regression, test, guard, blocked, and warning counts. The guard and eval
+manifest checks inspect tracked, staged, and untracked changes for protected
+eval/runtime gate files. Promotion remains a PR step rather than an automatic
+write to main.
 
 Use raw traces only for trusted local debugging. Raw traces preserve complete model/tool inputs and outputs, which can include prompts, documents, credentials, or user data.
 

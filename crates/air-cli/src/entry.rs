@@ -1,16 +1,19 @@
+use crate::memory::MemoryPackOutput;
 use crate::project::{
-    default_project_file, project_plan, project_run, ProjectPlanOptions, ProjectRunOptions,
+    default_project_file, project_plan_capture, project_run_capture, ProjectPlanOptions,
+    ProjectRunOptions,
 };
 use crate::review_agent::{explain_review_agent, run_review_agent, ReviewOptions};
 use crate::skill::{
     prepare_skill_composition, prepare_skill_composition_for_executor, route_skills_value_for_task,
-    run_skill_auto, SkillAutoRunOptions,
+    run_skill_auto_capture, SkillAutoRunOptions,
 };
 use anyhow::{bail, Result};
 use clap::ValueEnum;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub(crate) enum EntryMode {
@@ -42,6 +45,8 @@ pub(crate) struct EntryTaskOptions {
     pub(crate) plan_only: bool,
     pub(crate) execute: bool,
     pub(crate) planner_model: String,
+    pub(crate) memory_context: Option<String>,
+    pub(crate) memory_pack: Option<MemoryPackOutput>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,32 +57,62 @@ enum EntryExecutor {
     Bench,
 }
 
-pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
+pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<Value> {
     if options.task.trim().is_empty() {
         bail!("air run task must not be empty");
     }
     let executor = select_entry_executor(&options.task, options.mode);
+    let requested_mode = options.mode;
+    let original_task = options.task.clone();
+    let memory_used = options.memory_pack.is_some();
+    let memory_cards = options
+        .memory_pack
+        .as_ref()
+        .map(|pack| pack.cards.len())
+        .unwrap_or_default();
     if options.explain {
-        return explain_entry_task(&options, executor);
+        let explanation = explain_entry_task(&options, executor)?;
+        return Ok(run_output_envelope(
+            &original_task,
+            requested_mode,
+            executor,
+            memory_used,
+            memory_cards,
+            explanation,
+        ));
     }
     match executor {
-        EntryExecutor::Code => run_skill_auto(SkillAutoRunOptions {
-            task: options.task,
-            top_k: options.top_k,
-            skills: options.skills,
-            executor_override: Some("code-agent".to_string()),
-            profile_override: None,
-            model_config: options.model_config,
-            trace_out: options.trace_out,
-            trace_redact: options.trace_redact,
-            trace_raw: options.trace_raw,
-            log: options.log,
-            tool_config_override: options.tool_config,
-            artifact_out: options.artifact_out,
-            replay_artifact: options.replay_artifact,
-            replay_from: options.replay_from,
-            verification_command: options.verification_command,
-        }),
+        EntryExecutor::Code => {
+            let output = run_skill_auto_capture(SkillAutoRunOptions {
+                task: task_with_memory_context(&options.task, options.memory_context.as_deref()),
+                top_k: options.top_k,
+                skills: options.skills,
+                executor_override: Some("code-agent".to_string()),
+                profile_override: None,
+                model_config: options.model_config,
+                trace_out: options.trace_out,
+                trace_redact: options.trace_redact,
+                trace_raw: options.trace_raw,
+                log: options.log,
+                tool_config_override: options.tool_config,
+                artifact_out: artifact_out_with_memory_default(
+                    options.artifact_out,
+                    options.memory_pack.as_ref(),
+                ),
+                replay_artifact: options.replay_artifact,
+                replay_from: options.replay_from,
+                verification_command: options.verification_command,
+                memory_pack: memory_pack_value(options.memory_pack.as_ref())?,
+            })?;
+            Ok(run_output_envelope(
+                &original_task,
+                requested_mode,
+                executor,
+                memory_used,
+                memory_cards,
+                output,
+            ))
+        }
         EntryExecutor::Project => {
             if options.trace_out.is_some()
                 || options.tool_config.is_some()
@@ -86,7 +121,12 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
                 || options.replay_from.is_some()
             {
                 bail!(
-                    "--trace-out/--tool-config/--artifact-out/--replay-artifact are code-agent options; use --mode code or run project subcommands directly"
+                    "--trace-out/--tool-config/--artifact-out/--replay-artifact/--replay-from are code-agent options; use --mode code or run project subcommands directly"
+                );
+            }
+            if options.verification_command.is_some() {
+                eprintln!(
+                    "[air run] ignoring --verification-command in project mode; project verification is generated per task in the project manifest"
                 );
             }
             let project_file = options
@@ -96,7 +136,7 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
                 "[air run] selected project-agent; writing project manifest to {}",
                 project_file.display()
             );
-            project_plan(ProjectPlanOptions {
+            let plan_output = project_plan_capture(ProjectPlanOptions {
                 goal: options.task,
                 output: Some(project_file.clone()),
                 model_config: options.model_config,
@@ -108,17 +148,38 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
                     "[air run] project plan written; review it, then run `air project run --file {} --log` or pass --execute",
                     project_file.display()
                 );
-                return Ok(());
+                return Ok(run_output_envelope(
+                    &original_task,
+                    requested_mode,
+                    executor,
+                    memory_used,
+                    memory_cards,
+                    json!({
+                        "plan": plan_output,
+                        "execution": Value::Null,
+                    }),
+                ));
             }
-            project_run(ProjectRunOptions {
+            let execution = project_run_capture(ProjectRunOptions {
                 file: project_file,
                 task: None,
                 log: options.log,
-            })
+            })?;
+            Ok(run_output_envelope(
+                &original_task,
+                requested_mode,
+                executor,
+                memory_used,
+                memory_cards,
+                json!({
+                    "plan": plan_output,
+                    "execution": execution,
+                }),
+            ))
         }
         EntryExecutor::Review => {
             let outputs = run_review_agent(ReviewOptions {
-                task: options.task,
+                task: task_with_memory_context(&options.task, options.memory_context.as_deref()),
                 top_k: options.top_k,
                 skills: options.skills,
                 model_config: options.model_config,
@@ -127,34 +188,130 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
                 trace_raw: options.trace_raw,
                 log: options.log,
                 tool_config: options.tool_config,
-                artifact_out: options.artifact_out,
+                artifact_out: artifact_out_with_memory_default(
+                    options.artifact_out,
+                    options.memory_pack.as_ref(),
+                ),
                 replay_artifact: options.replay_artifact,
                 replay_from: options.replay_from,
             })?;
-            println!("{}", serde_json::to_string_pretty(&outputs)?);
-            Ok(())
+            Ok(run_output_envelope(
+                &original_task,
+                requested_mode,
+                executor,
+                memory_used,
+                memory_cards,
+                outputs,
+            ))
         }
-        EntryExecutor::Bench => run_skill_auto(SkillAutoRunOptions {
-            task: options.task,
-            top_k: options.top_k,
-            skills: options.skills,
-            executor_override: Some("bench-agent".to_string()),
-            profile_override: None,
-            model_config: options.model_config,
-            trace_out: options.trace_out,
-            trace_redact: options.trace_redact,
-            trace_raw: options.trace_raw,
-            log: options.log,
-            tool_config_override: options.tool_config,
-            artifact_out: options.artifact_out,
-            replay_artifact: options.replay_artifact,
-            replay_from: options.replay_from,
-            verification_command: options.verification_command,
-        }),
+        EntryExecutor::Bench => {
+            let output = run_skill_auto_capture(SkillAutoRunOptions {
+                task: task_with_memory_context(&options.task, options.memory_context.as_deref()),
+                top_k: options.top_k,
+                skills: options.skills,
+                executor_override: Some("bench-agent".to_string()),
+                profile_override: None,
+                model_config: options.model_config,
+                trace_out: options.trace_out,
+                trace_redact: options.trace_redact,
+                trace_raw: options.trace_raw,
+                log: options.log,
+                tool_config_override: options.tool_config,
+                artifact_out: artifact_out_with_memory_default(
+                    options.artifact_out,
+                    options.memory_pack.as_ref(),
+                ),
+                replay_artifact: options.replay_artifact,
+                replay_from: options.replay_from,
+                verification_command: options.verification_command,
+                memory_pack: memory_pack_value(options.memory_pack.as_ref())?,
+            })?;
+            Ok(run_output_envelope(
+                &original_task,
+                requested_mode,
+                executor,
+                memory_used,
+                memory_cards,
+                output,
+            ))
+        }
     }
 }
 
-fn explain_entry_task(options: &EntryTaskOptions, executor: EntryExecutor) -> Result<()> {
+fn run_output_envelope(
+    task: &str,
+    requested_mode: EntryMode,
+    executor: EntryExecutor,
+    memory_used: bool,
+    memory_cards: usize,
+    output: Value,
+) -> Value {
+    json!({
+        "schema": "air.run.v1",
+        "task": task,
+        "requested_mode": entry_mode_name(requested_mode),
+        "executor": entry_executor_name(executor),
+        "memory": {
+            "enabled": memory_used,
+            "cards": memory_cards,
+        },
+        "output": output,
+    })
+}
+
+fn entry_mode_name(mode: EntryMode) -> &'static str {
+    match mode {
+        EntryMode::Auto => "auto",
+        EntryMode::Code => "code",
+        EntryMode::Project => "project",
+        EntryMode::Review => "review",
+        EntryMode::Bench => "bench",
+    }
+}
+
+fn entry_executor_name(executor: EntryExecutor) -> &'static str {
+    match executor {
+        EntryExecutor::Code => "code-agent",
+        EntryExecutor::Project => "project-agent",
+        EntryExecutor::Review => "review-agent",
+        EntryExecutor::Bench => "bench-agent",
+    }
+}
+
+fn task_with_memory_context(task: &str, memory_context: Option<&str>) -> String {
+    match memory_context
+        .map(str::trim)
+        .filter(|context| !context.is_empty())
+    {
+        Some(context) => format!("{context}\n\nUser task:\n{task}"),
+        None => task.to_string(),
+    }
+}
+
+fn memory_pack_value(memory_pack: Option<&MemoryPackOutput>) -> Result<Option<Value>> {
+    Ok(memory_pack.map(serde_json::to_value).transpose()?)
+}
+
+fn artifact_out_with_memory_default(
+    artifact_out: Option<PathBuf>,
+    memory_pack: Option<&MemoryPackOutput>,
+) -> Option<PathBuf> {
+    artifact_out.or_else(|| memory_pack.map(|_| default_memory_run_artifact_dir()))
+}
+
+fn default_memory_run_artifact_dir() -> PathBuf {
+    let pid = std::process::id();
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    PathBuf::from("target")
+        .join("generated")
+        .join("code-runs")
+        .join(format!("memory-run-{pid}-{nanos}"))
+}
+
+fn explain_entry_task(options: &EntryTaskOptions, executor: EntryExecutor) -> Result<Value> {
     let explanation = match executor {
         EntryExecutor::Code => explain_code_entry(options)?,
         EntryExecutor::Project => {
@@ -191,8 +348,7 @@ fn explain_entry_task(options: &EntryTaskOptions, executor: EntryExecutor) -> Re
         )?,
         EntryExecutor::Bench => explain_executor_entry(options, "bench-agent", "bench")?,
     };
-    println!("{}", serde_json::to_string_pretty(&explanation)?);
-    Ok(())
+    Ok(explanation)
 }
 
 fn explain_executor_entry(
@@ -357,7 +513,9 @@ fn task_looks_like_benchmark(task: &str) -> bool {
         "模型调用",
         "工具调用",
     ];
-    benchmark_markers.iter().any(|marker| task.contains(marker))
+    benchmark_markers
+        .iter()
+        .any(|marker| contains_marker(&task, marker))
 }
 
 fn task_looks_like_review(task: &str) -> bool {
@@ -366,6 +524,8 @@ fn task_looks_like_review(task: &str) -> bool {
         "code review",
         "review code",
         "review diff",
+        "review this",
+        "review the",
         "review this diff",
         "review this pr",
         "review this mr",
@@ -382,13 +542,14 @@ fn task_looks_like_review(task: &str) -> bool {
         "代码评审",
         "评审",
     ];
-    review_markers.iter().any(|marker| task.contains(marker))
+    review_markers
+        .iter()
+        .any(|marker| contains_marker(&task, marker))
 }
 
 fn task_looks_project_sized(task: &str) -> bool {
     let task = task.to_ascii_lowercase();
     let project_markers = [
-        "project",
         "end to end",
         "end-to-end",
         "multi-file",
@@ -415,12 +576,37 @@ fn task_looks_project_sized(task: &str) -> bool {
         "重构项目",
         "重构整个",
     ];
-    project_markers.iter().any(|marker| task.contains(marker))
+    project_markers
+        .iter()
+        .any(|marker| contains_marker(&task, marker))
+}
+
+fn contains_marker(task: &str, marker: &str) -> bool {
+    if marker
+        .chars()
+        .any(|ch| !ch.is_ascii() || !(ch.is_ascii_alphanumeric() || ch == '_' || ch == ' '))
+    {
+        return task.contains(marker);
+    }
+    let marker = marker.trim();
+    if marker.is_empty() {
+        return false;
+    }
+    task.match_indices(marker).any(|(start, _)| {
+        let end = start + marker.len();
+        let before = task[..start].chars().next_back();
+        let after = task[end..].chars().next();
+        !before.is_some_and(is_word_char) && !after.is_some_and(is_word_char)
+    })
+}
+
+fn is_word_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_'
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{select_entry_executor, EntryExecutor, EntryMode};
+    use super::{run_output_envelope, select_entry_executor, EntryExecutor, EntryMode};
 
     #[test]
     fn auto_routes_large_tasks_to_project_executor() {
@@ -443,12 +629,20 @@ mod tests {
             select_entry_executor("rename this helper and run tests", EntryMode::Auto),
             EntryExecutor::Code
         );
+        assert_eq!(
+            select_entry_executor("Add a project field to the config", EntryMode::Auto),
+            EntryExecutor::Code
+        );
     }
 
     #[test]
     fn auto_routes_review_tasks_to_review_executor() {
         assert_eq!(
             select_entry_executor("review this MR for regressions", EntryMode::Auto),
+            EntryExecutor::Review
+        );
+        assert_eq!(
+            select_entry_executor("Review this benchmark report", EntryMode::Auto),
             EntryExecutor::Review
         );
         assert_eq!(
@@ -476,6 +670,14 @@ mod tests {
     }
 
     #[test]
+    fn auto_routing_uses_boundaries_for_short_markers() {
+        assert_eq!(
+            select_entry_executor("Don't merge this pull/main branch", EntryMode::Auto),
+            EntryExecutor::Code
+        );
+    }
+
+    #[test]
     fn explicit_mode_overrides_auto_routing() {
         assert_eq!(
             select_entry_executor("refactor the whole crate", EntryMode::Code),
@@ -493,5 +695,25 @@ mod tests {
             select_entry_executor("small rename", EntryMode::Bench),
             EntryExecutor::Bench
         );
+    }
+
+    #[test]
+    fn run_output_envelope_is_stable_across_executors() {
+        let output = run_output_envelope(
+            "fix bug",
+            EntryMode::Auto,
+            EntryExecutor::Review,
+            true,
+            2,
+            serde_json::json!({"verdict": "pass"}),
+        );
+
+        assert_eq!(output["schema"], "air.run.v1");
+        assert_eq!(output["task"], "fix bug");
+        assert_eq!(output["requested_mode"], "auto");
+        assert_eq!(output["executor"], "review-agent");
+        assert_eq!(output["memory"]["enabled"], true);
+        assert_eq!(output["memory"]["cards"], 2);
+        assert_eq!(output["output"]["verdict"], "pass");
     }
 }

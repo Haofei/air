@@ -189,7 +189,7 @@ workflow:
             phase: choose
 
     - id: summarize-at-step-limit
-      when: phase == "choose" && _air.is_last_action_step == true
+      when: phase != "init" && phase != "post_act" && phase != "summarize" && phase != "done" && _air.is_last_action_step == true
       actions:
         - kind: append
           target: observations
@@ -325,6 +325,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 64
+          allowed_tools: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
           timeout_seconds: 1800
           on_error: observe
         - kind: append
@@ -445,9 +446,44 @@ workflow:
             verification_required: false
             phase: summarize
 
+    - id: verify-command-mutated-workspace
+      when: phase == "post_act" && verification_required == true && observation_summary.verification_status_update == "unknown"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_required
+              result:
+                literal: Verify phase cannot satisfy the gate with workspace-mutating commands. Run a non-mutating test/check/lint command.
+        - kind: set
+          values:
+            verification_required: false
+            phase: summarize
+
     - id: complete-verified
       when: phase == "act" && decision.complete == true && verification_status == "passed"
       actions:
+        - kind: set
+          values:
+            phase: summarize
+
+    - id: summarize-post-act-at-step-limit
+      when: phase == "post_act" && _air.is_last_action_step == true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: step_budget_reached
+              result:
+                object:
+                  runtime:
+                    ref: _air
+                  verification_status:
+                    ref: verification_status
         - kind: set
           values:
             phase: summarize
@@ -470,17 +506,28 @@ workflow:
                     literal: bash
                   input:
                     literal:
-                      command: git diff -- . && git ls-files --others --exclude-standard -- . | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
+                      command: |
+                        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                          git diff -- . && git ls-files --others --exclude-standard -- . | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
+                        else
+                          printf 'AIR non-git workspace: git diff unavailable; workspace delta is computed by AIR artifact snapshot when available.\n'
+                        fi
                       description: Show workspace diff including untracked files
               - object:
                   tool:
                     literal: bash
                   input:
                     literal:
-                      command: '{ git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u'
+                      command: |
+                        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                          { git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u
+                        else
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' | sed 's#^\./##' | sort
+                        fi
                       description: List changed files including untracked files
           output: final_diff_result
           max_calls: 2
+          allowed_tools: [bash]
           timeout_seconds: 1800
           on_error: observe
         - kind: set

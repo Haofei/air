@@ -32,6 +32,8 @@ pub(crate) struct CodeRunArtifact {
     pub(crate) files: CodeRunArtifactFiles,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) failure_reason: Option<FailureReason>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) extra: BTreeMap<String, Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -606,6 +608,7 @@ pub(crate) fn build_code_run_artifact(
             subagents: Some("subagents".to_string()),
         },
         failure_reason,
+        extra: descriptor.extra,
     })
 }
 
