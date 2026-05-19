@@ -68,6 +68,16 @@ workflow:
               changed_files:
                 split_lines:
                   literal: "crates/air-tools/src/lib.rs\nskills/code-agent/code-edit-loop.air.yaml\n\n"
+              new_changed_files:
+                line_difference:
+                  - split_lines:
+                      literal: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa  crates/air-tools/src/lib.rs\nskills/code-agent/code-edit-loop.air.yaml\n"
+                  - split_lines:
+                      literal: "skills/code-agent/code-edit-loop.air.yaml\n"
+              preexisting_files:
+                path_objects:
+                  split_lines:
+                    literal: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb  README.md\n"
           output: response
           timeout_seconds: 30
           retry:

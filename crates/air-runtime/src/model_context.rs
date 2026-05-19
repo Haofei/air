@@ -34,7 +34,48 @@ pub fn take_last_within_bytes_value(
         selected.push(candidate);
     }
     selected.reverse();
+    preserve_first_context_spine(values, &mut selected, &mut selected_bytes, max_bytes);
     Ok(Value::Array(selected))
+}
+
+fn preserve_first_context_spine(
+    values: &[Value],
+    selected: &mut Vec<Value>,
+    selected_bytes: &mut usize,
+    max_bytes: usize,
+) {
+    if values.len() <= selected.len() || selected.first() == values.first() {
+        return;
+    }
+    let Some(first) = values.first() else {
+        return;
+    };
+    let should_preserve_spine = first
+        .as_object()
+        .is_some_and(|object| looks_like_observation(object) || object.contains_key("task"));
+    if !should_preserve_spine {
+        return;
+    }
+    let mut spine = compact_model_context_payload(first, max_bytes);
+    let mut spine_bytes = json_value_size_bytes(&spine);
+    if spine_bytes > max_bytes {
+        spine = compact_json_value(&spine, max_bytes);
+        spine_bytes = json_value_size_bytes(&spine);
+    }
+    if spine_bytes > max_bytes {
+        return;
+    }
+    while selected_bytes.saturating_add(spine_bytes) > max_bytes {
+        let Some(removed) = selected.first() else {
+            return;
+        };
+        *selected_bytes = selected_bytes.saturating_sub(json_value_size_bytes(removed));
+        selected.remove(0);
+    }
+    if selected.first() != Some(&spine) {
+        selected.insert(0, spine);
+        *selected_bytes = selected_bytes.saturating_add(spine_bytes);
+    }
 }
 
 fn compact_model_context_payload(value: &Value, max_bytes: usize) -> Value {

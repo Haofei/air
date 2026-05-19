@@ -305,8 +305,13 @@ mod tests {
                 "verify-command",
                 "verify",
                 "act",
+                "act-missing-complete-decision",
+                "act-missing-tool-calls-decision",
                 "verify-act",
+                "verify-act-missing-complete-decision",
+                "verify-act-missing-tool-calls-decision",
                 "verification-passed",
+                "verification-failed-again",
                 "verification-failed",
                 "verification-reset-after-write",
                 "complete-needs-verification",
@@ -344,8 +349,6 @@ mod tests {
                 "read_range",
                 "read_contains",
                 "edit",
-                "write",
-                "apply_patch",
                 "webfetch",
                 "todowrite",
                 "todoread",
@@ -417,6 +420,7 @@ mod tests {
         assert!(names_command.contains("git diff --name-only -- ."));
         assert!(names_command.contains("git ls-files --others --exclude-standard -- ."));
         assert!(names_command.contains("find . -type f"));
+        assert!(names_command.contains("shasum -a 256"));
     }
 
     #[test]
@@ -641,9 +645,24 @@ mod tests {
         let patch_applied = &summarize["actions"][1]["values"]["edit"]["object"]["patch_applied"];
         assert!(patch_applied.get("not").is_some());
         assert!(patch_applied["not"].get("is_empty").is_some());
+        let patch_lines = patch_applied["not"]["is_empty"]["line_difference"]
+            .as_sequence()
+            .unwrap();
         assert_eq!(
-            patch_applied["not"]["is_empty"]["split_lines"]["ref"],
+            patch_lines[0]["split_lines"]["ref"],
             serde_yaml::Value::String("final_diff_result[1].output.log".to_string())
+        );
+        assert_eq!(
+            patch_lines[1]["split_lines"]["ref"],
+            serde_yaml::Value::String("preexisting_diff_result[0].output.log".to_string())
+        );
+        let changed_files = &summarize["actions"][1]["values"]["edit"]["object"]["changed_files"];
+        assert!(changed_files.get("line_difference").is_some());
+        let preexisting =
+            &summarize["actions"][1]["values"]["edit"]["object"]["preexisting_changed_files"];
+        assert_eq!(
+            preexisting["path_objects"]["split_lines"]["ref"],
+            serde_yaml::Value::String("preexisting_diff_result[0].output.log".to_string())
         );
         let final_success = &summarize["actions"][1]["values"]["edit"]["object"]["final_success"];
         assert_eq!(

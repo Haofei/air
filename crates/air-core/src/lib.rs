@@ -207,6 +207,12 @@ pub enum Expr {
     SplitLines {
         split_lines: Box<Expr>,
     },
+    LineDifference {
+        line_difference: Vec<Expr>,
+    },
+    PathObjects {
+        path_objects: Box<Expr>,
+    },
     Equals {
         equals: Vec<Expr>,
     },

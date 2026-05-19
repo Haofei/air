@@ -40,12 +40,13 @@ use crate::mcp::{
     McpListOptions,
 };
 use crate::memory::{
-    build_memory_pack, build_memory_run_hint, check_policy_candidate, draft_skill_from_memory,
-    evaluate_memory_skill, list_memory, pack_memory_command, promote_memory, retire_memory,
-    search_memory, show_memory_graph, show_memory_scorecard, view_memory, MemoryGraphOptions,
-    MemoryHintOptions, MemoryListOptions, MemoryPackOptions, MemoryPolicyCheckOptions,
-    MemoryPromoteOptions, MemoryRetireOptions, MemoryScorecardOptions, MemorySearchOptions,
-    MemorySkillDraftOptions, MemorySkillEvaluateOptions, MemoryViewOptions,
+    build_memory_pack, build_memory_run_hint, causal_eval_memory, check_policy_candidate,
+    draft_skill_from_memory, evaluate_memory_skill, list_memory, pack_memory_command,
+    promote_memory, retire_memory, search_memory, show_memory_graph, show_memory_scorecard,
+    view_memory, MemoryCausalEvalOptions, MemoryGraphOptions, MemoryHintOptions, MemoryListOptions,
+    MemoryPackOptions, MemoryPolicyCheckOptions, MemoryPromoteOptions, MemoryRetireOptions,
+    MemoryScorecardOptions, MemorySearchOptions, MemorySkillDraftOptions,
+    MemorySkillEvaluateOptions, MemoryViewOptions,
 };
 use crate::models::ModelProviderChoice;
 use crate::planner::{
@@ -89,6 +90,22 @@ fn parse_nonzero_usize(value: &str) -> Result<usize, String> {
         .map_err(|error| format!("expected a positive integer: {error}"))?;
     if parsed == 0 {
         return Err("value must be greater than 0".to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_dream_top_findings(value: &str) -> Result<usize, String> {
+    let parsed = parse_nonzero_usize(value)?;
+    if parsed > 10 {
+        return Err("value must be between 1 and 10".to_string());
+    }
+    Ok(parsed)
+}
+
+fn parse_dream_candidates(value: &str) -> Result<usize, String> {
+    let parsed = parse_nonzero_usize(value)?;
+    if parsed > 12 {
+        return Err("value must be between 1 and 12".to_string());
     }
     Ok(parsed)
 }
@@ -503,6 +520,10 @@ enum SelfCommand {
         /// Keep temporary candidate git worktrees for manual inspection.
         #[arg(long)]
         keep_worktrees: bool,
+
+        /// Allow bootstrapping uncommitted workspace changes into candidate baselines.
+        #[arg(long)]
+        allow_dirty_bootstrap: bool,
     },
     /// Compare candidate eval.json files.
     Compare {
@@ -552,7 +573,7 @@ enum DreamCommand {
         experiment: bool,
 
         /// Number of findings to experiment on when --experiment is set.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, value_parser = parse_dream_top_findings)]
         top_findings: usize,
 
         /// Maximum wall-clock seconds for all --experiment work.
@@ -560,7 +581,7 @@ enum DreamCommand {
         budget_seconds: Option<u64>,
 
         /// Candidate patches per finding when --experiment is set.
-        #[arg(long, default_value_t = 1)]
+        #[arg(long, default_value_t = 1, value_parser = parse_dream_candidates)]
         candidates: usize,
 
         /// Run only artifacts newer than the previous Dream state. This is the default.
@@ -691,6 +712,27 @@ enum MemoryCommand {
         /// Promotion status.
         #[arg(long)]
         status: Option<String>,
+    },
+    /// Record causal compare-no-memory/replay evidence for promotion.
+    CausalEval {
+        /// Memory id.
+        id: String,
+
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Causal outcome: helped, hurt, or neutral.
+        #[arg(long)]
+        outcome: String,
+
+        /// Evidence artifact, such as compare-no-memory output or replay/bench report.
+        #[arg(long)]
+        evidence: PathBuf,
+
+        /// Optional note describing the comparison.
+        #[arg(long)]
+        note: Option<String>,
     },
     /// Retire stale or harmful memory.
     Retire {
@@ -1592,6 +1634,19 @@ fn main() -> Result<()> {
                 id,
                 status,
             }),
+            MemoryCommand::CausalEval {
+                id,
+                memory_dir,
+                outcome,
+                evidence,
+                note,
+            } => causal_eval_memory(MemoryCausalEvalOptions {
+                memory_dir,
+                id,
+                outcome,
+                evidence,
+                note,
+            }),
             MemoryCommand::Retire {
                 id,
                 memory_dir,
@@ -1681,6 +1736,7 @@ fn main() -> Result<()> {
                 regression_file,
                 evaluate,
                 keep_worktrees,
+                allow_dirty_bootstrap,
             } => self_fix(SelfFixOptions {
                 finding,
                 candidates,
@@ -1692,6 +1748,7 @@ fn main() -> Result<()> {
                 regression_file,
                 evaluate,
                 keep_worktrees,
+                allow_dirty_bootstrap,
             }),
             SelfCommand::Compare { finding, from, out } => {
                 self_compare(SelfCompareOptions { finding, from, out })
@@ -2820,8 +2877,6 @@ mod tests {
                 "read_contains",
                 "read_range",
                 "edit",
-                "write",
-                "apply_patch",
                 "webfetch",
                 "todowrite",
                 "todoread",
@@ -3235,6 +3290,33 @@ mod tests {
     }
 
     #[test]
+    fn dream_experiment_rejects_excessive_candidate_counts() {
+        let err = Cli::try_parse_from([
+            "air",
+            "dream",
+            "run",
+            "--write-regressions",
+            "--experiment",
+            "--top-findings",
+            "1000",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+
+        let err = Cli::try_parse_from([
+            "air",
+            "dream",
+            "run",
+            "--write-regressions",
+            "--experiment",
+            "--candidates",
+            "1000",
+        ])
+        .unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
     fn dream_incremental_conflicts_with_explicit_since() {
         let err = Cli::try_parse_from([
             "air",
@@ -3364,6 +3446,40 @@ mod tests {
             panic!("expected memory promote command");
         };
         assert_eq!(id, "mem_failure_abc");
+
+        let causal = Cli::try_parse_from([
+            "air",
+            "memory",
+            "causal-eval",
+            "mem_failure_abc",
+            "--outcome",
+            "helped",
+            "--evidence",
+            "target/generated/compare-no-memory.json",
+            "--note",
+            "same task passed only with memory",
+        ])
+        .unwrap();
+        let Command::Memory {
+            command:
+                MemoryCommand::CausalEval {
+                    id,
+                    outcome,
+                    evidence,
+                    note,
+                    ..
+                },
+        } = causal.command
+        else {
+            panic!("expected memory causal-eval command");
+        };
+        assert_eq!(id, "mem_failure_abc");
+        assert_eq!(outcome, "helped");
+        assert_eq!(
+            evidence,
+            PathBuf::from("target/generated/compare-no-memory.json")
+        );
+        assert_eq!(note, Some("same task passed only with memory".to_string()));
 
         let pack =
             Cli::try_parse_from(["air", "memory", "pack", "fix verification failure"]).unwrap();
@@ -3618,6 +3734,7 @@ mod tests {
             "target/generated/improve/suggested-regressions/imp-001.json",
             "--evaluate",
             "--keep-worktrees",
+            "--allow-dirty-bootstrap",
         ])
         .unwrap();
         let Command::Self_ {
@@ -3633,6 +3750,7 @@ mod tests {
                     regression_file,
                     evaluate,
                     keep_worktrees,
+                    allow_dirty_bootstrap,
                 },
         } = fix.command
         else {
@@ -3653,6 +3771,7 @@ mod tests {
         );
         assert!(evaluate);
         assert!(keep_worktrees);
+        assert!(allow_dirty_bootstrap);
 
         let compare = Cli::try_parse_from([
             "air",

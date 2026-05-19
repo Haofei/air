@@ -2496,6 +2496,8 @@ fn looks_like_expr(value: &Value) -> bool {
                 | "take_last"
                 | "take_last_within_bytes"
                 | "split_lines"
+                | "line_difference"
+                | "path_objects"
                 | "equals"
                 | "is_empty"
                 | "not"
@@ -2556,6 +2558,28 @@ fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, Runti
                     .collect(),
             ))
         }
+        Expr::LineDifference { line_difference } => {
+            let [left, right] = line_difference.as_slice() else {
+                return Err(RuntimeError::UnsupportedExpression(
+                    "line_difference expects exactly two operands".to_string(),
+                ));
+            };
+            let left = expr_string_items(&eval_expr(state, outputs, left)?, "line_difference")?;
+            let right = expr_string_items(&eval_expr(state, outputs, right)?, "line_difference")?;
+            let right = right.into_iter().collect::<BTreeSet<_>>();
+            Ok(Value::Array(
+                left.into_iter()
+                    .filter(|item| !right.contains(item))
+                    .map(|item| Value::String(line_display_path(&item)))
+                    .collect(),
+            ))
+        }
+        Expr::PathObjects { path_objects } => Ok(Value::Array(
+            expr_string_items(&eval_expr(state, outputs, path_objects)?, "path_objects")?
+                .into_iter()
+                .map(|item| json!({ "path": line_display_path(&item) }))
+                .collect(),
+        )),
         Expr::Equals { equals } => {
             let [left, right] = equals.as_slice() else {
                 return Err(RuntimeError::UnsupportedExpression(
@@ -2579,6 +2603,40 @@ fn eval_expr(state: &State, outputs: &State, expr: &Expr) -> Result<Value, Runti
             };
             Ok(Value::Bool(!value))
         }
+    }
+}
+
+fn line_display_path(line: &str) -> String {
+    let trimmed = line.trim();
+    let Some((hash, path)) = trimmed.split_once(char::is_whitespace) else {
+        return trimmed.to_string();
+    };
+    if hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        path.trim().to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+fn expr_string_items(value: &Value, name: &str) -> Result<Vec<String>, RuntimeError> {
+    match value {
+        Value::Array(items) => items
+            .iter()
+            .map(|item| {
+                item.as_str().map(str::to_string).ok_or_else(|| {
+                    RuntimeError::UnsupportedExpression(format!("{name} expects arrays of strings"))
+                })
+            })
+            .collect(),
+        Value::String(text) => Ok(text
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+            .map(str::to_string)
+            .collect()),
+        _ => Err(RuntimeError::UnsupportedExpression(format!(
+            "{name} expects string or array operands"
+        ))),
     }
 }
 
@@ -3181,6 +3239,45 @@ mod tests {
         assert_eq!(items.len(), 20, "{rendered}");
         assert!(rendered.contains("note-0"), "{rendered}");
         assert!(rendered.contains("note-19"), "{rendered}");
+    }
+
+    #[test]
+    fn take_last_within_bytes_preserves_first_spine_item() {
+        let evidence = Value::Array(
+            std::iter::once(json!({
+                "action": "task",
+                "result": "original task statement and first verification attempt"
+            }))
+            .chain((0..40).map(|index| {
+                json!({
+                    "action": "tool_result",
+                    "result": {
+                        "tool": "bash",
+                        "log": format!("large intermediate output {index} {}", "x".repeat(2_000))
+                    }
+                })
+            }))
+            .collect(),
+        );
+
+        let compacted = take_last_within_bytes_value(&evidence, 20_000).unwrap();
+        let items = compacted.as_array().unwrap();
+        let rendered = serde_json::to_string(&compacted).unwrap();
+
+        assert!(
+            rendered.len() <= 20_000,
+            "compacted context exceeded budget: {}",
+            rendered.len()
+        );
+        assert_eq!(items[0]["action"], json!("task"));
+        assert!(
+            rendered.contains("original task statement"),
+            "first context spine was dropped: {rendered}"
+        );
+        assert!(
+            rendered.contains("large intermediate output 39"),
+            "tail context was dropped: {rendered}"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ modules:
     path: skills/code-agent/code-edit-loop.air.yaml
     kind: composite
     visibility: public
-    description: "Minimal opencode-style code-agent skill using question/bash/search/context/edit/write/task/webfetch/todo/skill tools."
+    description: "Minimal opencode-style code-agent skill using question/bash/search/context/edit/task/webfetch/todo/skill tools."
     tags: [coding, edit, tool_loop, test]
     covers: [code_exploration, code_edit, bounded_tool_loop, retest]
     priority: 80

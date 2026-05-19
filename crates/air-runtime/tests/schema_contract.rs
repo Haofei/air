@@ -496,6 +496,12 @@ fn evaluates_composable_input_expressions() {
             "changed_files": [
                 "crates/air-tools/src/lib.rs",
                 "skills/code-agent/code-edit-loop.air.yaml"
+            ],
+            "new_changed_files": [
+                "crates/air-tools/src/lib.rs"
+            ],
+            "preexisting_files": [
+                {"path": "README.md"}
             ]
         })
     );

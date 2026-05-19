@@ -93,13 +93,12 @@ PR is opened.
 
 `air dream run` is the productized version of that review window. It is
 incremental by default: AIR reads `.air/dream/state.json`, uses the previous
-window's maximum input mtime minus an overlap as the next scan cursor,
+per-root high-watermark cursors minus an overlap as the next scan window,
 de-duplicates exact inputs already seen in the prior window, and updates the
 state only after the Dream run succeeds. Use `--full` to ignore the saved
-cursor, or `--since-unix` to force a specific window. It writes
-`.air/dream/latest/dream.json`, `.air/dream/latest/dream.md`, and
-`.air/dream/latest/window/window.json`, plus `audit/`, `improve/`, `memory/`,
-and `logs/` subdirectories. Dream is intentionally offline and review-first: it
+cursor, or `--since-unix` to force a specific window. By default it writes
+`.air/dream/runs/<run-id>/dream.json`, `dream.md`, and `window/window.json`;
+`.air/dream/latest` points at the newest run. Dream is intentionally offline and review-first: it
 audits recent artifacts, mines findings, optionally writes suggested regression
 JSON files, compiles evidence-backed memory candidates, and prints next
 commands. It does not modify source code, open PRs, inject memory into prompts,
@@ -142,8 +141,11 @@ Dream also keeps persistent finding state under `.air/dream/`:
 ```
 
 `findings.jsonl` is append-only and stores the latest lifecycle snapshot for
-each finding: first seen, last seen, recurrence count, open/resolved/dismissed
-status, linked regressions/candidates, and whether a resolved finding recurred.
+each finding: a stable finding key, the current display id such as `IMP-001`,
+aliases from past Dream runs, first seen, last seen, recurrence count,
+open/resolved/dismissed status, linked regressions/candidates, and whether a
+resolved finding recurred. Treat `IMP-*` as a run-local display rank; the stable
+key is what prevents history from moving when finding order changes.
 `ledger.jsonl` records lifecycle events such as `finding_observed`,
 `finding_resolved`, and `experiment_ran`.
 
@@ -179,18 +181,24 @@ cargo run -p air-cli -- dream run \
 ```
 
 This chains into `self fix --evaluate` and `self compare` for the selected
-findings, writes candidates under `.air/dream/latest/candidates/`, and links
-the candidate paths back to `.air/dream/findings.jsonl`. It does not promote,
-commit, trust, or open PRs.
+findings, writes candidates under the run directory's `candidates/`, records
+`dream_provenance.json` with the run id, finding stable key, and window
+manifest hash, and links the candidate paths back to `.air/dream/findings.jsonl`.
+It requires a clean git workspace, skips unsupported regression kinds before
+spending model calls, and does not promote, commit, trust, or open PRs.
 
 ```bash
 cargo run -p air-cli -- memory list --status candidate
 cargo run -p air-cli -- memory search verification --kind failure
 cargo run -p air-cli -- memory view mem_failure_... --evidence
-cargo run -p air-cli -- memory promote mem_procedure_...
+cargo run -p air-cli -- memory promote mem_procedure_... --status validated
 cargo run -p air-cli -- memory pack "fix a Rust verification failure"
 cargo run -p air-cli -- memory graph --limit 20
 cargo run -p air-cli -- memory scorecard
+cargo run -p air-cli -- memory causal-eval mem_procedure_... \
+  --outcome helped \
+  --evidence target/generated/compare-no-memory.json
+cargo run -p air-cli -- memory promote mem_procedure_...
 cargo run -p air-cli -- run "fix a Rust verification failure" --memory
 cargo run -p air-cli -- skill route "fix a Rust verification failure" --memory
 cargo run -p air-cli -- memory skill-draft mem_procedure_...
@@ -218,10 +226,12 @@ writes one under `target/generated/code-runs/memory-run-*` so the next Dream
 pass can read those success/failure episodes and append `helped_candidate` or
 `hurt_candidate` outcomes to `.air/memory/usage.jsonl`. Repeated positive
 evidence confirms `helped` and auto-validates candidate memory, but it does not
-pin or prompt-inject it. Repeated negative evidence confirms `hurt` and
-auto-retires the memory so it stops being suggested. `air memory scorecard`
-summarizes which memories are actually useful before the team promotes, retires,
-or edits them.
+pin or prompt-inject it. Promotion to `promoted` or `pinned` requires causal
+evidence recorded with `air memory causal-eval`, normally from a
+compare-no-memory, replay, or benchmark artifact. Repeated negative evidence
+confirms `hurt` and auto-retires the memory so it stops being suggested.
+`air memory scorecard` summarizes which memories are actually useful before the
+team promotes, retires, or edits them.
 
 `memory policy-check` reviews a policy memory as a deterministic guard proposal:
 it reports likely affected runtime files, tests that should exist, and whether
@@ -578,7 +588,7 @@ AIR checks:
 Common native tools live in the `air-tools` crate and are configured through `--tool-config`.
 Tool kinds are lower-level capabilities; the names exposed to a model are application aliases.
 For the code-agent edit loop, prefer the OpenCode-style aliases `question`, `bash`,
-`read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`, `todowrite`,
+`read`, `glob`, `grep`, `edit`, `task`, `webfetch`, `todowrite`,
 `todoread`, and `skill`. Git operations should use `bash`, the same terminal path
 a human developer would use.
 
@@ -639,7 +649,7 @@ passed through semantic compaction or adapter layers and wants to validate again
 enforcement.
 
 The `skills/code-agent` workflow exposes one OpenCode-style loop over declared tools such as
-`question`, `bash`, `read`, `glob`, `grep`, `edit`, `write`, `task`, `webfetch`,
+`question`, `bash`, `read`, `glob`, `grep`, `edit`, `task`, `webfetch`,
 `todowrite`, `todoread`, and `skill`.
 The same loop handles exploration, review, editing,
 formatting, and verification from a single task prompt; the model discovers relevant files through

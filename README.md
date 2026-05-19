@@ -230,15 +230,16 @@ cargo run -p air-cli -- dream run \
   --from target/generated \
   --limit 100 \
   --mode deep \
-  --out-dir .air/dream/latest \
   --write-regressions
 ```
 
 `dream run` is incremental by default. It reads `.air/dream/state.json`, uses
-the previous window's maximum input mtime minus a small overlap as the next scan
-cursor, and de-duplicates exact inputs already seen in the prior window. Use
-`--full` to ignore the saved state, or pass `--since-unix` to set an explicit
-window. The audit and improve stages are both derived from the same
+per-root high-watermark cursors minus a small overlap as the next scan window,
+and de-duplicates exact inputs already seen in the prior window. Use `--full`
+to ignore the saved state, or pass `--since-unix` to set an explicit window. By
+default, runs are written under `.air/dream/runs/<run-id>/` and
+`.air/dream/latest` points at the newest run; pass `--out-dir` for a custom
+destination. The audit and improve stages are both derived from the same
 `window/window.json` manifest, so the report does not mix full-history audit
 with windowed improvement findings.
 
@@ -269,10 +270,12 @@ The Dream directory contains:
   for this window.
 - `logs/`: captured stdout/stderr from the underlying audit and improve stages.
 - `.air/dream/state.json`: the persistent incremental cursor and last Dream
-  summary, including the last window's input fingerprints.
+  summary, including the last window's input fingerprints and per-root cursors.
 - `.air/dream/findings.jsonl`: append-only persistent finding records with
-  first_seen, last_seen, recurrence_count, status, linked regressions,
-  linked candidates, and recurred_after_fix.
+  stable finding keys, current display ids such as `IMP-001`, first_seen,
+  last_seen, recurrence_count, status, linked regressions, linked candidates,
+  and recurred_after_fix. `IMP-*` is a per-run display rank, not the durable
+  identity.
 - `.air/dream/ledger.jsonl`: append-only lifecycle events such as
   finding_observed, finding_resolved, and experiment_ran.
 - `.air/memory/`: local long-term evidence store with `episodes.jsonl`,
@@ -292,10 +295,14 @@ gates approve it.
 cargo run -p air-cli -- memory list --status candidate
 cargo run -p air-cli -- memory search verification --kind failure
 cargo run -p air-cli -- memory view mem_failure_... --evidence
-cargo run -p air-cli -- memory promote mem_procedure_...
+cargo run -p air-cli -- memory promote mem_procedure_... --status validated
 cargo run -p air-cli -- memory pack "fix a Rust verification failure"
 cargo run -p air-cli -- memory graph --limit 20
 cargo run -p air-cli -- memory scorecard
+cargo run -p air-cli -- memory causal-eval mem_procedure_... \
+  --outcome helped \
+  --evidence target/generated/compare-no-memory.json
+cargo run -p air-cli -- memory promote mem_procedure_...
 cargo run -p air-cli -- memory skill-draft mem_procedure_...
 cargo run -p air-cli -- memory skill-evaluate mem_procedure_...
 cargo run -p air-cli -- memory policy-check mem_policy_...
@@ -318,9 +325,12 @@ cargo run -p air-cli -- dream run \
   --budget-seconds 900
 ```
 
-The experiment writes candidates under `.air/dream/latest/candidates/`, logs
-under `.air/dream/latest/logs/`, and linked candidate paths into the finding
-store. It still does not trust, promote, commit, or open a PR. Memory follow-up is similarly explicit:
+The experiment writes candidates under the run directory's `candidates/`, logs
+under `logs/`, and a `dream_provenance.json` file with `dream_run_id`,
+`finding_stable_key`, and `window_manifest_sha`. Experiments require a clean git
+workspace and currently run only executable `code_run_verdict` regressions;
+unsupported regression kinds are skipped before model calls. It still does not
+trust, promote, commit, or open a PR. Memory follow-up is similarly explicit:
 review candidate memories, promote only the ones that should guide future runs,
 then use `air run --memory` or `air skill route --memory` to include a compact
 pack of promoted memories. Turn repeated procedures into skill drafts only after
@@ -330,10 +340,12 @@ AIR writes one under `target/generated/code-runs/memory-run-*` so the next Dream
 pass can turn successful runs into `helped_candidate` events and failed runs
 into `hurt_candidate` events, visible through `air memory scorecard`. Repeated
 positive evidence confirms `helped` and auto-validates candidate memory, but it
-does not pin or prompt-inject it. Repeated negative evidence confirms `hurt` and
-auto-retires the memory so it stops being suggested. Promote policy memories
-only as deterministic guards after `air memory policy-check` and a normal
-reviewed patch. If Dream was run without `--write-regressions`, its next
+does not pin or prompt-inject it. Promotion to `promoted` or `pinned` requires
+causal evidence recorded with `air memory causal-eval`, normally from a
+compare-no-memory, replay, or benchmark artifact. Repeated negative evidence
+confirms `hurt` and auto-retires the memory so it stops being suggested.
+Promote policy memories only as deterministic guards after
+`air memory policy-check` and a normal reviewed patch. If Dream was run without `--write-regressions`, its next
 commands first promote the selected regression and then point `self fix` at the
 promoted regression file under `skills/code-agent/benches/regressions/`.
 Deterministic gates remain the source of truth for promotion.

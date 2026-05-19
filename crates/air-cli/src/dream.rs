@@ -3,7 +3,7 @@ use crate::memory::{extract_memory, MemoryExtractOptions};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -20,6 +20,8 @@ const DREAM_FINDINGS_PATH: &str = ".air/dream/findings.jsonl";
 const DREAM_LEDGER_PATH: &str = ".air/dream/ledger.jsonl";
 const DREAM_OUTPUT_MARKER: &str = ".air-dream-output";
 const DREAM_CURSOR_OVERLAP_SECONDS: u64 = 300;
+const DREAM_FINDING_LIST_LIMIT: usize = 50;
+const DREAM_FINDINGS_COMPACT_BYTES: u64 = 1_048_576;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "snake_case")]
@@ -80,12 +82,15 @@ struct DreamState {
     last_top_finding: Option<DreamFindingSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_window: Option<DreamWindowState>,
+    #[serde(default)]
+    root_cursors: Vec<DreamRootCursor>,
 }
 
 #[derive(Debug, Serialize)]
 struct DreamRunOutput {
     schema: &'static str,
     status: String,
+    run_id: String,
     mode: String,
     incremental: bool,
     incremental_source: String,
@@ -155,6 +160,9 @@ struct DreamExperimentStage {
 #[derive(Debug, Serialize)]
 struct DreamExperimentResult {
     finding: String,
+    dream_run_id: String,
+    finding_stable_key: String,
+    window_manifest_sha: String,
     status: String,
     self_fix_log: Option<String>,
     compare_log: Option<String>,
@@ -165,6 +173,9 @@ struct DreamExperimentResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct DreamFindingSummary {
     id: String,
+    stable_key: String,
+    persistent_id: String,
+    display_rank: Option<u64>,
     category: String,
     summary: String,
     impact_score: i64,
@@ -186,6 +197,14 @@ struct DreamWindowState {
     inputs: Vec<DreamWindowInput>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct DreamRootCursor {
+    root: String,
+    root_exists: bool,
+    last_seen_max_mtime_unix: Option<u64>,
+    last_scan_completed_at_unix: Option<u64>,
+}
+
 #[derive(Debug, Serialize)]
 struct DreamWindowManifest {
     schema: &'static str,
@@ -203,6 +222,14 @@ struct DreamWindowManifest {
 struct DreamFindingRecord {
     schema: String,
     id: String,
+    #[serde(default)]
+    stable_key: String,
+    #[serde(default)]
+    display_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    display_rank: Option<u64>,
+    #[serde(default)]
+    aliases: Vec<String>,
     category: String,
     summary: String,
     impact_score: i64,
@@ -260,6 +287,7 @@ struct DreamLedgerEvent {
 pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let started_at = unix_now();
+    let run_id = dream_run_id(started_at);
     let state_file = cwd.join(DREAM_STATE_PATH);
     let prior_state = read_dream_state(&state_file)?;
     let state_cursor = prior_state.as_ref().and_then(state_cursor_unix);
@@ -286,12 +314,16 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
     } else {
         options.from.clone()
     };
+    let default_out_dir = options.out_dir.is_none();
     let out_dir = absolutize(
         &cwd,
         options
             .out_dir
-            .unwrap_or_else(|| PathBuf::from(".air/dream/latest")),
+            .unwrap_or_else(|| PathBuf::from(".air/dream/runs").join(&run_id)),
     );
+    if options.experiment {
+        ensure_clean_experiment_workspace(&cwd, Some(&out_dir))?;
+    }
     clear_dream_out_dir(&out_dir)?;
     let audit_dir = out_dir.join("audit");
     let improve_dir = out_dir.join("improve");
@@ -300,12 +332,15 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
     let window_inputs = discover_dream_window_inputs(
         &cwd,
         &roots,
-        since_unix,
+        if options.full {
+            None
+        } else {
+            options.since_unix
+        },
         options.limit,
         dedupe_previous_window,
-        prior_state
-            .as_ref()
-            .and_then(|state| state.last_window.as_ref()),
+        prior_state.as_ref(),
+        options.full,
     )?;
     let max_input_mtime_unix = window_inputs.iter().map(|input| input.mtime_unix).max();
     let audit_roots = window_inputs
@@ -373,14 +408,6 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
             audit_args.push("--from".to_string());
             audit_args.push(root.display().to_string());
         }
-        if let Some(since_unix) = since_unix {
-            audit_args.push("--since-unix".to_string());
-            audit_args.push(since_unix.to_string());
-        }
-        if let Some(limit) = options.limit {
-            audit_args.push("--limit".to_string());
-            audit_args.push(limit.to_string());
-        }
         audit_args.push("--out-dir".to_string());
         audit_args.push(audit_dir.display().to_string());
         audit_args.push("--report".to_string());
@@ -398,6 +425,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
             improve_args.push("--write-regressions".to_string());
         }
         run_air_stage(&cwd, &improve_args, &improve_log)?;
+        validate_dream_stage_outputs(&audit_dir, &improve_dir)?;
     }
 
     let findings_file = improve_dir.join("findings.json");
@@ -424,6 +452,8 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         run_dream_experiments(
             &cwd,
             &out_dir,
+            &run_id,
+            &window_manifest,
             &roots,
             &findings,
             &improve_dir,
@@ -460,6 +490,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         } else {
             "findings_ready".to_string()
         },
+        run_id: run_id.clone(),
         mode: options.mode.as_str().to_string(),
         incremental,
         incremental_source,
@@ -516,25 +547,29 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
     fs::write(&dream_json, serde_json::to_string_pretty(&output)?)
         .with_context(|| format!("write {}", dream_json.display()))?;
     write_dream_report(&dream_report, &output)?;
+    if default_out_dir {
+        update_latest_dream_link(&cwd, &out_dir)?;
+    }
     let completed_at = unix_now();
     let state_window = if window_inputs.is_empty() {
         prior_state
             .as_ref()
             .and_then(|state| state.last_window.clone())
-            .unwrap_or_else(|| DreamWindowState {
-                from_unix: since_unix,
-                to_unix: started_at,
-                max_input_mtime_unix,
-                inputs: Vec::new(),
-            })
     } else {
-        DreamWindowState {
+        Some(DreamWindowState {
             from_unix: since_unix,
             to_unix: started_at,
             max_input_mtime_unix,
-            inputs: window_inputs,
-        }
+            inputs: window_inputs.clone(),
+        })
     };
+    let root_cursors = update_root_cursors(
+        &cwd,
+        &roots,
+        prior_state.as_ref(),
+        &window_inputs,
+        completed_at,
+    );
     write_dream_state(
         &state_file,
         &DreamState {
@@ -550,7 +585,8 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
                 .collect(),
             last_findings: output.findings,
             last_top_finding: output.top_finding.clone(),
-            last_window: Some(state_window),
+            last_window: state_window,
+            root_cursors,
         },
     )?;
     println!("{}", serde_json::to_string_pretty(&output)?);
@@ -571,6 +607,7 @@ pub(crate) fn show_dream_state(_options: DreamStateOptions) -> Result<()> {
         last_findings: 0,
         last_top_finding: None,
         last_window: None,
+        root_cursors: Vec::new(),
     });
     println!("{}", serde_json::to_string_pretty(&state)?);
     Ok(())
@@ -648,6 +685,8 @@ fn run_air_stage(cwd: &Path, args: &[String], log_path: &Path) -> Result<()> {
 fn run_dream_experiments(
     cwd: &Path,
     out_dir: &Path,
+    run_id: &str,
+    window_manifest: &Path,
     roots: &[PathBuf],
     findings: &[Value],
     improve_dir: &Path,
@@ -656,11 +695,12 @@ fn run_dream_experiments(
     budget_seconds: Option<u64>,
     now: u64,
 ) -> Result<DreamExperimentStage> {
-    let count = top_findings.clamp(1, 10);
-    let candidate_count = candidates.clamp(1, 12);
+    let count = top_findings;
+    let candidate_count = candidates;
     let budget = budget_seconds.map(Duration::from_secs);
     let started = Instant::now();
     let mut results = Vec::new();
+    let window_manifest_sha = file_fingerprint(window_manifest)?;
     for finding in findings.iter().take(count) {
         if let Some(budget) = budget {
             if started.elapsed() >= budget {
@@ -674,6 +714,9 @@ fn run_dream_experiments(
         if !regression_file.exists() {
             results.push(DreamExperimentResult {
                 finding: summary.id.clone(),
+                dream_run_id: run_id.to_string(),
+                finding_stable_key: summary.stable_key.clone(),
+                window_manifest_sha: window_manifest_sha.clone(),
                 status: "missing_regression_file".to_string(),
                 self_fix_log: None,
                 compare_log: None,
@@ -687,11 +730,43 @@ fn run_dream_experiments(
             append_dream_ledger(
                 cwd,
                 "experiment_skipped",
-                &summary.id,
+                &summary.persistent_id,
                 now,
                 Some(regression_file.display().to_string()),
                 Some("missing_regression_file".to_string()),
                 Some("run dream with --write-regressions before --experiment".to_string()),
+            )?;
+            continue;
+        }
+        let regression_kind = read_regression_kind(&regression_file)?;
+        if regression_kind != "code_run_verdict" {
+            let status = format!("unsupported_regression_kind_{regression_kind}");
+            results.push(DreamExperimentResult {
+                finding: summary.id.clone(),
+                dream_run_id: run_id.to_string(),
+                finding_stable_key: summary.stable_key.clone(),
+                window_manifest_sha: window_manifest_sha.clone(),
+                status: status.clone(),
+                self_fix_log: None,
+                compare_log: None,
+                candidates_dir: out_dir
+                    .join("candidates")
+                    .join(&summary.id)
+                    .display()
+                    .to_string(),
+                report: None,
+            });
+            append_dream_ledger(
+                cwd,
+                "experiment_skipped",
+                &summary.persistent_id,
+                now,
+                Some(regression_file.display().to_string()),
+                Some(status),
+                Some(
+                    "dream experiment only runs executable code_run_verdict regressions"
+                        .to_string(),
+                ),
             )?;
             continue;
         }
@@ -703,6 +778,9 @@ fn run_dream_experiments(
             .join("logs")
             .join(format!("experiment-{}-compare.log", summary.id));
         let candidates_dir = out_dir.join("candidates");
+        let provenance_file = candidates_dir
+            .join(&summary.id)
+            .join("dream_provenance.json");
         let mut fix_args = vec![
             "self".to_string(),
             "fix".to_string(),
@@ -720,6 +798,14 @@ fn run_dream_experiments(
             fix_args.push(root.display().to_string());
         }
         let fix_status = run_air_stage_with_timeout(cwd, &fix_args, &fix_log, remaining)?;
+        write_experiment_provenance(
+            &provenance_file,
+            run_id,
+            &summary,
+            &window_manifest_sha,
+            window_manifest,
+            &regression_file,
+        )?;
         let mut status = if fix_status == "completed" {
             "self_fix_completed".to_string()
         } else {
@@ -729,7 +815,7 @@ fn run_dream_experiments(
             append_dream_ledger(
                 cwd,
                 "experiment_ran",
-                &summary.id,
+                &summary.persistent_id,
                 now,
                 Some(
                     out_dir
@@ -743,6 +829,9 @@ fn run_dream_experiments(
             )?;
             results.push(DreamExperimentResult {
                 finding: summary.id,
+                dream_run_id: run_id.to_string(),
+                finding_stable_key: summary.stable_key,
+                window_manifest_sha: window_manifest_sha.clone(),
                 status,
                 self_fix_log: Some(fix_log.display().to_string()),
                 compare_log: None,
@@ -783,7 +872,7 @@ fn run_dream_experiments(
         append_dream_ledger(
             cwd,
             "experiment_ran",
-            &summary.id,
+            &summary.persistent_id,
             now,
             Some(
                 out_dir
@@ -797,7 +886,7 @@ fn run_dream_experiments(
         )?;
         link_finding_candidate(
             &cwd.join(DREAM_FINDINGS_PATH),
-            &summary.id,
+            &summary.stable_key,
             out_dir
                 .join("candidates")
                 .join(&summary.id)
@@ -806,6 +895,9 @@ fn run_dream_experiments(
         )?;
         results.push(DreamExperimentResult {
             finding: summary.id,
+            dream_run_id: run_id.to_string(),
+            finding_stable_key: summary.stable_key,
+            window_manifest_sha: window_manifest_sha.clone(),
             status,
             self_fix_log: Some(fix_log.display().to_string()),
             compare_log: Some(compare_log.display().to_string()),
@@ -864,7 +956,7 @@ fn run_air_stage_with_timeout(
         }
         if let Some(timeout) = timeout {
             if started.elapsed() >= timeout {
-                let _ = child.kill();
+                terminate_child_gracefully(&mut child);
                 let output = child
                     .wait_with_output()
                     .context("collect timed out dream experiment output")?;
@@ -874,6 +966,24 @@ fn run_air_stage_with_timeout(
         }
         std::thread::sleep(Duration::from_millis(250));
     }
+}
+
+fn terminate_child_gracefully(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    {
+        let _ = Command::new("kill")
+            .arg("-TERM")
+            .arg(child.id().to_string())
+            .status();
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(3) {
+            if matches!(child.try_wait(), Ok(Some(_))) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+    let _ = child.kill();
 }
 
 fn write_stage_timeout_log(log_path: &Path, args: &[String], status: &str) -> Result<()> {
@@ -899,6 +1009,33 @@ fn write_stage_log(log_path: &Path, args: &[String], stdout: &[u8], stderr: &[u8
     fs::write(log_path, log).with_context(|| format!("write {}", log_path.display()))
 }
 
+fn write_experiment_provenance(
+    path: &Path,
+    run_id: &str,
+    summary: &DreamFindingSummary,
+    window_manifest_sha: &str,
+    window_manifest: &Path,
+    regression_file: &Path,
+) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    fs::write(
+        path,
+        serde_json::to_vec_pretty(&serde_json::json!({
+            "schema": "air.dream_candidate_provenance.v1",
+            "dream_run_id": run_id,
+            "finding_display_id": summary.id,
+            "finding_stable_key": summary.stable_key,
+            "finding_persistent_id": summary.persistent_id,
+            "window_manifest": window_manifest.display().to_string(),
+            "window_manifest_sha": window_manifest_sha,
+            "regression_file": regression_file.display().to_string()
+        }))?,
+    )
+    .with_context(|| format!("write {}", path.display()))
+}
+
 fn read_findings(path: &Path) -> Result<Vec<Value>> {
     if !path.exists() {
         return Ok(Vec::new());
@@ -912,6 +1049,91 @@ fn read_findings(path: &Path) -> Result<Vec<Value>> {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default())
+}
+
+fn validate_dream_stage_outputs(audit_dir: &Path, improve_dir: &Path) -> Result<()> {
+    validate_json_schema(&audit_dir.join("collection.json"), "air.audit_collection.v")?;
+    validate_json_schema(
+        &improve_dir.join("observations.json"),
+        "air.improve_observations.v",
+    )?;
+    validate_json_schema(&improve_dir.join("findings.json"), "air.improve_findings.v")?;
+    validate_json_schema(
+        &improve_dir.join("suggested_regressions.json"),
+        "air.improve_suggested_regressions.v",
+    )
+}
+
+fn validate_json_schema(path: &Path, expected_prefix: &str) -> Result<()> {
+    if !path.exists() {
+        bail!(
+            "dream stage incomplete: expected {} with schema prefix {}",
+            path.display(),
+            expected_prefix
+        );
+    }
+    let value: Value = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    let schema = value.get("schema").and_then(Value::as_str);
+    if !schema.is_some_and(|schema| schema.starts_with(expected_prefix)) {
+        bail!(
+            "dream stage incomplete: {} schema {:?}, expected prefix {}",
+            path.display(),
+            schema,
+            expected_prefix
+        );
+    }
+    Ok(())
+}
+
+fn read_regression_kind(path: &Path) -> Result<String> {
+    let value: Value = serde_json::from_slice(
+        &fs::read(path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    Ok(value
+        .get("kind")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string())
+}
+
+fn ensure_clean_experiment_workspace(cwd: &Path, ignored_out_dir: Option<&Path>) -> Result<()> {
+    let tracked = Command::new("git")
+        .args(["diff", "--quiet", "HEAD", "--"])
+        .current_dir(cwd)
+        .status()
+        .context("check tracked workspace diff before dream experiment")?;
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--quiet", "--"])
+        .current_dir(cwd)
+        .status()
+        .context("check staged workspace diff before dream experiment")?;
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(cwd)
+        .output()
+        .context("check untracked files before dream experiment")?;
+    let untracked_stdout = String::from_utf8_lossy(&untracked.stdout);
+    let dream_output_root = cwd.join(".air/dream");
+    let untracked_blockers = untracked_stdout
+        .lines()
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .filter(|path| {
+            let absolute = absolutize(cwd, PathBuf::from(path));
+            !path_is_under(&absolute, &dream_output_root)
+                && ignored_out_dir.is_none_or(|out_dir| !path_is_under(&absolute, out_dir))
+        })
+        .collect::<Vec<_>>();
+    if !tracked.success() || !staged.success() || !untracked_blockers.is_empty() {
+        bail!(
+            "dream experiment requires a clean git workspace; commit or stash tracked, staged, and untracked changes before running --experiment"
+        );
+    }
+    Ok(())
 }
 
 fn write_skipped_stage(report: &Path, log: &Path, reason: &str) -> Result<()> {
@@ -990,10 +1212,19 @@ fn update_finding_store(
         } else {
             None
         };
-        let Some(existing) = records.iter_mut().find(|record| record.id == summary.id) else {
+        let display_alias = summary.id.clone();
+        let run_alias = format!("{} from {}", summary.id, out_dir.display());
+        let Some(existing) = records
+            .iter_mut()
+            .find(|record| record_matches_finding(record, &summary.stable_key))
+        else {
             let record = DreamFindingRecord {
                 schema: DREAM_FINDING_RECORD_SCHEMA.to_string(),
-                id: summary.id.clone(),
+                id: summary.persistent_id.clone(),
+                stable_key: summary.stable_key.clone(),
+                display_id: summary.id.clone(),
+                display_rank: summary.display_rank,
+                aliases: vec![display_alias, run_alias],
                 category: summary.category.clone(),
                 summary: summary.summary.clone(),
                 impact_score: summary.impact_score,
@@ -1034,11 +1265,30 @@ fn update_finding_store(
         existing.category = summary.category;
         existing.summary = summary.summary;
         existing.impact_score = summary.impact_score;
+        existing.display_id = summary.id.clone();
+        existing.display_rank = summary.display_rank;
+        if existing.stable_key.is_empty() {
+            existing.stable_key = summary.stable_key.clone();
+        }
+        push_unique_capped(
+            &mut existing.aliases,
+            display_alias,
+            DREAM_FINDING_LIST_LIMIT,
+        );
+        push_unique_capped(&mut existing.aliases, run_alias, DREAM_FINDING_LIST_LIMIT);
         existing.last_seen_unix = now;
         existing.recurrence_count = existing.recurrence_count.saturating_add(1);
-        push_unique(&mut existing.seen_in, out_dir.display().to_string());
+        push_unique_capped(
+            &mut existing.seen_in,
+            out_dir.display().to_string(),
+            DREAM_FINDING_LIST_LIMIT,
+        );
         if let Some(regression) = linked_regression {
-            push_unique(&mut existing.linked_regressions, regression);
+            push_unique_capped(
+                &mut existing.linked_regressions,
+                regression,
+                DREAM_FINDING_LIST_LIMIT,
+            );
         }
         append_finding_record(&findings_file, existing)?;
         append_dream_ledger(
@@ -1068,12 +1318,10 @@ fn update_dream_finding_status(options: DreamFindingUpdateOptions, status: &str)
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let findings_file = cwd.join(DREAM_FINDINGS_PATH);
     let mut records = read_latest_finding_records(&findings_file)?;
-    let Some(record) = records
-        .iter_mut()
-        .find(|record| record.id == options.finding)
-    else {
+    let Some(index) = find_unique_record_index(&records, &options.finding)? else {
         bail!("dream finding not found: {}", options.finding);
     };
+    let record = &mut records[index];
     let now = unix_now();
     record.status = status.to_string();
     record.reason = options.reason.clone();
@@ -1122,9 +1370,13 @@ fn read_latest_finding_records(path: &Path) -> Result<Vec<DreamFindingRecord>> {
     let text = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut records = Vec::<DreamFindingRecord>::new();
     for line in text.lines().filter(|line| !line.trim().is_empty()) {
-        let record: DreamFindingRecord =
+        let mut record: DreamFindingRecord =
             serde_json::from_str(line).with_context(|| format!("parse {}", path.display()))?;
-        if let Some(existing) = records.iter_mut().find(|existing| existing.id == record.id) {
+        normalize_finding_record(&mut record);
+        if let Some(existing) = records
+            .iter_mut()
+            .find(|existing| same_finding_record(existing, &record))
+        {
             *existing = record;
         } else {
             records.push(record);
@@ -1134,7 +1386,85 @@ fn read_latest_finding_records(path: &Path) -> Result<Vec<DreamFindingRecord>> {
 }
 
 fn append_finding_record(path: &Path, record: &DreamFindingRecord) -> Result<()> {
-    append_jsonl(path, record)
+    let _lock = FindingStoreLock::acquire(path)?;
+    append_jsonl(path, record)?;
+    if fs::metadata(path)
+        .map(|metadata| metadata.len())
+        .unwrap_or(0)
+        > DREAM_FINDINGS_COMPACT_BYTES
+    {
+        compact_finding_records(path)?;
+    }
+    Ok(())
+}
+
+struct FindingStoreLock {
+    path: PathBuf,
+}
+
+impl FindingStoreLock {
+    fn acquire(path: &Path) -> Result<Self> {
+        let lock_path = path.with_extension("jsonl.lock");
+        if let Some(parent) = lock_path.parent() {
+            fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+        }
+        for _ in 0..50 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => return Ok(Self { path: lock_path }),
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    remove_stale_finding_lock(&lock_path);
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                Err(error) => {
+                    return Err(error).with_context(|| format!("create {}", lock_path.display()));
+                }
+            }
+        }
+        bail!(
+            "timed out waiting for finding store lock {}",
+            lock_path.display()
+        )
+    }
+}
+
+impl Drop for FindingStoreLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+fn remove_stale_finding_lock(path: &Path) {
+    let Ok(metadata) = fs::metadata(path) else {
+        return;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return;
+    };
+    let Ok(age) = SystemTime::now().duration_since(modified) else {
+        return;
+    };
+    if age > Duration::from_secs(300) {
+        let _ = fs::remove_file(path);
+    }
+}
+
+fn compact_finding_records(path: &Path) -> Result<()> {
+    let records = read_latest_finding_records(path)?;
+    let tmp = path.with_extension("jsonl.tmp");
+    {
+        let mut file =
+            fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+        for record in records {
+            writeln!(file, "{}", serde_json::to_string(&record)?)
+                .with_context(|| format!("write {}", tmp.display()))?;
+        }
+    }
+    fs::rename(&tmp, path)
+        .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))
 }
 
 fn append_dream_ledger(
@@ -1179,12 +1509,89 @@ fn push_unique(values: &mut Vec<String>, value: String) {
     }
 }
 
+fn push_unique_capped(values: &mut Vec<String>, value: String, limit: usize) {
+    push_unique(values, value);
+    if values.len() > limit {
+        values.drain(0..values.len() - limit);
+    }
+}
+
+fn normalize_finding_record(record: &mut DreamFindingRecord) {
+    if record.stable_key.is_empty() {
+        record.stable_key = record.id.clone();
+    }
+    if record.display_id.is_empty() {
+        record.display_id = record.id.clone();
+    }
+    if record.aliases.is_empty() && record.display_id != record.id {
+        record.aliases.push(record.display_id.clone());
+    }
+    if record.aliases.len() > DREAM_FINDING_LIST_LIMIT {
+        record
+            .aliases
+            .drain(0..record.aliases.len() - DREAM_FINDING_LIST_LIMIT);
+    }
+    if record.linked_candidates.len() > DREAM_FINDING_LIST_LIMIT {
+        record
+            .linked_candidates
+            .drain(0..record.linked_candidates.len() - DREAM_FINDING_LIST_LIMIT);
+    }
+    if record.linked_regressions.len() > DREAM_FINDING_LIST_LIMIT {
+        record
+            .linked_regressions
+            .drain(0..record.linked_regressions.len() - DREAM_FINDING_LIST_LIMIT);
+    }
+    if record.seen_in.len() > DREAM_FINDING_LIST_LIMIT {
+        record
+            .seen_in
+            .drain(0..record.seen_in.len() - DREAM_FINDING_LIST_LIMIT);
+    }
+}
+
+fn same_finding_record(left: &DreamFindingRecord, right: &DreamFindingRecord) -> bool {
+    if !left.stable_key.is_empty() && !right.stable_key.is_empty() {
+        return left.stable_key == right.stable_key;
+    }
+    left.id == right.id
+}
+
+fn record_matches_finding(record: &DreamFindingRecord, stable_key: &str) -> bool {
+    record.stable_key == stable_key || (record.stable_key.is_empty() && record.id == stable_key)
+}
+
+fn record_matches_query(record: &DreamFindingRecord, query: &str) -> bool {
+    record.id == query
+        || record.stable_key == query
+        || record.display_id == query
+        || record.aliases.iter().any(|alias| alias == query)
+}
+
+fn find_unique_record_index(records: &[DreamFindingRecord], query: &str) -> Result<Option<usize>> {
+    let matches = records
+        .iter()
+        .enumerate()
+        .filter_map(|(index, record)| record_matches_query(record, query).then_some(index))
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [] => Ok(None),
+        [index] => Ok(Some(*index)),
+        _ => bail!(
+            "dream finding query `{query}` is ambiguous; use the stable_key or FND-* id from `air dream findings list`"
+        ),
+    }
+}
+
 fn link_finding_candidate(path: &Path, finding: &str, candidate: String) -> Result<()> {
     let mut records = read_latest_finding_records(path)?;
-    let Some(record) = records.iter_mut().find(|record| record.id == finding) else {
+    let Some(index) = find_unique_record_index(&records, finding)? else {
         return Ok(());
     };
-    push_unique(&mut record.linked_candidates, candidate);
+    let record = &mut records[index];
+    push_unique_capped(
+        &mut record.linked_candidates,
+        candidate,
+        DREAM_FINDING_LIST_LIMIT,
+    );
     append_finding_record(path, record)
 }
 
@@ -1194,11 +1601,18 @@ fn discover_dream_window_inputs(
     since_unix: Option<u64>,
     limit: Option<usize>,
     dedupe_previous_window: bool,
-    previous: Option<&DreamWindowState>,
+    prior_state: Option<&DreamState>,
+    full: bool,
 ) -> Result<Vec<DreamWindowInput>> {
     let mut files = Vec::new();
     for root in roots {
-        collect_improve_input_files(&absolutize(cwd, root.clone()), &mut files)?;
+        let root = absolutize(cwd, root.clone());
+        let root_since = if full {
+            None
+        } else {
+            since_unix.or_else(|| root_cursor_unix(prior_state, &root))
+        };
+        collect_improve_input_files(&root, root_since, &mut files)?;
     }
     files.sort_by(|left, right| {
         file_mtime_unix(right)
@@ -1209,11 +1623,9 @@ fn discover_dream_window_inputs(
     if let Some(since_unix) = since_unix {
         files.retain(|path| file_mtime_unix(path).unwrap_or(0) >= since_unix);
     }
-    if let Some(limit) = limit {
-        files.truncate(limit);
-    }
     let previous_keys = if dedupe_previous_window {
-        previous
+        prior_state
+            .and_then(|state| state.last_window.as_ref())
             .map(|window| {
                 window
                     .inputs
@@ -1241,15 +1653,24 @@ fn discover_dream_window_inputs(
         }
         inputs.push(input);
     }
+    if let Some(limit) = limit {
+        inputs.truncate(limit);
+    }
     Ok(inputs)
 }
 
-fn collect_improve_input_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
+fn collect_improve_input_files(
+    root: &Path,
+    since_unix: Option<u64>,
+    files: &mut Vec<PathBuf>,
+) -> Result<()> {
     if !root.exists() {
         return Ok(());
     }
     if root.is_file() {
-        if is_improve_input(root) {
+        if is_improve_input(root)
+            && since_unix.is_none_or(|since| file_mtime_unix(root).unwrap_or(0) >= since)
+        {
             files.push(root.to_path_buf());
         }
         return Ok(());
@@ -1268,8 +1689,10 @@ fn collect_improve_input_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<
             ) {
                 continue;
             }
-            collect_improve_input_files(&path, files)?;
-        } else if is_improve_input(&path) {
+            collect_improve_input_files(&path, since_unix, files)?;
+        } else if is_improve_input(&path)
+            && since_unix.is_none_or(|since| file_mtime_unix(&path).unwrap_or(0) >= since)
+        {
             files.push(path);
         }
     }
@@ -1284,15 +1707,85 @@ fn is_improve_input(path: &Path) -> bool {
 }
 
 fn finding_summary(value: &Value) -> DreamFindingSummary {
+    let id = string_field(value, "id").unwrap_or_else(|| "unknown".to_string());
+    let category = string_field(value, "category").unwrap_or_else(|| "unknown".to_string());
+    let summary = string_field(value, "summary").unwrap_or_else(|| "No summary".to_string());
+    let stable_key = stable_finding_key(value, &category, &summary);
     DreamFindingSummary {
-        id: string_field(value, "id").unwrap_or_else(|| "unknown".to_string()),
-        category: string_field(value, "category").unwrap_or_else(|| "unknown".to_string()),
-        summary: string_field(value, "summary").unwrap_or_else(|| "No summary".to_string()),
+        persistent_id: persistent_finding_id(&stable_key),
+        display_rank: parse_display_rank(&id),
+        id,
+        stable_key,
+        category,
+        summary,
         impact_score: value
             .get("impact_score")
             .and_then(Value::as_i64)
             .unwrap_or(0),
     }
+}
+
+fn stable_finding_key(value: &Value, category: &str, summary: &str) -> String {
+    let expected_regression = string_field(value, "expected_regression").unwrap_or_default();
+    let recommended_change_type =
+        string_field(value, "recommended_change_type").unwrap_or_default();
+    let material = format!(
+        "{}\n{}\n{}\n{}",
+        normalize_key_part(category),
+        normalize_key_part(&expected_regression),
+        normalize_summary_template(summary),
+        normalize_key_part(&recommended_change_type)
+    );
+    format!(
+        "finding:{}:{}",
+        normalize_key_part(category),
+        &sha256_hex(material.as_bytes())[..16]
+    )
+}
+
+fn persistent_finding_id(stable_key: &str) -> String {
+    let suffix = stable_key.rsplit(':').next().unwrap_or(stable_key);
+    format!("FND-{}", suffix.to_ascii_uppercase())
+}
+
+fn parse_display_rank(id: &str) -> Option<u64> {
+    id.strip_prefix("IMP-")
+        .and_then(|rank| rank.parse::<u64>().ok())
+}
+
+fn normalize_summary_template(value: &str) -> String {
+    let mut out = String::new();
+    let mut previous_space = false;
+    let mut previous_digit = false;
+    for ch in value.chars().flat_map(char::to_lowercase) {
+        if ch.is_ascii_digit() {
+            if !previous_digit {
+                out.push('#');
+            }
+            previous_digit = true;
+            previous_space = false;
+        } else if ch.is_whitespace() {
+            if !previous_space {
+                out.push(' ');
+            }
+            previous_space = true;
+            previous_digit = false;
+        } else {
+            out.push(ch);
+            previous_space = false;
+            previous_digit = false;
+        }
+    }
+    out.trim().to_string()
+}
+
+fn normalize_key_part(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn dream_next_commands(
@@ -1487,12 +1980,95 @@ fn shell_quote_arg(value: &str) -> String {
 }
 
 fn state_cursor_unix(state: &DreamState) -> Option<u64> {
+    if state
+        .root_cursors
+        .iter()
+        .any(|cursor| cursor.last_seen_max_mtime_unix.is_some())
+    {
+        return state
+            .root_cursors
+            .iter()
+            .filter_map(|cursor| cursor.last_seen_max_mtime_unix)
+            .min()
+            .map(|cursor| cursor.saturating_sub(DREAM_CURSOR_OVERLAP_SECONDS));
+    }
+    match state.last_window.as_ref() {
+        Some(window) => window
+            .max_input_mtime_unix
+            .map(|cursor| cursor.saturating_sub(DREAM_CURSOR_OVERLAP_SECONDS)),
+        None => state
+            .last_completed_at_unix
+            .map(|cursor| cursor.saturating_sub(DREAM_CURSOR_OVERLAP_SECONDS)),
+    }
+}
+
+fn root_cursor_unix(state: Option<&DreamState>, root: &Path) -> Option<u64> {
+    let root = dream_root_key(root);
     state
-        .last_window
-        .as_ref()
-        .and_then(|window| window.max_input_mtime_unix)
-        .or(state.last_completed_at_unix)
+        .and_then(|state| {
+            state
+                .root_cursors
+                .iter()
+                .find(|cursor| cursor.root == root)
+                .and_then(|cursor| cursor.last_seen_max_mtime_unix)
+        })
         .map(|cursor| cursor.saturating_sub(DREAM_CURSOR_OVERLAP_SECONDS))
+}
+
+fn update_root_cursors(
+    cwd: &Path,
+    roots: &[PathBuf],
+    prior_state: Option<&DreamState>,
+    inputs: &[DreamWindowInput],
+    completed_at: u64,
+) -> Vec<DreamRootCursor> {
+    let mut cursors = prior_state
+        .map(|state| {
+            state
+                .root_cursors
+                .iter()
+                .map(|cursor| (cursor.root.clone(), cursor.clone()))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
+    for root in roots {
+        let absolute = normalize_dream_root(&absolutize(cwd, root.clone()));
+        let root_key = dream_root_key(&absolute);
+        let root_exists = absolute.exists();
+        let max_seen = inputs
+            .iter()
+            .filter(|input| path_is_under(Path::new(&input.path), &absolute))
+            .map(|input| input.mtime_unix)
+            .max();
+        let mut cursor = cursors.remove(&root_key).unwrap_or(DreamRootCursor {
+            root: root_key.clone(),
+            root_exists,
+            last_seen_max_mtime_unix: None,
+            last_scan_completed_at_unix: None,
+        });
+        cursor.root_exists = root_exists;
+        if let Some(max_seen) = max_seen {
+            cursor.last_seen_max_mtime_unix =
+                Some(cursor.last_seen_max_mtime_unix.unwrap_or(0).max(max_seen));
+            cursor.last_scan_completed_at_unix = Some(completed_at);
+        }
+        cursors.insert(root_key, cursor);
+    }
+    cursors.into_values().collect()
+}
+
+fn normalize_dream_root(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn dream_root_key(path: &Path) -> String {
+    normalize_dream_root(path).display().to_string()
+}
+
+fn path_is_under(path: &Path, root: &Path) -> bool {
+    let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let root = normalize_dream_root(root);
+    path == root || path.starts_with(&root)
 }
 
 fn dream_input_kind(path: &Path) -> &'static str {
@@ -1514,7 +2090,7 @@ fn window_input_key(input: &DreamWindowInput) -> String {
 
 fn clear_dream_out_dir(out_dir: &Path) -> Result<()> {
     ensure_safe_dream_out_dir(out_dir)?;
-    for child in ["audit", "improve", "logs", "memory", "window"] {
+    for child in ["audit", "improve", "logs", "memory", "window", "candidates"] {
         let path = out_dir.join(child);
         if path.exists() {
             fs::remove_dir_all(&path).with_context(|| format!("remove old {}", path.display()))?;
@@ -1598,8 +2174,45 @@ fn file_mtime_unix(path: &Path) -> Option<u64> {
 fn unix_now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock must be after UNIX_EPOCH")
-        .as_secs()
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
+}
+
+fn dream_run_id(started_at: u64) -> String {
+    format!("dream-{started_at}-{}", std::process::id())
+}
+
+fn update_latest_dream_link(cwd: &Path, out_dir: &Path) -> Result<()> {
+    let latest = cwd.join(".air/dream/latest");
+    if let Some(parent) = latest.parent() {
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
+    }
+    if latest.exists() || latest.symlink_metadata().is_ok() {
+        let metadata = latest
+            .symlink_metadata()
+            .with_context(|| format!("stat {}", latest.display()))?;
+        if !(metadata.file_type().is_symlink() || metadata.is_file()) {
+            ensure_safe_dream_out_dir(&latest)?;
+            fs::remove_dir_all(&latest).with_context(|| format!("remove {}", latest.display()))?;
+        }
+    }
+    #[cfg(unix)]
+    {
+        let tmp = latest.with_extension(format!("tmp-{}", std::process::id()));
+        if tmp.exists() || tmp.symlink_metadata().is_ok() {
+            let _ = fs::remove_file(&tmp);
+        }
+        std::os::unix::fs::symlink(out_dir, &tmp)
+            .with_context(|| format!("symlink {} to {}", tmp.display(), out_dir.display()))?;
+        fs::rename(&tmp, &latest)
+            .with_context(|| format!("rename {} to {}", tmp.display(), latest.display()))?;
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(latest.with_extension("txt"), out_dir.display().to_string())
+            .with_context(|| format!("write {}", latest.with_extension("txt").display()))?;
+    }
+    Ok(())
 }
 
 fn absolutize(cwd: &Path, path: PathBuf) -> PathBuf {
@@ -1643,11 +2256,79 @@ mod tests {
                 max_input_mtime_unix: Some(1_500),
                 inputs: Vec::new(),
             }),
+            root_cursors: Vec::new(),
         };
         assert_eq!(
             state_cursor_unix(&state),
             Some(1_500 - DREAM_CURSOR_OVERLAP_SECONDS)
         );
+    }
+
+    #[test]
+    fn state_cursor_does_not_advance_empty_window() {
+        let state = DreamState {
+            schema: "air.dream_state.v1".to_string(),
+            status: "no_findings".to_string(),
+            state_file: ".air/dream/state.json".to_string(),
+            last_started_at_unix: Some(1_000),
+            last_completed_at_unix: Some(2_000),
+            last_out_dir: None,
+            last_roots: Vec::new(),
+            last_findings: 0,
+            last_top_finding: None,
+            last_window: Some(DreamWindowState {
+                from_unix: None,
+                to_unix: 1_000,
+                max_input_mtime_unix: None,
+                inputs: Vec::new(),
+            }),
+            root_cursors: Vec::new(),
+        };
+
+        assert_eq!(state_cursor_unix(&state), None);
+    }
+
+    #[test]
+    fn root_cursor_uses_per_root_high_watermark() {
+        let root = temp_root("root-cursor");
+        let root_a = root.join("a");
+        let root_b = root.join("b");
+        let state = DreamState {
+            schema: "air.dream_state.v1".to_string(),
+            status: "findings_ready".to_string(),
+            state_file: ".air/dream/state.json".to_string(),
+            last_started_at_unix: Some(1_000),
+            last_completed_at_unix: Some(2_000),
+            last_out_dir: None,
+            last_roots: Vec::new(),
+            last_findings: 0,
+            last_top_finding: None,
+            last_window: None,
+            root_cursors: vec![
+                DreamRootCursor {
+                    root: root_a.display().to_string(),
+                    root_exists: true,
+                    last_seen_max_mtime_unix: Some(1_500),
+                    last_scan_completed_at_unix: Some(1_600),
+                },
+                DreamRootCursor {
+                    root: root_b.display().to_string(),
+                    root_exists: true,
+                    last_seen_max_mtime_unix: Some(3_000),
+                    last_scan_completed_at_unix: Some(3_100),
+                },
+            ],
+        };
+
+        assert_eq!(
+            root_cursor_unix(Some(&state), &root_a),
+            Some(1_500 - DREAM_CURSOR_OVERLAP_SECONDS)
+        );
+        assert_eq!(
+            state_cursor_unix(&state),
+            Some(1_500 - DREAM_CURSOR_OVERLAP_SECONDS)
+        );
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]
@@ -1675,7 +2356,20 @@ mod tests {
             None,
             None,
             true,
-            Some(&previous),
+            Some(&DreamState {
+                schema: DREAM_STATE_SCHEMA.to_string(),
+                status: "findings_ready".to_string(),
+                state_file: String::new(),
+                last_started_at_unix: None,
+                last_completed_at_unix: None,
+                last_out_dir: None,
+                last_roots: Vec::new(),
+                last_findings: 0,
+                last_top_finding: None,
+                last_window: Some(previous),
+                root_cursors: Vec::new(),
+            }),
+            false,
         )
         .unwrap();
 
@@ -1684,9 +2378,71 @@ mod tests {
     }
 
     #[test]
+    fn window_applies_limit_after_previous_dedupe() {
+        let root = temp_root("dedupe-limit");
+        let previous_dir = root.join("a-previous");
+        let new_dir = root.join("z-new");
+        fs::create_dir_all(&previous_dir).unwrap();
+        fs::create_dir_all(&new_dir).unwrap();
+        let previous_artifact = previous_dir.join("artifact.json");
+        let new_artifact = new_dir.join("artifact.json");
+        fs::write(
+            &previous_artifact,
+            br#"{"schema":"air.code_run_artifact.v1","id":"previous"}"#,
+        )
+        .unwrap();
+        fs::write(
+            &new_artifact,
+            br#"{"schema":"air.code_run_artifact.v1","id":"new"}"#,
+        )
+        .unwrap();
+        let previous = DreamWindowState {
+            from_unix: None,
+            to_unix: unix_now(),
+            max_input_mtime_unix: file_mtime_unix(&previous_artifact),
+            inputs: vec![DreamWindowInput {
+                kind: "code_run_artifact".to_string(),
+                path: previous_artifact.display().to_string(),
+                fingerprint: file_fingerprint(&previous_artifact).unwrap(),
+                mtime_unix: file_mtime_unix(&previous_artifact).unwrap(),
+            }],
+        };
+
+        let inputs = discover_dream_window_inputs(
+            &root,
+            std::slice::from_ref(&root),
+            None,
+            Some(1),
+            true,
+            Some(&DreamState {
+                schema: DREAM_STATE_SCHEMA.to_string(),
+                status: "findings_ready".to_string(),
+                state_file: String::new(),
+                last_started_at_unix: None,
+                last_completed_at_unix: None,
+                last_out_dir: None,
+                last_roots: Vec::new(),
+                last_findings: 0,
+                last_top_finding: None,
+                last_window: Some(previous),
+                root_cursors: Vec::new(),
+            }),
+            false,
+        )
+        .unwrap();
+
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].path, new_artifact.display().to_string());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn next_commands_use_promoted_regression_after_manual_promote() {
         let finding = DreamFindingSummary {
             id: "IMP-001".to_string(),
+            stable_key: "finding:verification_failed:test".to_string(),
+            persistent_id: "FND-TEST".to_string(),
+            display_rank: Some(1),
             category: "verification_failed".to_string(),
             summary: "summary".to_string(),
             impact_score: 10,
@@ -1715,6 +2471,9 @@ mod tests {
     fn next_commands_shell_quote_paths_with_spaces() {
         let finding = DreamFindingSummary {
             id: "IMP 001".to_string(),
+            stable_key: "finding:verification_failed:test".to_string(),
+            persistent_id: "FND-TEST".to_string(),
+            display_rank: None,
             category: "verification_failed".to_string(),
             summary: "summary".to_string(),
             impact_score: 10,
@@ -1756,6 +2515,27 @@ mod tests {
     }
 
     #[test]
+    fn stage_schema_validation_rejects_missing_outputs() {
+        let root = temp_root("stage-schema");
+        let audit_dir = root.join("audit");
+        let improve_dir = root.join("improve");
+        fs::create_dir_all(&audit_dir).unwrap();
+        fs::create_dir_all(&improve_dir).unwrap();
+        fs::write(
+            audit_dir.join("collection.json"),
+            br#"{"schema":"air.audit_collection.v1"}"#,
+        )
+        .unwrap();
+
+        let error = validate_dream_stage_outputs(&audit_dir, &improve_dir)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("dream stage incomplete"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn finding_store_tracks_recurrence_and_reopen() {
         let root = temp_root("finding-store");
         let out_dir = root.join(".air/dream/latest");
@@ -1783,6 +2563,55 @@ mod tests {
         assert_eq!(records[0].status, "open");
         assert!(records[0].recurred_after_fix);
         assert_eq!(records[0].recurrence_count, 2);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn finding_store_uses_stable_key_not_display_id() {
+        let root = temp_root("finding-stable-key");
+        let out_dir = root.join(".air/dream/latest");
+        let improve_dir = out_dir.join("improve");
+        fs::create_dir_all(&improve_dir).unwrap();
+        let first = vec![serde_json::json!({
+            "id": "IMP-001",
+            "category": "verification_failed",
+            "summary": "1 run(s) failed because verification was missing or failed",
+            "impact_score": 10,
+            "expected_regression": "A verdict fixture fails when no passing verification is present after a patch.",
+            "recommended_change_type": "verification_loop_regression"
+        })];
+        let second = vec![serde_json::json!({
+            "id": "IMP-002",
+            "category": "verification_failed",
+            "summary": "2 run(s) failed because verification was missing or failed",
+            "impact_score": 20,
+            "expected_regression": "A verdict fixture fails when no passing verification is present after a patch.",
+            "recommended_change_type": "verification_loop_regression"
+        })];
+
+        update_finding_store(&root, &out_dir, &first, &improve_dir, false, 1_000).unwrap();
+        update_finding_store(&root, &out_dir, &second, &improve_dir, false, 1_200).unwrap();
+        let records = read_latest_finding_records(&root.join(DREAM_FINDINGS_PATH)).unwrap();
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].display_id, "IMP-002");
+        assert_eq!(records[0].recurrence_count, 2);
+        assert!(records[0].id.starts_with("FND-"));
+        assert!(records[0].aliases.iter().any(|alias| alias == "IMP-001"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn regression_kind_reader_supports_experiment_skip() {
+        let root = temp_root("regression-kind");
+        let regression = root.join("imp-001.json");
+        fs::write(
+            &regression,
+            br#"{"finding_id":"IMP-001","kind":"skill_route","category":"skill_routing_miss"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(read_regression_kind(&regression).unwrap(), "skill_route");
         let _ = fs::remove_dir_all(root);
     }
 }

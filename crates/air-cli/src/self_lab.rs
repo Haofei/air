@@ -36,6 +36,7 @@ pub(crate) struct SelfFixOptions {
     pub(crate) regression_file: Option<PathBuf>,
     pub(crate) evaluate: bool,
     pub(crate) keep_worktrees: bool,
+    pub(crate) allow_dirty_bootstrap: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -311,6 +312,9 @@ pub(crate) fn self_fix(options: SelfFixOptions) -> Result<()> {
         options.regression_file.as_deref(),
         options.skill.as_deref(),
     )?;
+    if !options.allow_dirty_bootstrap {
+        ensure_clean_self_fix_workspace(&cwd)?;
+    }
     let preflight_regression = if options.evaluate {
         Some(run_regression_suite(RegressionRunConfig {
             finding: Some(options.finding.clone()),
@@ -947,6 +951,30 @@ fn copy_bootstrap_file(source: &Path, worktree: &Path, relative: &str) -> Result
             target_file.display()
         )
     })?;
+    Ok(())
+}
+
+fn ensure_clean_self_fix_workspace(cwd: &Path) -> Result<()> {
+    let tracked = Command::new("git")
+        .args(["diff", "--quiet", "HEAD", "--"])
+        .current_dir(cwd)
+        .status()
+        .context("check tracked workspace diff before self fix")?;
+    let staged = Command::new("git")
+        .args(["diff", "--cached", "--quiet", "--"])
+        .current_dir(cwd)
+        .status()
+        .context("check staged workspace diff before self fix")?;
+    let untracked = Command::new("git")
+        .args(["ls-files", "--others", "--exclude-standard"])
+        .current_dir(cwd)
+        .output()
+        .context("check untracked files before self fix")?;
+    if !tracked.success() || !staged.success() || !untracked.stdout.is_empty() {
+        bail!(
+            "self fix requires a clean git workspace so candidate baselines cannot hide bootstrap diffs; commit/stash changes or pass --allow-dirty-bootstrap"
+        );
+    }
     Ok(())
 }
 

@@ -72,6 +72,14 @@ pub(crate) struct MemoryPromoteOptions {
     pub(crate) status: Option<String>,
 }
 
+pub(crate) struct MemoryCausalEvalOptions {
+    pub(crate) memory_dir: Option<PathBuf>,
+    pub(crate) id: String,
+    pub(crate) outcome: String,
+    pub(crate) evidence: PathBuf,
+    pub(crate) note: Option<String>,
+}
+
 pub(crate) struct MemoryRetireOptions {
     pub(crate) memory_dir: Option<PathBuf>,
     pub(crate) id: String,
@@ -154,6 +162,8 @@ struct MemoryScorecardRow {
     hurt_candidate: usize,
     helped: usize,
     hurt: usize,
+    causal_helped: usize,
+    causal_hurt: usize,
     neutral: usize,
     help_rate: f64,
     hurt_rate: f64,
@@ -369,6 +379,8 @@ struct MemoryUsageStats {
     hurt_candidate: usize,
     helped_confirmed: usize,
     hurt_confirmed: usize,
+    causal_helped: usize,
+    causal_hurt: usize,
     neutral: usize,
 }
 
@@ -819,6 +831,15 @@ pub(crate) fn promote_memory(options: MemoryPromoteOptions) -> Result<()> {
     if !matches!(status.as_str(), "validated" | "promoted" | "pinned") {
         anyhow::bail!("unsupported memory promotion status: {status}");
     }
+    if matches!(status.as_str(), "promoted" | "pinned")
+        && !has_causal_promotion_evidence(&memory_dir, &card.id)?
+    {
+        anyhow::bail!(
+            "memory {} cannot be promoted to {status} without causal eval evidence; run `air memory causal-eval {} --outcome helped --evidence <compare-no-memory.json>` first, or use --status validated",
+            card.id,
+            card.id
+        );
+    }
     card.status = status.clone();
     card.updated_at = unix_now();
     card.promotion.requires_human_review = false;
@@ -847,6 +868,59 @@ pub(crate) fn promote_memory(options: MemoryPromoteOptions) -> Result<()> {
             "id": card.id,
             "kind": card.kind,
             "path": path.display().to_string()
+        }))?
+    );
+    Ok(())
+}
+
+pub(crate) fn causal_eval_memory(options: MemoryCausalEvalOptions) -> Result<()> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let memory_dir = memory_dir(&cwd, options.memory_dir);
+    let (card, path) = find_card(&memory_dir, &options.id)?;
+    if !matches!(options.outcome.as_str(), "helped" | "hurt" | "neutral") {
+        bail!("unsupported causal memory outcome: {}", options.outcome);
+    }
+    let evidence = absolutize(&cwd, options.evidence);
+    if !evidence.exists() {
+        bail!(
+            "causal eval evidence does not exist: {}",
+            evidence.display()
+        );
+    }
+    let outcome = match options.outcome.as_str() {
+        "helped" => "causal_helped",
+        "hurt" => "causal_hurt",
+        _ => "causal_neutral",
+    };
+    let now = unix_now();
+    append_jsonl(
+        &memory_dir.join("usage.jsonl"),
+        &MemoryUsageEvent {
+            schema: "air.memory_usage.v1".to_string(),
+            memory_id: card.id.clone(),
+            task: options.note.unwrap_or_default(),
+            outcome: outcome.to_string(),
+            run_artifact: Some(evidence.display().to_string()),
+            at_unix: now,
+        },
+    )?;
+    append_ledger(
+        &memory_dir,
+        "memory_causal_eval_recorded",
+        &card.id,
+        &card.kind,
+        &path.display().to_string(),
+        now,
+    )?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&json!({
+            "schema": "air.memory_causal_eval.v1",
+            "status": "recorded",
+            "id": card.id,
+            "kind": card.kind,
+            "outcome": outcome,
+            "evidence": evidence.display().to_string()
         }))?
     );
     Ok(())
@@ -938,6 +1012,8 @@ pub(crate) fn show_memory_scorecard(options: MemoryScorecardOptions) -> Result<(
             hurt_candidate: stats.hurt_candidate,
             helped: stats.helped_confirmed,
             hurt: stats.hurt_confirmed,
+            causal_helped: stats.causal_helped,
+            causal_hurt: stats.causal_hurt,
             neutral: stats.neutral,
             help_rate: ratio(stats.helped_candidate, evaluated),
             hurt_rate: ratio(stats.hurt_candidate, evaluated),
@@ -1275,6 +1351,53 @@ fn synthesize_dream_ir(
         .iter()
         .map(|episode| episode.id.clone())
         .collect::<Vec<_>>();
+    let mut by_category: BTreeMap<String, Vec<&MemoryEpisode>> = BTreeMap::new();
+    for episode in episodes {
+        by_category
+            .entry(episode.category.clone())
+            .or_default()
+            .push(episode);
+    }
+    for (category, category_episodes) in &by_category {
+        let successes = category_episodes
+            .iter()
+            .filter(|episode| episode.verdict == "success")
+            .count();
+        let failures = category_episodes
+            .iter()
+            .filter(|episode| episode.verdict != "success")
+            .count();
+        if successes > 0 && failures > 0 && mode != "micro" {
+            let derived_from = category_episodes
+                .iter()
+                .take(12)
+                .map(|episode| episode.id.clone())
+                .collect::<Vec<_>>();
+            candidates.push(DreamIrCandidate {
+                id: memory_id("dream_ir", &["procedure_delta", category]),
+                kind: "procedure_candidate".to_string(),
+                name: format!("{}_success_failure_delta", category.replace('-', "_")),
+                confidence: confidence_from_count(successes + failures),
+                description: format!(
+                    "Dream compared successful and failed `{category}` episodes and found enough mixed evidence to draft a procedure delta. This candidate should be turned into a skill only after compare-no-memory or replay evidence."
+                ),
+                derived_from,
+                generalizes: vec![category.clone()],
+                suggested_actions: vec![
+                    DreamIrAction {
+                        kind: "skill_draft_candidate".to_string(),
+                        name: format!("{}_procedure_delta", category.replace('-', "_")),
+                        detail: "Draft a skill from the successful trace shape, then run skill-evaluate with benchmark/replay evidence before promotion.".to_string(),
+                    },
+                    DreamIrAction {
+                        kind: "causal_eval_required".to_string(),
+                        name: "compare_no_memory_before_promotion".to_string(),
+                        detail: "Record causal eval evidence with `air memory causal-eval` before promoting this memory.".to_string(),
+                    },
+                ],
+            });
+        }
+    }
     if categories.iter().any(|category| {
         matches!(
             category.as_str(),
@@ -1816,6 +1939,12 @@ fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
     Ok(events)
 }
 
+fn has_causal_promotion_evidence(memory_dir: &Path, memory_id: &str) -> Result<bool> {
+    Ok(read_usage_events(&memory_dir.join("usage.jsonl"))?
+        .iter()
+        .any(|event| event.memory_id == memory_id && event.outcome == "causal_helped"))
+}
+
 fn memory_usage_stats(events: &[MemoryUsageEvent]) -> BTreeMap<String, MemoryUsageStats> {
     let mut stats = BTreeMap::new();
     for event in events {
@@ -1826,6 +1955,8 @@ fn memory_usage_stats(events: &[MemoryUsageEvent]) -> BTreeMap<String, MemoryUsa
             "hurt_candidate" => entry.hurt_candidate += 1,
             "helped" => entry.helped_confirmed += 1,
             "hurt" => entry.hurt_confirmed += 1,
+            "causal_helped" => entry.causal_helped += 1,
+            "causal_hurt" => entry.causal_hurt += 1,
             _ => entry.neutral += 1,
         }
     }
@@ -2771,6 +2902,50 @@ mod tests {
     }
 
     #[test]
+    fn synthesis_compares_success_and_failure_episodes() {
+        let episodes = vec![
+            MemoryEpisode {
+                schema: EPISODE_SCHEMA,
+                id: "ep-success".to_string(),
+                source_kind: "code_run_artifact".to_string(),
+                source_path: "success/artifact.json".to_string(),
+                artifact_path: Some("success/artifact.json".to_string()),
+                task: Some("fix parser".to_string()),
+                category: "rust_debugging".to_string(),
+                verdict: "success".to_string(),
+                changed_files: vec!["src/lib.rs".to_string()],
+                skills: Vec::new(),
+                evidence: Vec::new(),
+                memory_ids: Vec::new(),
+                summary: "success".to_string(),
+                created_at: 1,
+            },
+            MemoryEpisode {
+                schema: EPISODE_SCHEMA,
+                id: "ep-failure".to_string(),
+                source_kind: "code_run_artifact".to_string(),
+                source_path: "failure/artifact.json".to_string(),
+                artifact_path: Some("failure/artifact.json".to_string()),
+                task: Some("fix parser".to_string()),
+                category: "rust_debugging".to_string(),
+                verdict: "failure".to_string(),
+                changed_files: Vec::new(),
+                skills: Vec::new(),
+                evidence: Vec::new(),
+                memory_ids: Vec::new(),
+                summary: "failure".to_string(),
+                created_at: 1,
+            },
+        ];
+        let ir = synthesize_dream_ir(&[], &[], &episodes, 1_770_000_000, "deep");
+
+        assert!(ir
+            .candidates
+            .iter()
+            .any(|candidate| candidate.name == "rust_debugging_success_failure_delta"));
+    }
+
+    #[test]
     fn window_artifacts_create_success_episodes_with_memory_ids() {
         let root = temp_root("window-episode");
         let artifact = root.join("artifact.json");
@@ -2949,6 +3124,69 @@ mod tests {
         assert!(usage
             .iter()
             .any(|event| event.memory_id == "mem_harmful" && event.outcome == "hurt"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn promote_requires_causal_evidence_for_prompt_memory() {
+        let root = temp_root("causal-promote");
+        let now = 1_770_000_000;
+        write_card(
+            &root,
+            MemoryCard {
+                schema: MEMORY_SCHEMA.to_string(),
+                id: "mem_causal".to_string(),
+                kind: "procedure".to_string(),
+                scope: MemoryScope {
+                    level: "repo".to_string(),
+                    repo: Some("repo".to_string()),
+                    executor: Some("code-agent".to_string()),
+                    skill: None,
+                },
+                title: "Causal memory".to_string(),
+                content: "Use this only after causal eval.".to_string(),
+                triggers: vec!["task".to_string()],
+                evidence: vec![MemoryEvidence {
+                    kind: "code_run_artifact".to_string(),
+                    path: "artifact.json".to_string(),
+                    verdict: Some("success".to_string()),
+                    fingerprint: None,
+                    note: None,
+                }],
+                confidence: 0.7,
+                impact: 0.7,
+                stability: "medium".to_string(),
+                status: "validated".to_string(),
+                created_at: now,
+                updated_at: now,
+                conflicts: Vec::new(),
+                promotion: MemoryPromotion {
+                    can_prompt_inject: false,
+                    can_route: true,
+                    can_compile_skill: true,
+                    can_regression: false,
+                    can_policy: false,
+                    requires_human_review: true,
+                },
+            },
+            now,
+        )
+        .unwrap();
+
+        assert!(!has_causal_promotion_evidence(&root, "mem_causal").unwrap());
+        append_jsonl(
+            &root.join("usage.jsonl"),
+            &MemoryUsageEvent {
+                schema: "air.memory_usage.v1".to_string(),
+                memory_id: "mem_causal".to_string(),
+                task: "compare-no-memory".to_string(),
+                outcome: "causal_helped".to_string(),
+                run_artifact: Some("compare.json".to_string()),
+                at_unix: now,
+            },
+        )
+        .unwrap();
+        assert!(has_causal_promotion_evidence(&root, "mem_causal").unwrap());
         let _ = fs::remove_dir_all(root);
     }
 

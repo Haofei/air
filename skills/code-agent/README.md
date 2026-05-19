@@ -39,8 +39,6 @@ The model sees the user task, recent tool results, and these tools:
 - `read_contains`
 - `read_range`
 - `edit`
-- `write`
-- `apply_patch`
 - `task`
 - `webfetch`
 - `todowrite`

@@ -907,6 +907,22 @@ impl Verifier {
             air_core::Expr::SplitLines { split_lines } => {
                 self.verify_expr(rule_id, label, split_lines, module);
             }
+            air_core::Expr::LineDifference { line_difference } => {
+                if line_difference.len() != 2 {
+                    self.error(
+                        "AIR098",
+                        format!(
+                            "{label} in rule {rule_id} line_difference expression must have exactly two operands"
+                        ),
+                    );
+                }
+                for nested in line_difference {
+                    self.verify_expr(rule_id, label, nested, module);
+                }
+            }
+            air_core::Expr::PathObjects { path_objects } => {
+                self.verify_expr(rule_id, label, path_objects, module);
+            }
             air_core::Expr::Equals { equals } => {
                 if equals.len() != 2 {
                     self.error(

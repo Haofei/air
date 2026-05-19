@@ -8,7 +8,7 @@ inputs:
   verification_command: string
 
 outputs:
-  edit:
+  edit: &edit_output_schema
     type: object
     required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
     properties:
@@ -86,28 +86,10 @@ state:
   final_diff_result:
     type: array
     items: object
-  edit:
-    type: object
-    required: [initial_success, final_success, patch_applied, changed_files, workspace_changed_files, preexisting_changed_files, workspace_diff, rationale]
-    properties:
-      initial_success: boolean
-      final_success: boolean
-      patch_applied: boolean
-      changed_files:
-        type: array
-        items: string
-      workspace_changed_files:
-        type: array
-        items: string
-      preexisting_changed_files:
-        type: array
-        items:
-          type: object
-          required: [path]
-          properties:
-            path: string
-      workspace_diff: object
-      rationale: string
+  preexisting_diff_result:
+    type: array
+    items: object
+  edit: *edit_output_schema
 
 tools:
   - name: question
@@ -137,12 +119,6 @@ tools:
   - name: edit
     capability: file.write
     timeout_ms: 300000
-  - name: write
-    capability: file.write
-    timeout_ms: 300000
-  - name: apply_patch
-    capability: file.write
-    timeout_ms: 300000
   - name: webfetch
     capability: code.read
     timeout_ms: 1800000
@@ -166,6 +142,26 @@ workflow:
       actions:
         - kind: approval
           approval_for: [file.write]
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: bash
+                  input:
+                    literal:
+                      command: |
+                        if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                          { git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u
+                        else
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
+                        fi
+                      description: Capture pre-existing workspace changes before editing
+          output: preexisting_diff_result
+          max_calls: 1
+          allowed_tools: [bash]
+          timeout_seconds: 1800
+          on_error: observe
         - kind: tool_call
           tool: skill
           input:
@@ -223,7 +219,7 @@ workflow:
               available_skills:
                 ref: available_skills
               allowed_tools:
-                literal: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
+                literal: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, webfetch, todowrite, todoread, skill]
           output: decision
           timeout_seconds: 1800
           retry:
@@ -325,7 +321,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 64
-          allowed_tools: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
+          allowed_tools: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, webfetch, todowrite, todoread, skill]
           timeout_seconds: 1800
           on_error: observe
         - kind: append
@@ -343,6 +339,36 @@ workflow:
         - kind: set
           values:
             phase: post_act
+
+    - id: act-missing-complete-decision
+      when: phase == "act" && decision.complete == null
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: malformed_decision
+              result:
+                literal: The prior decision was missing complete/tool_calls. Return valid structured output before tool execution.
+        - kind: set
+          values:
+            phase: choose
+
+    - id: act-missing-tool-calls-decision
+      when: phase == "act" && decision.tool_calls == null
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: malformed_decision
+              result:
+                literal: The prior decision was missing tool_calls. Return valid structured output before tool execution.
+        - kind: set
+          values:
+            phase: choose
 
     - id: verify-act
       when: phase == "verify_act" && decision.complete == false
@@ -371,6 +397,36 @@ workflow:
           values:
             phase: post_act
 
+    - id: verify-act-missing-complete-decision
+      when: phase == "verify_act" && decision.complete == null
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: malformed_decision
+              result:
+                literal: The verification decision was missing complete/tool_calls. Return exactly one bash verification command.
+        - kind: set
+          values:
+            phase: verify
+
+    - id: verify-act-missing-tool-calls-decision
+      when: phase == "verify_act" && decision.tool_calls == null
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: malformed_decision
+              result:
+                literal: The verification decision was missing tool_calls. Return exactly one bash verification command.
+        - kind: set
+          values:
+            phase: verify
+
     - id: verification-passed
       when: phase == "post_act" && observation_summary.verification_status_update == "passed"
       actions:
@@ -379,6 +435,23 @@ workflow:
             verification_status: passed
             verification_required: false
             phase: choose
+
+    - id: verification-failed-again
+      when: phase == "post_act" && verification_status == "failed" && observation_summary.verification_status_update == "failed"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_failed_cap
+              result:
+                literal: Verification failed again after a prior failed verification; summarize with the failing command/output instead of looping.
+        - kind: set
+          values:
+            verification_status: failed
+            verification_required: false
+            phase: summarize
 
     - id: verification-failed
       when: phase == "post_act" && observation_summary.verification_status_update == "failed"
@@ -522,7 +595,7 @@ workflow:
                         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                           { git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u
                         else
-                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' | sed 's#^\./##' | sort
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
                         fi
                       description: List changed files including untracked files
           output: final_diff_result
@@ -542,22 +615,36 @@ workflow:
                         - ref: verification_status
                         - not:
                             is_empty:
-                              split_lines:
-                                ref: final_diff_result[1].output.log
+                              line_difference:
+                                - split_lines:
+                                    ref: final_diff_result[1].output.log
+                                - split_lines:
+                                    ref: preexisting_diff_result[0].output.log
                     - literal: [passed, true]
                 patch_applied:
                   not:
                     is_empty:
-                      split_lines:
-                        ref: final_diff_result[1].output.log
+                      line_difference:
+                        - split_lines:
+                            ref: final_diff_result[1].output.log
+                        - split_lines:
+                            ref: preexisting_diff_result[0].output.log
                 changed_files:
-                  split_lines:
-                    ref: final_diff_result[1].output.log
+                  line_difference:
+                    - split_lines:
+                        ref: final_diff_result[1].output.log
+                    - split_lines:
+                        ref: preexisting_diff_result[0].output.log
                 workspace_changed_files:
-                  split_lines:
-                    ref: final_diff_result[1].output.log
+                  line_difference:
+                    - split_lines:
+                        ref: final_diff_result[1].output.log
+                    - split_lines:
+                        ref: preexisting_diff_result[0].output.log
                 preexisting_changed_files:
-                  literal: []
+                  path_objects:
+                    split_lines:
+                      ref: preexisting_diff_result[0].output.log
                 workspace_diff:
                   object:
                     provider:
