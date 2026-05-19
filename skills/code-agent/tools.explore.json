@@ -3,7 +3,7 @@
     "glob": {
       "kind": "repo_files",
       "capability": "code.read",
-      "repo_dir": "../..",
+      "repo_dir": ".",
       "max_files": 100
     },
     "question": {
@@ -13,19 +13,19 @@
     "read_range": {
       "kind": "file_read",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": ".",
       "max_bytes": 51200
     },
     "read_contains": {
       "kind": "file_read",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": ".",
       "max_bytes": 51200
     },
     "grep": {
       "kind": "file_search",
       "capability": "file.read",
-      "base_dir": "../..",
+      "base_dir": ".",
       "max_matches": 100,
       "max_context_lines": 2,
       "max_line_chars": 2000,
@@ -34,7 +34,7 @@
     "lsp": {
       "kind": "rust_analyzer",
       "capability": "code.read",
-      "root_dir": "../..",
+      "root_dir": ".",
       "max_results": 120,
       "max_diagnostics": 80,
       "max_bytes": 51200
@@ -49,5 +49,6 @@
       "kind": "local_reflection",
       "capability": "code.read"
     }
-  }
+  },
+  "workspace_dir": "."
 }

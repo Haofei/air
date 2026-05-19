@@ -595,6 +595,8 @@ fn default_true() -> bool {
 pub struct ConfigTools {
     tools: BTreeMap<String, ToolConfig>,
     approvals: BTreeMap<String, ApprovalConfig>,
+    // `config_dir` anchors profile/tool-config sibling files; `workspace_dir`
+    // anchors user workspace content that tools may read, write, or execute in.
     config_dir: PathBuf,
     workspace_dir: PathBuf,
     search_observations: BTreeMap<String, SearchObservation>,
@@ -1161,14 +1163,20 @@ impl ToolProvider for ConfigTools {
             } => call_skill_tool(
                 name,
                 input,
-                &resolve_config_path(&self.workspace_dir, &root_dir),
+                &resolve_config_path(&self.config_dir, &root_dir),
                 max_bytes.unwrap_or(64 * 1024),
                 enabled,
             ),
             ToolConfig::Subagent {
                 capability: _,
                 subagents,
-            } => call_subagent_tool(name, input, &subagents, &self.workspace_dir),
+            } => call_subagent_tool(
+                name,
+                input,
+                &subagents,
+                &self.workspace_dir,
+                &self.config_dir,
+            ),
             ToolConfig::Bash {
                 capability: _,
                 cwd,

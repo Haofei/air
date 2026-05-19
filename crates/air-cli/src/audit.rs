@@ -1,17 +1,21 @@
 use crate::code_artifact::{read_code_run_artifact, CodeRunArtifact, CodeRunVerdict};
+use crate::llm_advisory::{cached_llm_advisory, CachedLlmAdvisoryOptions};
 use air_runtime::{read_trace_jsonl, TraceEvent, TraceStatus};
 use anyhow::{Context, Result};
-use serde::Serialize;
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+const AUDIT_DIAGNOSER_MODEL: &str = "audit_diagnoser";
+
 pub(crate) struct AuditRunOptions {
     pub(crate) artifact_dir: PathBuf,
     pub(crate) report: Option<PathBuf>,
+    pub(crate) model_config: Option<PathBuf>,
 }
 
 pub(crate) struct AuditCollectOptions {
@@ -35,7 +39,17 @@ struct AuditReport {
     context: ContextAudit,
     cost: CostAudit,
     reward_hacking: RewardHackingAudit,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnosis: Option<AuditDiagnosis>,
     findings: Vec<AuditFinding>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+struct AuditDiagnosis {
+    model: String,
+    summary: String,
+    cited_findings: Vec<String>,
+    cited_tools: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -214,7 +228,13 @@ struct TraceAuditFacts {
 pub(crate) fn audit_run(options: AuditRunOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let artifact_dir = absolutize(&cwd, options.artifact_dir);
-    let report = audit_code_run_artifact(&artifact_dir)?;
+    let mut report = audit_code_run_artifact(&artifact_dir)?;
+    if let Some(model_config) = options.model_config.as_ref() {
+        match diagnose_audit_report(&report, model_config) {
+            Ok(diagnosis) => report.diagnosis = Some(diagnosis),
+            Err(error) => eprintln!("[air audit] advisory diagnosis failed: {error}"),
+        }
+    }
     if let Some(path) = options.report {
         let path = absolutize(&cwd, path);
         write_markdown_report(&path, &report)?;
@@ -224,6 +244,81 @@ pub(crate) fn audit_run(options: AuditRunOptions) -> Result<()> {
         anyhow::bail!("audit failed for {}", artifact_dir.display());
     }
     Ok(())
+}
+
+fn diagnose_audit_report(report: &AuditReport, model_config: &Path) -> Result<AuditDiagnosis> {
+    cached_llm_advisory(
+        CachedLlmAdvisoryOptions {
+            cache_root: Path::new(".air/memory/cache"),
+            out_file: None,
+            purpose: "audit-diagnosis",
+            model_alias: AUDIT_DIAGNOSER_MODEL,
+            model_config,
+            request: &json!({
+                "schema": "air.audit_diagnosis_request.v1",
+                "target": &report.target,
+                "verdict": &report.verdict,
+                "correctness": &report.correctness,
+                "safety": &report.safety,
+                "verification": &report.verification,
+                "tool_use": &report.tool_use,
+                "context": &report.context,
+                "cost": &report.cost,
+                "reward_hacking": &report.reward_hacking,
+                "findings": &report.findings,
+                "instruction": "Write 1-3 concise advisory sentences explaining likely failure causes. Cite only finding IDs and tool names present in this request.",
+            }),
+            generated_at_unix: unix_now(),
+        },
+        |output| validate_audit_diagnosis(report, output),
+    )
+}
+
+#[derive(Debug, Deserialize)]
+struct AuditDiagnosisOutput {
+    summary: String,
+    #[serde(default)]
+    cited_findings: Vec<String>,
+    #[serde(default)]
+    cited_tools: Vec<String>,
+}
+
+fn validate_audit_diagnosis(report: &AuditReport, output: Value) -> Result<AuditDiagnosis> {
+    let parsed: AuditDiagnosisOutput =
+        serde_json::from_value(output).context("audit diagnosis output must be an object")?;
+    let summary = parsed.summary.trim();
+    if summary.is_empty() {
+        anyhow::bail!("audit diagnosis summary is empty");
+    }
+    let finding_ids = report
+        .findings
+        .iter()
+        .map(|finding| finding.id.as_str())
+        .collect::<BTreeSet<_>>();
+    let tool_names = report
+        .tool_use
+        .tool_counts
+        .keys()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+    let cited_findings = parsed
+        .cited_findings
+        .into_iter()
+        .filter(|id| finding_ids.contains(id.as_str()))
+        .take(8)
+        .collect();
+    let cited_tools = parsed
+        .cited_tools
+        .into_iter()
+        .filter(|tool| tool_names.contains(tool.as_str()))
+        .take(8)
+        .collect();
+    Ok(AuditDiagnosis {
+        model: AUDIT_DIAGNOSER_MODEL.to_string(),
+        summary: truncate_chars(summary, 900),
+        cited_findings,
+        cited_tools,
+    })
 }
 
 pub(crate) fn audit_collect(options: AuditCollectOptions) -> Result<()> {
@@ -412,6 +507,7 @@ fn audit_code_run_artifact(artifact_dir: &Path) -> Result<AuditReport> {
         context: context_audit(trace_facts.as_ref()),
         cost: cost_audit(trace_facts.as_ref()),
         reward_hacking,
+        diagnosis: None,
         findings,
     })
 }
@@ -1088,6 +1184,18 @@ fn write_markdown_report(path: &Path, report: &AuditReport) -> Result<()> {
         "- cost: `{}` model calls, `{}` tool calls, `{}` tokens\n\n",
         report.cost.model_calls, report.cost.tool_calls, report.cost.total_tokens
     ));
+    if let Some(diagnosis) = &report.diagnosis {
+        out.push_str("## Advisory Diagnosis\n\n");
+        out.push_str("> This section is model-generated advisory text. The audit verdict above is deterministic.\n\n");
+        out.push_str(&format!("{}\n\n", md_inline(&diagnosis.summary)));
+        if !diagnosis.cited_findings.is_empty() || !diagnosis.cited_tools.is_empty() {
+            out.push_str(&format!(
+                "- cited findings: `{}`\n- cited tools: `{}`\n\n",
+                diagnosis.cited_findings.join(", "),
+                diagnosis.cited_tools.join(", ")
+            ));
+        }
+    }
     out.push_str("## Findings\n\n");
     if report.findings.is_empty() {
         out.push_str("No deterministic findings.\n");
@@ -1241,6 +1349,13 @@ fn truncate_chars(value: &str, max_chars: usize) -> String {
         .collect::<String>();
     text.push_str("...");
     text
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn optional_bool(value: Option<bool>) -> String {

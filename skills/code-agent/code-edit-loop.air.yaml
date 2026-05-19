@@ -51,6 +51,8 @@ state:
     enum: [unknown, passed, failed]
   verification_required:
     type: boolean
+  patch_seen:
+    type: boolean
   decision:
     type: object
     required: [complete, tool_calls]
@@ -73,6 +75,7 @@ state:
       any_workspace_change: boolean
       any_verification_passed: boolean
       any_verification_failed: boolean
+      error_count: number
       verification_status_update:
         type: enum
         enum: [unchanged, unknown, passed, failed]
@@ -152,9 +155,9 @@ workflow:
                     literal:
                       command: |
                         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                          { git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u
+                          { git diff --name-only -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; git ls-files --others --exclude-standard -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; } | sort -u
                         else
-                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -not -path './node_modules/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
                         fi
                       description: Capture pre-existing workspace changes before editing
           output: preexisting_diff_result
@@ -182,6 +185,7 @@ workflow:
               any_verification_failed: false
             verification_status: unknown
             verification_required: false
+            patch_seen: false
             phase: choose
 
     - id: summarize-at-step-limit
@@ -215,11 +219,11 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_bytes: 600000
+                max_bytes: 50000
               available_skills:
                 ref: available_skills
               allowed_tools:
-                literal: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, webfetch, todowrite, todoread, skill]
+                literal: [bash, grep, glob, read_contains, read_range, edit, todowrite, todoread]
           output: decision
           timeout_seconds: 1800
           retry:
@@ -298,7 +302,7 @@ workflow:
               observations:
                 take_last_within_bytes:
                   ref: observations
-                max_bytes: 600000
+                max_bytes: 30000
               allowed_tools:
                 literal: [bash]
               verification_gate:
@@ -321,7 +325,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 64
-          allowed_tools: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, webfetch, todowrite, todoread, skill]
+          allowed_tools: [bash, grep, glob, read_contains, read_range, edit, todowrite, todoread]
           timeout_seconds: 1800
           on_error: observe
         - kind: append
@@ -427,6 +431,16 @@ workflow:
           values:
             phase: verify
 
+    - id: verification-passed-after-patch
+      when: phase == "post_act" && observation_summary.verification_status_update == "passed" && observation_summary.any_workspace_change == true
+      actions:
+        - kind: set
+          values:
+            verification_status: passed
+            verification_required: false
+            patch_seen: true
+            phase: choose
+
     - id: verification-passed
       when: phase == "post_act" && observation_summary.verification_status_update == "passed"
       actions:
@@ -434,6 +448,21 @@ workflow:
           values:
             verification_status: passed
             verification_required: false
+            phase: choose
+
+    - id: tool-error-retry
+      when: phase == "post_act" && observation_summary.error_count > 0
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: malformed_tool_call
+              result:
+                literal: A requested tool call failed schema validation. Retry with complete tool arguments; for edit, include the target file and exact old/new content.
+        - kind: set
+          values:
             phase: choose
 
     - id: verification-failed-again
@@ -469,6 +498,7 @@ workflow:
           values:
             verification_status: unknown
             verification_required: false
+            patch_seen: true
             phase: choose
 
     - id: complete-needs-verification
@@ -536,11 +566,26 @@ workflow:
             phase: summarize
 
     - id: complete-verified
-      when: phase == "act" && decision.complete == true && verification_status == "passed"
+      when: phase == "act" && decision.complete == true && verification_status == "passed" && patch_seen == true
       actions:
         - kind: set
           values:
             phase: summarize
+
+    - id: complete-verified-needs-patch
+      when: phase == "act" && decision.complete == true && verification_status == "passed" && patch_seen != true
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: patch_required
+              result:
+                literal: The task requires a code change. Tests have passed, but no workspace-changing edit has been observed; make a bounded source edit before completing.
+        - kind: set
+          values:
+            phase: choose
 
     - id: summarize-post-act-at-step-limit
       when: phase == "post_act" && _air.is_last_action_step == true
@@ -581,7 +626,7 @@ workflow:
                     literal:
                       command: |
                         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                          git diff -- . && git ls-files --others --exclude-standard -- . | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
+                          git diff -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**' && git ls-files --others --exclude-standard -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**' | while IFS= read -r file; do git diff --no-index -- /dev/null "$file" || true; done
                         else
                           printf 'AIR non-git workspace: git diff unavailable; workspace delta is computed by AIR artifact snapshot when available.\n'
                         fi
@@ -593,9 +638,9 @@ workflow:
                     literal:
                       command: |
                         if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-                          { git diff --name-only -- .; git ls-files --others --exclude-standard -- .; } | sort -u
+                          { git diff --name-only -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; git ls-files --others --exclude-standard -- . ':(exclude).air/**' ':(exclude)target/**' ':(exclude)node_modules/**'; } | sort -u
                         else
-                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
+                          find . -type f -not -path './.git/*' -not -path './.air/*' -not -path './target/*' -not -path './node_modules/*' -exec shasum -a 256 {} \; | sed 's#  \./#  #' | sort
                         fi
                       description: List changed files including untracked files
           output: final_diff_result

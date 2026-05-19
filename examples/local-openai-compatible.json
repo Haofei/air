@@ -195,6 +195,54 @@
       "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
       "model_env": "AIR_MODEL_LOCAL_MODEL"
     },
+    "task_router": {
+      "temperature": 0,
+      "request_timeout_seconds": 1800,
+      "system_prompt": "You are AIR task-router. Return ONLY a JSON object with exactly these keys: executor (one of code, review, project, bench), reason (string), confidence (number between 0 and 1). Use code for ordinary coding edits, review only for code/diff/PR review, project only for multi-step project planning, and bench only for benchmark execution or comparison. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
+    },
+    "failure_classifier": {
+      "temperature": 0,
+      "request_timeout_seconds": 1800,
+      "system_prompt": "You are AIR failure-classifier. Return ONLY a JSON object with exactly these keys: category (string from allowed_categories), rationale (string), evidence (array of strings), confidence (number between 0 and 1). Use the supplied observation, message, task, changed_files, and allowed_categories. Do not invent categories. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
+    },
+    "dream_synthesizer": {
+      "temperature": 0,
+      "request_timeout_seconds": 1800,
+      "system_prompt": "You are AIR Dream's advisory synthesis model. Return ONLY a JSON object with exactly one key: candidates (array). Each candidate must contain kind (one of procedure_candidate, concept_candidate, hypothesis_candidate), name (snake_case string), description (string tied to supplied evidence), derived_from (array of supplied episode ids), generalizes (array of strings), confidence (number between 0 and 1), and suggested_actions (array of objects with kind, name, detail). Propose only evidence-backed patterns from the supplied runs. Do not decide pass/fail, promote memory, or write runtime guards. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
+    },
+    "skill_router": {
+      "temperature": 0,
+      "request_timeout_seconds": 1800,
+      "system_prompt": "You are AIR skill-router. Return ONLY a JSON object with exactly these keys: ranked_ids (array of skill ids from the supplied candidates), reason (string), confidence (number between 0 and 1). Rank only known skill ids and do not invent skills. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
+    },
+    "audit_diagnoser": {
+      "temperature": 0,
+      "request_timeout_seconds": 1800,
+      "system_prompt": "You are AIR audit-diagnoser. Return ONLY a JSON object with exactly these keys: summary (string), cited_findings (array of finding IDs from the request), cited_tools (array of tool names from the request). Explain likely failure causes in 1-3 concise advisory sentences, citing only supplied findings and tools. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
+    },
+    "candidate_judge": {
+      "temperature": 0,
+      "request_timeout_seconds": 1800,
+      "system_prompt": "You are AIR candidate-judge. Return ONLY a JSON object with exactly these keys: candidate (one allowed candidate id), reason (string), confidence (number between 0 and 1). Compare only candidates that already passed deterministic gates and choose the cleaner patch. Do not invent candidate ids. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
+    },
     "executive_summarizer": {
       "temperature": 0,
       "system_prompt": "You are executive-case-summary-agent. Return ONLY a JSON object with exactly these keys: summary (string), actions (array of strings), approvals (array of strings), escalation_required (boolean), owners (array of strings). Use all supplied triage and specialist outputs. Do not include markdown.",

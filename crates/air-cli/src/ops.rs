@@ -239,7 +239,7 @@ fn configure_child_process_group(command: &mut Command) {
     {
         use std::os::unix::process::CommandExt;
         unsafe {
-            command.pre_exec(|| unix_process::set_current_process_group());
+            command.pre_exec(unix_process::set_current_process_group);
         }
     }
 }

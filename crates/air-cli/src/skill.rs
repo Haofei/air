@@ -3,6 +3,7 @@ use crate::code_agent::{
     run_code_agent, CodeOptions,
 };
 use crate::code_artifact::{path_content_identity, CodeRunSkill, CodeRunVerdictConstraints};
+use crate::llm_advisory::{cached_llm_advisory, llm_advisory_disabled, CachedLlmAdvisoryOptions};
 use crate::profile::{read_run_plan_profile, resolve_profile_path};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -16,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const SKILL_MANIFEST: &str = "air-skill.yaml";
 const SKILL_SCHEMA: &str = "air.skill.v1";
 const DEFAULT_EXECUTOR_SKILL: &str = "code-agent";
+const SKILL_ROUTER_MODEL: &str = "skill_router";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct AirSkillManifest {
@@ -146,6 +148,7 @@ pub(crate) struct SkillRouteOptions {
     pub(crate) top_k: usize,
     pub(crate) explain: bool,
     pub(crate) memory_pack: Option<Value>,
+    pub(crate) model_config: Option<PathBuf>,
 }
 
 pub(crate) struct SkillUpgradeOptions {
@@ -181,6 +184,18 @@ struct SkillRouteResult {
     selected: Vec<SkillRouteCard>,
     rejected: Vec<SkillRouteRejection>,
     candidates: Vec<SkillRouteCard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advisory: Option<SkillRouteAdvisory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advisory_status: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SkillRouteAdvisory {
+    model: String,
+    ranked_ids: Vec<String>,
+    reason: String,
+    confidence: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -258,7 +273,11 @@ pub(crate) fn list_skills() -> Result<()> {
 }
 
 pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
-    let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
+    let route = route_skills_for_task_advisory(
+        &options.task,
+        options.top_k.max(1),
+        options.model_config.as_deref(),
+    )?;
     if options.explain {
         print_json(&json!({
             "task": options.task,
@@ -267,6 +286,8 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
             "selected": route.selected,
             "rejected": route.rejected,
             "candidates": route.candidates,
+            "advisory": route.advisory,
+            "advisory_status": route.advisory_status,
             "memory_pack": options.memory_pack,
         }))
     } else {
@@ -275,6 +296,8 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
             "executor": route.executor,
             "instructions": route.instructions,
             "selected": route.selected,
+            "advisory": route.advisory,
+            "advisory_status": route.advisory_status,
             "memory_pack": options.memory_pack,
         }))
     }
@@ -291,6 +314,8 @@ fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
             selected: Vec::new(),
             rejected: Vec::new(),
             candidates: Vec::new(),
+            advisory: None,
+            advisory_status: Some("not_needed_top_k_zero".to_string()),
         });
     }
     let root = if Path::new("skills").exists() {
@@ -300,6 +325,149 @@ fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
     };
     let route = air_skill_runtime::route_skills_for_task(&root, task, top_k)?;
     Ok(serde_json::from_value(serde_json::to_value(route)?)?)
+}
+
+fn route_skills_for_task_advisory(
+    task: &str,
+    top_k: usize,
+    model_config: Option<&Path>,
+) -> Result<SkillRouteResult> {
+    let mut route = route_skills_for_task(task, top_k)?;
+    if route.candidates.is_empty() {
+        route.advisory_status = Some("not_needed_no_candidates".to_string());
+        return Ok(route);
+    }
+    let Some(model_config) = model_config else {
+        route.advisory_status = Some("lexical_only_needs_llm_model_config".to_string());
+        return Ok(route);
+    };
+    if llm_advisory_disabled() {
+        route.advisory_status = Some("lexical_only_llm_advisory_disabled".to_string());
+        return Ok(route);
+    }
+    let request = json!({
+        "schema": "air.skill_router_request.v1",
+        "task": task,
+        "top_k": top_k,
+        "deterministic_selected": route.selected.iter().map(|card| card.id.as_str()).collect::<Vec<_>>(),
+        "candidates": route.candidates.iter().map(|card| json!({
+            "id": card.id,
+            "mode": card.mode,
+            "host": card.host,
+            "description": card.description,
+            "score": card.score,
+            "reasons": card.reasons,
+        })).collect::<Vec<_>>(),
+        "instruction": "Rank only the listed candidate skill ids for this task. Do not invent skill ids.",
+    });
+    let candidate_ids = route
+        .candidates
+        .iter()
+        .map(|card| card.id.clone())
+        .collect::<BTreeSet<_>>();
+    let advisory = cached_llm_advisory(
+        CachedLlmAdvisoryOptions {
+            cache_root: Path::new(".air/memory/cache"),
+            out_file: None,
+            purpose: "skill-router",
+            model_alias: SKILL_ROUTER_MODEL,
+            model_config,
+            request: &request,
+            generated_at_unix: unix_now(),
+        },
+        |output| validate_skill_router_output(output, &candidate_ids),
+    );
+    let advisory = match advisory {
+        Ok(advisory) => advisory,
+        Err(error) => {
+            route.advisory_status = Some(format!(
+                "lexical_only_llm_advisory_failed: {}",
+                truncate_for_status(&error.to_string(), 180)
+            ));
+            return Ok(route);
+        }
+    };
+    let by_id = route
+        .candidates
+        .iter()
+        .map(|card| (card.id.clone(), card.clone()))
+        .collect::<BTreeMap<_, _>>();
+    let mut selected = Vec::new();
+    let mut seen = BTreeSet::new();
+    for id in &advisory.ranked_ids {
+        if selected.len() >= top_k {
+            break;
+        }
+        if seen.insert(id.clone()) {
+            if let Some(card) = by_id.get(id) {
+                selected.push(card.clone());
+            }
+        }
+    }
+    for card in &route.selected {
+        if selected.len() >= top_k {
+            break;
+        }
+        if seen.insert(card.id.clone()) {
+            selected.push(card.clone());
+        }
+    }
+    route.instructions = selected
+        .iter()
+        .filter(|card| card.mode == "instruction")
+        .cloned()
+        .collect();
+    route.selected = selected;
+    route.advisory = Some(advisory);
+    route.advisory_status = Some("complete".to_string());
+    Ok(route)
+}
+
+fn truncate_for_status(value: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for ch in value.chars().take(max_chars) {
+        out.push(ch);
+    }
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
+#[derive(Debug, Deserialize)]
+struct SkillRouterOutput {
+    ranked_ids: Vec<String>,
+    reason: String,
+    #[serde(default)]
+    confidence: Option<f64>,
+}
+
+fn validate_skill_router_output(
+    output: Value,
+    candidate_ids: &BTreeSet<String>,
+) -> Result<SkillRouteAdvisory> {
+    let parsed: SkillRouterOutput =
+        serde_json::from_value(output).context("skill router output must be an object")?;
+    let mut ranked_ids = Vec::new();
+    let mut seen = BTreeSet::new();
+    for id in parsed.ranked_ids {
+        if candidate_ids.contains(&id) && seen.insert(id.clone()) {
+            ranked_ids.push(id);
+        }
+    }
+    if ranked_ids.is_empty() {
+        anyhow::bail!("skill router did not return any known skill ids");
+    }
+    let reason = parsed.reason.trim().to_string();
+    if reason.is_empty() {
+        anyhow::bail!("skill router reason is empty");
+    }
+    Ok(SkillRouteAdvisory {
+        model: SKILL_ROUTER_MODEL.to_string(),
+        ranked_ids,
+        reason,
+        confidence: parsed.confidence.unwrap_or(0.5).clamp(0.0, 1.0),
+    })
 }
 
 pub(crate) fn route_skills_value_for_task(task: &str, top_k: usize) -> Result<Value> {
@@ -1945,6 +2113,13 @@ fn print_json(value: &Value) -> Result<()> {
     serde_json::to_writer_pretty(std::io::stdout(), value)?;
     println!();
     Ok(())
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 #[cfg(test)]

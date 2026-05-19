@@ -9,6 +9,7 @@ mod entry;
 mod eval_manifest;
 mod explain;
 mod improve;
+mod llm_advisory;
 mod mcp;
 mod memory;
 mod models;
@@ -221,11 +222,14 @@ impl AirCliConfig {
     }
 
     fn model_config(&self) -> Option<PathBuf> {
-        self.model_config.clone().or_else(|| {
-            self.defaults
-                .as_ref()
-                .and_then(|defaults| defaults.model_config.clone())
-        })
+        self.model_config
+            .clone()
+            .or_else(|| {
+                self.defaults
+                    .as_ref()
+                    .and_then(|defaults| defaults.model_config.clone())
+            })
+            .or_else(|| std::env::var_os("AIR_MODEL_CONFIG").map(PathBuf::from))
     }
 
     fn memory_dir(&self) -> Option<PathBuf> {
@@ -1590,6 +1594,7 @@ fn main() -> Result<()> {
                 task,
                 top_k,
                 explain,
+                model_config: config.model_config(),
             }),
             SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
         },
@@ -1600,6 +1605,7 @@ fn main() -> Result<()> {
             } => audit_run(AuditRunOptions {
                 artifact_dir,
                 report,
+                model_config: config.model_config(),
             }),
             AuditCommand::Collect {
                 from,
@@ -1699,6 +1705,7 @@ fn main() -> Result<()> {
             from,
             out_dir,
             write_regressions,
+            model_config: config.model_config(),
         }),
         Command::Regression { command } => match command {
             RegressionCommand::Run {
@@ -1739,6 +1746,7 @@ fn main() -> Result<()> {
                 write_regressions,
                 full,
                 mode,
+                model_config: config.model_config(),
                 experiment,
                 top_findings,
                 budget_seconds,
@@ -1960,9 +1968,12 @@ fn main() -> Result<()> {
                 keep_worktrees,
                 allow_dirty_bootstrap,
             }),
-            SelfCommand::Compare { finding, from, out } => {
-                self_compare(SelfCompareOptions { finding, from, out })
-            }
+            SelfCommand::Compare { finding, from, out } => self_compare(SelfCompareOptions {
+                finding,
+                from,
+                out,
+                model_config: config.model_config(),
+            }),
         },
         Command::Dev { command } => run_dev_command(command, &config),
         Command::Project { command } => match command {
@@ -3350,6 +3361,16 @@ mod tests {
             &fixture_root.join("skills/code-agent"),
         );
         copy_dir_recursive(&root.join("modules/std"), &fixture_root.join("modules/std"));
+        let fixture_tool_config = fixture_root.join("skills/code-agent/tools.json");
+        let mut tool_config_json: serde_json::Value =
+            serde_json::from_slice(&fs::read(&fixture_tool_config).unwrap()).unwrap();
+        tool_config_json["workspace_dir"] =
+            serde_json::Value::String(fixture_root.display().to_string());
+        fs::write(
+            &fixture_tool_config,
+            serde_json::to_vec_pretty(&tool_config_json).unwrap(),
+        )
+        .unwrap();
 
         let git_init = std::process::Command::new("git")
             .arg("-C")
@@ -3365,9 +3386,22 @@ mod tests {
             .arg("add")
             .arg("examples")
             .arg("modules")
+            .arg("skills")
             .status()
             .unwrap();
         assert!(git_add.success());
+        let git_commit = std::process::Command::new("git")
+            .arg("-C")
+            .arg(&fixture_root)
+            .args(["-c", "user.email=air@example.test"])
+            .args(["-c", "user.name=AIR Test"])
+            .arg("commit")
+            .arg("-q")
+            .arg("-m")
+            .arg("baseline")
+            .status()
+            .unwrap();
+        assert!(git_commit.success());
 
         let result = run_plan_with_inputs_capture(
             fixture_root.join("skills/code-agent/code-edit.air-plan.yaml"),
@@ -3388,7 +3422,7 @@ mod tests {
                 parallel: false,
                 log: false,
                 example_tools: false,
-                tool_config: Some(fixture_root.join("skills/code-agent/tools.json")),
+                tool_config: Some(fixture_tool_config),
                 model_replay: None,
             },
         )
@@ -3413,19 +3447,14 @@ mod tests {
         assert_eq!(
             first_decider.input.as_ref().unwrap()["allowed_tools"],
             json!([
-                "question",
                 "bash",
                 "grep",
                 "glob",
-                "lsp",
-                "task",
                 "read_contains",
                 "read_range",
                 "edit",
-                "webfetch",
                 "todowrite",
-                "todoread",
-                "skill"
+                "todoread"
             ])
         );
 

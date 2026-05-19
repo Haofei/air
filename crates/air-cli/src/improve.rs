@@ -1,5 +1,7 @@
 use crate::eval_manifest::check_default_eval_manifest_if_present;
+use crate::llm_advisory::{cached_llm_advisory, llm_advisory_disabled, CachedLlmAdvisoryOptions};
 use crate::regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
+use air_runtime::read_trace_jsonl;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -13,12 +15,14 @@ const IMPROVE_OBSERVATIONS_SCHEMA: &str = "air.improve_observations.v1";
 const IMPROVE_FINDINGS_SCHEMA: &str = "air.improve_findings.v1";
 const IMPROVE_REGRESSIONS_SCHEMA: &str = "air.improve_suggested_regressions.v1";
 const DEFAULT_CHECK_SUITE: &str = "skills/code-agent/benches/rust-small/suite.json";
+const FAILURE_CLASSIFIER_MODEL: &str = "failure_classifier";
 
 pub(crate) struct ImproveOptions {
     pub(crate) action: ImproveAction,
     pub(crate) from: Vec<PathBuf>,
     pub(crate) out_dir: Option<PathBuf>,
     pub(crate) write_regressions: bool,
+    pub(crate) model_config: Option<PathBuf>,
 }
 
 pub(crate) enum ImproveAction {
@@ -54,6 +58,7 @@ struct ImproveOutput {
     regression_dir: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     next_action: Option<ImproveNextAction>,
+    failure_classifier_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -164,6 +169,12 @@ struct ImproveObservation {
     #[serde(skip_serializing_if = "Option::is_none")]
     task: Option<String>,
     category: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    category_source: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    effective_category: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advisory_category: Option<ImproveAdvisoryCategory>,
     message: String,
     final_success: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -171,6 +182,15 @@ struct ImproveObservation {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     skills: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct ImproveAdvisoryCategory {
+    model: String,
+    category: String,
+    confidence: f64,
+    rationale: String,
     evidence: Vec<String>,
 }
 
@@ -210,6 +230,54 @@ struct SuggestedRegression {
     title: String,
     source_observations: Vec<String>,
     fixture_hint: Value,
+}
+
+#[derive(Debug, Serialize)]
+struct FailureClassifierRequest {
+    observation_id: String,
+    source_kind: String,
+    source_path: String,
+    task_id: Option<String>,
+    task: Option<String>,
+    deterministic_category: String,
+    message: String,
+    evidence: Vec<String>,
+    changed_files: Vec<String>,
+    allowed_categories: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+struct FailureClassifierSummary {
+    observation_id: String,
+    deterministic_category: String,
+    advisory_category: String,
+    confidence: f64,
+    rationale: String,
+    evidence: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct FailureClassifierError {
+    observation_id: String,
+    deterministic_category: String,
+    error: String,
+}
+
+#[derive(Debug, Serialize)]
+struct FailureClassifierRun {
+    status: String,
+    summaries: Vec<FailureClassifierSummary>,
+    errors: Vec<FailureClassifierError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FailureClassifierOutput {
+    category: String,
+    rationale: String,
+    #[serde(default)]
+    evidence: Vec<String>,
+    #[serde(default)]
+    confidence: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -277,10 +345,13 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
         match file_name {
             Some("run.json") => collect_bench_run(&file, &mut observations, &mut seen)?,
             Some("artifact.json") => collect_code_artifact(&file, &mut observations, &mut seen)?,
+            Some("trace.jsonl") => collect_trace_hygiene(&file, &mut observations, &mut seen)?,
             _ => {}
         }
     }
     renumber_observations(&mut observations);
+    let advisory =
+        apply_failure_classifier_advisory(options.model_config.as_deref(), &mut observations);
 
     let findings = mine_findings(&observations);
     let regressions = suggest_regressions(&findings);
@@ -307,6 +378,21 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
             observations: observations.clone(),
         },
     )?;
+    if !advisory.summaries.is_empty()
+        || !advisory.errors.is_empty()
+        || advisory.status != "not_needed"
+    {
+        write_json(
+            &out_dir.join("failure_classifier.json"),
+            &json!({
+                "schema": "air.improve_failure_classifier.v1",
+                "model": FAILURE_CLASSIFIER_MODEL,
+                "status": advisory.status,
+                "categories": advisory.summaries,
+                "errors": advisory.errors,
+            }),
+        )?;
+    }
     write_json(
         &findings_path,
         &ImproveFindingsFile {
@@ -383,6 +469,7 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
             .write_regressions
             .then(|| out_dir.join("suggested-regressions").display().to_string()),
         next_action: choose_next_action(&findings, &observations, &statuses),
+        failure_classifier_status: advisory.status,
     };
     println!("{}", serde_json::to_string_pretty(&output)?);
     Ok(())
@@ -422,10 +509,17 @@ fn collect_improve_inputs(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
 }
 
 fn is_improve_input(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("run.json" | "artifact.json")
-    )
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("run.json" | "artifact.json") => true,
+        Some("trace.jsonl") => trace_without_sibling_artifact(path),
+        _ => false,
+    }
+}
+
+fn trace_without_sibling_artifact(path: &Path) -> bool {
+    path.parent()
+        .map(|parent| !parent.join("artifact.json").exists())
+        .unwrap_or(true)
 }
 
 fn collect_suite_files(root: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -525,6 +619,9 @@ fn collect_bench_run_inner(
             task_id,
             task: None,
             category,
+            category_source: None,
+            effective_category: None,
+            advisory_category: None,
             message,
             final_success: task
                 .verdict
@@ -611,6 +708,9 @@ fn collect_code_artifact(
             .and_then(Value::as_str)
             .map(ToOwned::to_owned),
         category,
+        category_source: None,
+        effective_category: None,
+        advisory_category: None,
         message,
         final_success: verdict
             .and_then(|verdict| verdict.get("final_success"))
@@ -621,6 +721,182 @@ fn collect_code_artifact(
         evidence,
     });
     Ok(())
+}
+
+fn collect_trace_hygiene(
+    path: &Path,
+    observations: &mut Vec<ImproveObservation>,
+    seen: &mut BTreeSet<String>,
+) -> Result<()> {
+    let source_path = path.display().to_string();
+    let events = read_trace_jsonl(path)
+        .map_err(|error| anyhow::anyhow!("read trace {}: {error}", path.display()))?;
+    if events.is_empty() {
+        push_trace_observation(
+            observations,
+            seen,
+            &source_path,
+            "aborted_trace_without_artifact",
+            "trace file is empty and no artifact verdict was produced",
+            vec!["empty trace".to_string()],
+        );
+        return Ok(());
+    }
+
+    let has_return = events.iter().any(|event| event.action == "return");
+    if !has_return {
+        push_trace_observation(
+            observations,
+            seen,
+            &source_path,
+            "aborted_trace_without_artifact",
+            "trace ended without a return event or artifact verdict",
+            vec![
+                format!("trace events: {}", events.len()),
+                format!(
+                    "last event: {}",
+                    events
+                        .last()
+                        .map(trace_event_label)
+                        .unwrap_or_else(|| "unknown".to_string())
+                ),
+            ],
+        );
+    }
+
+    let mut broad_glob_evidence = Vec::new();
+    let mut generated_path_evidence = Vec::new();
+    let mut max_input_bytes = 0usize;
+    let mut first_input_bytes = None::<usize>;
+    let mut model_calls = 0usize;
+
+    for event in &events {
+        if event.action == "model_call_start" {
+            model_calls += 1;
+            let input_bytes = event
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("input_bytes"))
+                .and_then(Value::as_u64)
+                .map(|value| value as usize)
+                .unwrap_or_else(|| event.input.as_ref().map(value_len).unwrap_or(0));
+            first_input_bytes.get_or_insert(input_bytes);
+            max_input_bytes = max_input_bytes.max(input_bytes);
+            if let Some(input) = &event.input {
+                let text = value_to_search_text(input);
+                collect_internal_path_evidence(
+                    &text,
+                    format!("model input at step {}", event.step),
+                    &mut generated_path_evidence,
+                );
+            }
+        }
+        if event.action == "tool_batch_dispatch_item" {
+            let tool = event
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("tool"))
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let input_text = event
+                .input
+                .as_ref()
+                .map(value_to_search_text)
+                .unwrap_or_default();
+            let output_text = event
+                .output
+                .as_ref()
+                .map(value_to_search_text)
+                .unwrap_or_default();
+            if tool == "glob" && input_text.contains("\"**/*\"") {
+                collect_internal_path_evidence(
+                    &output_text,
+                    format!("glob **/* output at step {}", event.step),
+                    &mut broad_glob_evidence,
+                );
+            }
+            collect_internal_path_evidence(
+                &output_text,
+                format!("{tool} output at step {}", event.step),
+                &mut generated_path_evidence,
+            );
+        }
+    }
+
+    if !broad_glob_evidence.is_empty() {
+        push_trace_observation(
+            observations,
+            seen,
+            &source_path,
+            "trace_hygiene_warning",
+            "broad glob exposed internal/generated paths to the agent trace",
+            capped_evidence(broad_glob_evidence),
+        );
+    }
+    if !generated_path_evidence.is_empty() {
+        push_trace_observation(
+            observations,
+            seen,
+            &source_path,
+            "trace_hygiene_warning",
+            "generated or internal paths were exposed in model/tool observations",
+            capped_evidence(generated_path_evidence),
+        );
+    }
+    if let Some(first) = first_input_bytes {
+        if model_calls >= 3
+            && max_input_bytes >= 50_000
+            && max_input_bytes >= first.saturating_mul(8)
+        {
+            push_trace_observation(
+                observations,
+                seen,
+                &source_path,
+                "context_hygiene_warning",
+                "model context grew rapidly before the run produced an artifact verdict",
+                vec![
+                    format!("model calls: {model_calls}"),
+                    format!("first model input bytes: {first}"),
+                    format!("max model input bytes: {max_input_bytes}"),
+                ],
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn push_trace_observation(
+    observations: &mut Vec<ImproveObservation>,
+    seen: &mut BTreeSet<String>,
+    source_path: &str,
+    category: &str,
+    message: &str,
+    evidence: Vec<String>,
+) {
+    let key = format!("trace:{source_path}:{category}:{message}");
+    if !seen.insert(key) {
+        return;
+    }
+    observations.push(ImproveObservation {
+        id: String::new(),
+        source_kind: "trace_jsonl".to_string(),
+        source_path: source_path.to_string(),
+        artifact_path: None,
+        suite: None,
+        suite_path: None,
+        task_id: None,
+        task: None,
+        category: category.to_string(),
+        category_source: None,
+        effective_category: None,
+        advisory_category: None,
+        message: message.to_string(),
+        final_success: false,
+        changed_files: Vec::new(),
+        skills: Vec::new(),
+        evidence,
+    });
 }
 
 fn bench_task_failed(task: &BenchTaskRunLite) -> bool {
@@ -646,6 +922,52 @@ fn artifact_failed(artifact: &Value) -> bool {
         .and_then(|verdict| verdict.get("final_success"))
         .and_then(Value::as_bool)
         == Some(false)
+}
+
+fn trace_event_label(event: &air_runtime::TraceEvent) -> String {
+    format!(
+        "step={} rule={} action={} status={:?}",
+        event.step, event.rule, event.action, event.status
+    )
+}
+
+fn value_len(value: &Value) -> usize {
+    serde_json::to_string(value)
+        .map(|text| text.len())
+        .unwrap_or_default()
+}
+
+fn value_to_search_text(value: &Value) -> String {
+    serde_json::to_string(value).unwrap_or_default()
+}
+
+fn collect_internal_path_evidence(text: &str, label: String, evidence: &mut Vec<String>) {
+    for marker in [
+        ".git/",
+        ".git\\\\/",
+        ".air/",
+        ".air\\\\/",
+        "target/",
+        "target\\\\/",
+        "node_modules/",
+        "node_modules\\\\/",
+    ] {
+        if text.contains(marker) {
+            evidence.push(format!(
+                "{label}: contains `{}`",
+                marker.replace("\\\\/", "/")
+            ));
+        }
+    }
+}
+
+fn capped_evidence(evidence: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    evidence
+        .into_iter()
+        .filter(|item| seen.insert(item.clone()))
+        .take(8)
+        .collect()
 }
 
 fn failure_category_and_message(
@@ -735,6 +1057,183 @@ fn infer_category_from_text(text: &str) -> String {
     }
 }
 
+fn apply_failure_classifier_advisory(
+    model_config: Option<&Path>,
+    observations: &mut [ImproveObservation],
+) -> FailureClassifierRun {
+    let mut summaries = Vec::new();
+    let mut errors = Vec::new();
+    let cache_root = Path::new(".air/memory/cache");
+    let mut candidates = 0usize;
+    if model_config.is_none() || llm_advisory_disabled() {
+        let status = if llm_advisory_disabled() {
+            "needs_llm_advisory_disabled"
+        } else {
+            "needs_llm_advisory_model_config"
+        };
+        for observation in observations.iter_mut() {
+            if matches!(
+                observation.category.as_str(),
+                "agent_error" | "unknown_failure"
+            ) {
+                observation.category_source = Some(status.to_string());
+            }
+        }
+        return FailureClassifierRun {
+            status: status.to_string(),
+            summaries,
+            errors,
+        };
+    }
+    let model_config = model_config.expect("checked above");
+    for observation in observations.iter_mut() {
+        if !matches!(
+            observation.category.as_str(),
+            "agent_error" | "unknown_failure"
+        ) {
+            continue;
+        }
+        candidates += 1;
+        let request = FailureClassifierRequest {
+            observation_id: observation.id.clone(),
+            source_kind: observation.source_kind.clone(),
+            source_path: observation.source_path.clone(),
+            task_id: observation.task_id.clone(),
+            task: observation.task.clone(),
+            deterministic_category: observation.category.clone(),
+            message: observation.message.clone(),
+            evidence: observation.evidence.clone(),
+            changed_files: observation.changed_files.clone(),
+            allowed_categories: vec![
+                "agent_error",
+                "unknown_failure",
+                "verification_failed",
+                "no_patch_applied",
+                "diff_constraint_failed",
+                "budget_exceeded",
+                "configuration_error",
+                "provider_rate_limited",
+                "replay_mismatch",
+                "mcp_tool_failure",
+                "skill_routing_miss",
+                "aborted_trace_without_artifact",
+                "trace_hygiene_warning",
+                "context_hygiene_warning",
+                "tool_call_error",
+                "model_output_malformed",
+                "workspace_setup_failed",
+            ],
+        };
+        let result = cached_llm_advisory(
+            CachedLlmAdvisoryOptions {
+                cache_root,
+                out_file: None,
+                purpose: "failure-classifier",
+                model_alias: FAILURE_CLASSIFIER_MODEL,
+                model_config,
+                request: &request,
+                generated_at_unix: unix_now(),
+            },
+            |output| validate_failure_classifier_output(&request, output),
+        );
+        let advisory = match result {
+            Ok(advisory) => advisory,
+            Err(error) => {
+                observation.category_source =
+                    Some("deterministic_fallback_after_llm_error".to_string());
+                errors.push(FailureClassifierError {
+                    observation_id: observation.id.clone(),
+                    deterministic_category: observation.category.clone(),
+                    error: error.to_string(),
+                });
+                continue;
+            }
+        };
+        let summary = FailureClassifierSummary {
+            observation_id: observation.id.clone(),
+            deterministic_category: observation.category.clone(),
+            advisory_category: advisory.category.clone(),
+            confidence: advisory.confidence,
+            rationale: advisory.rationale.clone(),
+            evidence: advisory.evidence.clone(),
+        };
+        observation.category_source = Some("llm_advisory".to_string());
+        observation.effective_category = Some(advisory.category.clone());
+        observation.advisory_category = Some(advisory);
+        summaries.push(summary);
+    }
+    let status = if candidates == 0 {
+        "not_needed"
+    } else if errors.is_empty() {
+        "complete"
+    } else if summaries.is_empty() {
+        "llm_advisory_failed_deterministic_fallback"
+    } else {
+        "partial_llm_advisory"
+    };
+    FailureClassifierRun {
+        status: status.to_string(),
+        summaries,
+        errors,
+    }
+}
+
+fn validate_failure_classifier_output(
+    request: &FailureClassifierRequest,
+    output: Value,
+) -> Result<ImproveAdvisoryCategory> {
+    let parsed: FailureClassifierOutput =
+        serde_json::from_value(output).context("failure classifier output must be an object")?;
+    let category = normalize_advisory_category(&parsed.category);
+    if category.is_empty()
+        || !request
+            .allowed_categories
+            .iter()
+            .any(|allowed| *allowed == category)
+    {
+        anyhow::bail!(
+            "failure classifier returned unsupported category `{}`",
+            parsed.category
+        );
+    }
+    let rationale = truncate(parsed.rationale.trim(), 600);
+    if rationale.is_empty() {
+        anyhow::bail!("failure classifier rationale is empty");
+    }
+    let evidence = parsed
+        .evidence
+        .into_iter()
+        .map(|item| truncate(item.trim(), 240))
+        .filter(|item| !item.is_empty())
+        .take(5)
+        .collect::<Vec<_>>();
+    Ok(ImproveAdvisoryCategory {
+        model: FAILURE_CLASSIFIER_MODEL.to_string(),
+        category,
+        confidence: parsed.confidence.unwrap_or(0.5).clamp(0.0, 1.0),
+        rationale,
+        evidence,
+    })
+}
+
+fn normalize_advisory_category(category: &str) -> String {
+    category
+        .trim()
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .split('_')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("_")
+}
+
 fn normalize_category(category: &str, message: &str) -> String {
     let message = message.to_ascii_lowercase();
     let mut normalized = String::new();
@@ -772,7 +1271,10 @@ fn mine_findings(observations: &[ImproveObservation]) -> Vec<ImproveFinding> {
     for observation in observations {
         grouped
             .entry(normalize_category(
-                &observation.category,
+                observation
+                    .effective_category
+                    .as_deref()
+                    .unwrap_or(&observation.category),
                 &observation.message,
             ))
             .or_default()
@@ -834,6 +1336,9 @@ fn category_priority(category: &str) -> i32 {
         "mcp_tool_failure" => 65,
         "replay_mismatch" => 60,
         "provider_rate_limited" => 50,
+        "aborted_trace_without_artifact" => 88,
+        "context_hygiene_warning" => 72,
+        "trace_hygiene_warning" => 68,
         _ => 40,
     }
 }
@@ -880,6 +1385,15 @@ fn finding_summary(category: &str, count: usize) -> String {
         "replay_mismatch" => format!("{count} run(s) had stale or mismatched replay artifacts"),
         "mcp_tool_failure" => format!("{count} run(s) failed in MCP tooling"),
         "skill_routing_miss" => format!("{count} run(s) suggest a skill routing miss"),
+        "aborted_trace_without_artifact" => {
+            format!("{count} trace(s) ended without a run artifact verdict")
+        }
+        "trace_hygiene_warning" => {
+            format!("{count} trace(s) exposed generated or internal paths to the agent")
+        }
+        "context_hygiene_warning" => {
+            format!("{count} trace(s) showed risky context growth or context pollution")
+        }
         _ => format!("{count} run(s) failed with category `{category}`"),
     }
 }
@@ -894,6 +1408,9 @@ fn recommended_change_type(category: &str) -> &'static str {
         "no_patch_applied" => "code_edit_loop_regression",
         "provider_rate_limited" => "provider_budget_or_retry_policy",
         "budget_exceeded" => "loop_budget_or_context_policy",
+        "aborted_trace_without_artifact" => "trace_artifact_completion_policy",
+        "trace_hygiene_warning" => "tool_context_hygiene_policy",
+        "context_hygiene_warning" => "loop_budget_or_context_policy",
         "configuration_error" => "profile_or_path_configuration_fix",
         _ => "failure_regression",
     }
@@ -917,6 +1434,15 @@ fn expected_regression(category: &str) -> &'static str {
         }
         "budget_exceeded" => {
             "A benchmark fixture captures the loop path that exhausts model/tool budget."
+        }
+        "aborted_trace_without_artifact" => {
+            "A trace fixture fails when a run aborts without a return event or artifact verdict."
+        }
+        "trace_hygiene_warning" => {
+            "A trace fixture warns when broad tools expose .git, .air, target, or dependency paths."
+        }
+        "context_hygiene_warning" => {
+            "A trace fixture warns when model context grows rapidly after noisy observations."
         }
         "configuration_error" => {
             "A configuration fixture fails fast when profile, tool, or skill paths are invalid."
@@ -950,6 +1476,9 @@ fn regression_kind(category: &str) -> &'static str {
         "skill_routing_miss" => "skill_route",
         "mcp_tool_failure" => "mcp_audit",
         "replay_mismatch" => "artifact_replay",
+        "aborted_trace_without_artifact" | "trace_hygiene_warning" | "context_hygiene_warning" => {
+            "trace_hygiene"
+        }
         _ => "code_run_verdict",
     }
 }
@@ -1796,6 +2325,17 @@ fn unix_now() -> u64 {
 mod tests {
     use super::*;
 
+    fn temp_root(name: &str) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "air-improve-test-{}-{}-{name}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        root
+    }
+
     #[test]
     fn verdict_without_patch_maps_to_no_patch() {
         let verdict = json!({
@@ -1833,6 +2373,9 @@ mod tests {
                 task_id: Some("task-a".to_string()),
                 task: None,
                 category: "verification_failed".to_string(),
+                category_source: None,
+                effective_category: None,
+                advisory_category: None,
                 message: "failed".to_string(),
                 final_success: false,
                 changed_files: Vec::new(),
@@ -1849,6 +2392,9 @@ mod tests {
                 task_id: Some("task-b".to_string()),
                 task: None,
                 category: "verification_failed".to_string(),
+                category_source: None,
+                effective_category: None,
+                advisory_category: None,
                 message: "failed".to_string(),
                 final_success: false,
                 changed_files: Vec::new(),
@@ -1860,6 +2406,44 @@ mod tests {
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].count, 2);
         assert_eq!(findings[0].category, "verification_failed");
+    }
+
+    #[test]
+    fn trace_only_aborted_run_produces_hygiene_findings() {
+        let root = temp_root("trace-hygiene");
+        let trace = root.join("trace.jsonl");
+        fs::write(
+            &trace,
+            concat!(
+                r#"{"agent":"code","step":1,"rule":"choose","action":"model_call_start","input":{"task":"refactor"},"meta":{"input_bytes":2000},"status":"ok"}"#,
+                "\n",
+                r#"{"agent":"code","step":2,"rule":"act","action":"tool_batch_dispatch_item","input":{"pattern":"**/*"},"output":{"files":["src/app.js",".git/HEAD",".air/dream/state.json","target/generated/run/trace.jsonl"]},"meta":{"tool":"glob"},"status":"ok"}"#,
+                "\n",
+                r#"{"agent":"code","step":3,"rule":"choose","action":"model_call_start","input":{"observations":"glob exposed .git/HEAD .air/dream/state.json target/generated/run/trace.jsonl"},"meta":{"input_bytes":60000},"status":"ok"}"#,
+                "\n",
+                r#"{"agent":"code","step":4,"rule":"choose","action":"model_call_start","input":{"observations":"continued noisy trace context with .git/HEAD .air/dream/state.json target/generated/run/trace.jsonl"},"meta":{"input_bytes":80000},"status":"ok"}"#,
+                "\n"
+            ),
+        )
+        .unwrap();
+
+        let mut observations = Vec::new();
+        let mut seen = BTreeSet::new();
+        collect_trace_hygiene(&trace, &mut observations, &mut seen).unwrap();
+        renumber_observations(&mut observations);
+        let findings = mine_findings(&observations);
+        let categories = findings
+            .iter()
+            .map(|finding| finding.category.as_str())
+            .collect::<BTreeSet<_>>();
+
+        assert!(categories.contains("aborted_trace_without_artifact"));
+        assert!(categories.contains("trace_hygiene_warning"));
+        assert!(categories.contains("context_hygiene_warning"));
+        assert!(observations
+            .iter()
+            .any(|observation| observation.source_kind == "trace_jsonl"));
+        let _ = fs::remove_dir_all(root);
     }
 
     #[test]

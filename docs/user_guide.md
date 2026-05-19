@@ -26,7 +26,10 @@ memory_dir: .air/memory
 dream_dir: .air/dream
 ```
 
-Per-command flags override config values. Trace files are redacted by default;
+`AIR_MODEL_CONFIG` can provide the same `model_config` globally so new projects
+do not need their own `.air/config.yaml`. Repo-local config takes precedence
+when both are present. Per-command flags override config values where a command
+still exposes an explicit model override. Trace files are redacted by default;
 use `--trace raw` only for trusted local debugging, or `--trace off` to suppress
 trace writing even when a command path would otherwise provide `--trace-out`.
 
@@ -198,10 +201,31 @@ Micro mode skips advance automatically, and `--advance-limit` caps how many
 memory cards can be touched in one pass.
 
 `dream run` also writes `.air/dream/latest/memory/dream_ir.json`. This is the
-first Deep Dream layer: AIR deterministically recombines multiple episodes and
-findings into concept, hypothesis, procedure, and policy candidates. The IR is a
-proposal surface, not an authority; its products still go through memory
-promotion, benchmark/regression checks, skill audit, and human review.
+first Deep Dream layer: AIR recombines multiple episodes and findings into
+concept, hypothesis, and procedure candidates. The deterministic rules remain
+available, and deep/evolution mode also requires `.air/config.yaml`
+`model_config` so AIR can run an LLM advisory pass with the model alias
+`dream_synthesizer`. That model sees compact finding, observation, and episode
+evidence and returns candidate JSON. AIR caches the prompt/output by input hash
+under `.air/memory/cache/dream-synthesis/`, so rerunning the same window reuses
+the same advisory result. The LLM is not part of the hard safety layer: it
+cannot decide pass/fail, cannot promote memory, and cannot create runtime guard
+policy. The IR is a proposal surface, not an authority; its products still go
+through memory promotion, benchmark/regression checks, skill audit, and human
+review.
+
+AIR uses the same cached LLM pattern in a few other places where novelty is
+useful and hard safety decisions are not being made. With `.air/config.yaml`
+`model_config`, `air improve` calls `failure_classifier` to turn generic
+`agent_error` observations into more specific candidate categories. `air audit
+run` calls `audit_diagnoser` to add a short human-readable diagnosis beside the
+deterministic audit facts. `air run` calls `task_router` for auto executor
+routing, `air skill route` calls `skill_router` to rerank local skill
+candidates, and `air self compare` calls `candidate_judge` when multiple
+candidates have already passed the hard gates. These calls are cached by
+structured input hash under `.air/memory/cache/`. Regression replay, eval
+integrity, trace-derived verdicts, and protected-file guards remain
+deterministic.
 
 Choose the Dream depth explicitly when needed:
 
@@ -279,7 +303,11 @@ Only promoted or pinned memory enters a pack. `air run` enables that safe
 promoted-memory pack by default; pass `--no-memory` when a run must ignore
 long-term guidance. Candidate memory from Dream is reviewable evidence, not
 runtime guidance. `air memory retire` marks stale or harmful cards as retired so
-they are ignored by future packs.
+they are ignored by future packs. Before memory can enter a runtime pack, AIR
+scans the card content for prompt-injection, secret-exfiltration, and invisible
+Unicode patterns. Cards that fail the scan are excluded from packs; promoted or
+pinned promotion and skill drafting fail closed until the memory is edited or
+retired.
 
 `memory skill-draft` writes an untrusted skill package under
 `.air/memory/drafts/skills/<name>/` with `SKILL.md` and `evidence.json`. It does
@@ -293,17 +321,27 @@ a small compare-no-skill benchmark. Passing drafts are reported as validated
 skill drafts, not trusted installed skills.
 
 When `air run` uses promoted memories, AIR stores the selected memory pack in
-the code-run artifact. If the caller did not pass `--artifact-out`, AIR writes
-one under `target/generated/code-runs/memory-run-*` so the next Dream pass can
-read those success/failure episodes and append `helped_candidate` or
-`hurt_candidate` outcomes to `.air/memory/usage.jsonl`. Those outcomes are only
-correlation: they cannot validate, promote, retire, or compile memory by
-themselves. Causal evidence recorded with `air memory causal-eval`, normally
-from a compare-no-memory, replay, or benchmark artifact, is required for
-promotion to `promoted`; promotion to `pinned` remains a manual governance
-decision. Confirmed or causal harm can retire memory so it stops being
-suggested. `air memory scorecard` summarizes which memories look useful before
-the team promotes, retires, or edits them.
+the code-run artifact as a frozen pack: card ids, content hashes, safety status,
+`generated_at_unix`, and `pack_hash`. The pack is selected once at run start and
+does not refresh mid-run, so the artifact can be replayed and audited against
+the exact memory context the agent saw. If the caller did not pass
+`--artifact-out`, AIR writes one under `target/generated/code-runs/memory-run-*`
+so the next Dream pass can read those success/failure episodes and append
+`helped_candidate` or `hurt_candidate` outcomes to `.air/memory/usage.jsonl`.
+Those outcomes are only correlation: they cannot validate, promote, retire, or
+compile memory by themselves. Causal evidence recorded with
+`air memory causal-eval`, normally from a compare-no-memory, replay, or
+benchmark artifact, is required for promotion to `promoted`; promotion to
+`pinned` remains a manual governance decision. Confirmed or causal harm can
+retire memory so it stops being suggested. `air memory scorecard` summarizes
+which memories look useful before the team promotes, retires, or edits them.
+
+AIR also writes `.air/memory/provider-events.jsonl` for the local memory
+provider hook surface (`memory_pack_built`, `memory_promoted`,
+`skill_draft_created`). The stream is best-effort; external memory providers
+should reconcile by polling memory cards rather than treating events as the only
+source of truth. They may only propose candidate memory; AIR promotion remains
+evidence-gated locally.
 
 `memory policy-check` reviews a policy memory as a deterministic guard proposal:
 it requires structured `rule_type`, `scope`, `deny`/`allow`, affected runtime
@@ -332,8 +370,10 @@ AIR_MODEL_LOCAL_MODEL=qwen2.5-coder
 ```
 
 AIR's default model config is `examples/local-openai-compatible.json`, which
-uses `AIR_MODEL_LOCAL_*` variables directly. Use `--model-config` when a command
-should target a different provider.
+uses `AIR_MODEL_LOCAL_*` variables directly. For normal use, put the provider
+config path in `.air/config.yaml` as `model_config`; Dream, improve, audit
+diagnosis, task routing, skill routing, and candidate judging all read from that
+shared config.
 
 The profile points to:
 
@@ -653,6 +693,11 @@ Tool config:
 }
 ```
 
+`workspace_dir` anchors user workspace content for read/write/search/bash tools.
+Profile and sibling tool-config references are anchored at the tool config file
+directory instead, so a bundled skill can keep its own profiles while operating
+on the caller's current project by default.
+
 AIR checks:
 
 - the module declares the tool;
@@ -916,7 +961,8 @@ events, tool call counts, context/cost metrics, and reward-hacking indicators
 such as protected eval or trust-state file changes. Missing traces,
 verification failures, forbidden-file changes, and protected eval mutations are
 findings in the report; LLM-generated explanations should be treated as advisory
-only.
+only. `air audit run` adds that advisory diagnosis automatically when
+`.air/config.yaml` provides `model_config`.
 
 For a group of runs, collect audits into a platform review report:
 

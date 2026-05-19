@@ -64,6 +64,7 @@ pub(super) fn call_subagent_tool(
     input: &Value,
     profiles: &BTreeMap<String, SubagentProfileConfig>,
     workspace_dir: &Path,
+    config_dir: &Path,
 ) -> Result<Value, RuntimeError> {
     let prompt = required_string(name, input, "prompt")?;
     let description = input
@@ -99,7 +100,7 @@ pub(super) fn call_subagent_tool(
     let argv = profile
         .command
         .iter()
-        .map(|part| render_subagent_arg(name, part, input, &run_paths))
+        .map(|part| render_subagent_arg(name, part, input, &run_paths, config_dir))
         .collect::<Result<Vec<_>, _>>()?;
     let mut output = run_command_argv(
         name,
@@ -467,9 +468,11 @@ fn render_subagent_arg(
     template: &str,
     input: &Value,
     run_paths: &SubagentRunPaths,
+    config_dir: &Path,
 ) -> Result<String, RuntimeError> {
     let mut rendered = template
         .replace("{air_exe}", &current_exe(name)?)
+        .replace("{config_dir}", &config_dir.display().to_string())
         .replace("{input_file}", &run_paths.input_file.display().to_string())
         .replace("{trace_file}", &run_paths.trace_file.display().to_string())
         .replace(

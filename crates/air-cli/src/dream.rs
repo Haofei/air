@@ -55,6 +55,7 @@ pub(crate) struct DreamRunOptions {
     pub(crate) advance: bool,
     pub(crate) advance_limit: Option<usize>,
     pub(crate) advance_timeout_seconds: Option<u64>,
+    pub(crate) model_config: Option<PathBuf>,
 }
 
 pub(crate) struct DreamStateOptions;
@@ -461,6 +462,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         findings_file: findings_file.clone(),
         suggested_regressions_file: Some(improve_dir.join("suggested_regressions.json")),
         mode: options.mode.as_str().to_string(),
+        model_config: options.model_config.clone(),
     })?;
     let memory_advance_out_dir = out_dir.join("memory-advance");
     let memory_advance = if options.advance && options.mode != DreamMode::Micro {
@@ -711,6 +713,7 @@ fn run_air_stage(cwd: &Path, args: &[String], log_path: &Path) -> Result<()> {
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_dream_experiments(
     cwd: &Path,
     out_dir: &Path,
@@ -1599,10 +1602,14 @@ fn collect_improve_input_files(
 }
 
 fn is_improve_input(path: &Path) -> bool {
-    matches!(
-        path.file_name().and_then(|name| name.to_str()),
-        Some("run.json" | "artifact.json")
-    )
+    match path.file_name().and_then(|name| name.to_str()) {
+        Some("run.json" | "artifact.json") => true,
+        Some("trace.jsonl") => path
+            .parent()
+            .map(|parent| !parent.join("artifact.json").exists())
+            .unwrap_or(true),
+        _ => false,
+    }
 }
 
 fn finding_summary(value: &Value) -> DreamFindingSummary {
@@ -1725,6 +1732,14 @@ fn dream_next_commands(
             PathBuf::from("skills/code-agent/benches/regressions")
                 .join(format!("{}.json", finding.id.to_ascii_lowercase()))
         };
+        if !finding_supports_code_self_fix(&finding.category) {
+            commands.push(format!(
+                "# {} is `{}`; review the finding before self-fix because this regression kind is not executable by `air regression run` yet",
+                shell_quote_arg(&finding.id),
+                finding.category
+            ));
+            return commands;
+        }
         commands.push(format!(
             "air self fix {} --from {} --out-dir {} --regression-file {} --evaluate",
             shell_quote_arg(&finding.id),
@@ -1744,6 +1759,18 @@ fn dream_next_commands(
         ));
     }
     commands
+}
+
+fn finding_supports_code_self_fix(category: &str) -> bool {
+    !matches!(
+        category,
+        "skill_routing_miss"
+            | "mcp_tool_failure"
+            | "replay_mismatch"
+            | "aborted_trace_without_artifact"
+            | "trace_hygiene_warning"
+            | "context_hygiene_warning"
+    )
 }
 
 fn write_dream_report(path: &Path, output: &DreamRunOutput) -> Result<()> {
@@ -1990,6 +2017,7 @@ fn dream_input_kind(path: &Path) -> &'static str {
     match path.file_name().and_then(|name| name.to_str()) {
         Some("artifact.json") => "code_run_artifact",
         Some("run.json") => "bench_run",
+        Some("trace.jsonl") => "trace_jsonl",
         _ => "unknown",
     }
 }
@@ -2360,6 +2388,50 @@ mod tests {
     }
 
     #[test]
+    fn window_discovers_trace_without_sibling_artifact() {
+        let root = temp_root("trace-input");
+        let aborted_dir = root.join("aborted");
+        let completed_dir = root.join("completed");
+        fs::create_dir_all(&aborted_dir).unwrap();
+        fs::create_dir_all(&completed_dir).unwrap();
+        let aborted_trace = aborted_dir.join("trace.jsonl");
+        let completed_trace = completed_dir.join("trace.jsonl");
+        fs::write(&aborted_trace, b"{}\n").unwrap();
+        fs::write(&completed_trace, b"{}\n").unwrap();
+        fs::write(
+            completed_dir.join("artifact.json"),
+            br#"{"schema":"air.code_run_artifact.v1"}"#,
+        )
+        .unwrap();
+
+        let inputs = discover_dream_window_inputs(
+            &root,
+            std::slice::from_ref(&root),
+            None,
+            None,
+            false,
+            None,
+            true,
+        )
+        .unwrap();
+        let kinds = inputs
+            .iter()
+            .map(|input| (input.kind.as_str(), input.path.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(kinds
+            .iter()
+            .any(|(kind, path)| *kind == "trace_jsonl"
+                && *path == aborted_trace.display().to_string()));
+        assert!(!kinds
+            .iter()
+            .any(|(kind, path)| *kind == "trace_jsonl"
+                && *path == completed_trace.display().to_string()));
+        assert!(kinds.iter().any(|(kind, _)| *kind == "code_run_artifact"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn next_commands_use_promoted_regression_after_manual_promote() {
         let finding = DreamFindingSummary {
             id: "IMP-001".to_string(),
@@ -2416,6 +2488,37 @@ mod tests {
             .iter()
             .any(|command| command.contains("'target/generated with spaces/run/artifact.json'")));
         assert!(commands.iter().any(|command| command.contains("'IMP 001'")));
+    }
+
+    #[test]
+    fn next_commands_do_not_self_fix_unsupported_trace_findings() {
+        let finding = DreamFindingSummary {
+            id: "IMP-001".to_string(),
+            stable_key: "finding:trace_hygiene_warning:test".to_string(),
+            persistent_id: "FND-TRACE".to_string(),
+            display_rank: Some(1),
+            category: "trace_hygiene_warning".to_string(),
+            summary: "summary".to_string(),
+            impact_score: 10,
+        };
+        let commands = dream_next_commands(
+            &[PathBuf::from("target/generated/run/trace.jsonl")],
+            &[],
+            &[PathBuf::from("target/generated/run/trace.jsonl")],
+            Path::new(".air/dream/latest"),
+            false,
+            Some(&finding),
+        );
+
+        assert!(commands
+            .iter()
+            .any(|command| command.contains("air improve --out-dir")));
+        assert!(!commands
+            .iter()
+            .any(|command| command.contains("air self fix")));
+        assert!(commands
+            .iter()
+            .any(|command| command.contains("not executable by `air regression run` yet")));
     }
 
     #[test]

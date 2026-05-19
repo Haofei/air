@@ -56,7 +56,9 @@ AIR_MODEL_LOCAL_BASE_URL=http://localhost:11434/v1
 AIR_MODEL_LOCAL_MODEL=qwen2.5-coder
 ```
 
-Use `--model-config` to point a command at another OpenAI-compatible provider config.
+Set `AIR_MODEL_CONFIG` once in your shell, or set `.air/config.yaml`
+`model_config`, to point AIR at an OpenAI-compatible provider config for normal
+use. Repo-local config wins over the environment variable.
 If `OPENAI_API_KEY`, `OPENAI_BASE_URL`, or `OPENAI_MODEL` is already set, AIR
 keeps the explicit environment value and does not overwrite it from
 `AIR_MODEL_PROFILE`.
@@ -69,7 +71,10 @@ memory_dir: .air/memory
 dream_dir: .air/dream
 ```
 
-Per-command flags still win over config values.
+Some lower-level commands still accept explicit model overrides, but the
+recommended path is `AIR_MODEL_CONFIG` for global defaults plus a repo-local
+`.air/config.yaml` only when a project needs to override Dream, improve,
+routing, and audit advisory model setup.
 
 ## Product Surface
 
@@ -222,8 +227,10 @@ cargo run -p air-cli -- audit run target/generated/code-runs/helper \
 `air audit run` emits an `air.audit.v1` JSON report with deterministic sections
 for correctness, safety, verification, tool use, context, cost, and
 reward-hacking risk. The final audit verdict is derived from artifact files,
-workspace diff, `CodeRunVerdict`, and trace events; LLM advisory explanations
-can be layered on later, but they do not decide pass/fail.
+workspace diff, `CodeRunVerdict`, and trace events. When `.air/config.yaml`
+declares `model_config`, AIR also adds a cached `audit_diagnoser` advisory
+diagnosis to the JSON/Markdown report; this text can explain likely causes, but
+it still cannot decide pass/fail.
 
 Summarize a window of runs for platform review:
 
@@ -278,7 +285,10 @@ Dream has three depths:
 - `--mode micro`: short consolidation. It selects the window and records
   episode memory without running audit/improve mining or Dream IR.
 - `--mode deep`: the default. It runs full audit + improve + memory synthesis
-  and writes Dream IR concept, hypothesis, and policy candidates.
+  and writes Dream IR concept, hypothesis, and policy candidates. This mode
+  requires `.air/config.yaml` `model_config` and runs an LLM synthesis pass using
+  the `dream_synthesizer` model alias; the result is cached by input hash and
+  remains candidate-only.
 - `--mode evolution`: deep mode plus conservative cross-domain proposals. Add
   `--experiment --write-regressions` to run bounded self-fix experiments for
   top findings; experiments still do not promote patches or open PRs.
@@ -297,7 +307,8 @@ The Dream directory contains:
 - `audit/`: deterministic audit collection and per-run audit reports.
 - `improve/`: observations, findings, suggested regressions, and report.
 - `memory/`: Dream memory extraction summary, Dream IR, and synthesis report
-  for this window.
+  for this window. When LLM advisory synthesis is enabled, this directory also
+  contains `llm_synthesis.json` or `llm_synthesis_error.json`.
 - `memory-advance/`: low-risk memory lifecycle updates, routing scorecards,
   validated skill-draft gates, and reviewed runtime-guard proposals.
 - `logs/`: captured stdout/stderr from the underlying audit and improve stages.
@@ -317,8 +328,22 @@ The Dream directory contains:
 Dream memory is deliberately conservative. It writes episode records and
 candidate failure/procedure/routing memories with source evidence, confidence,
 impact, lifecycle status, and promotion gates. Dream also writes
-`memory/dream_ir.json`, a deterministic synthesis IR whose concept, hypothesis,
-and runtime-policy candidates are compiled into memory cards and graph edges.
+`memory/dream_ir.json`, a synthesis IR whose deterministic candidates may be
+augmented by LLM advisory candidates from the configured `dream_synthesizer`
+alias. LLM output is replayable through
+`.air/memory/cache/dream-synthesis/<hash>.json`, can only produce concept,
+hypothesis, or procedure candidates, and cannot directly generate runtime guard
+policy.
+The same cached advisory mechanism is mandatory in other creative layers once
+`.air/config.yaml` has a `model_config`: `air improve` asks
+`failure_classifier` to reclassify otherwise generic failure observations; `air
+run` uses `task_router` to choose the entry executor for `--mode auto`; `air
+skill route` uses `skill_router` to rerank discovered skill candidates; and
+`air self compare` uses `candidate_judge` to choose among candidates that
+already passed hard gates.
+These LLM passes are intended to create better hypotheses and choices, while
+verification, regression replay, eval integrity, and reward-hacking guards
+remain non-model gates.
 Candidate memory is not injected into prompts, used for routing, compiled into
 skills, or promoted into runtime policy until later validation gates approve it.
 `dream run` now runs `memory advance` by default. Correlated success/failure
@@ -399,16 +424,22 @@ unsupported regression kinds are skipped before model calls. It still does not
 trust, promote patches, commit, or open a PR. Memory follow-up is default-closed
 loop but human-gated at the dangerous boundary: `air run` includes promoted
 Dream memory by default and accepts `--no-memory` to disable it; Dream records
-which memories were used in the code-run artifact. If no `--artifact-out` is
-supplied, AIR writes one under `target/generated/code-runs/memory-run-*` so the
-next Dream pass can turn successful runs into `helped_candidate` events and
-failed runs into `hurt_candidate` events, visible through `air memory
-scorecard`. These events are correlation only: they cannot validate, promote,
-retire, or compile memory by themselves. Causal evidence recorded with
-`air memory causal-eval`, normally from compare-no-memory, replay, or benchmark
-output, lets `memory advance` validate/promote useful memory or retire harmful
-memory. Procedure memory can become a validated skill draft only after causal
-evidence, but import/trust still requires manual review. Policy memories become
+which memories were used in the code-run artifact as a frozen pack with card
+ids, content hashes, safety status, `generated_at_unix`, and `pack_hash`.
+Memory is selected once at run start and does not refresh mid-run. If no
+`--artifact-out` is supplied, AIR writes one under
+`target/generated/code-runs/memory-run-*` so the next Dream pass can turn
+successful runs into `helped_candidate` events and failed runs into
+`hurt_candidate` events, visible through `air memory scorecard`. Before memory
+can enter a runtime pack, AIR scans it for prompt-injection,
+secret-exfiltration, and invisible Unicode patterns; unsafe cards are skipped or
+blocked from promotion/skill drafting. These events are correlation only: they
+cannot validate, promote, retire, or compile memory by themselves. Causal
+evidence recorded with `air memory causal-eval`, normally from
+compare-no-memory, replay, or benchmark output, lets `memory advance`
+validate/promote useful memory or retire harmful memory. Procedure memory can
+become a validated skill draft only after causal evidence, but import/trust
+still requires manual review. Policy memories become
 deterministic-guard proposals under `memory-advance/guards/` only when they
 include structured `rule_type`, `scope`, `deny`/`allow`, affected runtime
 components/files, and evidence hashes; accepted guards are implemented as
@@ -416,6 +447,12 @@ normal reviewed patches. If Dream was run without `--write-regressions`, its nex
 commands first promote the selected regression and then point `self fix` at the
 promoted regression file under `skills/code-agent/benches/regressions/`.
 Deterministic gates remain the source of truth for promotion.
+
+The memory provider hook surface is event-based in this prototype:
+`.air/memory/provider-events.jsonl` records `memory_pack_built`,
+`memory_promoted`, and `skill_draft_created` events on a best-effort basis.
+Future external providers can mirror or search this stream, but they must
+reconcile by polling memory cards and cannot promote memory directly.
 
 `air run` emits a single stable JSON envelope for every executor:
 

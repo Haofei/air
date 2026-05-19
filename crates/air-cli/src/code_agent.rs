@@ -59,7 +59,7 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
         bail!("air run task must not be empty");
     }
 
-    let profile = profile.unwrap_or_else(|| PathBuf::from(DEFAULT_CODE_PROFILE));
+    let profile = profile.unwrap_or_else(default_code_profile_path);
     let input = build_input(task, verification_command);
     let descriptor_task = artifact_task.unwrap_or_else(|| {
         input
@@ -173,6 +173,43 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
         let _ = fs::remove_file(path);
     }
     Ok(outputs)
+}
+
+fn default_code_profile_path() -> PathBuf {
+    if let Some(path) = find_default_code_profile_from_exe() {
+        return path;
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if let Some(path) = find_default_code_profile_from(&cwd) {
+            return path;
+        }
+    }
+    #[cfg(debug_assertions)]
+    {
+        let dev_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(DEFAULT_CODE_PROFILE);
+        if dev_path.exists() {
+            return dev_path;
+        }
+    }
+    PathBuf::from(DEFAULT_CODE_PROFILE)
+}
+
+fn find_default_code_profile_from_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let start = exe.parent()?;
+    find_default_code_profile_from(start)
+}
+
+fn find_default_code_profile_from(start: &Path) -> Option<PathBuf> {
+    for ancestor in start.ancestors() {
+        let candidate = ancestor.join(DEFAULT_CODE_PROFILE);
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 fn implicit_code_trace_path() -> PathBuf {
@@ -310,7 +347,9 @@ mod tests {
                 "verify-act",
                 "verify-act-missing-complete-decision",
                 "verify-act-missing-tool-calls-decision",
+                "verification-passed-after-patch",
                 "verification-passed",
+                "tool-error-retry",
                 "verification-failed-again",
                 "verification-failed",
                 "verification-reset-after-write",
@@ -319,6 +358,7 @@ mod tests {
                 "verify-command-required",
                 "verify-command-mutated-workspace",
                 "complete-verified",
+                "complete-verified-needs-patch",
                 "summarize-post-act-at-step-limit",
                 "continue-after-act",
                 "summarize",
@@ -386,7 +426,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             choose["actions"][0]["input"]["object"]["observations"]["max_bytes"],
-            serde_yaml::Value::Number(600000.into())
+            serde_yaml::Value::Number(50000.into())
         );
         assert!(rules
             .iter()

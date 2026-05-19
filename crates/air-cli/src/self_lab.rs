@@ -1,11 +1,15 @@
+use crate::llm_advisory::{cached_llm_advisory, CachedLlmAdvisoryOptions};
 use crate::regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+const CANDIDATE_JUDGE_MODEL: &str = "candidate_judge";
 
 pub(crate) struct SelfPrepareOptions {
     pub(crate) finding: String,
@@ -17,6 +21,7 @@ pub(crate) struct SelfCompareOptions {
     pub(crate) finding: String,
     pub(crate) from: Vec<PathBuf>,
     pub(crate) out: Option<PathBuf>,
+    pub(crate) model_config: Option<PathBuf>,
 }
 
 pub(crate) struct SelfCaptureOptions {
@@ -114,7 +119,18 @@ struct SelfCompareOutput {
     finding: String,
     candidates: Vec<CandidateScore>,
     recommendation: String,
+    deterministic_recommendation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    advisory_recommendation: Option<SelfCompareAdvisory>,
     report: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SelfCompareAdvisory {
+    model: String,
+    candidate: String,
+    reason: String,
+    confidence: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -561,11 +577,36 @@ pub(crate) fn self_compare(options: SelfCompareOptions) -> Result<()> {
             .then_with(|| right.score_delta.cmp(&left.score_delta))
             .then_with(|| left.id.cmp(&right.id))
     });
-    let recommendation = scores
+    let deterministic_recommendation = scores
         .iter()
         .find(|score| score.decision == "accept_candidate")
         .map(|score| format!("accept {}", score.id))
         .unwrap_or_else(|| "no acceptable candidate".to_string());
+    let advisory_recommendation = if scores
+        .iter()
+        .filter(|score| score.decision == "accept_candidate")
+        .count()
+        >= 2
+    {
+        options.model_config.as_deref().and_then(|model_config| {
+            match candidate_judge_advisory(&options.finding, &scores, model_config) {
+                Ok(advisory) => Some(advisory),
+                Err(error) => {
+                    eprintln!(
+                        "[air self compare] candidate judge LLM failed; using deterministic ranking: {error}"
+                    );
+                    None
+                }
+            }
+        })
+    } else {
+        None
+    };
+    let recommendation = advisory_recommendation
+        .as_ref()
+        .filter(|advisory| advisory.confidence >= 0.55)
+        .map(|advisory| format!("accept {} (llm_advisory)", advisory.candidate))
+        .unwrap_or_else(|| deterministic_recommendation.clone());
     let report = options
         .out
         .as_ref()
@@ -575,6 +616,8 @@ pub(crate) fn self_compare(options: SelfCompareOptions) -> Result<()> {
         finding: options.finding,
         candidates: scores,
         recommendation,
+        deterministic_recommendation,
+        advisory_recommendation,
         report: report.as_ref().map(|path| path.display().to_string()),
     };
     if let Some(path) = report {
@@ -608,6 +651,88 @@ fn collect_candidate_scores(root: &Path, scores: &mut Vec<CandidateScore>) -> Re
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct CandidateJudgeOutput {
+    candidate: String,
+    reason: String,
+    #[serde(default)]
+    confidence: Option<f64>,
+}
+
+fn candidate_judge_advisory(
+    finding: &str,
+    scores: &[CandidateScore],
+    model_config: &Path,
+) -> Result<SelfCompareAdvisory> {
+    let accepted = scores
+        .iter()
+        .filter(|score| score.decision == "accept_candidate")
+        .collect::<Vec<_>>();
+    if accepted.len() < 2 {
+        return Err(anyhow::anyhow!(
+            "candidate judge requires at least two accepted candidates"
+        ));
+    }
+    let request = json!({
+        "schema": "air.candidate_judge_request.v1",
+        "finding": finding,
+        "candidates": accepted.iter().map(|score| json!({
+            "id": score.id,
+            "changed_files": score.changed_files,
+            "patch_bytes": score.patch_bytes,
+            "score_delta": score.score_delta,
+            "regression_passed": score.regression_passed,
+            "regression_total": score.regression_total,
+            "tests_passed": score.tests_passed,
+            "guard_passed": score.guard_passed,
+            "blocked": score.blocked,
+            "warnings": score.warnings,
+            "patch_excerpt": score.patch.as_deref().map(|patch| truncate_for_advisory(patch, 4000)),
+        })).collect::<Vec<_>>(),
+        "instruction": "Choose the cleanest accepted candidate. Only return one listed candidate id. This is advisory and must not override deterministic gates.",
+    });
+    let allowed = accepted
+        .iter()
+        .map(|score| score.id.clone())
+        .collect::<BTreeSet<_>>();
+    cached_llm_advisory(
+        CachedLlmAdvisoryOptions {
+            cache_root: Path::new(".air/memory/cache"),
+            out_file: None,
+            purpose: "candidate-judge",
+            model_alias: CANDIDATE_JUDGE_MODEL,
+            model_config,
+            request: &request,
+            generated_at_unix: unix_now(),
+        },
+        |output| validate_candidate_judge_output(output, &allowed),
+    )
+}
+
+fn validate_candidate_judge_output(
+    output: Value,
+    allowed: &BTreeSet<String>,
+) -> Result<SelfCompareAdvisory> {
+    let parsed: CandidateJudgeOutput =
+        serde_json::from_value(output).context("candidate judge output must be an object")?;
+    if !allowed.contains(&parsed.candidate) {
+        anyhow::bail!(
+            "candidate judge returned unknown candidate `{}`",
+            parsed.candidate
+        );
+    }
+    let reason = parsed.reason.trim().to_string();
+    if reason.is_empty() {
+        anyhow::bail!("candidate judge reason is empty");
+    }
+    Ok(SelfCompareAdvisory {
+        model: CANDIDATE_JUDGE_MODEL.to_string(),
+        candidate: parsed.candidate,
+        reason,
+        confidence: parsed.confidence.unwrap_or(0.5).clamp(0.0, 1.0),
+    })
 }
 
 fn regression_already_resolved(regression: &RegressionRunReport) -> bool {
@@ -798,6 +923,15 @@ fn write_compare_report(path: &Path, output: &SelfCompareOutput) -> Result<()> {
         "- recommendation: `{}`\n\n",
         output.recommendation
     ));
+    if let Some(advisory) = &output.advisory_recommendation {
+        out.push_str(&format!(
+            "- deterministic recommendation: `{}`\n- LLM candidate judge: `{}` confidence `{:.2}`: {}\n\n",
+            output.deterministic_recommendation,
+            advisory.candidate,
+            advisory.confidence,
+            md_inline(&advisory.reason)
+        ));
+    }
     out.push_str(
         "| Candidate | Patch | Files | Bytes | Decision | Score | Generation | Regression | Regression Status | Tests | Guard | Blocked | Warnings |\n",
     );
@@ -836,6 +970,29 @@ fn decision_rank(decision: &str) -> u8 {
         "reject_candidate" => 1,
         _ => 0,
     }
+}
+
+fn truncate_for_advisory(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut text = value
+        .chars()
+        .take(max_chars.saturating_sub(3))
+        .collect::<String>();
+    text.push_str("...");
+    text
+}
+
+fn md_inline(value: &str) -> String {
+    value.replace('`', "'").replace('\n', " ")
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or(0)
 }
 
 fn candidate_patch(candidate_dir: &Path) -> Option<String> {

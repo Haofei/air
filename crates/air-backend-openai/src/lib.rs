@@ -2792,7 +2792,16 @@ fn parse_native_tool_calls(
         let arguments = call
             .pointer("/function/arguments")
             .and_then(Value::as_str)
-            .unwrap_or("{}");
+            .ok_or_else(|| {
+                RuntimeError::Provider(format!(
+                    "missing native tool call arguments for {original_name}"
+                ))
+            })?;
+        if arguments.trim().is_empty() {
+            return Err(RuntimeError::Provider(format!(
+                "empty native tool call arguments for {original_name}"
+            )));
+        }
         let input: Value = serde_json::from_str(arguments).map_err(|error| {
             RuntimeError::Provider(format!(
                 "invalid native tool call arguments for {original_name}: {error}"
@@ -4963,6 +4972,37 @@ mod tests {
                     }
                 }]
             })
+        );
+    }
+
+    #[test]
+    fn native_tool_calls_reject_missing_arguments() {
+        let mut tool_name_map = BTreeMap::new();
+        tool_name_map.insert("edit".to_string(), "edit".to_string());
+
+        let error = parse_chat_completion_content(
+            &json!({
+                "choices": [{
+                    "message": {
+                        "tool_calls": [{
+                            "id": "call_edit_1",
+                            "type": "function",
+                            "function": {
+                                "name": "edit"
+                            }
+                        }]
+                    }
+                }]
+            }),
+            &tool_name_map,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("missing native tool call arguments for edit"),
+            "{error}"
         );
     }
 
