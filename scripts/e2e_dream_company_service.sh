@@ -124,7 +124,7 @@ GIT_AUTHOR_NAME='AIR E2E' GIT_AUTHOR_EMAIL='air-e2e@example.com' \
   git commit -qm 'seed company service fixture'
 
 set +e
-"$AIR_BIN" run --mode code --memory \
+"$AIR_BIN" run --mode code \
   --model-config "$MODEL_CONFIG" \
   --tool-config skills/code-agent/tools.json \
   --artifact-out target/generated/code-runs/day-success \

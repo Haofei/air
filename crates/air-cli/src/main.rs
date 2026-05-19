@@ -12,6 +12,7 @@ mod improve;
 mod mcp;
 mod memory;
 mod models;
+mod ops;
 mod planner;
 mod profile;
 mod project;
@@ -74,11 +75,12 @@ use crate::skill::{
     validate_skill, SkillRouteOptions, SkillUpgradeOptions,
 };
 use crate::tools::ToolProviderChoice;
-use anyhow::Result;
-use clap::{Parser, Subcommand};
+use anyhow::{Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
 use serde_json::Value;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn load_dotenv() {
     let _ = dotenvy::from_filename(".env");
@@ -151,63 +153,113 @@ fn normalize_model_profile_key(profile: &str) -> String {
 
 #[derive(Debug, Parser)]
 #[command(name = "air")]
-#[command(about = "AIR skill runtime CLI")]
+#[command(about = "AIR audit-first runtime CLI")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum TraceMode {
+    Redact,
+    Raw,
+    Off,
+}
+
+impl TraceMode {
+    fn redact(self) -> bool {
+        !matches!(self, Self::Raw)
+    }
+
+    fn raw(self) -> bool {
+        matches!(self, Self::Raw)
+    }
+
+    fn trace_out(self, trace_out: Option<PathBuf>) -> Option<PathBuf> {
+        if matches!(self, Self::Off) {
+            None
+        } else {
+            trace_out
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AirCliConfig {
+    #[serde(default)]
+    model_config: Option<PathBuf>,
+    #[serde(default)]
+    memory_dir: Option<PathBuf>,
+    #[serde(default)]
+    dream_dir: Option<PathBuf>,
+    #[serde(default)]
+    defaults: Option<AirCliConfigDefaults>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct AirCliConfigDefaults {
+    #[serde(default)]
+    model_config: Option<PathBuf>,
+    #[serde(default)]
+    memory_dir: Option<PathBuf>,
+    #[serde(default)]
+    dream_dir: Option<PathBuf>,
+}
+
+impl AirCliConfig {
+    fn load() -> Result<Self> {
+        let path = Path::new(".air/config.yaml");
+        if !path.exists() {
+            return Ok(Self::default());
+        }
+        let raw = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        serde_yaml::from_str(&raw).with_context(|| format!("parse {}", path.display()))
+    }
+
+    fn model_config(&self) -> Option<PathBuf> {
+        self.model_config.clone().or_else(|| {
+            self.defaults
+                .as_ref()
+                .and_then(|defaults| defaults.model_config.clone())
+        })
+    }
+
+    fn memory_dir(&self) -> Option<PathBuf> {
+        self.memory_dir.clone().or_else(|| {
+            self.defaults
+                .as_ref()
+                .and_then(|defaults| defaults.memory_dir.clone())
+        })
+    }
+
+    fn dream_dir(&self) -> Option<PathBuf> {
+        self.dream_dir.clone().or_else(|| {
+            self.defaults
+                .as_ref()
+                .and_then(|defaults| defaults.dream_dir.clone())
+        })
+    }
+}
+
+fn option_or_config(option: Option<PathBuf>, fallback: Option<PathBuf>) -> Option<PathBuf> {
+    option.or(fallback)
+}
+
 #[derive(Debug, Subcommand)]
 #[allow(clippy::large_enum_variant)]
 enum Command {
-    /// Run or inspect installed AIR skills.
-    Skill {
-        #[command(subcommand)]
-        command: SkillCommand,
-    },
     /// Deterministically audit AIR run artifacts without calling a model.
     Audit {
         #[command(subcommand)]
         command: AuditCommand,
     },
-    /// Run AIR benchmark suites.
-    Bench {
-        #[command(subcommand)]
-        command: BenchCommand,
+    /// One-screen summary of the current AIR workspace state.
+    Status {
+        /// Emit machine-readable JSON instead of the human-readable view.
+        #[arg(long)]
+        json: bool,
     },
-    /// Mine AIR artifacts and benchmark runs for failures and regression candidates.
-    Improve {
-        #[command(subcommand)]
-        command: Option<ImproveCommand>,
-
-        /// Artifact, benchmark, or generated output roots to scan.
-        #[arg(long = "from", global = true)]
-        from: Vec<PathBuf>,
-
-        /// Output directory for observations, findings, suggested regressions, and report.
-        #[arg(long, global = true)]
-        out_dir: Option<PathBuf>,
-
-        /// Write one suggested regression JSON file per finding.
-        #[arg(long, global = true)]
-        write_regressions: bool,
-    },
-    /// Run promoted AIR regression candidates.
-    Regression {
-        #[command(subcommand)]
-        command: RegressionCommand,
-    },
-    /// Offline review cycle that audits recent runs and mines improvement findings.
-    Dream {
-        #[command(subcommand)]
-        command: DreamCommand,
-    },
-    /// Inspect evidence-backed Dream memory candidates.
-    Memory {
-        #[command(subcommand)]
-        command: MemoryCommand,
-    },
-    /// Show the organized agent brain: memory, skill drafts, policies, and findings.
+    /// Show the organized agent brain: memory, skill drafts, policies, findings, and candidates.
     Brain {
         #[command(subcommand)]
         command: Option<BrainCommand>,
@@ -221,12 +273,64 @@ enum Command {
         dream_dir: Option<PathBuf>,
 
         /// Maximum items per section.
-        #[arg(long, global = true)]
+        #[arg(short = 'l', long, global = true)]
         limit: Option<usize>,
 
         /// Emit machine-readable JSON instead of the human-readable view.
         #[arg(long, global = true)]
         json: bool,
+    },
+    /// Run or inspect installed AIR skills.
+    Skill {
+        #[command(subcommand)]
+        command: SkillCommand,
+    },
+    /// Offline review cycle that audits recent runs and mines improvement findings.
+    Dream {
+        #[command(subcommand)]
+        command: DreamCommand,
+    },
+    /// Persistent Dream findings.
+    Findings {
+        #[command(subcommand)]
+        command: DreamFindingsCommand,
+    },
+    /// Inspect evidence-backed Dream memory candidates.
+    Memory {
+        #[command(subcommand)]
+        command: MemoryCommand,
+    },
+    /// Inspect and audit MCP tools declared in AIR tool configs.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
+    /// Run AIR benchmark suites.
+    Bench {
+        #[command(subcommand)]
+        command: BenchCommand,
+    },
+    /// Mine AIR artifacts and benchmark runs for failures and regression candidates.
+    Improve {
+        #[command(subcommand)]
+        command: Option<ImproveCommand>,
+
+        /// Artifact, benchmark, or generated output roots to scan.
+        #[arg(short = 'f', long = "from", global = true)]
+        from: Vec<PathBuf>,
+
+        /// Output directory for observations, findings, suggested regressions, and report.
+        #[arg(short = 'o', long, global = true)]
+        out_dir: Option<PathBuf>,
+
+        /// Write one suggested regression JSON file per finding.
+        #[arg(long, global = true)]
+        write_regressions: bool,
+    },
+    /// Run promoted AIR regression candidates.
+    Regression {
+        #[command(subcommand)]
+        command: RegressionCommand,
     },
     /// Protect evaluation files with a content manifest.
     Eval {
@@ -239,18 +343,12 @@ enum Command {
         #[command(subcommand)]
         command: SelfCommand,
     },
-    /// Inspect and audit MCP tools declared in AIR tool configs.
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommand,
-    },
     /// Advanced AIR IR/runtime tools.
     Dev {
         #[command(subcommand)]
         command: DevCommand,
     },
     /// Run bounded multi-task coding projects.
-    #[command(hide = true)]
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
@@ -296,17 +394,17 @@ enum Command {
         #[arg(long, hide = true)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long, hide = true)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact", hide = true)]
-        trace_raw: bool,
+        /// Trace writing mode when --trace-out is set.
+        #[arg(long, value_enum, default_value_t = TraceMode::Redact, hide = true)]
+        trace: TraceMode,
 
         /// Print human-readable execution logs to stderr.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
+
+        /// Maximum wall-clock seconds for this run.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
 
         /// Explain selected executor, skills, and permissions without running a model.
         #[arg(long)]
@@ -332,22 +430,15 @@ enum Command {
         #[arg(long, hide = true)]
         verification_command: Option<String>,
 
-        /// Include promoted Dream memory in the task context. Enabled by default; kept for explicitness.
-        ///
-        /// When memory is enabled and --artifact-out is omitted, AIR also writes an auditable
-        /// run artifact under target/generated/code-runs/.
-        #[arg(long)]
-        memory: bool,
-
         /// Disable promoted Dream memory injection for this run.
-        #[arg(long, conflicts_with = "memory")]
+        #[arg(long)]
         no_memory: bool,
 
-        /// Memory directory for --memory.
+        /// Memory directory for default Dream memory injection.
         #[arg(long, hide = true)]
         memory_dir: Option<PathBuf>,
 
-        /// Maximum promoted memories to include with --memory.
+        /// Maximum promoted memories to include with default Dream memory injection.
         #[arg(long, default_value_t = 5, hide = true)]
         memory_limit: usize,
     },
@@ -378,7 +469,7 @@ enum SkillCommand {
 
         /// Destination skill directory for one skill, or destination root for a skill collection.
         /// Defaults to skills/vendor for collections and skills/vendor/<skill-id> for single skills.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out: Option<PathBuf>,
     },
     /// Check what would change if an imported skill was upgraded from its source.
@@ -396,22 +487,22 @@ enum SkillCommand {
         task: String,
 
         /// Number of selected skill cards to return.
-        #[arg(long, default_value_t = 3)]
+        #[arg(short = 'k', long, default_value_t = 3)]
         top_k: usize,
 
         /// Include deterministic routing score details.
         #[arg(long)]
         explain: bool,
 
-        /// Include promoted Dream memory pack in routing output.
+        /// Disable promoted Dream memory pack in routing output.
         #[arg(long)]
-        memory: bool,
+        no_memory: bool,
 
-        /// Memory directory for --memory.
+        /// Memory directory for Dream memory.
         #[arg(long, hide = true)]
         memory_dir: Option<PathBuf>,
 
-        /// Maximum promoted memories to include with --memory.
+        /// Maximum promoted memories to include.
         #[arg(long, default_value_t = 5, hide = true)]
         memory_limit: usize,
     },
@@ -440,7 +531,7 @@ enum AuditCommand {
     /// Collect and summarize many code-run artifact audits for a time window or run set.
     Collect {
         /// Artifact, benchmark, or generated output roots to scan.
-        #[arg(long = "from")]
+        #[arg(short = 'f', long = "from")]
         from: Vec<PathBuf>,
 
         /// Only audit artifacts whose artifact.json mtime is at or after this Unix timestamp.
@@ -448,11 +539,11 @@ enum AuditCommand {
         since_unix: Option<u64>,
 
         /// Audit at most this many newest artifacts after applying the time window.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
 
         /// Output directory for collection.json, per-run audits, and default report.md.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// Optional Markdown collection report path.
@@ -466,7 +557,7 @@ enum EvalCommand {
     /// Write an eval integrity manifest with sha256 pins.
     Manifest {
         /// Output manifest path.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out: Option<PathBuf>,
 
         /// File or directory to include. Defaults to AIR benchmark/regression files.
@@ -493,7 +584,7 @@ enum SelfCommand {
         candidates: usize,
 
         /// Candidate root directory.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
     },
     /// Capture the current workspace diff as a candidate patch.
@@ -505,7 +596,7 @@ enum SelfCommand {
         candidate: String,
 
         /// Candidate root directory.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
     },
     /// Generate candidate patches with AIR's code-agent in isolated worktrees.
@@ -526,11 +617,11 @@ enum SelfCommand {
         task: Option<String>,
 
         /// Artifact, benchmark, or generated output roots to use during evaluation.
-        #[arg(long = "from")]
+        #[arg(short = 'f', long = "from")]
         from: Vec<PathBuf>,
 
         /// Candidate root directory.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// Optional OpenAI-compatible model config JSON.
@@ -559,11 +650,11 @@ enum SelfCommand {
         finding: String,
 
         /// Candidate directory or eval.json path. Defaults to .air/candidates/<finding>.
-        #[arg(long = "from")]
+        #[arg(short = 'f', long = "from")]
         from: Vec<PathBuf>,
 
         /// Optional Markdown scorecard path.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out: Option<PathBuf>,
     },
 }
@@ -573,7 +664,7 @@ enum DreamCommand {
     /// Audit a run window and mine improvement findings without changing source code.
     Run {
         /// Artifact, benchmark, or generated output roots to scan.
-        #[arg(long = "from")]
+        #[arg(short = 'f', long = "from")]
         from: Vec<PathBuf>,
 
         /// Only include artifacts whose artifact.json mtime is at or after this Unix timestamp.
@@ -581,11 +672,11 @@ enum DreamCommand {
         since_unix: Option<u64>,
 
         /// Review at most this many newest artifacts after applying the time window.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
 
         /// Output directory for dream.json, dream.md, audit/, improve/, and logs/.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// Write one suggested regression JSON file per finding under the Dream improve output.
@@ -620,12 +711,12 @@ enum DreamCommand {
         #[arg(long, default_value_t = 25)]
         advance_limit: usize,
 
-        /// Run only artifacts newer than the previous Dream state. This is the default.
-        #[arg(long, conflicts_with_all = ["full", "since_unix"])]
-        incremental: bool,
+        /// Maximum wall-clock seconds for the memory advancement pass.
+        #[arg(long)]
+        advance_timeout_seconds: Option<u64>,
 
         /// Ignore Dream state and scan the full requested roots.
-        #[arg(long, conflicts_with = "incremental")]
+        #[arg(long, conflicts_with = "since_unix")]
         full: bool,
     },
     /// Show the saved Dream incremental state.
@@ -646,7 +737,7 @@ enum DreamFindingsCommand {
         status: Option<String>,
 
         /// Maximum records to return.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
     },
     /// Reopen a finding.
@@ -699,7 +790,7 @@ enum MemoryCommand {
         status: Option<String>,
 
         /// Maximum cards to return.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
     },
     /// Search memory cards.
@@ -720,7 +811,7 @@ enum MemoryCommand {
         status: Option<String>,
 
         /// Maximum cards to return.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
     },
     /// View one memory card.
@@ -793,7 +884,7 @@ enum MemoryCommand {
         memory_dir: Option<PathBuf>,
 
         /// Maximum promoted memories to include.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
 
         /// Include evidence pointers in JSON output.
@@ -807,7 +898,7 @@ enum MemoryCommand {
         memory_dir: Option<PathBuf>,
 
         /// Maximum graph edges to return.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
     },
     /// Show helped/hurt usage scorecard for promoted memory.
@@ -817,7 +908,7 @@ enum MemoryCommand {
         memory_dir: Option<PathBuf>,
 
         /// Maximum rows to return.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
     },
     /// Advance evidence-backed memory into promoted memory, validated skill drafts, routing measurements, and guard proposals.
@@ -827,7 +918,7 @@ enum MemoryCommand {
         memory_dir: Option<PathBuf>,
 
         /// Output directory for advance reports and review artifacts.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// Also run a small compare-no-skill benchmark for generated skill drafts.
@@ -835,8 +926,12 @@ enum MemoryCommand {
         skill_bench: bool,
 
         /// Maximum memory cards to process.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
+
+        /// Maximum wall-clock seconds for skill validation/audit work during this pass.
+        #[arg(long)]
+        timeout_seconds: Option<u64>,
     },
     /// Draft an untrusted skill package from procedure memory.
     SkillDraft {
@@ -848,7 +943,7 @@ enum MemoryCommand {
         memory_dir: Option<PathBuf>,
 
         /// Destination draft skill directory.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
     },
     /// Draft and validate/audit a skill from procedure memory; benchmark is opt-in.
@@ -861,7 +956,7 @@ enum MemoryCommand {
         memory_dir: Option<PathBuf>,
 
         /// Destination draft skill directory.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// Also run a small benchmark comparison for this draft.
@@ -889,6 +984,8 @@ enum BrainCommand {
     Policies,
     /// Show persistent Dream findings by lifecycle status.
     Findings,
+    /// Show self-improvement candidates produced by Dream experiments.
+    Candidates,
     /// View one memory, skill draft, guard proposal, or finding.
     View {
         /// Memory id, skill id, guard memory id, or finding id.
@@ -897,7 +994,7 @@ enum BrainCommand {
     /// Write a Markdown report of the organized agent brain.
     Report {
         /// Output Markdown path.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out: Option<PathBuf>,
     },
 }
@@ -952,7 +1049,7 @@ enum BenchCommand {
         suite: Option<PathBuf>,
 
         /// Output directory for run.json, traces, and workdirs.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// Coding-agent run profile.
@@ -968,11 +1065,11 @@ enum BenchCommand {
         task: Option<String>,
 
         /// Run at most N selected tasks.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
 
         /// Print AIR execution logs while the benchmark runs.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
 
         /// Keep successful task workdirs. Failed task workdirs are always kept.
@@ -1001,7 +1098,7 @@ enum BenchCommand {
         suite: Option<PathBuf>,
 
         /// Output directory for run.json, traces, and workdirs.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
 
         /// OpenAI-compatible model config JSON.
@@ -1013,7 +1110,7 @@ enum BenchCommand {
         task: Option<String>,
 
         /// Run at most N selected tasks.
-        #[arg(long)]
+        #[arg(short = 'l', long)]
         limit: Option<usize>,
 
         /// Compare against a no-skill baseline in the same benchmark run.
@@ -1021,7 +1118,7 @@ enum BenchCommand {
         compare_no_skill: bool,
 
         /// Print AIR execution logs while the benchmark runs.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
 
         /// Keep successful task workdirs. Failed task workdirs are always kept.
@@ -1044,7 +1141,7 @@ enum BenchCommand {
         suite: Option<PathBuf>,
 
         /// Output directory for run.json.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
     },
 }
@@ -1099,11 +1196,11 @@ enum RegressionCommand {
         file: Option<PathBuf>,
 
         /// Artifact, benchmark, or generated output roots used by regression checks.
-        #[arg(long = "from")]
+        #[arg(short = 'f', long = "from")]
         from: Vec<PathBuf>,
 
         /// Output directory for regression run artifacts.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         out_dir: Option<PathBuf>,
     },
 }
@@ -1168,7 +1265,7 @@ enum DevCommand {
         explain: bool,
 
         /// Optional output path. Prints YAML to stdout when omitted.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         output: Option<PathBuf>,
     },
     /// Run a state-machine AIR module directly.
@@ -1188,16 +1285,12 @@ enum DevCommand {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact")]
-        trace_raw: bool,
+        /// Trace writing mode when --trace-out is set.
+        #[arg(long, value_enum, default_value_t = TraceMode::Redact)]
+        trace: TraceMode,
 
         /// Print human-readable execution logs to stderr.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
 
         /// Use built-in example tools such as docs.search.
@@ -1225,16 +1318,12 @@ enum DevCommand {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact")]
-        trace_raw: bool,
+        /// Trace writing mode when --trace-out is set.
+        #[arg(long, value_enum, default_value_t = TraceMode::Redact)]
+        trace: TraceMode,
 
         /// Print human-readable execution logs to stderr.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
 
         /// Use built-in example tools such as docs.search.
@@ -1270,13 +1359,9 @@ enum DevCommand {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact")]
-        trace_raw: bool,
+        /// Trace writing mode when --trace-out is set.
+        #[arg(long, value_enum, default_value_t = TraceMode::Redact)]
+        trace: TraceMode,
 
         /// Optional JSON state output path for AIR resume.
         #[arg(long)]
@@ -1295,7 +1380,7 @@ enum DevCommand {
         parallel: bool,
 
         /// Print human-readable execution logs to stderr.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
 
         /// Use built-in example tools such as docs.search.
@@ -1339,13 +1424,9 @@ enum DevCommand {
         #[arg(long)]
         trace_out: Option<PathBuf>,
 
-        /// Redact sensitive fields and cap trace event size before writing --trace-out (default).
-        #[arg(long)]
-        trace_redact: bool,
-
-        /// Write raw trace events without redaction.
-        #[arg(long, conflicts_with = "trace_redact")]
-        trace_raw: bool,
+        /// Trace writing mode when --trace-out is set.
+        #[arg(long, value_enum, default_value_t = TraceMode::Redact)]
+        trace: TraceMode,
 
         /// Optional JSON state output path for AIR resume.
         #[arg(long)]
@@ -1356,7 +1437,7 @@ enum DevCommand {
         checkpoint_out: Option<PathBuf>,
 
         /// Print human-readable execution logs to stderr.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
 
         /// Use built-in example tools such as docs.search.
@@ -1381,7 +1462,7 @@ enum DevCommand {
         store: Option<PathBuf>,
 
         /// Optional specialized .air-plan.yaml output path. Prints YAML when omitted.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         output: Option<PathBuf>,
 
         /// Optional cache identity JSON output path for specialized traces.
@@ -1402,7 +1483,7 @@ enum ProjectCommand {
         goal: String,
 
         /// Output project manifest path. Prints YAML to stdout when omitted.
-        #[arg(long)]
+        #[arg(short = 'o', long)]
         output: Option<PathBuf>,
 
         /// OpenAI-compatible model config JSON for project task decomposition.
@@ -1428,7 +1509,7 @@ enum ProjectCommand {
         task: Option<String>,
 
         /// Print AIR execution logs while tasks run.
-        #[arg(long)]
+        #[arg(short = 'v', long)]
         log: bool,
     },
     /// Show project task state without calling a model.
@@ -1452,6 +1533,7 @@ enum ProjectCommand {
 fn main() -> Result<()> {
     load_dotenv();
     let cli = Cli::parse();
+    let config = AirCliConfig::load()?;
 
     match cli.command {
         Command::Skill { command } => match command {
@@ -1466,14 +1548,14 @@ fn main() -> Result<()> {
                 task,
                 top_k,
                 explain,
-                memory,
+                no_memory,
                 memory_dir,
                 memory_limit,
             } => route_skill(SkillRouteOptions {
-                memory_pack: if memory {
+                memory_pack: if !no_memory {
                     Some(serde_json::to_value(build_memory_pack(
                         MemoryPackOptions {
-                            memory_dir,
+                            memory_dir: option_or_config(memory_dir, config.memory_dir()),
                             task: task.clone(),
                             limit: Some(memory_limit),
                             include_evidence: false,
@@ -1511,6 +1593,7 @@ fn main() -> Result<()> {
                 limit,
             }),
         },
+        Command::Status { json } => show_status(json, &config),
         Command::Mcp { command } => match command {
             McpCommand::List { tool_config } => list_mcp(McpListOptions { tool_config }),
             McpCommand::Explain { tool, tool_config } => {
@@ -1545,7 +1628,7 @@ fn main() -> Result<()> {
                 suite,
                 out_dir,
                 profile,
-                model_config,
+                model_config: option_or_config(model_config, config.model_config()),
                 task,
                 limit,
                 log,
@@ -1571,7 +1654,7 @@ fn main() -> Result<()> {
                 skills,
                 suite,
                 out_dir,
-                model_config,
+                model_config: option_or_config(model_config, config.model_config()),
                 task,
                 limit,
                 compare_no_skill,
@@ -1624,7 +1707,7 @@ fn main() -> Result<()> {
                 candidates,
                 no_advance,
                 advance_limit,
-                incremental,
+                advance_timeout_seconds,
                 full,
             } => run_dream(DreamRunOptions {
                 from,
@@ -1632,7 +1715,6 @@ fn main() -> Result<()> {
                 limit,
                 out_dir,
                 write_regressions,
-                incremental,
                 full,
                 mode,
                 experiment,
@@ -1641,37 +1723,12 @@ fn main() -> Result<()> {
                 candidates,
                 advance: !no_advance,
                 advance_limit: Some(advance_limit),
+                advance_timeout_seconds,
             }),
             DreamCommand::State => show_dream_state(DreamStateOptions),
-            DreamCommand::Findings { command } => match command {
-                DreamFindingsCommand::List { status, limit } => {
-                    list_dream_findings(DreamFindingsListOptions { status, limit })
-                }
-                DreamFindingsCommand::Open { finding, reason } => {
-                    open_dream_finding(DreamFindingUpdateOptions {
-                        finding,
-                        reason,
-                        fixed_by: None,
-                    })
-                }
-                DreamFindingsCommand::Resolve {
-                    finding,
-                    reason,
-                    fixed_by,
-                } => resolve_dream_finding(DreamFindingUpdateOptions {
-                    finding,
-                    reason,
-                    fixed_by,
-                }),
-                DreamFindingsCommand::Dismiss { finding, reason } => {
-                    dismiss_dream_finding(DreamFindingUpdateOptions {
-                        finding,
-                        reason,
-                        fixed_by: None,
-                    })
-                }
-            },
+            DreamCommand::Findings { command } => run_dream_findings_command(command),
         },
+        Command::Findings { command } => run_dream_findings_command(command),
         Command::Memory { command } => match command {
             MemoryCommand::List {
                 memory_dir,
@@ -1679,7 +1736,7 @@ fn main() -> Result<()> {
                 status,
                 limit,
             } => list_memory(MemoryListOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 kind,
                 status,
                 limit,
@@ -1691,7 +1748,7 @@ fn main() -> Result<()> {
                 status,
                 limit,
             } => search_memory(MemorySearchOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 query,
                 kind,
                 status,
@@ -1702,7 +1759,7 @@ fn main() -> Result<()> {
                 memory_dir,
                 evidence,
             } => view_memory(MemoryViewOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 id,
                 evidence,
             }),
@@ -1711,7 +1768,7 @@ fn main() -> Result<()> {
                 memory_dir,
                 status,
             } => promote_memory(MemoryPromoteOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 id,
                 status,
             }),
@@ -1722,7 +1779,7 @@ fn main() -> Result<()> {
                 evidence,
                 note,
             } => causal_eval_memory(MemoryCausalEvalOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 id,
                 outcome,
                 evidence,
@@ -1733,7 +1790,7 @@ fn main() -> Result<()> {
                 memory_dir,
                 reason,
             } => retire_memory(MemoryRetireOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 id,
                 reason,
             }),
@@ -1743,29 +1800,35 @@ fn main() -> Result<()> {
                 limit,
                 evidence,
             } => pack_memory_command(MemoryPackOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 task,
                 limit,
                 include_evidence: evidence,
                 record_usage: false,
             }),
-            MemoryCommand::Graph { memory_dir, limit } => {
-                show_memory_graph(MemoryGraphOptions { memory_dir, limit })
-            }
+            MemoryCommand::Graph { memory_dir, limit } => show_memory_graph(MemoryGraphOptions {
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
+                limit,
+            }),
             MemoryCommand::Scorecard { memory_dir, limit } => {
-                show_memory_scorecard(MemoryScorecardOptions { memory_dir, limit })
+                show_memory_scorecard(MemoryScorecardOptions {
+                    memory_dir: option_or_config(memory_dir, config.memory_dir()),
+                    limit,
+                })
             }
             MemoryCommand::Advance {
                 memory_dir,
                 out_dir,
                 skill_bench,
                 limit,
+                timeout_seconds,
             } => {
                 let output = advance_memory(MemoryAdvanceOptions {
-                    memory_dir,
+                    memory_dir: option_or_config(memory_dir, config.memory_dir()),
                     out_dir,
                     skill_bench,
                     limit,
+                    timeout_seconds,
                 })?;
                 println!("{}", serde_json::to_string_pretty(&output)?);
                 Ok(())
@@ -1775,7 +1838,7 @@ fn main() -> Result<()> {
                 memory_dir,
                 out_dir,
             } => draft_skill_from_memory(MemorySkillDraftOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 id,
                 out_dir,
             }),
@@ -1785,13 +1848,16 @@ fn main() -> Result<()> {
                 out_dir,
                 bench,
             } => evaluate_memory_skill(MemorySkillEvaluateOptions {
-                memory_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
                 id,
                 out_dir,
                 bench,
             }),
             MemoryCommand::PolicyCheck { id, memory_dir } => {
-                check_policy_candidate(MemoryPolicyCheckOptions { memory_dir, id })
+                check_policy_candidate(MemoryPolicyCheckOptions {
+                    memory_dir: option_or_config(memory_dir, config.memory_dir()),
+                    id,
+                })
             }
         },
         Command::Brain {
@@ -1807,12 +1873,13 @@ fn main() -> Result<()> {
                 Some(BrainCommand::Skills) => (BrainSection::Skills, None),
                 Some(BrainCommand::Policies) => (BrainSection::Policies, None),
                 Some(BrainCommand::Findings) => (BrainSection::Findings, None),
+                Some(BrainCommand::Candidates) => (BrainSection::Candidates, None),
                 Some(BrainCommand::View { id }) => (BrainSection::View(id), None),
                 Some(BrainCommand::Report { out }) => (BrainSection::Report, out),
             };
             show_brain(BrainOptions {
-                memory_dir,
-                dream_dir,
+                memory_dir: option_or_config(memory_dir, config.memory_dir()),
+                dream_dir: option_or_config(dream_dir, config.dream_dir()),
                 section,
                 limit,
                 out,
@@ -1865,7 +1932,7 @@ fn main() -> Result<()> {
                 task,
                 from,
                 out_dir,
-                model_config,
+                model_config: option_or_config(model_config, config.model_config()),
                 regression_file,
                 evaluate,
                 keep_worktrees,
@@ -1875,7 +1942,7 @@ fn main() -> Result<()> {
                 self_compare(SelfCompareOptions { finding, from, out })
             }
         },
-        Command::Dev { command } => run_dev_command(command),
+        Command::Dev { command } => run_dev_command(command, &config),
         Command::Project { command } => match command {
             ProjectCommand::Plan {
                 goal,
@@ -1886,7 +1953,7 @@ fn main() -> Result<()> {
             } => project_plan(ProjectPlanOptions {
                 goal,
                 output,
-                model_config,
+                model_config: option_or_config(model_config, config.model_config()),
                 planner_model,
                 template,
             }),
@@ -1909,21 +1976,21 @@ fn main() -> Result<()> {
             planner_model,
             model_config,
             trace_out,
-            trace_redact,
-            trace_raw,
+            trace,
             log,
+            timeout_seconds,
             explain,
             tool_config,
             artifact_out,
             replay_artifact,
             replay_from,
             verification_command,
-            memory: _,
             no_memory,
             memory_dir,
             memory_limit,
         } => {
             let memory_enabled = !no_memory;
+            let memory_dir = option_or_config(memory_dir, config.memory_dir());
             let memory_hint = build_memory_run_hint(MemoryHintOptions {
                 memory_dir: memory_dir.clone(),
                 task: target.clone(),
@@ -1949,10 +2016,10 @@ fn main() -> Result<()> {
                 mode,
                 top_k,
                 skills,
-                model_config,
-                trace_out,
-                trace_redact,
-                trace_raw,
+                model_config: option_or_config(model_config, config.model_config()),
+                trace_out: trace.trace_out(trace_out),
+                trace_redact: trace.redact(),
+                trace_raw: trace.raw(),
                 log,
                 explain,
                 tool_config,
@@ -1966,6 +2033,7 @@ fn main() -> Result<()> {
                 planner_model,
                 memory_context,
                 memory_pack,
+                timeout_seconds,
             })?;
             let mut output = output;
             attach_memory_hint(&mut output, memory_hint)?;
@@ -1973,6 +2041,268 @@ fn main() -> Result<()> {
             Ok(())
         }
     }
+}
+
+fn run_dream_findings_command(command: DreamFindingsCommand) -> Result<()> {
+    match command {
+        DreamFindingsCommand::List { status, limit } => {
+            list_dream_findings(DreamFindingsListOptions { status, limit })
+        }
+        DreamFindingsCommand::Open { finding, reason } => {
+            open_dream_finding(DreamFindingUpdateOptions {
+                finding,
+                reason,
+                fixed_by: None,
+            })
+        }
+        DreamFindingsCommand::Resolve {
+            finding,
+            reason,
+            fixed_by,
+        } => resolve_dream_finding(DreamFindingUpdateOptions {
+            finding,
+            reason,
+            fixed_by,
+        }),
+        DreamFindingsCommand::Dismiss { finding, reason } => {
+            dismiss_dream_finding(DreamFindingUpdateOptions {
+                finding,
+                reason,
+                fixed_by: None,
+            })
+        }
+    }
+}
+
+fn show_status(json: bool, config: &AirCliConfig) -> Result<()> {
+    let status = build_status_value(config)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    println!("AIR status");
+    if let Some(last_completed_at) = status
+        .pointer("/dream/last_completed_at_unix")
+        .and_then(Value::as_u64)
+    {
+        println!("- Dream: last completed at unix {last_completed_at}");
+    } else {
+        println!("- Dream: no completed run recorded");
+    }
+    println!(
+        "- Findings: {} open",
+        status
+            .pointer("/findings/open_count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    if let Some(items) = status
+        .pointer("/findings/top_open")
+        .and_then(Value::as_array)
+    {
+        for item in items.iter().take(3) {
+            let id = item.get("id").and_then(Value::as_str).unwrap_or("unknown");
+            let category = item
+                .get("category")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let impact = item
+                .get("impact_score")
+                .and_then(Value::as_f64)
+                .unwrap_or_default();
+            println!("  - {id}: {category} (impact {impact:.1})");
+        }
+    }
+    println!(
+        "- Memory: {} total cards",
+        status
+            .pointer("/memory/total")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    if let Some(by_status) = status
+        .pointer("/memory/by_status")
+        .and_then(Value::as_object)
+    {
+        let mut parts: Vec<String> = by_status
+            .iter()
+            .map(|(status, count)| format!("{status}={}", count.as_u64().unwrap_or(0)))
+            .collect();
+        parts.sort();
+        if !parts.is_empty() {
+            println!("  - {}", parts.join(", "));
+        }
+    }
+    println!(
+        "- Candidates: {} dream experiment candidates",
+        status
+            .pointer("/candidates/count")
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+    );
+    Ok(())
+}
+
+fn build_status_value(config: &AirCliConfig) -> Result<Value> {
+    let dream_dir = config
+        .dream_dir()
+        .unwrap_or_else(|| PathBuf::from(".air/dream"));
+    let memory_dir = config
+        .memory_dir()
+        .unwrap_or_else(|| PathBuf::from(".air/memory"));
+    let dream_state_path = dream_dir.join("state.json");
+    let dream_state = read_json_if_exists(&dream_state_path)?;
+    let last_completed_at_unix = dream_state
+        .as_ref()
+        .and_then(|value| value.get("last_completed_at_unix"))
+        .and_then(Value::as_u64);
+
+    let findings = read_latest_status_findings(&dream_dir.join("findings.jsonl"))?;
+    let open_count = findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("open")
+                == "open"
+        })
+        .count();
+    let mut top_open: Vec<Value> = findings
+        .iter()
+        .filter(|finding| {
+            finding
+                .get("status")
+                .and_then(Value::as_str)
+                .unwrap_or("open")
+                == "open"
+        })
+        .cloned()
+        .collect();
+    top_open.sort_by(|left, right| {
+        status_number(right, "impact_score")
+            .partial_cmp(&status_number(left, "impact_score"))
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    top_open.truncate(3);
+
+    let memory_summary = summarize_memory_cards(&memory_dir.join("cards"))?;
+    let candidate_count = count_candidate_eval_files(&dream_dir.join("latest").join("candidates"))?;
+
+    Ok(serde_json::json!({
+        "schema": "air.status.v1",
+        "dream": {
+            "state_path": dream_state_path,
+            "last_completed_at_unix": last_completed_at_unix,
+        },
+        "findings": {
+            "path": dream_dir.join("findings.jsonl"),
+            "total": findings.len(),
+            "open_count": open_count,
+            "top_open": top_open,
+        },
+        "memory": memory_summary,
+        "candidates": {
+            "path": dream_dir.join("latest").join("candidates"),
+            "count": candidate_count,
+        },
+    }))
+}
+
+fn read_json_if_exists(path: &Path) -> Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&raw)?))
+}
+
+fn read_latest_status_findings(path: &Path) -> Result<Vec<Value>> {
+    use std::collections::BTreeMap;
+
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let raw = fs::read_to_string(path)?;
+    let mut latest = BTreeMap::<String, Value>::new();
+    for line in raw.lines().filter(|line| !line.trim().is_empty()) {
+        let value: Value = serde_json::from_str(line)?;
+        let key = value
+            .get("stable_key")
+            .or_else(|| value.get("id"))
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        latest.insert(key, value);
+    }
+    Ok(latest.into_values().collect())
+}
+
+fn summarize_memory_cards(cards_dir: &Path) -> Result<Value> {
+    use std::collections::BTreeMap;
+
+    let mut by_status = BTreeMap::<String, usize>::new();
+    let mut by_kind = BTreeMap::<String, usize>::new();
+    let mut total = 0usize;
+    for path in json_files_under(cards_dir)? {
+        let Some(value) = read_json_if_exists(&path)? else {
+            continue;
+        };
+        total += 1;
+        let status = value
+            .get("status")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        let kind = value
+            .get("kind")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        *by_status.entry(status).or_default() += 1;
+        *by_kind.entry(kind).or_default() += 1;
+    }
+    Ok(serde_json::json!({
+        "path": cards_dir,
+        "total": total,
+        "by_status": by_status,
+        "by_kind": by_kind,
+    }))
+}
+
+fn count_candidate_eval_files(path: &Path) -> Result<usize> {
+    Ok(json_files_under(path)?
+        .into_iter()
+        .filter(|path| path.file_name().and_then(|name| name.to_str()) == Some("eval.json"))
+        .count())
+}
+
+fn json_files_under(root: &Path) -> Result<Vec<PathBuf>> {
+    let mut out = Vec::new();
+    collect_json_files(root, &mut out)?;
+    Ok(out)
+}
+
+fn collect_json_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    if !root.exists() {
+        return Ok(());
+    }
+    if root.is_file() {
+        if root.extension().and_then(|ext| ext.to_str()) == Some("json") {
+            out.push(root.to_path_buf());
+        }
+        return Ok(());
+    }
+    for entry in fs::read_dir(root)? {
+        let entry = entry?;
+        collect_json_files(&entry.path(), out)?;
+    }
+    Ok(())
+}
+
+fn status_number(value: &Value, field: &str) -> f64 {
+    value.get(field).and_then(Value::as_f64).unwrap_or_default()
 }
 
 fn attach_memory_hint(output: &mut Value, hint: crate::memory::MemoryRunHint) -> Result<()> {
@@ -2001,7 +2331,7 @@ fn improve_action(command: Option<ImproveCommand>) -> ImproveAction {
     }
 }
 
-fn run_dev_command(command: DevCommand) -> Result<()> {
+fn run_dev_command(command: DevCommand, config: &AirCliConfig) -> Result<()> {
     match command {
         DevCommand::ValidateModule { file } => validate(file),
         DevCommand::ValidateSystem { file } => validate_system(file),
@@ -2029,7 +2359,7 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             task,
             task_file,
             store,
-            model_config,
+            model_config: option_or_config(model_config, config.model_config()),
             planner_model,
             allow_internal,
             explain,
@@ -2040,17 +2370,16 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             input,
             model_config,
             trace_out,
-            trace_redact,
-            trace_raw,
+            trace,
             log,
             example_tools,
             tool_config,
         } => run(
             file,
             input,
-            model_config,
-            trace_out,
-            trace_redact || !trace_raw,
+            option_or_config(model_config, config.model_config()),
+            trace.trace_out(trace_out),
+            trace.redact(),
             log,
             example_tools,
             tool_config,
@@ -2060,17 +2389,16 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             input,
             model_config,
             trace_out,
-            trace_redact,
-            trace_raw,
+            trace,
             log,
             example_tools,
             tool_config,
         } => run_system(
             file,
             input,
-            model_config,
-            trace_out,
-            trace_redact || !trace_raw,
+            option_or_config(model_config, config.model_config()),
+            trace.trace_out(trace_out),
+            trace.redact(),
             log,
             example_tools,
             tool_config,
@@ -2082,8 +2410,7 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             input,
             model_config,
             trace_out,
-            trace_redact,
-            trace_raw,
+            trace,
             state_out,
             checkpoint_out,
             jit_cache,
@@ -2097,10 +2424,10 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             store,
             input,
             input_values: None,
-            model_config,
-            trace_out,
-            trace_redact,
-            trace_raw,
+            model_config: option_or_config(model_config, config.model_config()),
+            trace_out: trace.trace_out(trace_out),
+            trace_redact: trace.redact(),
+            trace_raw: trace.raw(),
             state_out,
             checkpoint_out,
             jit_cache,
@@ -2119,8 +2446,7 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             overrides,
             model_config,
             trace_out,
-            trace_redact,
-            trace_raw,
+            trace,
             state_out,
             checkpoint_out,
             log,
@@ -2133,10 +2459,10 @@ fn run_dev_command(command: DevCommand) -> Result<()> {
             input,
             state,
             overrides,
-            model_config,
-            trace_out,
-            trace_redact,
-            trace_raw,
+            model_config: option_or_config(model_config, config.model_config()),
+            trace_out: trace.trace_out(trace_out),
+            trace_redact: trace.redact(),
+            trace_raw: trace.raw(),
             state_out,
             checkpoint_out,
             log,
@@ -3083,7 +3409,24 @@ mod tests {
             .filter_map(|line| line.split_whitespace().next())
             .collect::<Vec<_>>();
 
-        for command in ["run", "skill", "bench", "mcp", "dev"] {
+        for command in [
+            "run",
+            "status",
+            "audit",
+            "brain",
+            "skill",
+            "dream",
+            "findings",
+            "memory",
+            "mcp",
+            "bench",
+            "improve",
+            "regression",
+            "eval",
+            "self",
+            "dev",
+            "project",
+        ] {
             assert!(
                 command_names.contains(&command),
                 "expected {command} in help"
@@ -3091,7 +3434,6 @@ mod tests {
         }
 
         for command in [
-            "project",
             "validate-plan",
             "plan",
             "run-plan",
@@ -3220,7 +3562,6 @@ mod tests {
             "route",
             "fix a security vulnerability",
             "--explain",
-            "--memory",
         ])
         .unwrap();
 
@@ -3230,7 +3571,7 @@ mod tests {
                     task,
                     top_k,
                     explain,
-                    memory,
+                    no_memory,
                     ..
                 },
         } = cli.command
@@ -3241,7 +3582,7 @@ mod tests {
         assert_eq!(task, "fix a security vulnerability");
         assert_eq!(top_k, 3);
         assert!(explain);
-        assert!(memory);
+        assert!(!no_memory);
     }
 
     #[test]
@@ -3378,7 +3719,7 @@ mod tests {
                     candidates,
                     no_advance,
                     advance_limit,
-                    incremental,
+                    advance_timeout_seconds,
                     full,
                 },
         } = cli.command
@@ -3398,7 +3739,7 @@ mod tests {
         assert_eq!(candidates, 1);
         assert!(!no_advance);
         assert_eq!(advance_limit, 25);
-        assert!(!incremental);
+        assert_eq!(advance_timeout_seconds, None);
         assert!(!full);
     }
 
@@ -3444,7 +3785,7 @@ mod tests {
     }
 
     #[test]
-    fn dream_incremental_conflicts_with_explicit_since() {
+    fn dream_full_conflicts_with_explicit_since() {
         let err = Cli::try_parse_from([
             "air",
             "dream",
@@ -3453,7 +3794,7 @@ mod tests {
             "target/generated",
             "--since-unix",
             "1770000000",
-            "--incremental",
+            "--full",
         ])
         .unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
@@ -3987,7 +4328,6 @@ mod tests {
             "tdd-workflow",
             "--mode",
             "code",
-            "--memory",
             "--explain",
         ])
         .unwrap();
@@ -3998,7 +4338,6 @@ mod tests {
             skills,
             execute,
             explain,
-            memory,
             ..
         } = cli.command
         else {
@@ -4010,7 +4349,6 @@ mod tests {
         assert_eq!(skills, vec!["tdd-workflow"]);
         assert!(!execute);
         assert!(explain);
-        assert!(memory);
     }
 
     #[test]

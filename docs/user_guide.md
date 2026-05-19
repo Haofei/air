@@ -2,11 +2,33 @@
 
 This guide is the shortest path from a clean checkout to running and modifying AIR workflows.
 
+AIR's user-facing surface is flat and split by intent:
+
+- **Daily**: `air run`, `air status`, and `air brain` for developers and
+  platform teams checking the current state.
+- **Governance**: `air skill/dream/findings/memory/mcp/bench/audit` for
+  teams governing skills, tools, benchmarks, Dream, and memory.
+- **Experimental**: `air improve/self/eval/project/regression/dev` for
+  controlled experiments, runtime development, and self-improvement candidate
+  work.
+
 AIR has three layers:
 
 - **Module**: a typed, bounded state machine in `.air.yaml`.
 - **RunPlan**: a verified DAG that connects modules, including dynamic fan-out/fan-in.
 - **Runtime**: the native AIR VM executes checked plans and writes auditable traces.
+
+Optional local defaults live in `.air/config.yaml`:
+
+```yaml
+model_config: .air/models/local.json
+memory_dir: .air/memory
+dream_dir: .air/dream
+```
+
+Per-command flags override config values. Trace files are redacted by default;
+use `--trace raw` only for trusted local debugging, or `--trace off` to suppress
+trace writing even when a command path would otherwise provide `--trace-out`.
 
 Host applications provide model, tool, and approval implementations through typed provider contracts.
 
@@ -207,13 +229,13 @@ cargo run -p air-cli -- memory promote mem_procedure_... --status validated
 cargo run -p air-cli -- memory pack "fix a Rust verification failure"
 cargo run -p air-cli -- memory graph --limit 20
 cargo run -p air-cli -- memory scorecard
-cargo run -p air-cli -- memory advance
+cargo run -p air-cli -- memory advance --timeout-seconds 600
 cargo run -p air-cli -- memory causal-eval mem_procedure_... \
   --outcome helped \
   --evidence target/generated/compare-no-memory.json
 cargo run -p air-cli -- memory promote mem_procedure_...
-cargo run -p air-cli -- run "fix a Rust verification failure" --memory
-cargo run -p air-cli -- skill route "fix a Rust verification failure" --memory
+cargo run -p air-cli -- run "fix a Rust verification failure" --timeout-seconds 1800
+cargo run -p air-cli -- skill route "fix a Rust verification failure"
 cargo run -p air-cli -- memory skill-draft mem_procedure_...
 cargo run -p air-cli -- memory skill-evaluate mem_procedure_...
 cargo run -p air-cli -- memory policy-check mem_policy_...
@@ -231,16 +253,18 @@ cargo run -p air-cli -- brain memory
 cargo run -p air-cli -- brain skills
 cargo run -p air-cli -- brain policies
 cargo run -p air-cli -- brain findings
+cargo run -p air-cli -- brain candidates
 cargo run -p air-cli -- brain view mem_procedure_...
 cargo run -p air-cli -- brain report --out .air/brain/report.md
 ```
 
 `brain` is a read-only organized index. It groups memories by lifecycle status,
 shows helped/hurt scorecard data, lists installed skills and Dream-compiled
-skill drafts, surfaces reviewed runtime-guard proposals, and shows persistent
-Dream findings. The default output is written for humans; pass `--json` for
-dashboards and automation. `brain view <id>` follows the evidence chain for one
-memory, skill draft, guard proposal, or finding.
+skill drafts, surfaces reviewed runtime-guard proposals, shows persistent
+Dream findings, and lists Dream experiment candidates under `brain candidates`.
+The default output is written for humans; pass `--json` for dashboards and
+automation. `brain view <id>` follows the evidence chain for one memory, skill
+draft, guard proposal, experiment candidate, or finding.
 
 Only promoted or pinned memory enters a pack. `air run` enables that safe
 promoted-memory pack by default; pass `--no-memory` when a run must ignore
@@ -1014,7 +1038,7 @@ Use raw traces only for trusted local debugging. Raw traces preserve complete mo
 ```bash
 cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.air-profile.yaml \
   --trace-out target/generated/run.raw.trace.jsonl \
-  --trace-raw
+  --trace raw
 ```
 
 Use checkpoint/resume for long plans:

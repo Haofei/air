@@ -40,13 +40,11 @@ AIR is a local compiler/runtime prototype. The native Rust VM is the reference r
 ```bash
 cargo build
 
-# Inspect which local skills match a task without spending model calls.
-cargo run -p air-cli -- skill route "use TDD to refactor the parser"
-
 # Run a task through AIR's entry agent.
-# AIR routes skills and picks the right executor. Small coding tasks use code-agent;
-# larger project tasks can be routed to the project orchestrator.
 cargo run -p air-cli -- run "use TDD to fix the failing add function" --log
+
+# Explain the selected executor, skills, memory, and permissions without running a model.
+cargo run -p air-cli -- run "use TDD to fix the failing add function" --explain
 ```
 
 `air` defaults to the local OpenAI-compatible model config at
@@ -59,6 +57,30 @@ AIR_MODEL_LOCAL_MODEL=qwen2.5-coder
 ```
 
 Use `--model-config` to point a command at another OpenAI-compatible provider config.
+
+AIR also reads optional local defaults from `.air/config.yaml`:
+
+```yaml
+model_config: .air/models/local.json
+memory_dir: .air/memory
+dream_dir: .air/dream
+```
+
+Per-command flags still win over config values.
+
+## Product Surface
+
+AIR has one primary public entry point and flat top-level commands for the
+parts teams actually inspect:
+
+| Layer | Commands | Audience |
+| --- | --- | --- |
+| Daily | `air run`, `air status`, `air brain` | Developers and platform teams checking current state |
+| Governance | `air skill`, `air dream`, `air findings`, `air memory`, `air mcp`, `air bench`, `air audit` | Teams governing skills, tools, evals, and Dream review |
+| Experimental | `air improve`, `air self`, `air eval`, `air project`, `air regression`, `air dev` | Controlled self-improvement experiments and AIR runtime development |
+
+The default workflow is intentionally narrow: run a bounded coding task, check
+`air status`, then inspect what the agent has learned with `air brain`.
 
 ## Skills
 
@@ -231,6 +253,7 @@ cargo run -p air-cli -- dream run \
   --from target/generated \
   --limit 100 \
   --mode deep \
+  --advance-timeout-seconds 600 \
   --write-regressions
 ```
 
@@ -300,7 +323,9 @@ measured, and policy memory is written as a guard-review proposal. It still
 does not pin memory, import/trust generated skills, edit runtime guard code,
 commit, or open PRs. Pass `--no-advance` for an observation-only Dream run.
 Micro mode skips advance automatically. `--advance-limit` caps how many memory
-cards the pass can touch.
+cards the pass can touch, and `--advance-timeout-seconds` gives the advance
+stage a wall-clock budget. `air run --timeout-seconds <n>` provides the same
+kind of outer budget for foreground runs.
 
 ```bash
 cargo run -p air-cli -- memory list --status candidate
@@ -310,7 +335,7 @@ cargo run -p air-cli -- memory promote mem_procedure_... --status validated
 cargo run -p air-cli -- memory pack "fix a Rust verification failure"
 cargo run -p air-cli -- memory graph --limit 20
 cargo run -p air-cli -- memory scorecard
-cargo run -p air-cli -- memory advance
+cargo run -p air-cli -- memory advance --timeout-seconds 600
 cargo run -p air-cli -- memory causal-eval mem_procedure_... \
   --outcome helped \
   --evidence target/generated/compare-no-memory.json
@@ -331,16 +356,18 @@ cargo run -p air-cli -- brain memory
 cargo run -p air-cli -- brain skills
 cargo run -p air-cli -- brain policies
 cargo run -p air-cli -- brain findings
+cargo run -p air-cli -- brain candidates
 cargo run -p air-cli -- brain view mem_procedure_...
 cargo run -p air-cli -- brain report --out .air/brain/report.md
 ```
 
 `brain` is read-only. It aggregates `.air/memory/cards`, memory scorecards,
-Dream findings, validated skill drafts, installed skills, and guard proposals
-into a lifecycle-oriented view, so users can see what is promoted, what is only
-candidate evidence, what has been compiled into a skill draft, and what still
-needs benchmark or human review. The default output is human-readable; add
-`--json` when scripts or dashboards need the structured form.
+Dream findings, Dream experiment candidates, validated skill drafts, installed
+skills, and guard proposals into a lifecycle-oriented view, so users can see
+what is promoted, what is only candidate evidence, what has been compiled into a
+skill draft, which candidate patches were tried, and what still needs benchmark
+or human review. The default output is human-readable; add `--json` when
+scripts or dashboards need the structured form.
 
 The safe follow-up is still explicit: promote/review regressions, run
 `air self fix ... --evaluate` only when a finding is worth fixing, compare
@@ -663,30 +690,28 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 
 ## CLI Surface
 
-| Command | Description |
-| --- | --- |
-| `run` | User entry point; routes skills and picks code-agent or project-agent |
-| `skill route` | Route a task to matching skills |
-| `skill list/validate/explain/audit/import/upgrade` | Skill lifecycle management |
-| `audit run/collect` | Audit one code-run artifact or summarize many artifacts |
-| `dream run/state` | Incrementally audit recent runs, mine improvement findings, compile memory candidates, and inspect the Dream cursor |
-| `dream findings` | List, reopen, resolve, or dismiss persistent Dream findings |
-| `brain memory/skills/policies/findings/view/report` | Read-only organized view of agent memory, compiled skill drafts, guard proposals, and findings |
-| `memory list/search/view` | Inspect evidence-backed Dream memory cards |
-| `memory promote/retire/pack/advance` | Manage memory lifecycle, build compact promoted-memory context, and run safe lifecycle advancement |
-| `memory graph/scorecard` | Inspect Dream-derived experience graph edges and helped/hurt memory outcomes |
-| `memory skill-draft/skill-evaluate` | Compile a procedure memory into an untrusted skill draft and run validation/audit gates |
-| `memory policy-check` | Turn a policy memory into a reviewed deterministic-guard proposal, without applying it |
-| `eval manifest/check` | Pin and verify evaluation corpus integrity |
-| `self prepare/fix/capture/compare` | Create, generate, capture, and compare candidate improvements |
-| `mcp list/explain/audit` | Inspect MCP tool governance before runs |
-| `bench code` | Benchmark code agent on a suite |
-| `bench skill` | Benchmark with skill preload, optional no-skill comparison |
-| `improve` | Mine artifacts/bench runs for failures and suggested regressions |
-| `regression run` | Execute promoted AIR regression candidates |
-| `dev` | Advanced IR/runtime tools for AIR development |
+| Layer | Command | Description |
+| --- | --- | --- |
+| Daily | `run` | User entry point for bounded coding tasks |
+| Daily | `status` | One-screen workspace status: last Dream, open findings, memory, candidates |
+| Daily | `brain memory/skills/policies/findings/candidates/view/report` | Organized view of memory, skill drafts, guard proposals, findings, and Dream experiment candidates |
+| Governance | `audit run/collect` | Audit one code-run artifact or summarize many artifacts |
+| Governance | `skill ...` | Skill routing, validation, audit, import, and upgrade |
+| Governance | `dream ...` | Incremental offline audit, finding mining, and memory synthesis |
+| Governance | `findings ...` | Shortcut for persistent Dream finding triage |
+| Governance | `memory ...` | Evidence-backed memory lifecycle, scorecards, and skill/policy drafts |
+| Governance | `mcp ...` | MCP tool governance before runs |
+| Governance | `bench ...` | Code-agent and skill benchmark suites |
+| Experimental | `improve ...` | Failure mining and suggested regressions |
+| Experimental | `regression run ...` | Execute promoted AIR regression candidates |
+| Experimental | `self ...` | Create, generate, capture, and compare candidate improvements |
+| Experimental | `eval ...` | Pin and verify evaluation corpus integrity |
+| Experimental | `project ...` | Bounded multi-task project orchestration |
+| Experimental | `dev ...` | Advanced AIR IR/runtime tools |
 
-Lower-level IR commands live under `air dev` (`dev validate-plan`, `dev make-plan`, `dev run-plan`, `dev resume-plan`, `dev replay`, and `dev run-module`). The public workflow should start from `air run`.
+Lower-level IR commands live under `air dev` (`dev validate-plan`,
+`dev make-plan`, `dev run-plan`, `dev resume-plan`, `dev replay`, and
+`dev run-module`). The public workflow should start from `air run`.
 
 ## Verification
 

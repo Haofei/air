@@ -1,11 +1,13 @@
 use crate::code_artifact::sha256_hex;
 use crate::memory::{advance_memory, extract_memory, MemoryAdvanceOptions, MemoryExtractOptions};
+use crate::ops::{
+    append_jsonl_locked, run_current_air_stage, with_jsonl_lock, write_json_atomic, AirLayout,
+};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -15,9 +17,6 @@ const DREAM_STATE_SCHEMA: &str = "air.dream_state.v1";
 const DREAM_WINDOW_SCHEMA: &str = "air.dream_window.v1";
 const DREAM_FINDING_RECORD_SCHEMA: &str = "air.dream_finding_record.v1";
 const DREAM_LEDGER_SCHEMA: &str = "air.dream_ledger_event.v1";
-const DREAM_STATE_PATH: &str = ".air/dream/state.json";
-const DREAM_FINDINGS_PATH: &str = ".air/dream/findings.jsonl";
-const DREAM_LEDGER_PATH: &str = ".air/dream/ledger.jsonl";
 const DREAM_OUTPUT_MARKER: &str = ".air-dream-output";
 const DREAM_CURSOR_OVERLAP_SECONDS: u64 = 300;
 const DREAM_FINDING_LIST_LIMIT: usize = 50;
@@ -47,7 +46,6 @@ pub(crate) struct DreamRunOptions {
     pub(crate) limit: Option<usize>,
     pub(crate) out_dir: Option<PathBuf>,
     pub(crate) write_regressions: bool,
-    pub(crate) incremental: bool,
     pub(crate) full: bool,
     pub(crate) mode: DreamMode,
     pub(crate) experiment: bool,
@@ -56,6 +54,7 @@ pub(crate) struct DreamRunOptions {
     pub(crate) candidates: usize,
     pub(crate) advance: bool,
     pub(crate) advance_limit: Option<usize>,
+    pub(crate) advance_timeout_seconds: Option<u64>,
 }
 
 pub(crate) struct DreamStateOptions;
@@ -302,9 +301,10 @@ struct DreamLedgerEvent {
 
 pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
+    let layout = AirLayout::new(cwd.clone());
     let started_at = unix_now();
     let run_id = dream_run_id(started_at);
-    let state_file = cwd.join(DREAM_STATE_PATH);
+    let state_file = layout.dream_state_path();
     let prior_state = read_dream_state(&state_file)?;
     let state_cursor = prior_state.as_ref().and_then(state_cursor_unix);
     let since_unix = if options.full {
@@ -316,8 +316,6 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         "full".to_string()
     } else if options.since_unix.is_some() {
         "explicit_since".to_string()
-    } else if options.incremental {
-        "explicit_incremental".to_string()
     } else if state_cursor.is_some() {
         "state".to_string()
     } else {
@@ -471,51 +469,15 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
             out_dir: Some(memory_advance_out_dir.clone()),
             skill_bench: false,
             limit: options.advance_limit,
+            timeout_seconds: options.advance_timeout_seconds,
         })?
     } else {
-        fs::create_dir_all(&memory_advance_out_dir)
-            .with_context(|| format!("create {}", memory_advance_out_dir.display()))?;
         let status = if options.mode == DreamMode::Micro {
             "skipped_micro"
         } else {
             "skipped"
         };
-        let output = crate::memory::MemoryAdvanceOutput {
-            schema: "air.memory_advance.v1",
-            status: status.to_string(),
-            memory_dir: ".air/memory".to_string(),
-            out_dir: memory_advance_out_dir.display().to_string(),
-            promoted_memories: Vec::new(),
-            validated_memories: Vec::new(),
-            retired_memories: Vec::new(),
-            validated_skills: Vec::new(),
-            routing_measurements: Vec::new(),
-            reviewed_guards: Vec::new(),
-            next_commands: Vec::new(),
-        };
-        fs::write(
-            memory_advance_out_dir.join("advance.json"),
-            serde_json::to_vec_pretty(&output)?,
-        )
-        .with_context(|| {
-            format!(
-                "write {}",
-                memory_advance_out_dir.join("advance.json").display()
-            )
-        })?;
-        fs::write(
-            memory_advance_out_dir.join("advance.md"),
-            format!(
-                "# AIR Memory Advance\n\n- status: `{status}`\n\nNo memory advancement was run for this Dream pass.\n"
-            ),
-        )
-        .with_context(|| {
-            format!(
-                "write {}",
-                memory_advance_out_dir.join("advance.md").display()
-            )
-        })?;
-        output
+        crate::memory::MemoryAdvanceOutput::skipped(&memory_advance_out_dir, status)?
     };
     let experiment = if options.experiment {
         run_dream_experiments(
@@ -678,7 +640,7 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
 
 pub(crate) fn show_dream_state(_options: DreamStateOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
-    let state_file = cwd.join(DREAM_STATE_PATH);
+    let state_file = AirLayout::new(cwd).dream_state_path();
     let state = read_dream_state(&state_file)?.unwrap_or_else(|| DreamState {
         schema: DREAM_STATE_SCHEMA.to_string(),
         status: "never_run".to_string(),
@@ -698,7 +660,7 @@ pub(crate) fn show_dream_state(_options: DreamStateOptions) -> Result<()> {
 
 pub(crate) fn list_dream_findings(options: DreamFindingsListOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
-    let findings_file = cwd.join(DREAM_FINDINGS_PATH);
+    let findings_file = AirLayout::new(cwd).dream_findings_path();
     let mut findings = read_latest_finding_records(&findings_file)?;
     if let Some(status) = options.status.as_deref() {
         findings.retain(|finding| finding.status == status);
@@ -737,28 +699,12 @@ pub(crate) fn dismiss_dream_finding(options: DreamFindingUpdateOptions) -> Resul
 }
 
 fn run_air_stage(cwd: &Path, args: &[String], log_path: &Path) -> Result<()> {
-    let exe = std::env::current_exe().context("resolve current air executable")?;
-    let output = Command::new(&exe)
-        .args(args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("run {} {}", exe.display(), args.join(" ")))?;
-    let mut log = String::new();
-    log.push_str("$ air ");
-    log.push_str(&args.join(" "));
-    log.push_str("\n\n## stdout\n\n");
-    log.push_str(&String::from_utf8_lossy(&output.stdout));
-    log.push_str("\n\n## stderr\n\n");
-    log.push_str(&String::from_utf8_lossy(&output.stderr));
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    fs::write(log_path, log).with_context(|| format!("write {}", log_path.display()))?;
-    if !output.status.success() {
+    let output = run_current_air_stage(cwd, args, log_path, None)?;
+    if !output.success {
         bail!(
-            "dream stage failed: air {} (status {:?}); see {}",
+            "dream stage failed: air {} ({}); see {}",
             args.join(" "),
-            output.status.code(),
+            output.status,
             log_path.display()
         );
     }
@@ -968,7 +914,7 @@ fn run_dream_experiments(
             None,
         )?;
         link_finding_candidate(
-            &cwd.join(DREAM_FINDINGS_PATH),
+            &AirLayout::new(cwd.to_path_buf()).dream_findings_path(),
             &summary.stable_key,
             out_dir
                 .join("candidates")
@@ -1012,84 +958,7 @@ fn run_air_stage_with_timeout(
     log_path: &Path,
     timeout: Option<Duration>,
 ) -> Result<String> {
-    let exe = std::env::current_exe().context("resolve current air executable")?;
-    if timeout.is_some_and(|timeout| timeout.is_zero()) {
-        write_stage_timeout_log(log_path, args, "timeout_before_start")?;
-        return Ok("timeout_before_start".to_string());
-    }
-    let mut child = Command::new(&exe)
-        .args(args)
-        .current_dir(cwd)
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .with_context(|| format!("run {} {}", exe.display(), args.join(" ")))?;
-    let started = Instant::now();
-    loop {
-        if let Some(status) = child.try_wait().context("poll dream experiment stage")? {
-            let output = child
-                .wait_with_output()
-                .context("collect dream experiment output")?;
-            write_stage_log(log_path, args, &output.stdout, &output.stderr)?;
-            return if status.success() {
-                Ok("completed".to_string())
-            } else {
-                Ok(format!("failed_status_{:?}", status.code()))
-            };
-        }
-        if let Some(timeout) = timeout {
-            if started.elapsed() >= timeout {
-                terminate_child_gracefully(&mut child);
-                let output = child
-                    .wait_with_output()
-                    .context("collect timed out dream experiment output")?;
-                write_stage_log(log_path, args, &output.stdout, &output.stderr)?;
-                return Ok("timeout".to_string());
-            }
-        }
-        std::thread::sleep(Duration::from_millis(250));
-    }
-}
-
-fn terminate_child_gracefully(child: &mut std::process::Child) {
-    #[cfg(unix)]
-    {
-        let _ = Command::new("kill")
-            .arg("-TERM")
-            .arg(child.id().to_string())
-            .status();
-        let started = Instant::now();
-        while started.elapsed() < Duration::from_secs(3) {
-            if matches!(child.try_wait(), Ok(Some(_))) {
-                return;
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-    }
-    let _ = child.kill();
-}
-
-fn write_stage_timeout_log(log_path: &Path, args: &[String], status: &str) -> Result<()> {
-    write_stage_log(
-        log_path,
-        args,
-        status.as_bytes(),
-        b"stage did not start because budget was exhausted",
-    )
-}
-
-fn write_stage_log(log_path: &Path, args: &[String], stdout: &[u8], stderr: &[u8]) -> Result<()> {
-    let mut log = String::new();
-    log.push_str("$ air ");
-    log.push_str(&args.join(" "));
-    log.push_str("\n\n## stdout\n\n");
-    log.push_str(&String::from_utf8_lossy(stdout));
-    log.push_str("\n\n## stderr\n\n");
-    log.push_str(&String::from_utf8_lossy(stderr));
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    fs::write(log_path, log).with_context(|| format!("write {}", log_path.display()))
+    Ok(run_current_air_stage(cwd, args, log_path, timeout)?.status)
 }
 
 fn write_experiment_provenance(
@@ -1278,7 +1147,7 @@ fn update_finding_store(
     wrote_regressions: bool,
     now: u64,
 ) -> Result<DreamFindingStoreStage> {
-    let findings_file = cwd.join(DREAM_FINDINGS_PATH);
+    let findings_file = AirLayout::new(cwd.to_path_buf()).dream_findings_path();
     let mut records = read_latest_finding_records(&findings_file)?;
     let mut opened = 0;
     let mut recurred = 0;
@@ -1399,7 +1268,7 @@ fn update_finding_store(
 
 fn update_dream_finding_status(options: DreamFindingUpdateOptions, status: &str) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
-    let findings_file = cwd.join(DREAM_FINDINGS_PATH);
+    let findings_file = AirLayout::new(cwd.clone()).dream_findings_path();
     let mut records = read_latest_finding_records(&findings_file)?;
     let Some(index) = find_unique_record_index(&records, &options.finding)? else {
         bail!("dream finding not found: {}", options.finding);
@@ -1536,18 +1405,15 @@ fn remove_stale_finding_lock(path: &Path) {
 }
 
 fn compact_finding_records(path: &Path) -> Result<()> {
-    let records = read_latest_finding_records(path)?;
-    let tmp = path.with_extension("jsonl.tmp");
-    {
-        let mut file =
-            fs::File::create(&tmp).with_context(|| format!("create {}", tmp.display()))?;
+    with_jsonl_lock(path, || {
+        let records = read_latest_finding_records(path)?;
+        let mut bytes = Vec::new();
         for record in records {
-            writeln!(file, "{}", serde_json::to_string(&record)?)
-                .with_context(|| format!("write {}", tmp.display()))?;
+            bytes.extend_from_slice(serde_json::to_string(&record)?.as_bytes());
+            bytes.push(b'\n');
         }
-    }
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename {} to {}", tmp.display(), path.display()))
+        write_json_atomic(path, &bytes)
+    })
 }
 
 fn append_dream_ledger(
@@ -1560,7 +1426,7 @@ fn append_dream_ledger(
     note: Option<String>,
 ) -> Result<()> {
     append_jsonl(
-        &cwd.join(DREAM_LEDGER_PATH),
+        &AirLayout::new(cwd.to_path_buf()).dream_ledger_path(),
         &DreamLedgerEvent {
             schema: DREAM_LEDGER_SCHEMA,
             event: event.to_string(),
@@ -1574,16 +1440,7 @@ fn append_dream_ledger(
 }
 
 fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    writeln!(file, "{}", serde_json::to_string(value)?)
-        .with_context(|| format!("write {}", path.display()))
+    append_jsonl_locked(path, value)
 }
 
 fn push_unique(values: &mut Vec<String>, value: String) {
@@ -2656,16 +2513,17 @@ mod tests {
         })];
 
         update_finding_store(&root, &out_dir, &findings, &improve_dir, false, 1_000).unwrap();
-        let mut records = read_latest_finding_records(&root.join(DREAM_FINDINGS_PATH)).unwrap();
+        let findings_path = AirLayout::new(root.to_path_buf()).dream_findings_path();
+        let mut records = read_latest_finding_records(&findings_path).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].status, "open");
         records[0].status = "resolved".to_string();
         records[0].resolved_at_unix = Some(1_100);
-        append_finding_record(&root.join(DREAM_FINDINGS_PATH), &records[0]).unwrap();
+        append_finding_record(&findings_path, &records[0]).unwrap();
 
         let stage =
             update_finding_store(&root, &out_dir, &findings, &improve_dir, false, 1_200).unwrap();
-        let records = read_latest_finding_records(&root.join(DREAM_FINDINGS_PATH)).unwrap();
+        let records = read_latest_finding_records(&findings_path).unwrap();
         assert_eq!(stage.recurred, 1);
         assert_eq!(records[0].status, "open");
         assert!(records[0].recurred_after_fix);
@@ -2698,7 +2556,8 @@ mod tests {
 
         update_finding_store(&root, &out_dir, &first, &improve_dir, false, 1_000).unwrap();
         update_finding_store(&root, &out_dir, &second, &improve_dir, false, 1_200).unwrap();
-        let records = read_latest_finding_records(&root.join(DREAM_FINDINGS_PATH)).unwrap();
+        let findings_path = AirLayout::new(root.to_path_buf()).dream_findings_path();
+        let records = read_latest_finding_records(&findings_path).unwrap();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].display_id, "IMP-002");

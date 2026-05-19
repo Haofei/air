@@ -1,21 +1,26 @@
 use crate::code_artifact::sha256_hex;
+use crate::ops::{
+    append_jsonl_locked, run_current_air_stage, with_jsonl_lock, write_json_atomic, AirLayout,
+};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
-use std::io::Write;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MEMORY_SCHEMA: &str = "air.memory_card.v1";
 const EPISODE_SCHEMA: &str = "air.memory_episode.v1";
 const LEDGER_SCHEMA: &str = "air.memory_ledger_event.v1";
 const MEMORY_EXTRACT_SCHEMA: &str = "air.memory_extract.v1";
+const MEMORY_ADVANCE_SCHEMA: &str = "air.memory_advance.v1";
 const DREAM_IR_SCHEMA: &str = "air.dream_ir.v1";
 const GRAPH_EDGE_SCHEMA: &str = "air.experience_graph_edge.v1";
+const MEMORY_SCORECARD_SCHEMA: &str = "air.memory_scorecard_state.v1";
 const DEFAULT_MEMORY_DIR: &str = ".air/memory";
+const MEMORY_USAGE_COMPACT_BYTES: u64 = 1_048_576;
 
 pub(crate) struct MemoryExtractOptions {
     pub(crate) memory_dir: Option<PathBuf>,
@@ -115,6 +120,7 @@ pub(crate) struct MemoryAdvanceOptions {
     pub(crate) out_dir: Option<PathBuf>,
     pub(crate) skill_bench: bool,
     pub(crate) limit: Option<usize>,
+    pub(crate) timeout_seconds: Option<u64>,
 }
 
 pub(crate) struct BrainOptions {
@@ -132,6 +138,7 @@ pub(crate) enum BrainSection {
     Skills,
     Policies,
     Findings,
+    Candidates,
     View(String),
     Report,
 }
@@ -236,6 +243,32 @@ pub(crate) struct MemoryAdvanceOutput {
     pub(crate) next_commands: Vec<String>,
 }
 
+impl MemoryAdvanceOutput {
+    pub(crate) fn skipped(out_dir: &Path, reason: &str) -> Result<Self> {
+        fs::create_dir_all(out_dir).with_context(|| format!("create {}", out_dir.display()))?;
+        let output = Self {
+            schema: MEMORY_ADVANCE_SCHEMA,
+            status: reason.to_string(),
+            memory_dir: DEFAULT_MEMORY_DIR.to_string(),
+            out_dir: out_dir.display().to_string(),
+            promoted_memories: Vec::new(),
+            validated_memories: Vec::new(),
+            retired_memories: Vec::new(),
+            validated_skills: Vec::new(),
+            routing_measurements: Vec::new(),
+            reviewed_guards: Vec::new(),
+            next_commands: Vec::new(),
+        };
+        fs::write(
+            out_dir.join("advance.json"),
+            serde_json::to_vec_pretty(&output)?,
+        )
+        .with_context(|| format!("write {}", out_dir.join("advance.json").display()))?;
+        write_advance_report(&out_dir.join("advance.md"), &output)?;
+        Ok(output)
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub(crate) struct MemoryAdvanceSkill {
     pub(crate) memory_id: String,
@@ -287,6 +320,8 @@ struct BrainOutput {
     #[serde(skip_serializing_if = "Option::is_none")]
     findings: Option<BrainFindingSection>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    candidates: Option<BrainCandidateSection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     view: Option<Value>,
     next_commands: Vec<String>,
 }
@@ -297,6 +332,7 @@ struct BrainSummary {
     skills: BTreeMap<String, usize>,
     policies: BTreeMap<String, usize>,
     findings: BTreeMap<String, usize>,
+    candidates: BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -401,6 +437,24 @@ struct BrainFindingItem {
     linked_regressions: Vec<String>,
     linked_candidates: Vec<String>,
     recurred_after_fix: bool,
+    next_action: String,
+}
+
+#[derive(Debug, Serialize)]
+struct BrainCandidateSection {
+    items: Vec<BrainCandidateItem>,
+}
+
+#[derive(Debug, Serialize)]
+struct BrainCandidateItem {
+    id: String,
+    finding: String,
+    status: String,
+    decision: Option<String>,
+    score: Option<f64>,
+    path: String,
+    eval: Option<String>,
+    report: Option<String>,
     next_action: String,
 }
 
@@ -581,7 +635,7 @@ struct MemoryUsageEvent {
     at_unix: u64,
 }
 
-#[derive(Debug, Default, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 struct MemoryUsageStats {
     used: usize,
     helped_candidate: usize,
@@ -591,6 +645,13 @@ struct MemoryUsageStats {
     causal_helped: usize,
     causal_hurt: usize,
     neutral: usize,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct MemoryUsageScorecardFile {
+    schema: String,
+    compacted_at_unix: u64,
+    stats: BTreeMap<String, MemoryUsageStats>,
 }
 
 struct SkillDraftResult {
@@ -870,10 +931,12 @@ pub(crate) fn evaluate_memory_skill(options: MemorySkillEvaluateOptions) -> Resu
             draft.draft_dir.to_string_lossy().as_ref(),
         ],
         &log_dir.join("validate.log"),
+        None,
     )?;
     let audit = run_air_check(
         &["skill", "audit", draft.draft_dir.to_string_lossy().as_ref()],
         &log_dir.join("audit.log"),
+        None,
     )?;
     let bench_check = if bench {
         Some(run_air_check(
@@ -886,6 +949,7 @@ pub(crate) fn evaluate_memory_skill(options: MemorySkillEvaluateOptions) -> Resu
                 "1",
             ],
             &log_dir.join("bench.log"),
+            None,
         )?)
     } else {
         None
@@ -1065,8 +1129,7 @@ pub(crate) fn promote_memory(options: MemoryPromoteOptions) -> Result<()> {
         card.promotion.can_prompt_inject = true;
         card.promotion.can_route = true;
     }
-    fs::write(&path, serde_json::to_vec_pretty(&card)?)
-        .with_context(|| format!("write {}", path.display()))?;
+    write_card_snapshot(&path, &card)?;
     append_ledger(
         &memory_dir,
         "memory_promoted",
@@ -1127,6 +1190,7 @@ pub(crate) fn causal_eval_memory(options: MemoryCausalEvalOptions) -> Result<()>
         &path.display().to_string(),
         now,
     )?;
+    compact_usage_log_if_needed(&memory_dir, now)?;
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
@@ -1147,11 +1211,7 @@ pub(crate) fn retire_memory(options: MemoryRetireOptions) -> Result<()> {
     let (mut card, path) = find_card(&memory_dir, &options.id)?;
     card.status = "retired".to_string();
     card.updated_at = unix_now();
-    if let Some(reason) = &options.reason {
-        card.conflicts.push(format!("retired: {reason}"));
-    }
-    fs::write(&path, serde_json::to_vec_pretty(&card)?)
-        .with_context(|| format!("write {}", path.display()))?;
+    write_card_snapshot(&path, &card)?;
     append_ledger(
         &memory_dir,
         "memory_retired",
@@ -1201,8 +1261,7 @@ pub(crate) fn show_memory_graph(options: MemoryGraphOptions) -> Result<()> {
 pub(crate) fn show_memory_scorecard(options: MemoryScorecardOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
     let memory_dir = memory_dir(&cwd, options.memory_dir);
-    let usage = read_usage_events(&memory_dir.join("usage.jsonl"))?;
-    let stats = memory_usage_stats(&usage);
+    let stats = memory_usage_stats_for_dir(&memory_dir)?;
     let mut rows = Vec::new();
     for (card, _path) in load_cards(&memory_dir)? {
         let stats = stats.get(&card.id).copied().unwrap_or_default();
@@ -1258,12 +1317,11 @@ pub(crate) fn show_memory_scorecard(options: MemoryScorecardOptions) -> Result<(
 
 pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
     let cwd = std::env::current_dir().context("resolve current directory")?;
+    let layout = AirLayout::new(cwd.clone());
     let memory_dir = memory_dir(&cwd, options.memory_dir);
     let dream_dir = absolutize(
         &cwd,
-        options
-            .dream_dir
-            .unwrap_or_else(|| PathBuf::from(".air/dream")),
+        options.dream_dir.unwrap_or_else(|| layout.dream_dir()),
     );
     let section = options.section;
     let effective_limit = if matches!(section, BrainSection::Summary) {
@@ -1284,6 +1342,7 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                     skills: Some(brain.skills),
                     policies: Some(brain.policies),
                     findings: Some(brain.findings),
+                    candidates: Some(brain.candidates),
                     view: None,
                     next_commands: brain_next_commands(),
                 },
@@ -1301,6 +1360,7 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                     skills: None,
                     policies: None,
                     findings: None,
+                    candidates: None,
                     view: None,
                     next_commands: brain_next_commands(),
                 },
@@ -1318,6 +1378,7 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                     skills: Some(brain.skills),
                     policies: None,
                     findings: None,
+                    candidates: None,
                     view: None,
                     next_commands: brain_next_commands(),
                 },
@@ -1335,6 +1396,7 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                     skills: None,
                     policies: Some(brain.policies),
                     findings: None,
+                    candidates: None,
                     view: None,
                     next_commands: brain_next_commands(),
                 },
@@ -1352,16 +1414,14 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                     skills: None,
                     policies: None,
                     findings: Some(brain.findings),
+                    candidates: None,
                     view: None,
                     next_commands: brain_next_commands(),
                 },
                 options.json,
             )?;
         }
-        BrainSection::View(id) => {
-            let Some(view) = brain_view(&brain, &id) else {
-                bail!("brain object not found: {id}");
-            };
+        BrainSection::Candidates => {
             print_brain_output(
                 BrainOutput {
                     schema: "air.brain.v1",
@@ -1372,6 +1432,26 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                     skills: None,
                     policies: None,
                     findings: None,
+                    candidates: Some(brain.candidates),
+                    view: None,
+                    next_commands: brain_next_commands(),
+                },
+                options.json,
+            )?;
+        }
+        BrainSection::View(id) => {
+            let view = brain_view(&brain, &id)?;
+            print_brain_output(
+                BrainOutput {
+                    schema: "air.brain.v1",
+                    memory_dir: memory_dir.display().to_string(),
+                    dream_dir: dream_dir.display().to_string(),
+                    summary: brain.summary,
+                    memory: None,
+                    skills: None,
+                    policies: None,
+                    findings: None,
+                    candidates: None,
                     view: Some(view),
                     next_commands: brain_next_commands(),
                 },
@@ -1403,7 +1483,8 @@ pub(crate) fn show_brain(options: BrainOptions) -> Result<()> {
                         "air brain memory",
                         "air brain skills",
                         "air brain policies",
-                        "air brain findings"
+                        "air brain findings",
+                        "air brain candidates"
                     ]
                     }))?
                 );
@@ -1430,11 +1511,12 @@ fn render_brain_text(output: &BrainOutput) -> String {
     out.push_str("A readable digest of what AIR has learned, what it can use now, and what still needs review.\n\n");
     out.push_str("At a glance\n");
     out.push_str(&format!(
-        "- Memory: {}\n- Skills: {}\n- Policies: {}\n- Findings: {}\n\n",
+        "- Memory: {}\n- Skills: {}\n- Policies: {}\n- Findings: {}\n- Candidates: {}\n\n",
         friendly_counts(&output.summary.memory),
         friendly_counts(&output.summary.skills),
         friendly_counts(&output.summary.policies),
-        friendly_counts(&output.summary.findings)
+        friendly_counts(&output.summary.findings),
+        friendly_counts(&output.summary.candidates)
     ));
     if let Some(memory) = &output.memory {
         render_brain_memory_text(&mut out, memory);
@@ -1448,6 +1530,9 @@ fn render_brain_text(output: &BrainOutput) -> String {
     if let Some(findings) = &output.findings {
         render_brain_findings_text(&mut out, findings);
     }
+    if let Some(candidates) = &output.candidates {
+        render_brain_candidates_text(&mut out, candidates);
+    }
     if let Some(view) = &output.view {
         render_brain_view_text(&mut out, view);
     }
@@ -1457,6 +1542,29 @@ fn render_brain_text(output: &BrainOutput) -> String {
     }
     out.push_str("\nUse --json for machine-readable output.\n");
     out
+}
+
+fn render_brain_candidates_text(out: &mut String, candidates: &BrainCandidateSection) {
+    out.push_str("Dream experiment candidates\n");
+    if candidates.items.is_empty() {
+        out.push_str("- No Dream experiment candidates found yet.\n\n");
+        return;
+    }
+    for item in &candidates.items {
+        out.push_str(&format!(
+            "- {} for {}: {}\n  decision: {}; score: {}; eval: {}\n  next: {}\n",
+            item.id,
+            item.finding,
+            item.status,
+            item.decision.as_deref().unwrap_or("unknown"),
+            item.score
+                .map(|score| format!("{score:.2}"))
+                .unwrap_or_else(|| "n/a".to_string()),
+            item.eval.as_deref().unwrap_or("not written"),
+            item.next_action
+        ));
+    }
+    out.push('\n');
 }
 
 fn render_brain_memory_text(out: &mut String, memory: &BrainMemorySection) {
@@ -1848,8 +1956,7 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
     fs::create_dir_all(&out_dir).with_context(|| format!("create {}", out_dir.display()))?;
     let now = unix_now();
     let _ = reconcile_memory_usage(&memory_dir, now)?;
-    let usage = read_usage_events(&memory_dir.join("usage.jsonl"))?;
-    let stats = memory_usage_stats(&usage);
+    let stats = memory_usage_stats_for_dir(&memory_dir)?;
 
     let mut promoted_memories = Vec::new();
     let mut validated_memories = Vec::new();
@@ -1858,6 +1965,8 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
     let mut routing_measurements = Vec::new();
     let mut reviewed_guards = Vec::new();
     let mut next_commands = Vec::new();
+    let started = Instant::now();
+    let timeout = options.timeout_seconds.map(Duration::from_secs);
     let mut cards = load_cards(&memory_dir)?;
     cards.sort_by(|(left, _), (right, _)| {
         advance_card_priority(right)
@@ -1874,6 +1983,11 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
 
     for (mut card, path) in cards {
         if options.limit.is_some_and(|limit| touched >= limit) {
+            break;
+        }
+        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
+            next_commands
+                .push("memory advance stopped because --timeout-seconds was exhausted".to_string());
             break;
         }
         let item = stats.get(&card.id).copied().unwrap_or_default();
@@ -1948,10 +2062,8 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
                 "measured_improvement"
             } else if item.helped_confirmed > 0 {
                 "validated_correlation"
-            } else if item.used > 0 || evaluated > 0 {
-                "needs_causal_eval"
             } else {
-                "unmeasured"
+                "needs_causal_eval"
             };
             routing_measurements.push(MemoryRoutingMeasurement {
                 memory_id: card.id.clone(),
@@ -1975,7 +2087,14 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
             && card.kind == "procedure"
             && card.promotion.can_compile_skill
         {
-            let skill = advance_skill_candidate(&memory_dir, &card, &out_dir, options.skill_bench)?;
+            let remaining = timeout.map(|timeout| timeout.saturating_sub(started.elapsed()));
+            let skill = advance_skill_candidate(
+                &memory_dir,
+                &card,
+                &out_dir,
+                options.skill_bench,
+                remaining,
+            )?;
             if skill.status == "validated_skill" {
                 validated_skills.push(skill);
             } else {
@@ -2031,7 +2150,7 @@ pub(crate) fn advance_memory(options: MemoryAdvanceOptions) -> Result<MemoryAdva
     }
 
     let output = MemoryAdvanceOutput {
-        schema: "air.memory_advance.v1",
+        schema: MEMORY_ADVANCE_SCHEMA,
         status: "advanced".to_string(),
         memory_dir: memory_dir.display().to_string(),
         out_dir: out_dir.display().to_string(),
@@ -2090,10 +2209,7 @@ pub(crate) fn build_memory_run_hint(options: MemoryHintOptions) -> Result<Memory
         .collect::<Vec<_>>();
     let mut next_commands = Vec::new();
     if !suggested_memory_ids.is_empty() {
-        next_commands.push(format!(
-            "air run {} --memory",
-            shell_quote_like(&options.task)
-        ));
+        next_commands.push(format!("air run {}", shell_quote_like(&options.task)));
     }
     if !candidate_memory_ids.is_empty() {
         next_commands.push("air memory list --status candidate".to_string());
@@ -2112,7 +2228,7 @@ pub(crate) fn build_memory_run_hint(options: MemoryHintOptions) -> Result<Memory
                 .to_string()
         }
         (false, true) => {
-            "Promoted memories match this task. Re-run with --memory to include them.".to_string()
+            "Promoted memories match this task and will be included by default.".to_string()
         }
         (true, false) => {
             "Candidate memories are waiting for review before they can be injected.".to_string()
@@ -2722,61 +2838,34 @@ fn record_memory_pack_usage(
             },
         )?;
     }
+    compact_usage_log_if_needed(memory_dir, now)?;
     Ok(())
 }
 
-fn run_air_check(args: &[&str], log_path: &Path) -> Result<StageCheck> {
-    let exe = std::env::current_exe().context("resolve current air executable")?;
-    let output = Command::new(&exe)
-        .args(args)
-        .output()
-        .with_context(|| format!("run air {}", args.join(" ")))?;
-    if let Some(parent) = log_path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let mut log = String::new();
-    log.push_str("$ air ");
-    log.push_str(&args.join(" "));
-    log.push_str("\n\n## stdout\n\n");
-    log.push_str(&String::from_utf8_lossy(&output.stdout));
-    log.push_str("\n\n## stderr\n\n");
-    log.push_str(&String::from_utf8_lossy(&output.stderr));
-    fs::write(log_path, log).with_context(|| format!("write {}", log_path.display()))?;
+fn run_air_check(args: &[&str], log_path: &Path, timeout: Option<Duration>) -> Result<StageCheck> {
+    let cwd = std::env::current_dir().context("resolve current directory")?;
+    let args = args
+        .iter()
+        .map(|arg| (*arg).to_string())
+        .collect::<Vec<_>>();
+    let output = run_current_air_stage(&cwd, &args, log_path, timeout)?;
     Ok(StageCheck {
         command: format!("air {}", args.join(" ")),
-        status: if output.status.success() {
+        status: if output.success {
             "passed".to_string()
+        } else if output.status == "timeout" || output.status == "timeout_before_start" {
+            output.status
         } else {
             "failed".to_string()
         },
-        code: output.status.code(),
+        code: output.code,
         log: log_path.display().to_string(),
     })
 }
 
 fn policy_affected_files(card: &MemoryCard) -> Vec<String> {
-    let text = format!("{} {}", card.title, card.content).to_ascii_lowercase();
-    let mut files = Vec::new();
-    if text.contains("verification") || text.contains("trace") {
-        files.push("crates/air-cli/src/code_artifact.rs".to_string());
-        files.push("crates/air-cli/src/audit.rs".to_string());
-    }
-    if text.contains("eval") || text.contains("regression") || text.contains("candidate") {
-        files.push("crates/air-cli/src/improve.rs".to_string());
-        files.push("crates/air-cli/src/eval_manifest.rs".to_string());
-        files.push("crates/air-cli/src/self_lab.rs".to_string());
-    }
-    if text.contains("memory") || text.contains("routing") {
-        files.push("crates/air-cli/src/memory.rs".to_string());
-        files.push("crates/air-cli/src/skill.rs".to_string());
-    }
-    if files.is_empty() {
-        files.push("crates/air-cli/src/dream.rs".to_string());
-        files.push("crates/air-cli/src/memory.rs".to_string());
-    }
-    files.sort();
-    files.dedup();
-    files
+    let _ = card;
+    Vec::new()
 }
 
 fn advance_card_priority(card: &MemoryCard) -> u8 {
@@ -2819,6 +2908,7 @@ fn advance_skill_candidate(
     card: &MemoryCard,
     out_dir: &Path,
     bench: bool,
+    timeout: Option<Duration>,
 ) -> Result<MemoryAdvanceSkill> {
     let draft_dir = out_dir.join("skills").join(slugify(&card.title));
     let draft = create_skill_draft(MemorySkillDraftOptions {
@@ -2835,10 +2925,12 @@ fn advance_skill_candidate(
             draft.draft_dir.to_string_lossy().as_ref(),
         ],
         &log_dir.join("validate.log"),
+        timeout,
     )?;
     let audit = run_air_check(
         &["skill", "audit", draft.draft_dir.to_string_lossy().as_ref()],
         &log_dir.join("audit.log"),
+        timeout,
     )?;
     let bench_check = if bench {
         Some(run_air_check(
@@ -2851,6 +2943,7 @@ fn advance_skill_candidate(
                 "1",
             ],
             &log_dir.join("bench.log"),
+            timeout,
         )?)
     } else {
         None
@@ -3032,6 +3125,7 @@ struct BrainIndex {
     skills: BrainSkillSection,
     policies: BrainPolicySection,
     findings: BrainFindingSection,
+    candidates: BrainCandidateSection,
     cards: Vec<(MemoryCard, PathBuf)>,
     finding_records: Vec<Value>,
 }
@@ -3043,21 +3137,30 @@ fn build_brain_index(
     limit: Option<usize>,
 ) -> Result<BrainIndex> {
     let cards = load_cards(memory_dir)?;
-    let stats = memory_usage_stats(&read_usage_events(&memory_dir.join("usage.jsonl"))?);
+    let stats = memory_usage_stats_for_dir(memory_dir)?;
     let full_skills = brain_skill_section(cwd, memory_dir, dream_dir, None)?;
     let full_policies = brain_policy_section(&cards, dream_dir, None)?;
     let (full_findings, finding_records) = brain_finding_section(dream_dir, None)?;
-    let summary = brain_summary(&cards, &full_skills, &full_policies, &full_findings);
+    let full_candidates = brain_candidate_section(dream_dir, None)?;
+    let summary = brain_summary(
+        &cards,
+        &full_skills,
+        &full_policies,
+        &full_findings,
+        &full_candidates,
+    );
     let memory = brain_memory_section(&cards, &stats, limit);
     let skills = brain_skill_section(cwd, memory_dir, dream_dir, limit)?;
     let policies = brain_policy_section(&cards, dream_dir, limit)?;
     let (findings, _) = brain_finding_section(dream_dir, limit)?;
+    let candidates = brain_candidate_section(dream_dir, limit)?;
     Ok(BrainIndex {
         summary,
         memory,
         skills,
         policies,
         findings,
+        candidates,
         cards,
         finding_records,
     })
@@ -3068,6 +3171,7 @@ fn brain_summary(
     skills: &BrainSkillSection,
     policies: &BrainPolicySection,
     findings: &BrainFindingSection,
+    candidates: &BrainCandidateSection,
 ) -> BrainSummary {
     let mut summary = BrainSummary::default();
     for (card, _) in cards {
@@ -3091,6 +3195,12 @@ fn brain_summary(
         for finding in records {
             *summary.findings.entry(finding.status.clone()).or_default() += 1;
         }
+    }
+    for candidate in &candidates.items {
+        *summary
+            .candidates
+            .entry(candidate.status.clone())
+            .or_default() += 1;
     }
     summary
 }
@@ -3270,6 +3380,112 @@ fn brain_findings_path(dream_dir: &Path) -> PathBuf {
         .map(|parent| parent.join("findings.jsonl"))
         .filter(|path| path.exists())
         .unwrap_or(direct)
+}
+
+fn brain_candidate_section(
+    dream_dir: &Path,
+    limit: Option<usize>,
+) -> Result<BrainCandidateSection> {
+    let mut items = Vec::new();
+    let latest = brain_latest_run_dir(dream_dir);
+    collect_brain_candidates_from_dir(&latest.join("candidates"), &mut items)?;
+    let runs_dir = dream_dir.join("runs");
+    if runs_dir.exists() {
+        for entry in
+            fs::read_dir(&runs_dir).with_context(|| format!("read {}", runs_dir.display()))?
+        {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                collect_brain_candidates_from_dir(&entry.path().join("candidates"), &mut items)?;
+            }
+        }
+    }
+    items.sort_by(|left, right| {
+        candidate_status_rank(&right.status)
+            .cmp(&candidate_status_rank(&left.status))
+            .then_with(|| {
+                right
+                    .score
+                    .partial_cmp(&left.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    items.dedup_by(|left, right| left.path == right.path);
+    if let Some(limit) = limit {
+        items.truncate(limit);
+    }
+    Ok(BrainCandidateSection { items })
+}
+
+fn collect_brain_candidates_from_dir(
+    dir: &Path,
+    items: &mut Vec<BrainCandidateItem>,
+) -> Result<()> {
+    if !dir.exists() {
+        return Ok(());
+    }
+    for finding_entry in fs::read_dir(dir).with_context(|| format!("read {}", dir.display()))? {
+        let finding_entry = finding_entry?;
+        if !finding_entry.file_type()?.is_dir() {
+            continue;
+        }
+        let finding = finding_entry.file_name().to_string_lossy().to_string();
+        for candidate_entry in fs::read_dir(finding_entry.path())
+            .with_context(|| format!("read {}", finding_entry.path().display()))?
+        {
+            let candidate_entry = candidate_entry?;
+            if !candidate_entry.file_type()?.is_dir() {
+                continue;
+            }
+            let path = candidate_entry.path();
+            let id = candidate_entry.file_name().to_string_lossy().to_string();
+            let eval_path = path.join("eval.json");
+            let eval = read_json_file(&eval_path).ok();
+            let decision = eval
+                .as_ref()
+                .and_then(|value| value.get("decision").or_else(|| value.get("status")))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let score = eval
+                .as_ref()
+                .and_then(|value| value.get("score"))
+                .and_then(Value::as_f64);
+            let status = decision.clone().unwrap_or_else(|| {
+                if eval_path.exists() {
+                    "evaluated".to_string()
+                } else {
+                    "generated".to_string()
+                }
+            });
+            let report = [path.join("report.md"), path.join("eval.md")]
+                .into_iter()
+                .find(|path| path.exists())
+                .map(|path| path.display().to_string());
+            items.push(BrainCandidateItem {
+                id,
+                finding: finding.clone(),
+                status,
+                decision,
+                score,
+                path: path.display().to_string(),
+                eval: eval_path.exists().then(|| eval_path.display().to_string()),
+                report,
+                next_action: "review candidate diff/eval before promotion".to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn candidate_status_rank(status: &str) -> u8 {
+    match status {
+        "accept_candidate" | "accepted" => 4,
+        "needs_review" | "evaluated" => 3,
+        "generated" => 2,
+        "reject_candidate" | "rejected" => 1,
+        _ => 0,
+    }
 }
 
 fn brain_finding_section(
@@ -3465,9 +3681,10 @@ fn read_brain_guard_proposal(path: &Path) -> Result<Option<BrainGuardProposalIte
     }))
 }
 
-fn brain_view(brain: &BrainIndex, id: &str) -> Option<Value> {
+fn brain_view(brain: &BrainIndex, id: &str) -> Result<Value> {
+    let mut matches = Vec::new();
     if let Some((card, path)) = brain.cards.iter().find(|(card, _)| card.id == id) {
-        return Some(json!({
+        matches.push(json!({
             "kind": "memory",
             "id": card.id,
             "status": card.status,
@@ -3482,7 +3699,7 @@ fn brain_view(brain: &BrainIndex, id: &str) -> Option<Value> {
     }
     for draft in &brain.skills.drafts {
         if draft.id == id || draft.memory_id.as_deref() == Some(id) {
-            return Some(json!({
+            matches.push(json!({
                 "kind": "skill_draft",
                 "id": draft.id,
                 "memory_id": draft.memory_id,
@@ -3498,7 +3715,7 @@ fn brain_view(brain: &BrainIndex, id: &str) -> Option<Value> {
     }
     for guard in &brain.policies.guard_proposals {
         if guard.memory_id == id {
-            return Some(json!({
+            matches.push(json!({
                 "kind": "guard_proposal",
                 "memory_id": guard.memory_id,
                 "status": guard.status,
@@ -3509,19 +3726,46 @@ fn brain_view(brain: &BrainIndex, id: &str) -> Option<Value> {
             }));
         }
     }
-    brain
-        .finding_records
-        .iter()
-        .find(|record| {
-            record.get("id").and_then(Value::as_str) == Some(id)
-                || record.get("display_id").and_then(Value::as_str) == Some(id)
-                || record
-                    .get("aliases")
-                    .and_then(Value::as_array)
-                    .is_some_and(|aliases| aliases.iter().any(|alias| alias.as_str() == Some(id)))
-        })
-        .cloned()
-        .map(|record| json!({"kind": "finding", "record": record}))
+    for candidate in &brain.candidates.items {
+        if candidate.id == id || candidate.path.ends_with(id) {
+            matches.push(json!({
+                "kind": "experiment_candidate",
+                "id": candidate.id,
+                "finding": candidate.finding,
+                "status": candidate.status,
+                "decision": candidate.decision,
+                "score": candidate.score,
+                "path": candidate.path,
+                "eval": candidate.eval,
+                "report": candidate.report,
+                "next_action": candidate.next_action,
+            }));
+        }
+    }
+    matches.extend(
+        brain
+            .finding_records
+            .iter()
+            .filter(|record| {
+                record.get("id").and_then(Value::as_str) == Some(id)
+                    || record.get("display_id").and_then(Value::as_str) == Some(id)
+                    || record
+                        .get("aliases")
+                        .and_then(Value::as_array)
+                        .is_some_and(|aliases| {
+                            aliases.iter().any(|alias| alias.as_str() == Some(id))
+                        })
+            })
+            .cloned()
+            .map(|record| json!({"kind": "finding", "record": record})),
+    );
+    match matches.len() {
+        0 => bail!("brain object not found: {id}"),
+        1 => Ok(matches.remove(0)),
+        count => bail!(
+            "brain object id is ambiguous: {id} matched {count} objects; use a more specific id"
+        ),
+    }
 }
 
 fn render_brain_report(brain: &BrainIndex) -> String {
@@ -3530,11 +3774,12 @@ fn render_brain_report(brain: &BrainIndex) -> String {
     out.push_str("Organized view of Dream memory, compiled skill drafts, policy proposals, and persistent findings.\n\n");
     out.push_str("## Summary\n\n");
     out.push_str(&format!(
-        "- Memory: {}\n- Skills: {}\n- Policies: {}\n- Findings: {}\n\n",
+        "- Memory: {}\n- Skills: {}\n- Policies: {}\n- Findings: {}\n- Candidates: {}\n\n",
         compact_counts(&brain.summary.memory),
         compact_counts(&brain.summary.skills),
         compact_counts(&brain.summary.policies),
-        compact_counts(&brain.summary.findings)
+        compact_counts(&brain.summary.findings),
+        compact_counts(&brain.summary.candidates)
     ));
     out.push_str("## Promoted / Validated Memory\n\n");
     for status in ["pinned", "promoted", "validated"] {
@@ -3587,6 +3832,17 @@ fn render_brain_report(brain: &BrainIndex) -> String {
             ));
         }
     }
+    out.push_str("\n## Dream Experiment Candidates\n\n");
+    for candidate in brain.candidates.items.iter().take(20) {
+        out.push_str(&format!(
+            "- `{}` finding `{}` status `{}` decision `{}` eval `{}`\n",
+            candidate.id,
+            candidate.finding,
+            candidate.status,
+            candidate.decision.as_deref().unwrap_or("unknown"),
+            candidate.eval.as_deref().unwrap_or("not written")
+        ));
+    }
     out
 }
 
@@ -3633,6 +3889,7 @@ fn brain_next_commands() -> Vec<String> {
         "air brain skills".to_string(),
         "air brain policies".to_string(),
         "air brain findings".to_string(),
+        "air brain candidates".to_string(),
         "air brain report".to_string(),
     ]
 }
@@ -3809,13 +4066,13 @@ fn append_memory_usage_outcomes(
             written += 1;
         }
     }
+    compact_usage_log_if_needed(memory_dir, now)?;
     Ok(written)
 }
 
 fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
     let usage_path = memory_dir.join("usage.jsonl");
-    let mut usage = read_usage_events(&usage_path)?;
-    let mut stats = memory_usage_stats(&usage);
+    let stats = memory_usage_stats_for_dir(memory_dir)?;
     let mut events = 0;
 
     for (memory_id, item) in stats.clone() {
@@ -3844,14 +4101,6 @@ fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
                 "",
                 now,
             )?;
-            usage.push(MemoryUsageEvent {
-                schema: "air.memory_usage.v1".to_string(),
-                memory_id: memory_id.clone(),
-                task: String::new(),
-                outcome: "helped".to_string(),
-                run_artifact: None,
-                at_unix: now,
-            });
             events += 2;
         }
         if item.hurt_confirmed == 0
@@ -3878,19 +4127,11 @@ fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
                 "",
                 now,
             )?;
-            usage.push(MemoryUsageEvent {
-                schema: "air.memory_usage.v1".to_string(),
-                memory_id,
-                task: String::new(),
-                outcome: "hurt".to_string(),
-                run_artifact: None,
-                at_unix: now,
-            });
             events += 2;
         }
     }
 
-    stats = memory_usage_stats(&usage);
+    let stats = memory_usage_stats_for_dir(memory_dir)?;
     for (mut card, path) in load_cards(memory_dir)? {
         let Some(item) = stats.get(&card.id).copied() else {
             continue;
@@ -3923,13 +4164,14 @@ fn reconcile_memory_usage(memory_dir: &Path, now: u64) -> Result<usize> {
             events += 1;
         }
     }
+    compact_usage_log_if_needed(memory_dir, now)?;
     Ok(events)
 }
 
 fn has_causal_promotion_evidence(memory_dir: &Path, memory_id: &str) -> Result<bool> {
-    Ok(read_usage_events(&memory_dir.join("usage.jsonl"))?
-        .iter()
-        .any(|event| event.memory_id == memory_id && event.outcome == "causal_helped"))
+    Ok(memory_usage_stats_for_dir(memory_dir)?
+        .get(memory_id)
+        .is_some_and(|stats| stats.causal_helped > 0))
 }
 
 fn memory_usage_stats(events: &[MemoryUsageEvent]) -> BTreeMap<String, MemoryUsageStats> {
@@ -3948,6 +4190,23 @@ fn memory_usage_stats(events: &[MemoryUsageEvent]) -> BTreeMap<String, MemoryUsa
         }
     }
     stats
+}
+
+fn merge_usage_stats(
+    target: &mut BTreeMap<String, MemoryUsageStats>,
+    source: BTreeMap<String, MemoryUsageStats>,
+) {
+    for (memory_id, item) in source {
+        let entry = target.entry(memory_id).or_default();
+        entry.used += item.used;
+        entry.helped_candidate += item.helped_candidate;
+        entry.hurt_candidate += item.hurt_candidate;
+        entry.helped_confirmed += item.helped_confirmed;
+        entry.hurt_confirmed += item.hurt_confirmed;
+        entry.causal_helped += item.causal_helped;
+        entry.causal_hurt += item.causal_hurt;
+        entry.neutral += item.neutral;
+    }
 }
 
 fn linked_observations<'a>(finding: &Value, observations: &'a [Value]) -> Vec<&'a Value> {
@@ -4269,8 +4528,7 @@ fn write_card(memory_dir: &Path, mut card: MemoryCard, now: u64) -> Result<PathB
 }
 
 fn write_card_snapshot(path: &Path, card: &MemoryCard) -> Result<()> {
-    fs::write(path, serde_json::to_vec_pretty(card)?)
-        .with_context(|| format!("write {}", path.display()))
+    write_json_atomic(path, &serde_json::to_vec_pretty(card)?)
 }
 
 fn find_card(memory_dir: &Path, id: &str) -> Result<(MemoryCard, PathBuf)> {
@@ -4529,16 +4787,7 @@ fn card_search_text(card: &MemoryCard) -> String {
 }
 
 fn append_jsonl<T: Serialize>(path: &Path, value: &T) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
-    }
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .with_context(|| format!("open {}", path.display()))?;
-    writeln!(file, "{}", serde_json::to_string(value)?)
-        .with_context(|| format!("write {}", path.display()))
+    append_jsonl_locked(path, value)
 }
 
 fn append_ledger(
@@ -4767,6 +5016,58 @@ fn read_usage_events(path: &Path) -> Result<Vec<MemoryUsageEvent>> {
         .collect())
 }
 
+fn memory_usage_stats_for_dir(memory_dir: &Path) -> Result<BTreeMap<String, MemoryUsageStats>> {
+    let mut stats = read_usage_scorecard(memory_dir)?;
+    merge_usage_stats(
+        &mut stats,
+        memory_usage_stats(&read_usage_events(&memory_dir.join("usage.jsonl"))?),
+    );
+    Ok(stats)
+}
+
+fn read_usage_scorecard(memory_dir: &Path) -> Result<BTreeMap<String, MemoryUsageStats>> {
+    let path = memory_dir.join("scorecard.json");
+    if !path.exists() {
+        return Ok(BTreeMap::new());
+    }
+    let file: MemoryUsageScorecardFile = serde_json::from_slice(
+        &fs::read(&path).with_context(|| format!("read {}", path.display()))?,
+    )
+    .with_context(|| format!("parse {}", path.display()))?;
+    Ok(file.stats)
+}
+
+fn persist_usage_scorecard(
+    memory_dir: &Path,
+    stats: &BTreeMap<String, MemoryUsageStats>,
+    now: u64,
+) -> Result<()> {
+    write_json_atomic(
+        &memory_dir.join("scorecard.json"),
+        &serde_json::to_vec_pretty(&MemoryUsageScorecardFile {
+            schema: MEMORY_SCORECARD_SCHEMA.to_string(),
+            compacted_at_unix: now,
+            stats: stats.clone(),
+        })?,
+    )
+}
+
+fn compact_usage_log_if_needed(memory_dir: &Path, now: u64) -> Result<()> {
+    let usage_path = memory_dir.join("usage.jsonl");
+    if !usage_path.exists()
+        || fs::metadata(&usage_path)
+            .map(|metadata| metadata.len() < MEMORY_USAGE_COMPACT_BYTES)
+            .unwrap_or(true)
+    {
+        return Ok(());
+    }
+    with_jsonl_lock(&usage_path, || {
+        let stats = memory_usage_stats_for_dir(memory_dir)?;
+        persist_usage_scorecard(memory_dir, &stats, now)?;
+        write_json_atomic(&usage_path, b"")
+    })
+}
+
 fn string_field(value: &Value, key: &str) -> Option<String> {
     value.get(key).and_then(Value::as_str).map(str::to_string)
 }
@@ -4818,7 +5119,7 @@ fn memory_id(kind: &str, parts: &[&str]) -> String {
 fn memory_dir(cwd: &Path, memory_dir: Option<PathBuf>) -> PathBuf {
     absolutize(
         cwd,
-        memory_dir.unwrap_or_else(|| PathBuf::from(DEFAULT_MEMORY_DIR)),
+        memory_dir.unwrap_or_else(|| AirLayout::new(cwd.to_path_buf()).memory_dir()),
     )
 }
 
@@ -5321,6 +5622,7 @@ mod tests {
             out_dir: Some(root.join("advance")),
             skill_bench: false,
             limit: None,
+            timeout_seconds: None,
         })
         .unwrap();
 
@@ -5409,6 +5711,7 @@ mod tests {
             out_dir: Some(root.join("advance")),
             skill_bench: false,
             limit: None,
+            timeout_seconds: None,
         })
         .unwrap();
 
@@ -5533,6 +5836,7 @@ mod tests {
             out_dir: Some(root.join("advance")),
             skill_bench: false,
             limit: Some(1),
+            timeout_seconds: None,
         })
         .unwrap();
 
@@ -5627,7 +5931,7 @@ mod tests {
         assert!(hint
             .next_commands
             .iter()
-            .any(|cmd| cmd.contains("--memory")));
+            .any(|cmd| cmd == "air run 'fix rust verification failure'"));
         assert!(hint
             .next_commands
             .iter()
