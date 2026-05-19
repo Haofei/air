@@ -137,6 +137,7 @@ pub(crate) struct SkillAutoRunOptions {
     pub(crate) artifact_out: Option<PathBuf>,
     pub(crate) replay_artifact: Option<PathBuf>,
     pub(crate) replay_from: Option<usize>,
+    pub(crate) verification_command: Option<String>,
 }
 
 pub(crate) struct SkillRouteOptions {
@@ -276,6 +277,18 @@ pub(crate) fn route_skill(options: SkillRouteOptions) -> Result<()> {
 }
 
 fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
+    if top_k == 0 {
+        return Ok(SkillRouteResult {
+            executor: SkillRouteExecutor {
+                id: "code-agent".to_string(),
+                reason: "skill routing disabled by top_k=0".to_string(),
+            },
+            instructions: Vec::new(),
+            selected: Vec::new(),
+            rejected: Vec::new(),
+            candidates: Vec::new(),
+        });
+    }
     let root = if Path::new("skills").exists() {
         PathBuf::from(".")
     } else {
@@ -286,10 +299,7 @@ fn route_skills_for_task(task: &str, top_k: usize) -> Result<SkillRouteResult> {
 }
 
 pub(crate) fn route_skills_value_for_task(task: &str, top_k: usize) -> Result<Value> {
-    Ok(serde_json::to_value(route_skills_for_task(
-        task,
-        top_k.max(1),
-    )?)?)
+    Ok(serde_json::to_value(route_skills_for_task(task, top_k)?)?)
 }
 
 fn route_tokens(text: &str) -> Vec<String> {
@@ -406,7 +416,7 @@ pub(crate) fn explain_skill(reference: &str, profile_override: Option<PathBuf>) 
     validate_resolved_skill(&skill)?;
     let effective = effective_execution(&skill)?;
     let profile = profile_override.unwrap_or_else(|| effective.profile.clone());
-    let input = build_input("<task>".to_string());
+    let input = build_input("<task>".to_string(), None);
     let mut explanation = code_profile_explain(&skill.manifest.id, &profile, &input)?;
     if let Some(object) = explanation.as_object_mut() {
         object.insert(
@@ -459,7 +469,7 @@ pub(crate) fn explain_skill(reference: &str, profile_override: Option<PathBuf>) 
 }
 
 pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
-    let route = route_skills_for_task(&options.task, options.top_k.max(1))?;
+    let route = route_skills_for_task(&options.task, options.top_k)?;
     let executor_id = options
         .executor_override
         .clone()
@@ -492,6 +502,7 @@ pub(crate) fn run_skill_auto(options: SkillAutoRunOptions) -> Result<()> {
     );
     let outputs = run_code_agent(CodeOptions {
         task,
+        verification_command: options.verification_command,
         artifact_task: Some(options.task.clone()),
         skill: Some(prepared.metadata.clone()),
         profile: Some(

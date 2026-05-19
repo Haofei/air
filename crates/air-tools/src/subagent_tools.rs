@@ -211,7 +211,7 @@ pub(super) fn validate_subagent_profiles(
 
 fn profile_options(profile: &SubagentProfileConfig) -> SubagentToolOptions {
     SubagentToolOptions {
-        timeout_seconds: profile.timeout_seconds.unwrap_or(600),
+        timeout_seconds: profile.timeout_seconds.unwrap_or(1800),
         max_bytes: profile.max_bytes.unwrap_or(256 * 1024),
         truncation_direction: profile
             .truncation_direction

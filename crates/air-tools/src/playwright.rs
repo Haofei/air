@@ -130,7 +130,7 @@ pub(super) fn call_playwright_page_audit_tool(
     let script = canonicalize_tool_path(name, "script_path", config.script_path)?;
     let base = canonicalize_tool_path(name, "base_dir", config.base_dir)?;
     let request_timeout =
-        compute_request_timeout(config.timeout_seconds, config.action_timeout, 30);
+        compute_request_timeout(config.timeout_seconds, config.action_timeout, 300);
 
     let mut request = Map::new();
     match (
@@ -233,7 +233,7 @@ pub(super) fn call_playwright_search_tool(
     let query = required_input_string(name, input, "query")?;
     let script = canonicalize_tool_path(name, "script_path", script_path)?;
     let request_timeout =
-        compute_request_timeout(config.timeout_seconds, config.action_timeout, 120);
+        compute_request_timeout(config.timeout_seconds, config.action_timeout, 600);
     let mut request = Map::new();
     request.insert("query".to_string(), Value::String(query.to_string()));
     insert_numeric_request_option(

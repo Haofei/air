@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 const DEFAULT_CODE_BENCH_SUITE: &str = "skills/code-agent/benches/rust-small/suite.json";
 const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profile.yaml";
-const DEFAULT_MODEL_CONFIG: &str = "examples/bigmodel-openai-compatible.json";
+const DEFAULT_MODEL_CONFIG: &str = "examples/local-openai-compatible.json";
 
 pub(crate) struct BenchCodeAgentOptions {
     pub(crate) suite: Option<PathBuf>,
@@ -770,6 +770,10 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
             .with_context(|| format!("enter workdir {}", workdir.display()))?;
         let agent_result = run_code_agent(CodeOptions {
             task: agent_task,
+            verification_command: task
+                .verification
+                .first()
+                .map(|command| command.command.clone()),
             artifact_task: Some(task.prompt.clone()),
             skill: context.skill.clone(),
             profile: Some(context.profile.to_path_buf()),
@@ -781,7 +785,7 @@ fn run_bench_task(context: &BenchTaskContext<'_>, task: &BenchTask) -> Result<Ta
             tool_config: Some(tool_config.clone()),
             artifact_out: Some(artifact_dir.clone()),
             artifact_extra,
-            verdict_constraints: CodeRunVerdictConstraints::code_edit(),
+            verdict_constraints: bench_verdict_constraints(&task.diff),
             replay_artifact: None,
             replay_from: None,
         });
@@ -1710,7 +1714,7 @@ fn git_changed_files(workdir: &Path) -> Result<Vec<String>> {
     let output = Command::new("sh")
         .args([
             "-lc",
-            "{ git diff --name-only --; git ls-files --others --exclude-standard; } | sort -u",
+            "{ git diff --name-only --cached --; git diff --name-only --; git ls-files --others --exclude-standard; } | sort -u",
         ])
         .current_dir(workdir)
         .output()
@@ -1731,7 +1735,7 @@ fn git_diff(workdir: &Path) -> Result<String> {
     let output = Command::new("sh")
         .args([
             "-lc",
-            "git diff -- && git ls-files --others --exclude-standard | while IFS= read -r file; do git diff --no-index -- /dev/null \"$file\" || true; done",
+            "git diff --cached -- && git diff -- && git ls-files --others --exclude-standard | while IFS= read -r file; do git diff --no-index -- /dev/null \"$file\" || true; done",
         ])
         .current_dir(workdir)
         .output()
@@ -1769,6 +1773,10 @@ fn preview_bytes(bytes: &[u8], max_chars: usize) -> String {
 mod tests {
     use super::*;
 
+    fn unique_temp_dir(prefix: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("{}-{}", prefix, timestamp_id()))
+    }
+
     #[test]
     fn diff_constraints_reject_unexpected_files() {
         let constraints = DiffConstraints {
@@ -1789,6 +1797,69 @@ mod tests {
             .violations
             .iter()
             .any(|violation| violation.contains("README.md")));
+    }
+
+    #[test]
+    fn bench_git_diff_includes_staged_required_text() {
+        let temp_dir = unique_temp_dir("air-bench-staged-diff");
+        fs::create_dir_all(temp_dir.join("src")).unwrap();
+        fs::write(temp_dir.join("src/config.rs"), "pub fn env_key() {}\n").unwrap();
+        init_git_baseline(&temp_dir).unwrap();
+        fs::write(
+            temp_dir.join("src/config.rs"),
+            "fn normalize_key_char(ch: char) -> char { ch }\n\npub fn env_key() {}\n",
+        )
+        .unwrap();
+        run_quiet(&temp_dir, "git add src/config.rs").unwrap();
+
+        let changed_files = git_changed_files(&temp_dir).unwrap();
+        let diff = git_diff(&temp_dir).unwrap();
+        let constraints = DiffConstraints {
+            allowed_changed_files: vec!["src/config.rs".to_string()],
+            required_changed_files: vec!["src/config.rs".to_string()],
+            forbidden_changed_files: Vec::new(),
+            required_diff_contains: vec!["normalize_key_char".to_string()],
+            max_diff_lines: None,
+        };
+        let result = check_diff_constraints(&constraints, &changed_files, &diff);
+
+        assert_eq!(changed_files, vec!["src/config.rs".to_string()]);
+        assert!(diff.contains("normalize_key_char"));
+        assert!(result.passed);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn bench_verdict_constraints_reject_missing_required_diff_text() {
+        let diff = DiffConstraints {
+            allowed_changed_files: vec!["src/config.rs".to_string()],
+            required_changed_files: vec!["src/config.rs".to_string()],
+            forbidden_changed_files: Vec::new(),
+            required_diff_contains: vec!["normalize_key_char".to_string()],
+            max_diff_lines: None,
+        };
+        let delta = WorkspaceDelta {
+            changed_files: vec!["src/config.rs".to_string()],
+            diff: "diff --git a/src/config.rs b/src/config.rs\n+pub fn env_key() {}\n".to_string(),
+        };
+        let verdict = derive_code_run_verdict_from_facts(
+            &delta,
+            CodeRunVerificationFacts {
+                verification_ran: true,
+                verification_passed: true,
+            },
+            &bench_verdict_constraints(&diff),
+        );
+
+        assert!(!verdict.required_diff_ok);
+        assert!(!verdict.final_success);
+        assert!(matches!(
+            verdict
+                .failure_reason
+                .as_ref()
+                .map(|reason| reason.category.clone()),
+            Some(FailureCategory::DiffConstraintFailed)
+        ));
     }
 
     #[test]

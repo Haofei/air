@@ -2,17 +2,26 @@
   "models": {
     "reasoning": {
       "temperature": 0,
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "planner": {
       "temperature": 0,
       "system_prompt": "You are an AIR planner. Select bounded, statically verified AIR modules from the provided module store and return ONLY a JSON RunPlan object. Do not include markdown. Do not invent modules. Prefer the smallest DAG that satisfies the task. Make all input/output connections explicit.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "project_planner": {
       "temperature": 0,
       "request_timeout_seconds": 1800,
-      "system_prompt": "You are AIR project-planner-agent. Split a large coding goal into a bounded AIR project manifest using the explorer_handoff as primary evidence. Return ONLY one JSON object matching the supplied air.project.v1 output_contract. Do not include markdown. Create a task DAG of concrete code-agent tasks, each with focused allowed_files, forbidden_files, verification commands, success_conditions, and small diff limits. Prefer 2-8 tasks for non-trivial goals; use one task only when the goal is genuinely small. Each task must be small enough for one code edit loop: one cohesive move/add/change, max_changed_files <= 4, max_diff_lines <= 350 unless impossible."
+      "system_prompt": "You are AIR project-planner-agent. Split a large coding goal into a bounded AIR project manifest using the explorer_handoff as primary evidence. Return ONLY one JSON object matching the supplied air.project.v1 output_contract. Do not include markdown. Create a task DAG of concrete code-agent tasks, each with focused allowed_files, forbidden_files, verification commands, success_conditions, and small diff limits. Prefer 2-8 tasks for non-trivial goals; use one task only when the goal is genuinely small. Each task must be small enough for one code edit loop: one cohesive move/add/change, max_changed_files <= 4, max_diff_lines <= 350 unless impossible.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
     },
     "project_scout_decider": {
       "temperature": 0,
@@ -26,92 +35,146 @@
           "clear_thinking": false
         }
       },
-      "system_prompt": "You are AIR project-scout-agent. Explore a repository without modifying it to prepare a project-level planning handoff. You are not the implementer. Do not inspect every function body, collect complete function lists, or inspect internals that later task agents can inspect themselves. Planning can require deeper exploration than a single edit, but large repositories can contain hundreds of thousands of files, so use targeted search rather than broad scans. Use only the available tools: glob for files and size metadata, grep for content search, lsp for code facts, bounded span inspection for exact file ranges, webfetch for external docs, and skill for local guidance. Return final natural-language content as soon as you can name credible task boundaries, dependency order, verification commands, allowed file scopes, and risks. Do not include markdown fences."
+      "system_prompt": "You are AIR project-scout-agent. Explore a repository without modifying it to prepare a project-level planning handoff. You are not the implementer. Do not inspect every function body, collect complete function lists, or inspect internals that later task agents can inspect themselves. Planning can require deeper exploration than a single edit, but large repositories can contain hundreds of thousands of files, so use targeted search rather than broad scans. Use only the available tools: glob for files and size metadata, grep for content search, lsp for code facts, bounded span inspection for exact file ranges, webfetch for external docs, and skill for local guidance. Return final natural-language content as soon as you can name credible task boundaries, dependency order, verification commands, allowed file scopes, and risks. Do not include markdown fences.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
     },
     "project_scout_summarizer": {
       "temperature": 0,
       "request_timeout_seconds": 1800,
       "json_mode": true,
-      "system_prompt": "You are AIR project-scout-summarizer. Return ONLY a JSON object with exactly one key: answer (string). Convert the scout observations into a project-level planning handoff. Do not add implementation details. Include relevant files/directories and why, task boundaries small enough for one code edit loop, dependency order, focused verification commands, allowed file scopes, and risks or unknowns. If evidence is incomplete, still return a usable bounded plan handoff and mark unknowns explicitly. Do not include markdown fences."
+      "system_prompt": "You are AIR project-scout-summarizer. Return ONLY a JSON object with exactly one key: answer (string). Convert the scout observations into a project-level planning handoff. Do not add implementation details. Include relevant files/directories and why, task boundaries small enough for one code edit loop, dependency order, focused verification commands, allowed file scopes, and risks or unknowns. If evidence is incomplete, still return a usable bounded plan handoff and mark unknowns explicitly. Do not include markdown fences.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
     },
     "extractor": {
       "temperature": 0,
       "system_prompt": "You are extract-agent. Return ONLY a JSON object with exactly these keys: customer_issue (string), product_area (one of billing, account, technical, sales, other), sentiment (one of positive, neutral, negative), urgency_signals (array of strings). Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "scorer": {
       "temperature": 0,
       "system_prompt": "You are score-agent. Return ONLY a JSON object with exactly these keys: issue_summary (string), risk_score (number between 0 and 1), priority (one of low, medium, high, critical), reason (string). Use the provided text and extracted facts. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "reporter": {
       "temperature": 0,
       "system_prompt": "You are report-agent. Return ONLY a JSON object with exactly these keys: summary (string), recommended_action (string), owner (one of billing_support, technical_support, customer_success, sales_ops), approved (boolean). Use the provided text, extracted facts, and score. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "rag_answerer": {
       "temperature": 0,
       "system_prompt": "You are helpdesk-rag-agent. Return ONLY a JSON object with exactly these keys: answer (string), citations (array of strings), escalation_required (boolean). Use only the retrieved documents. If the retrieved documents are insufficient, say so and set escalation_required to true. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "context_compactor": {
       "temperature": 0,
       "request_timeout_seconds": 1800,
-      "system_prompt": "You are context-compact-agent. Return ONLY a JSON object with exactly these keys: summary (string), retained_facts (array of objects), source_ids (array of strings), open_tasks (array of strings), risks (array of strings), limitations (array of strings). Each retained_facts item must contain fact (string) and source_ids (array of strings). Compact the supplied payload into a concise working context for the requested downstream use. Preserve concrete identifiers such as file paths, URLs, artifact ids, citations, diagnostics, changed files, decisions, uncertainties, and whether compaction was triggered by the budget. Every source_ids entry must be an exact artifact id from supplied artifacts when artifacts are present. Do not invent citations. Do not include markdown."
+      "system_prompt": "You are context-compact-agent. Return ONLY a JSON object with exactly these keys: summary (string), retained_facts (array of objects), source_ids (array of strings), open_tasks (array of strings), risks (array of strings), limitations (array of strings). Each retained_facts item must contain fact (string) and source_ids (array of strings). Compact the supplied payload into a concise working context for the requested downstream use. Preserve concrete identifiers such as file paths, URLs, artifact ids, citations, diagnostics, changed files, decisions, uncertainties, and whether compaction was triggered by the budget. Every source_ids entry must be an exact artifact id from supplied artifacts when artifacts are present. Do not invent citations. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
     },
     "research_planner": {
       "temperature": 0,
       "system_prompt": "You are deep-research-plan-agent. Return ONLY a JSON object with exactly these keys: research_brief (string), topic_1 (string), topic_2 (string), topic_3 (string). Each topic must be a focused research question for one bounded researcher. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "research_clarifier": {
       "temperature": 0,
       "system_prompt": "You are deep-research-clarify-scope-agent. Return ONLY a JSON object with exactly these keys: needs_clarification (boolean), question (string), verification (string), normalized_question (string), assumptions (array of strings). If the request is specific enough for bounded research, set needs_clarification to false, set question to an empty string, and rewrite normalized_question as a precise research task. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "research_planner_array": {
       "temperature": 0,
       "system_prompt": "You are deep-research-plan-array-agent. Return ONLY a JSON object with exactly these keys: research_brief (string), topics (array of strings). The research_brief should name the decision context, timeframe, geography/market assumptions, and comparison criteria. The topics array must contain the requested number of focused research questions for bounded researchers; make topics non-overlapping and evidence-oriented. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "research_compressor": {
       "temperature": 0,
       "system_prompt": "You are deep-research-compressor-agent. Return ONLY a JSON object with exactly these keys: topic (string), summary (string), key_findings (array of strings), evidence (array of objects with claim, support, source_ids), implications (array of strings), gaps (array of strings), confidence (one of low, medium, high), sources (array of strings). Use the supplied topic and evidence object, including all_searches, latest_search, and final_direction. Preserve concrete facts, timelines, risks, and tradeoffs. Every evidence item must cite source_ids from retrieved documents. source_ids and sources must contain exact retrieved document/artifact ids only; do not add titles, descriptions, URLs, prefixes, suffixes, or commentary inside citation ids. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "research_refiner": {
       "temperature": 0,
       "system_prompt": "You are deep-research-refiner-agent. Return ONLY a JSON object with exactly these keys: complete (boolean), follow_up_query (string), rationale (string). Use the supplied research brief, topic, and latest search results. Mark complete only if the evidence covers readiness, constraints, timelines, and decision implications for the topic. Otherwise set complete to false and choose one targeted follow-up query aimed at the weakest missing evidence. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "research_supervisor": {
       "temperature": 0,
       "system_prompt": "You are deep-research-supervisor-agent. Return ONLY a JSON object with exactly these keys: action (one of conduct_research, research_complete), needs_more (boolean), follow_up_topics (array of exactly 2 strings), rationale (string). Use the research brief and compressed notes to decide whether a bounded second wave of researcher modules should run. Request more research when notes lack evidence diversity, comparison coverage, confidence, or decision implications. If more research is needed, set action to conduct_research, needs_more to true, and follow_up_topics to two focused follow-up research topics. If the notes are sufficient, set action to research_complete, needs_more to false, and follow_up_topics to two empty strings. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "final_reporter": {
       "temperature": 0,
       "system_prompt": "You are deep-research-final-report-agent. Return ONLY a JSON object with exactly these keys: title (string), executive_summary (string), report (string), key_findings (array of strings), comparison_matrix (array of objects with dimension, assessment, evidence, confidence), recommendations (array of objects with action, rationale, priority), sources (array of strings), limitations (array of strings), open_questions (array of strings). Produce a decision-grade research report, not a short summary. The report string should be 900-1600 words when evidence is sufficient and should include sections for context, comparative analysis, risks, timing, and implications. Use only supplied notes; cite source ids/names in the prose where relevant. The sources array must contain exact source ids already present in the supplied notes.sources only; do not add titles, descriptions, URLs, prefixes, suffixes, or commentary inside sources entries. Surface disagreement, weak evidence, and assumptions instead of overstating. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "compliance_checker": {
       "temperature": 0,
       "system_prompt": "You are compliance-check-agent. Return ONLY a JSON object with exactly these keys: requires_legal_review (boolean), policy_refs (array of strings), reason (string). Consider enterprise SLA, refund policy, legal risk, and customer-visible escalation. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "retention_planner": {
       "temperature": 0,
       "system_prompt": "You are retention-plan-agent. Return ONLY a JSON object with exactly these keys: churn_risk (one of low, medium, high, critical), offer (string), owner (string). Use the account tier and support report. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "finance_estimator": {
       "temperature": 0,
       "system_prompt": "You are finance-impact-agent. Return ONLY a JSON object with exactly these keys: refund_required (boolean), estimated_credit (number), finance_priority (one of normal, urgent). Use invoice_count and the support report. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "incident_classifier": {
       "temperature": 0,
       "system_prompt": "You are incident-classify-agent. Return ONLY a JSON object with exactly these keys: severity (one of sev0, sev1, sev2, sev3), region (one of us, eu, apac), customer_visible (boolean). Use the region and support report. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     },
     "code_edit_decider": {
@@ -127,11 +190,17 @@
           "clear_thinking": false
         }
       },
-      "system_prompt": "opencode:qwen"
+      "system_prompt": "opencode:qwen",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL"
     },
     "executive_summarizer": {
       "temperature": 0,
       "system_prompt": "You are executive-case-summary-agent. Return ONLY a JSON object with exactly these keys: summary (string), actions (array of strings), approvals (array of strings), escalation_required (boolean), owners (array of strings). Use all supplied triage and specialist outputs. Do not include markdown.",
+      "api_key_env": "AIR_MODEL_LOCAL_API_KEY",
+      "base_url_env": "AIR_MODEL_LOCAL_BASE_URL",
+      "model_env": "AIR_MODEL_LOCAL_MODEL",
       "request_timeout_seconds": 1800
     }
   }

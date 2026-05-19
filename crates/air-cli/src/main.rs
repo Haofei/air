@@ -1,9 +1,12 @@
 use air_runtime::{system_return_event, Vm};
+mod audit;
 mod bench;
 mod code_agent;
 mod code_artifact;
 mod diagnostics;
+mod dream;
 mod entry;
+mod eval_manifest;
 mod explain;
 mod improve;
 mod mcp;
@@ -14,11 +17,17 @@ mod project;
 mod regression;
 mod review_agent;
 mod run_plan;
+mod self_lab;
 mod skill;
 mod tools;
+use crate::audit::{audit_collect, audit_run, AuditCollectOptions, AuditRunOptions};
 use crate::bench::{bench_code_agent, bench_skill, BenchCodeAgentOptions, BenchSkillOptions};
 use crate::diagnostics::emit_diagnostics;
+use crate::dream::{run_dream, show_dream_state, DreamRunOptions, DreamStateOptions};
 use crate::entry::{run_entry_task, EntryMode, EntryTaskOptions};
+use crate::eval_manifest::{
+    check_eval_manifest_command, write_eval_manifest, EvalCheckOptions, EvalManifestOptions,
+};
 use crate::explain::{build_plan_explanation, format_plan_explanation};
 use crate::improve::{run_improve, ImproveAction, ImproveOptions};
 use crate::mcp::{
@@ -40,6 +49,10 @@ use crate::regression::{run_regression_command, RegressionRunOptions};
 use crate::run_plan::{
     observe_event_with_trace_file, replay, resume_plan, run_plan, write_partial_trace, write_trace,
     ReplayOptions, ResumePlanOptions, RunPlanOptions,
+};
+use crate::self_lab::{
+    self_capture, self_compare, self_fix, self_prepare, SelfCaptureOptions, SelfCompareOptions,
+    SelfFixOptions, SelfPrepareOptions,
 };
 use crate::skill::{
     audit_skill, explain_skill, import_skill, list_skills, route_skill, upgrade_skill,
@@ -111,6 +124,11 @@ enum Command {
         #[command(subcommand)]
         command: SkillCommand,
     },
+    /// Deterministically audit AIR run artifacts without calling a model.
+    Audit {
+        #[command(subcommand)]
+        command: AuditCommand,
+    },
     /// Run AIR benchmark suites.
     Bench {
         #[command(subcommand)]
@@ -137,6 +155,22 @@ enum Command {
     Regression {
         #[command(subcommand)]
         command: RegressionCommand,
+    },
+    /// Offline review cycle that audits recent runs and mines improvement findings.
+    Dream {
+        #[command(subcommand)]
+        command: DreamCommand,
+    },
+    /// Protect evaluation files with a content manifest.
+    Eval {
+        #[command(subcommand)]
+        command: EvalCommand,
+    },
+    /// Prepare and compare self-improvement candidates.
+    #[command(name = "self")]
+    Self_ {
+        #[command(subcommand)]
+        command: SelfCommand,
     },
     /// Inspect and audit MCP tools declared in AIR tool configs.
     Mcp {
@@ -226,6 +260,10 @@ enum Command {
         /// 1-based trace event line where replay should switch to the live provider.
         #[arg(long, requires = "replay_artifact", hide = true)]
         replay_from: Option<usize>,
+
+        /// Deterministic verification command for code-agent verify phase.
+        #[arg(long, hide = true)]
+        verification_command: Option<String>,
     },
 }
 
@@ -288,6 +326,176 @@ enum SkillCommand {
         #[arg(long)]
         profile: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuditCommand {
+    /// Audit a code-run artifact directory containing artifact.json and trace.jsonl.
+    Run {
+        /// Code-run artifact directory.
+        artifact_dir: PathBuf,
+
+        /// Optional Markdown audit report path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+    /// Collect and summarize many code-run artifact audits for a time window or run set.
+    Collect {
+        /// Artifact, benchmark, or generated output roots to scan.
+        #[arg(long = "from")]
+        from: Vec<PathBuf>,
+
+        /// Only audit artifacts whose artifact.json mtime is at or after this Unix timestamp.
+        #[arg(long)]
+        since_unix: Option<u64>,
+
+        /// Audit at most this many newest artifacts after applying the time window.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Output directory for collection.json, per-run audits, and default report.md.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Optional Markdown collection report path.
+        #[arg(long)]
+        report: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum EvalCommand {
+    /// Write an eval integrity manifest with sha256 pins.
+    Manifest {
+        /// Output manifest path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+
+        /// File or directory to include. Defaults to AIR benchmark/regression files.
+        #[arg(long)]
+        include: Vec<PathBuf>,
+    },
+    /// Check the eval integrity manifest and protected git diff paths.
+    Check {
+        /// Eval manifest path.
+        #[arg(long)]
+        manifest: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum SelfCommand {
+    /// Create candidate directories for a finding.
+    Prepare {
+        /// Finding id such as IMP-001.
+        finding: String,
+
+        /// Number of candidate slots to create.
+        #[arg(long, default_value_t = 3)]
+        candidates: usize,
+
+        /// Candidate root directory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    /// Capture the current workspace diff as a candidate patch.
+    Capture {
+        /// Finding id such as IMP-001.
+        finding: String,
+
+        /// Candidate id such as cand-1.
+        candidate: String,
+
+        /// Candidate root directory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+    },
+    /// Generate candidate patches with AIR's code-agent in isolated worktrees.
+    Fix {
+        /// Finding id such as IMP-001.
+        finding: String,
+
+        /// Number of candidate patches to generate.
+        #[arg(long, default_value_t = 1)]
+        candidates: usize,
+
+        /// Limit the candidate improvement prompt to a local AIR skill package.
+        #[arg(long)]
+        skill: Option<String>,
+
+        /// Override the generated fix task prompt.
+        #[arg(long)]
+        task: Option<String>,
+
+        /// Artifact, benchmark, or generated output roots to use during evaluation.
+        #[arg(long = "from")]
+        from: Vec<PathBuf>,
+
+        /// Candidate root directory.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Optional OpenAI-compatible model config JSON.
+        #[arg(long)]
+        model_config: Option<PathBuf>,
+
+        /// Optional regression JSON file to evaluate instead of a promoted regression.
+        #[arg(long = "regression-file")]
+        regression_file: Option<PathBuf>,
+
+        /// Evaluate each generated candidate in its isolated worktree.
+        #[arg(long)]
+        evaluate: bool,
+    },
+    /// Compare candidate eval.json files.
+    Compare {
+        /// Finding id such as IMP-001.
+        finding: String,
+
+        /// Candidate directory or eval.json path. Defaults to .air/candidates/<finding>.
+        #[arg(long = "from")]
+        from: Vec<PathBuf>,
+
+        /// Optional Markdown scorecard path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum DreamCommand {
+    /// Audit a run window and mine improvement findings without changing source code.
+    Run {
+        /// Artifact, benchmark, or generated output roots to scan.
+        #[arg(long = "from")]
+        from: Vec<PathBuf>,
+
+        /// Only include artifacts whose artifact.json mtime is at or after this Unix timestamp.
+        #[arg(long)]
+        since_unix: Option<u64>,
+
+        /// Review at most this many newest artifacts after applying the time window.
+        #[arg(long)]
+        limit: Option<usize>,
+
+        /// Output directory for dream.json, dream.md, audit/, improve/, and logs/.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Write one suggested regression JSON file per finding under the Dream improve output.
+        #[arg(long)]
+        write_regressions: bool,
+
+        /// Run only artifacts newer than the previous Dream state. This is the default.
+        #[arg(long, conflicts_with = "full")]
+        incremental: bool,
+
+        /// Ignore Dream state and scan the full requested roots.
+        #[arg(long, conflicts_with = "incremental")]
+        full: bool,
+    },
+    /// Show the saved Dream incremental state.
+    State,
 }
 
 #[derive(Debug, Subcommand)]
@@ -460,6 +668,10 @@ enum ImproveCommand {
     Evaluate {
         /// Finding id such as IMP-001.
         finding: String,
+
+        /// Optional regression JSON file to evaluate instead of a promoted regression.
+        #[arg(long = "regression-file")]
+        regression_file: Option<PathBuf>,
 
         /// Optional markdown report path.
         #[arg(long)]
@@ -857,6 +1069,28 @@ fn main() -> Result<()> {
             }),
             SkillCommand::Explain { skill, profile } => explain_skill(&skill, profile),
         },
+        Command::Audit { command } => match command {
+            AuditCommand::Run {
+                artifact_dir,
+                report,
+            } => audit_run(AuditRunOptions {
+                artifact_dir,
+                report,
+            }),
+            AuditCommand::Collect {
+                from,
+                since_unix,
+                limit,
+                out_dir,
+                report,
+            } => audit_collect(AuditCollectOptions {
+                from,
+                out_dir,
+                report,
+                since_unix,
+                limit,
+            }),
+        },
         Command::Mcp { command } => match command {
             McpCommand::List { tool_config } => list_mcp(McpListOptions { tool_config }),
             McpCommand::Explain { tool, tool_config } => {
@@ -956,6 +1190,77 @@ fn main() -> Result<()> {
                 out_dir,
             }),
         },
+        Command::Dream { command } => match command {
+            DreamCommand::Run {
+                from,
+                since_unix,
+                limit,
+                out_dir,
+                write_regressions,
+                incremental: _,
+                full,
+            } => run_dream(DreamRunOptions {
+                from,
+                since_unix,
+                limit,
+                out_dir,
+                write_regressions,
+                full,
+            }),
+            DreamCommand::State => show_dream_state(DreamStateOptions),
+        },
+        Command::Eval { command } => match command {
+            EvalCommand::Manifest { out, include } => {
+                write_eval_manifest(EvalManifestOptions { out, include })
+            }
+            EvalCommand::Check { manifest } => {
+                check_eval_manifest_command(EvalCheckOptions { manifest })
+            }
+        },
+        Command::Self_ { command } => match command {
+            SelfCommand::Prepare {
+                finding,
+                candidates,
+                out_dir,
+            } => self_prepare(SelfPrepareOptions {
+                finding,
+                candidates,
+                out_dir,
+            }),
+            SelfCommand::Capture {
+                finding,
+                candidate,
+                out_dir,
+            } => self_capture(SelfCaptureOptions {
+                finding,
+                candidate,
+                out_dir,
+            }),
+            SelfCommand::Fix {
+                finding,
+                candidates,
+                skill,
+                task,
+                from,
+                out_dir,
+                model_config,
+                regression_file,
+                evaluate,
+            } => self_fix(SelfFixOptions {
+                finding,
+                candidates,
+                skill,
+                task,
+                from,
+                out_dir,
+                model_config,
+                regression_file,
+                evaluate,
+            }),
+            SelfCommand::Compare { finding, from, out } => {
+                self_compare(SelfCompareOptions { finding, from, out })
+            }
+        },
         Command::Dev { command } => run_dev_command(command),
         Command::Project { command } => match command {
             ProjectCommand::Plan {
@@ -998,6 +1303,7 @@ fn main() -> Result<()> {
             artifact_out,
             replay_artifact,
             replay_from,
+            verification_command,
         } => run_entry_task(EntryTaskOptions {
             task: target,
             mode,
@@ -1013,6 +1319,7 @@ fn main() -> Result<()> {
             artifact_out,
             replay_artifact,
             replay_from,
+            verification_command,
             project_file,
             plan_only,
             execute,
@@ -1028,9 +1335,15 @@ fn improve_action(command: Option<ImproveCommand>) -> ImproveAction {
         Some(ImproveCommand::Check { finding }) => ImproveAction::Check { finding },
         Some(ImproveCommand::Promote { finding }) => ImproveAction::Promote { finding },
         Some(ImproveCommand::Fix { finding }) => ImproveAction::Fix { finding },
-        Some(ImproveCommand::Evaluate { finding, report }) => {
-            ImproveAction::Evaluate { finding, report }
-        }
+        Some(ImproveCommand::Evaluate {
+            finding,
+            regression_file,
+            report,
+        }) => ImproveAction::Evaluate {
+            finding,
+            report,
+            regression_file,
+        },
     }
 }
 
@@ -2290,6 +2603,352 @@ mod tests {
 
         assert_eq!(tool, Some("github".to_string()));
         assert_eq!(tool_config, PathBuf::from("tools.json"));
+    }
+
+    #[test]
+    fn audit_run_accepts_artifact_dir_and_report() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "audit",
+            "run",
+            "target/generated/code-run-artifacts/demo",
+            "--report",
+            "target/audit.md",
+        ])
+        .unwrap();
+
+        let Command::Audit {
+            command:
+                AuditCommand::Run {
+                    artifact_dir,
+                    report,
+                },
+        } = cli.command
+        else {
+            panic!("expected audit run command");
+        };
+
+        assert_eq!(
+            artifact_dir,
+            PathBuf::from("target/generated/code-run-artifacts/demo")
+        );
+        assert_eq!(report, Some(PathBuf::from("target/audit.md")));
+    }
+
+    #[test]
+    fn audit_collect_accepts_roots_and_outputs() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "audit",
+            "collect",
+            "--from",
+            "target/generated/code-run-artifacts",
+            "--from",
+            ".air/runs",
+            "--since-unix",
+            "1770000000",
+            "--limit",
+            "25",
+            "--out-dir",
+            ".air/audit/window",
+            "--report",
+            ".air/audit/window.md",
+        ])
+        .unwrap();
+
+        let Command::Audit {
+            command:
+                AuditCommand::Collect {
+                    from,
+                    since_unix,
+                    limit,
+                    out_dir,
+                    report,
+                },
+        } = cli.command
+        else {
+            panic!("expected audit collect command");
+        };
+
+        assert_eq!(
+            from,
+            vec![
+                PathBuf::from("target/generated/code-run-artifacts"),
+                PathBuf::from(".air/runs")
+            ]
+        );
+        assert_eq!(since_unix, Some(1_770_000_000));
+        assert_eq!(limit, Some(25));
+        assert_eq!(out_dir, Some(PathBuf::from(".air/audit/window")));
+        assert_eq!(report, Some(PathBuf::from(".air/audit/window.md")));
+    }
+
+    #[test]
+    fn dream_run_accepts_window_and_outputs() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "dream",
+            "run",
+            "--from",
+            "target/generated",
+            "--since-unix",
+            "1770000000",
+            "--limit",
+            "25",
+            "--out-dir",
+            ".air/dream/nightly",
+            "--write-regressions",
+            "--incremental",
+        ])
+        .unwrap();
+
+        let Command::Dream {
+            command:
+                DreamCommand::Run {
+                    from,
+                    since_unix,
+                    limit,
+                    out_dir,
+                    write_regressions,
+                    incremental,
+                    full,
+                },
+        } = cli.command
+        else {
+            panic!("expected dream run command");
+        };
+
+        assert_eq!(from, vec![PathBuf::from("target/generated")]);
+        assert_eq!(since_unix, Some(1_770_000_000));
+        assert_eq!(limit, Some(25));
+        assert_eq!(out_dir, Some(PathBuf::from(".air/dream/nightly")));
+        assert!(write_regressions);
+        assert!(incremental);
+        assert!(!full);
+    }
+
+    #[test]
+    fn dream_state_parse() {
+        let cli = Cli::try_parse_from(["air", "dream", "state"]).unwrap();
+
+        let Command::Dream {
+            command: DreamCommand::State,
+        } = cli.command
+        else {
+            panic!("expected dream state command");
+        };
+    }
+
+    #[test]
+    fn improve_evaluate_accepts_regression_file() {
+        let cli = Cli::try_parse_from([
+            "air",
+            "improve",
+            "evaluate",
+            "IMP-001",
+            "--regression-file",
+            "target/generated/improve/suggested-regressions/imp-001.json",
+            "--report",
+            "target/generated/improve/eval.md",
+        ])
+        .unwrap();
+
+        let Command::Improve {
+            command,
+            from: _,
+            out_dir: _,
+            write_regressions: _,
+        } = cli.command
+        else {
+            panic!("expected improve command");
+        };
+        let ImproveAction::Evaluate {
+            finding,
+            report,
+            regression_file,
+        } = improve_action(command)
+        else {
+            panic!("expected improve evaluate action");
+        };
+
+        assert_eq!(finding, "IMP-001");
+        assert_eq!(
+            regression_file,
+            Some(PathBuf::from(
+                "target/generated/improve/suggested-regressions/imp-001.json"
+            ))
+        );
+        assert_eq!(
+            report,
+            Some(PathBuf::from("target/generated/improve/eval.md"))
+        );
+    }
+
+    #[test]
+    fn eval_manifest_and_check_parse() {
+        let manifest = Cli::try_parse_from([
+            "air",
+            "eval",
+            "manifest",
+            "--out",
+            ".air/evals/manifest.json",
+            "--include",
+            "skills/code-agent/benches",
+        ])
+        .unwrap();
+        let Command::Eval {
+            command: EvalCommand::Manifest { out, include },
+        } = manifest.command
+        else {
+            panic!("expected eval manifest command");
+        };
+        assert_eq!(out, Some(PathBuf::from(".air/evals/manifest.json")));
+        assert_eq!(include, vec![PathBuf::from("skills/code-agent/benches")]);
+
+        let check = Cli::try_parse_from([
+            "air",
+            "eval",
+            "check",
+            "--manifest",
+            ".air/evals/manifest.json",
+        ])
+        .unwrap();
+        let Command::Eval {
+            command: EvalCommand::Check { manifest },
+        } = check.command
+        else {
+            panic!("expected eval check command");
+        };
+        assert_eq!(manifest, Some(PathBuf::from(".air/evals/manifest.json")));
+    }
+
+    #[test]
+    fn self_prepare_and_compare_parse() {
+        let prepare = Cli::try_parse_from([
+            "air",
+            "self",
+            "prepare",
+            "IMP-001",
+            "--candidates",
+            "4",
+            "--out-dir",
+            ".air/candidates",
+        ])
+        .unwrap();
+        let Command::Self_ {
+            command:
+                SelfCommand::Prepare {
+                    finding,
+                    candidates,
+                    out_dir,
+                },
+        } = prepare.command
+        else {
+            panic!("expected self prepare command");
+        };
+        assert_eq!(finding, "IMP-001");
+        assert_eq!(candidates, 4);
+        assert_eq!(out_dir, Some(PathBuf::from(".air/candidates")));
+
+        let capture = Cli::try_parse_from([
+            "air",
+            "self",
+            "capture",
+            "IMP-001",
+            "cand-2",
+            "--out-dir",
+            ".air/candidates",
+        ])
+        .unwrap();
+        let Command::Self_ {
+            command:
+                SelfCommand::Capture {
+                    finding,
+                    candidate,
+                    out_dir,
+                },
+        } = capture.command
+        else {
+            panic!("expected self capture command");
+        };
+        assert_eq!(finding, "IMP-001");
+        assert_eq!(candidate, "cand-2");
+        assert_eq!(out_dir, Some(PathBuf::from(".air/candidates")));
+
+        let fix = Cli::try_parse_from([
+            "air",
+            "self",
+            "fix",
+            "IMP-001",
+            "--candidates",
+            "2",
+            "--skill",
+            "code-agent",
+            "--task",
+            "fix the repeated read loop",
+            "--from",
+            "target/generated/improve",
+            "--out-dir",
+            ".air/candidates",
+            "--model-config",
+            "models.json",
+            "--regression-file",
+            "target/generated/improve/suggested-regressions/imp-001.json",
+            "--evaluate",
+        ])
+        .unwrap();
+        let Command::Self_ {
+            command:
+                SelfCommand::Fix {
+                    finding,
+                    candidates,
+                    skill,
+                    task,
+                    from,
+                    out_dir,
+                    model_config,
+                    regression_file,
+                    evaluate,
+                },
+        } = fix.command
+        else {
+            panic!("expected self fix command");
+        };
+        assert_eq!(finding, "IMP-001");
+        assert_eq!(candidates, 2);
+        assert_eq!(skill, Some("code-agent".to_string()));
+        assert_eq!(task, Some("fix the repeated read loop".to_string()));
+        assert_eq!(from, vec![PathBuf::from("target/generated/improve")]);
+        assert_eq!(out_dir, Some(PathBuf::from(".air/candidates")));
+        assert_eq!(model_config, Some(PathBuf::from("models.json")));
+        assert_eq!(
+            regression_file,
+            Some(PathBuf::from(
+                "target/generated/improve/suggested-regressions/imp-001.json"
+            ))
+        );
+        assert!(evaluate);
+
+        let compare = Cli::try_parse_from([
+            "air",
+            "self",
+            "compare",
+            "IMP-001",
+            "--from",
+            ".air/candidates/IMP-001",
+            "--out",
+            ".air/candidates/IMP-001.md",
+        ])
+        .unwrap();
+        let Command::Self_ {
+            command: SelfCommand::Compare { finding, from, out },
+        } = compare.command
+        else {
+            panic!("expected self compare command");
+        };
+        assert_eq!(finding, "IMP-001");
+        assert_eq!(from, vec![PathBuf::from(".air/candidates/IMP-001")]);
+        assert_eq!(out, Some(PathBuf::from(".air/candidates/IMP-001.md")));
     }
 
     #[test]

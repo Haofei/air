@@ -34,7 +34,7 @@
     "webfetch": {
       "kind": "web_fetch",
       "capability": "code.read",
-      "timeout_seconds": 120,
+      "timeout_seconds": 600,
       "max_bytes": 51200
     },
     "skill": {
@@ -60,7 +60,7 @@
         "GITLAB_TOOLS": "execute_graphql",
         "GITLAB_READ_ONLY_MODE": "true"
       },
-      "timeout_seconds": 60,
+      "timeout_seconds": 300,
       "max_bytes": 131072
     },
     "gitlab_mr": {
@@ -80,7 +80,7 @@
         "GITLAB_READ_ONLY_MODE": "true"
       },
       "tool": "get_merge_request",
-      "timeout_seconds": 60,
+      "timeout_seconds": 300,
       "max_bytes": 131072
     },
     "gitlab_mr_files": {
@@ -100,7 +100,7 @@
         "GITLAB_READ_ONLY_MODE": "true"
       },
       "tool": "list_merge_request_changed_files",
-      "timeout_seconds": 60,
+      "timeout_seconds": 300,
       "max_bytes": 131072
     },
     "gitlab_mr_diffs": {
@@ -120,7 +120,7 @@
         "GITLAB_READ_ONLY_MODE": "true"
       },
       "tool": "get_merge_request_diffs",
-      "timeout_seconds": 60,
+      "timeout_seconds": 300,
       "max_bytes": 262144
     },
     "gitlab_graphql": {
@@ -141,7 +141,7 @@
         "GITLAB_READ_ONLY_MODE": "true"
       },
       "tool": "execute_graphql",
-      "timeout_seconds": 60,
+      "timeout_seconds": 300,
       "max_bytes": 131072
     }
   }

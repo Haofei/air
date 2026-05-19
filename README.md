@@ -49,17 +49,16 @@ cargo run -p air-cli -- skill route "use TDD to refactor the parser"
 cargo run -p air-cli -- run "use TDD to fix the failing add function" --log
 ```
 
-`air` auto-loads a repository-root `.env`:
+`air` defaults to the local OpenAI-compatible model config at
+`examples/local-openai-compatible.json` and auto-loads a repository-root `.env`:
 
 ```dotenv
-AIR_MODEL_PROFILE=glm
-
-AIR_MODEL_GLM_API_KEY=...
-AIR_MODEL_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-AIR_MODEL_GLM_MODEL=GLM-5.1
+AIR_MODEL_LOCAL_API_KEY=...
+AIR_MODEL_LOCAL_BASE_URL=http://localhost:11434/v1
+AIR_MODEL_LOCAL_MODEL=qwen2.5-coder
 ```
 
-Switch providers by changing `AIR_MODEL_PROFILE`. To use `OPENAI_*` directly, leave it unset.
+Use `--model-config` to point a command at another OpenAI-compatible provider config.
 
 ## Skills
 
@@ -183,6 +182,83 @@ cargo run -p air-cli -- run "refactor a helper and run tests" \
 
 Use `--replay-from <trace-line>` to replay the earlier trace up to a chosen event and switch back to live execution from that point.
 
+### Deterministic audit
+
+Audit a code-run artifact without calling a model:
+
+```bash
+cargo run -p air-cli -- audit run target/generated/code-runs/helper \
+  --report target/generated/code-runs/helper-audit.md
+```
+
+`air audit run` emits an `air.audit.v1` JSON report with deterministic sections
+for correctness, safety, verification, tool use, context, cost, and
+reward-hacking risk. The final audit verdict is derived from artifact files,
+workspace diff, `CodeRunVerdict`, and trace events; LLM advisory explanations
+can be layered on later, but they do not decide pass/fail.
+
+Summarize a window of runs for platform review:
+
+```bash
+cargo run -p air-cli -- audit collect \
+  --from target/generated \
+  --since-unix 1770000000 \
+  --limit 100 \
+  --out-dir .air/audit/latest \
+  --report .air/audit/latest.md
+```
+
+`air audit collect` scans for code-run artifacts, writes one audit JSON per run,
+and produces an `air.audit_collection.v1` summary with pass/fail counts, finding
+categories, severity counts, skill/tool distribution, top cost runs, high-risk
+runs, scan-window metadata, and collection errors. Use `--since-unix` and
+`--limit` to keep periodic platform reviews incremental instead of re-scanning a
+large `target/generated` tree. Teams can run it daily, weekly, after a release,
+or over any artifact directory they want to review.
+
+### Dream: offline optimization review
+
+Dream packages AIR's audit-first improvement loop as a periodic offline review:
+agents work during the day, then AIR reviews the traces and artifacts later.
+Dream does not trust model self-assessment and does not change source code by
+itself. It runs deterministic audit collection, mines findings and suggested
+regressions, writes a Dream report, and gives the platform team reviewable next
+commands.
+
+```bash
+cargo run -p air-cli -- dream run \
+  --from target/generated \
+  --limit 100 \
+  --out-dir .air/dream/latest \
+  --write-regressions
+```
+
+`dream run` is incremental by default. It reads `.air/dream/state.json` and
+uses the previous successful Dream completion time as the next scan window. Use
+`--full` to ignore the saved state, or pass `--since-unix` to set an explicit
+window.
+
+```bash
+cargo run -p air-cli -- dream state
+cargo run -p air-cli -- dream run --full --from target/generated
+```
+
+The output schema is `air.dream.v1`; the state schema is `air.dream_state.v1`.
+The Dream directory contains:
+
+- `dream.json` and `dream.md`: executive summary and next commands.
+- `audit/`: deterministic audit collection and per-run audit reports.
+- `improve/`: observations, findings, suggested regressions, and report.
+- `logs/`: captured stdout/stderr from the underlying audit and improve stages.
+- `.air/dream/state.json`: the persistent incremental cursor and last Dream
+  summary.
+
+The safe follow-up is still explicit: promote/review regressions, run
+`air self fix ... --evaluate` only when a finding is worth fixing, compare
+candidates, and open a PR manually. Future memory systems can plug into Dream as
+another offline consolidation stage, but deterministic gates remain the source
+of truth for promotion.
+
 ## Project Workflows
 
 For tasks larger than one edit loop, AIR has a project orchestrator with task DAGs, per-task worktree isolation, skill assignment, and diff constraints:
@@ -208,7 +284,7 @@ project:
   goal: refactor the tools crate into smaller modules
 defaults:
   profile: skills/code-agent/edit.air-profile.yaml
-  model_config: examples/bigmodel-openai-compatible.json
+  model_config: examples/local-openai-compatible.json
   tool_config: skills/code-agent/tools.json
   artifact_dir: .air/project
 tasks:
@@ -241,6 +317,26 @@ cargo run -p air-cli -- bench skill tdd-workflow --suite suite.json --compare-no
 
 Benchmarks produce JSON run artifacts and optional Markdown reports with per-task pass/fail, model calls, tool calls, and failure reasons. Code-run artifacts are cached by input fingerprint and replayed on subsequent runs.
 
+## Eval Integrity
+
+Pin the evaluation corpus before using self-improvement candidates:
+
+```bash
+cargo run -p air-cli -- eval manifest \
+  --out .air/evals/manifest.json
+
+cargo run -p air-cli -- eval check \
+  --manifest .air/evals/manifest.json
+```
+
+The manifest stores sha256 hashes for benchmark suites, promoted regressions,
+and scoring/evaluation code. Its protected paths are built from broad eval/trust
+globs plus the actual pinned git-tracked integrity files, so AIR does not depend
+on one hard-coded runner path. `air improve evaluate` automatically runs this
+check when `.air/evals/manifest.json` exists. A candidate that edits protected
+eval files, changes the manifest, removes a pinned file, or changes a pinned
+file's hash is blocked as `needs_review`.
+
 ## Improve Loop
 
 AIR can mine existing run artifacts and benchmark outputs for failed runs, group
@@ -255,6 +351,11 @@ cargo run -p air-cli -- improve check IMP-001
 cargo run -p air-cli -- improve promote IMP-001
 cargo run -p air-cli -- regression run IMP-001
 cargo run -p air-cli -- improve evaluate IMP-001
+cargo run -p air-cli -- self prepare IMP-001 --candidates 3
+cargo run -p air-cli -- self fix IMP-001 --candidates 3 --evaluate
+cargo run -p air-cli -- self fix IMP-001 --skill code-agent --candidates 3 --evaluate
+cargo run -p air-cli -- self capture IMP-001 cand-1
+cargo run -p air-cli -- self compare IMP-001 --out .air/candidates/IMP-001.md
 
 cargo run -p air-cli -- improve \
   --from target/generated/code-agent-bench/<run-id> \
@@ -264,12 +365,46 @@ cargo run -p air-cli -- improve \
 The default output is `.air/improve/latest/` with `observations.json`,
 `findings.json`, `suggested_regressions.json`, and `report.md`. This command is
 read-only with respect to AIR source code; it only turns real failures into
-evidence that can be promoted into benchmarks.
+evidence that can be promoted into benchmarks. Findings are sorted by an
+`impact_score` that combines frequency, task spread, changed-file spread, and
+failure-category weight, so the report surfaces what is most worth fixing first.
+`air self capture` stores a candidate's concrete workspace diff as
+`patch.diff` plus `changed_files.json`, so the candidate scorecard points to the
+actual code change being evaluated.
+`air self fix` uses AIR's own `code-agent` in detached worktrees to generate
+candidate patches; it can also evaluate each generated candidate before
+comparison when `--evaluate` is passed. Each detached worktree is bootstrapped
+with the caller's current tracked and untracked workspace overlay before the
+candidate starts, then the captured patch is diffed only against that bootstrap
+commit. The generated task prompt includes the selected finding, regression
+fixture hints, benchmark task context, impact reason, and any rejected candidate
+feedback from earlier candidates in the same run; each candidate slot also
+records that prompt as `task.md`. Benchmark suites, fixtures, regressions, eval
+manifests, and `skills.lock` are evidence/gates, not acceptable candidate fix
+targets.
+Use `--skill <skill-id>` when the candidate should improve a local skill package
+instead of AIR runtime code. External MCP servers remain out of scope; AIR can
+improve the local skill/tool config/policy that governs how those MCP tools are
+used.
 
 Promoted regressions become executable gates through `air regression run`.
 `air improve evaluate` runs the promoted regression, an improve-focused test
-gate, and deterministic anti-reward-hacking checks before returning
-`accept_candidate`, `reject_candidate`, or `needs_review`.
+gate, eval-manifest integrity when present, and deterministic
+anti-reward-hacking checks before returning `accept_candidate`,
+`reject_candidate`, or `needs_review`.
+
+The intended safe-improvement flow is:
+
+```text
+real run or bench failure
+  -> deterministic audit
+  -> finding
+  -> promoted regression
+  -> candidate patch in a reviewable candidate slot
+  -> regression + tests + guard
+  -> candidate scorecard
+  -> PR, not direct promotion
+```
 
 ## CodeRunVerdict
 
@@ -390,6 +525,10 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | `run` | User entry point; routes skills and picks code-agent or project-agent |
 | `skill route` | Route a task to matching skills |
 | `skill list/validate/explain/audit/import/upgrade` | Skill lifecycle management |
+| `audit run/collect` | Audit one code-run artifact or summarize many artifacts |
+| `dream run/state` | Incrementally audit recent runs, mine improvement findings, and inspect the Dream cursor |
+| `eval manifest/check` | Pin and verify evaluation corpus integrity |
+| `self prepare/fix/capture/compare` | Create, generate, capture, and compare candidate improvements |
 | `mcp list/explain/audit` | Inspect MCP tool governance before runs |
 | `bench code` | Benchmark code agent on a suite |
 | `bench skill` | Benchmark with skill preload, optional no-skill comparison |

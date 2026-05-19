@@ -5,6 +5,7 @@ agent:
 
 inputs:
   task: string
+  verification_command: string
 
 outputs:
   edit:
@@ -48,6 +49,8 @@ state:
   verification_status:
     type: enum
     enum: [unknown, passed, failed]
+  verification_required:
+    type: boolean
   decision:
     type: object
     required: [complete, tool_calls]
@@ -109,49 +112,49 @@ state:
 tools:
   - name: question
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: bash
     capability: code.test
-    timeout_ms: 120000
+    timeout_ms: 1800000
   - name: grep
     capability: file.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: glob
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: lsp
     capability: code.read
-    timeout_ms: 30000
+    timeout_ms: 1800000
   - name: task
     capability: code.read
-    timeout_ms: 600000
+    timeout_ms: 1800000
   - name: read_range
     capability: file.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: read_contains
     capability: file.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: edit
     capability: file.write
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: write
     capability: file.write
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: apply_patch
     capability: file.write
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: webfetch
     capability: code.read
-    timeout_ms: 120000
+    timeout_ms: 1800000
   - name: todowrite
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: todoread
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: skill
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
 
 workflow:
   kind: state_machine
@@ -172,7 +175,7 @@ workflow:
               top_k:
                 literal: 3
           output: available_skills
-          timeout_seconds: 10
+          timeout_seconds: 300
         - kind: set
           values:
             observations: []
@@ -182,6 +185,7 @@ workflow:
               any_verification_passed: false
               any_verification_failed: false
             verification_status: unknown
+            verification_required: false
             phase: choose
 
     - id: summarize-at-step-limit
@@ -221,15 +225,73 @@ workflow:
               allowed_tools:
                 literal: [question, bash, grep, glob, lsp, task, read_contains, read_range, edit, write, apply_patch, webfetch, todowrite, todoread, skill]
           output: decision
-          timeout_seconds: 180
+          timeout_seconds: 1800
           retry:
             max_attempts: 4
         - kind: set
           values:
             phase: act
 
+    - id: verify-command
+      when: phase == "verify" && verification_command != ""
+      actions:
+        - kind: tool_batch_dispatch
+          input:
+            array:
+              - object:
+                  tool:
+                    literal: bash
+                  input:
+                    object:
+                      command:
+                        ref: verification_command
+                      description:
+                        literal: Run deterministic verification command
+          output: observation
+          max_calls: 1
+          allowed_tools: [bash]
+          timeout_seconds: 1800
+          on_error: observe
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: tool_result
+              assistant:
+                object:
+                  complete:
+                    literal: false
+                  tool_calls:
+                    array:
+                      - object:
+                          tool:
+                            literal: bash
+                          input:
+                            object:
+                              command:
+                                ref: verification_command
+                              description:
+                                literal: Run deterministic verification command
+              requested:
+                array:
+                  - object:
+                      tool:
+                        literal: bash
+                      input:
+                        object:
+                          command:
+                            ref: verification_command
+                          description:
+                            literal: Run deterministic verification command
+              result:
+                ref: observation
+        - kind: set
+          values:
+            phase: post_act
+
     - id: verify
-      when: phase == "verify"
+      when: phase == "verify" && verification_command == ""
       actions:
         - kind: model_call
           model: code_edit_decider
@@ -243,8 +305,12 @@ workflow:
                 max_bytes: 600000
               allowed_tools:
                 literal: [bash]
+              verification_gate:
+                literal:
+                  required: true
+                  instruction: "Run exactly one real verification command such as cargo test, cargo check, cargo clippy, npm test, pytest, or another test/check/lint command. Do not inspect files, grep, print source, or run exploratory commands in verify phase."
           output: decision
-          timeout_seconds: 180
+          timeout_seconds: 1800
           retry:
             max_attempts: 4
         - kind: set
@@ -259,7 +325,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 64
-          timeout_seconds: 600
+          timeout_seconds: 1800
           on_error: observe
         - kind: append
           target: observations
@@ -286,7 +352,7 @@ workflow:
           output: observation
           max_calls: 64
           allowed_tools: [bash]
-          timeout_seconds: 600
+          timeout_seconds: 1800
           on_error: observe
         - kind: append
           target: observations
@@ -310,6 +376,7 @@ workflow:
         - kind: set
           values:
             verification_status: passed
+            verification_required: false
             phase: choose
 
     - id: verification-failed
@@ -318,6 +385,7 @@ workflow:
         - kind: set
           values:
             verification_status: failed
+            verification_required: false
             phase: choose
 
     - id: verification-reset-after-write
@@ -326,6 +394,7 @@ workflow:
         - kind: set
           values:
             verification_status: unknown
+            verification_required: false
             phase: choose
 
     - id: complete-needs-verification
@@ -341,6 +410,7 @@ workflow:
                 literal: Run an appropriate bash verification command before finishing.
         - kind: set
           values:
+            verification_required: true
             phase: verify
 
     - id: verify-complete-needs-command
@@ -356,7 +426,24 @@ workflow:
                 literal: Run an appropriate bash verification command before finishing.
         - kind: set
           values:
+            verification_required: true
             phase: verify
+
+    - id: verify-command-required
+      when: phase == "post_act" && verification_required == true && observation_summary.verification_status_update == "unchanged"
+      actions:
+        - kind: append
+          target: observations
+          value:
+            object:
+              action:
+                literal: verification_required
+              result:
+                literal: Verify phase only accepts real test/check/lint commands. Exploratory bash commands are not verification.
+        - kind: set
+          values:
+            verification_required: false
+            phase: summarize
 
     - id: complete-verified
       when: phase == "act" && decision.complete == true && verification_status == "passed"
@@ -394,7 +481,7 @@ workflow:
                       description: List changed files including untracked files
           output: final_diff_result
           max_calls: 2
-          timeout_seconds: 120
+          timeout_seconds: 1800
           on_error: observe
         - kind: set
           values:

@@ -18,6 +18,7 @@ pub(crate) const DEFAULT_CODE_PROFILE: &str = "skills/code-agent/edit.air-profil
 
 pub(crate) struct CodeOptions {
     pub(crate) task: String,
+    pub(crate) verification_command: Option<String>,
     pub(crate) artifact_task: Option<String>,
     pub(crate) skill: Option<CodeRunSkill>,
     pub(crate) profile: Option<PathBuf>,
@@ -37,6 +38,7 @@ pub(crate) struct CodeOptions {
 pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     let CodeOptions {
         task,
+        verification_command,
         artifact_task,
         skill,
         profile,
@@ -58,7 +60,7 @@ pub(crate) fn run_code_agent(options: CodeOptions) -> Result<Value> {
     }
 
     let profile = profile.unwrap_or_else(|| PathBuf::from(DEFAULT_CODE_PROFILE));
-    let input = build_input(task);
+    let input = build_input(task, verification_command);
     let descriptor_task = artifact_task.unwrap_or_else(|| {
         input
             .get("task")
@@ -204,9 +206,16 @@ pub(crate) fn code_profile_explain(
     }))
 }
 
-pub(crate) fn build_input(task: String) -> Map<String, Value> {
+pub(crate) fn build_input(
+    task: String,
+    verification_command: Option<String>,
+) -> Map<String, Value> {
     let mut input = Map::new();
     input.insert("task".to_string(), Value::String(task));
+    input.insert(
+        "verification_command".to_string(),
+        Value::String(verification_command.unwrap_or_default()),
+    );
     input
 }
 
@@ -259,13 +268,14 @@ mod tests {
 
     #[test]
     fn code_input_is_just_the_task() {
-        let input = build_input("refactor a helper".to_string());
+        let input = build_input("refactor a helper".to_string(), None);
 
-        assert_eq!(input.len(), 1);
+        assert_eq!(input.len(), 2);
         assert_eq!(
             input["task"],
             Value::String("refactor a helper".to_string())
         );
+        assert_eq!(input["verification_command"], Value::String(String::new()));
     }
 
     #[test]
@@ -292,6 +302,7 @@ mod tests {
                 "init",
                 "summarize-at-step-limit",
                 "choose",
+                "verify-command",
                 "verify",
                 "act",
                 "verify-act",
@@ -300,6 +311,7 @@ mod tests {
                 "verification-reset-after-write",
                 "complete-needs-verification",
                 "verify-complete-needs-command",
+                "verify-command-required",
                 "complete-verified",
                 "continue-after-act",
                 "summarize",
@@ -456,6 +468,10 @@ mod tests {
             serde_yaml::Value::String("passed".to_string())
         );
         assert_eq!(
+            verification_passed["actions"][0]["values"]["verification_required"],
+            serde_yaml::Value::Bool(false)
+        );
+        assert_eq!(
             verification_passed["actions"][0]["values"]["phase"],
             serde_yaml::Value::String("choose".to_string())
         );
@@ -493,14 +509,44 @@ mod tests {
             needs_verification["actions"][1]["values"]["phase"],
             serde_yaml::Value::String("verify".to_string())
         );
+        assert_eq!(
+            needs_verification["actions"][1]["values"]["verification_required"],
+            serde_yaml::Value::Bool(true)
+        );
 
         let verify = rules
             .iter()
             .find(|rule| rule["id"].as_str() == Some("verify"))
             .unwrap();
+        assert!(verify["when"]
+            .as_str()
+            .unwrap()
+            .contains("verification_command == \"\""));
+        assert_eq!(
+            verify["actions"][0]["input"]["object"]["verification_gate"]["literal"]["required"],
+            serde_yaml::Value::Bool(true)
+        );
         assert_eq!(
             verify["actions"][1]["values"]["phase"],
             serde_yaml::Value::String("verify_act".to_string())
+        );
+
+        let verify_command = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("verify-command"))
+            .unwrap();
+        assert!(verify_command["when"]
+            .as_str()
+            .unwrap()
+            .contains("verification_command != \"\""));
+        assert_eq!(
+            verify_command["actions"][0]["allowed_tools"],
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("bash".to_string())])
+        );
+        assert_eq!(
+            verify_command["actions"][0]["input"]["array"][0]["object"]["input"]["object"]
+                ["command"]["ref"],
+            serde_yaml::Value::String("verification_command".to_string())
         );
 
         let verify_act = rules
@@ -510,6 +556,19 @@ mod tests {
         assert_eq!(
             verify_act["actions"][0]["allowed_tools"],
             serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("bash".to_string())])
+        );
+
+        let verify_command_required = rules
+            .iter()
+            .find(|rule| rule["id"].as_str() == Some("verify-command-required"))
+            .unwrap();
+        let verify_command_required_condition = verify_command_required["when"].as_str().unwrap();
+        assert!(verify_command_required_condition.contains("verification_required == true"));
+        assert!(verify_command_required_condition
+            .contains("verification_status_update == \"unchanged\""));
+        assert_eq!(
+            verify_command_required["actions"][1]["values"]["phase"],
+            serde_yaml::Value::String("summarize".to_string())
         );
 
         let complete_verified = rules

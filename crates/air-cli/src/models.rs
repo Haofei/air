@@ -605,7 +605,7 @@ mod tests {
             .canonicalize()
             .unwrap();
         let config = air_backend_openai::parse_config_file(
-            root.join("examples/bigmodel-openai-compatible.json"),
+            root.join("examples/local-openai-compatible.json"),
         )
         .unwrap();
         let requirements = code_agent_model_output_requirements(&root);

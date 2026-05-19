@@ -63,7 +63,7 @@
       "kind": "bash",
       "capability": "code.test",
       "cwd": "../..",
-      "timeout_seconds": 120,
+      "timeout_seconds": 600,
       "max_bytes": 51200,
       "truncation_direction": "tail"
     },
@@ -88,7 +88,7 @@
             "--trace-out",
             "{trace_file}"
           ],
-          "timeout_seconds": 600,
+          "timeout_seconds": 1800,
           "max_bytes": 51200,
           "truncation_direction": "tail"
         }
@@ -97,7 +97,7 @@
     "webfetch": {
       "kind": "web_fetch",
       "capability": "code.read",
-      "timeout_seconds": 120,
+      "timeout_seconds": 600,
       "max_bytes": 51200
     },
     "todowrite": {

@@ -854,6 +854,26 @@ where
                 }
                 return Err(error);
             }
+            if let Err(error) = validate_tool_batch_input_shape(&tool, &tool_input) {
+                let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
+                insert_batch_item_meta(&mut meta, index);
+                context.push_event_with_meta(
+                    "tool_batch_dispatch_item",
+                    Some(tool_input.clone()),
+                    None,
+                    Some(meta),
+                    Err(error.to_string()),
+                );
+                if on_error == ToolErrorMode::Observe {
+                    results.push(tool_batch_error_observation_for_runtime_error(
+                        &tool,
+                        &tool_input,
+                        &error,
+                    ));
+                    continue;
+                }
+                return Err(error);
+            }
             if let Err(error) = validate_tool_capability(context.module, &tool, &self.tools) {
                 let mut meta = tool_error_meta(&tool, requested_tool.as_deref());
                 insert_batch_item_meta(&mut meta, index);
@@ -1761,6 +1781,22 @@ fn validate_tool_batch_allowlist(tool: &str, allowed_tools: &[String]) -> Result
         tool: tool.to_string(),
         allowed_tools: allowed_tools.to_vec(),
     })
+}
+
+fn validate_tool_batch_input_shape(tool: &str, input: &Value) -> Result<(), RuntimeError> {
+    if allows_empty_tool_input(tool) {
+        return Ok(());
+    }
+    if input.as_object().is_some_and(Map::is_empty) {
+        return Err(RuntimeError::SchemaViolation(format!(
+            "tool_batch_dispatch item.input for {tool} must not be empty"
+        )));
+    }
+    Ok(())
+}
+
+fn allows_empty_tool_input(tool: &str) -> bool {
+    matches!(tool, "todoread")
 }
 
 fn resolve_tool_selection(selection: &Value) -> Result<(String, Value), RuntimeError> {

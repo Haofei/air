@@ -10,6 +10,85 @@ AIR has three layers:
 
 Host applications provide model, tool, and approval implementations through typed provider contracts.
 
+## Company Adoption Flow
+
+For a team or company, AIR is meant to be installed once as the governed agent
+runtime around local skills, MCP tools, policy, evals, and run artifacts:
+
+```bash
+# 1. Connect company tools and inspect their capabilities.
+cargo run -p air-cli -- mcp audit --tool-config tools.json
+
+# 2. Import and audit company skills before trusting them.
+cargo run -p air-cli -- skill import ./skills/company-rust-style
+cargo run -p air-cli -- skill audit company-rust-style --write
+
+# 3. Run developer tasks through the bounded entrypoint.
+cargo run -p air-cli -- run "fix the failing invoice rounding test" \
+  --artifact-out target/generated/code-runs/invoice-rounding
+
+# 4. Audit the exact run artifact before using it as evidence.
+cargo run -p air-cli -- audit run target/generated/code-runs/invoice-rounding \
+  --report target/generated/code-runs/invoice-rounding-audit.md
+
+# 5. Periodically summarize any window of runs for platform review.
+cargo run -p air-cli -- audit collect \
+  --from target/generated \
+  --since-unix 1770000000 \
+  --limit 100 \
+  --out-dir .air/audit/latest \
+  --report .air/audit/latest.md
+
+# 6. Run Dream to package audit + improve mining into one offline review.
+cargo run -p air-cli -- dream run \
+  --from target/generated \
+  --limit 100 \
+  --out-dir .air/dream/latest \
+  --write-regressions
+
+cargo run -p air-cli -- dream state
+
+# 7. Pin evaluation files before evaluating candidate improvements.
+cargo run -p air-cli -- eval manifest --out .air/evals/manifest.json
+cargo run -p air-cli -- eval check --manifest .air/evals/manifest.json
+
+# 8. Mine real failures into regressions and gates.
+cargo run -p air-cli -- improve --from target/generated --write-regressions
+cargo run -p air-cli -- regression run --all
+cargo run -p air-cli -- self prepare IMP-001 --candidates 3
+cargo run -p air-cli -- self fix IMP-001 --candidates 3 --evaluate
+cargo run -p air-cli -- self compare IMP-001 --out .air/candidates/IMP-001.md
+```
+
+Developers mostly use `air run`. Platform teams own `tools.json`, imported
+skills, `skills.lock`, benchmark suites, promoted regressions, and audit policy.
+This separation keeps model freedom behind deterministic evidence: every useful
+run should leave a trace, artifact, verification result, and audit report that
+can be reviewed without trusting the model's self-assessment.
+
+The review window is operational, not hard-coded. A team can collect runs every
+day, every release, every incident review, or after enough new artifacts have
+accumulated. The collection report is the platform team's starting point: top
+failure categories become findings, repeated findings become regressions, and
+candidate runtime/skill/tool changes are evaluated against those gates before a
+PR is opened.
+
+`air dream run` is the productized version of that review window. It is
+incremental by default: AIR reads `.air/dream/state.json`, uses the previous
+successful Dream completion time as the next scan cursor, and updates the state
+only after the Dream run succeeds. Use `--full` to ignore the saved cursor, or
+`--since-unix` to force a specific window. It writes
+`.air/dream/latest/dream.json` and `.air/dream/latest/dream.md`, plus `audit/`,
+`improve/`, and `logs/` subdirectories. Dream is intentionally offline and
+review-first: it audits recent artifacts, mines findings, optionally writes
+suggested regression JSON files, and prints next commands. It does not modify
+source code, open PRs, or trust generated patches without the normal
+regression/test/guard/candidate comparison gates.
+
+Once `.air/evals/manifest.json` exists, `air improve evaluate` checks it
+automatically. This protects the loop from candidates that pass by editing
+benchmark suites, promoted regressions, scoring code, or the manifest itself.
+
 ## 1. Run The Simple Example
 
 ```bash
@@ -21,13 +100,14 @@ cargo run -p air-cli -- dev run-plan --profile examples/simple-helpdesk/profile.
 `air` auto-loads a repository-root `.env`. Put real provider settings there:
 
 ```dotenv
-AIR_MODEL_PROFILE=glm
-AIR_MODEL_GLM_API_KEY=...
-AIR_MODEL_GLM_BASE_URL=https://open.bigmodel.cn/api/coding/paas/v4
-AIR_MODEL_GLM_MODEL=GLM-5.1
+AIR_MODEL_LOCAL_API_KEY=...
+AIR_MODEL_LOCAL_BASE_URL=http://localhost:11434/v1
+AIR_MODEL_LOCAL_MODEL=qwen2.5-coder
 ```
 
-Use `AIR_MODEL_PROFILE=local` with `AIR_MODEL_LOCAL_*` variables to switch to a local OpenAI-compatible API without changing commands.
+AIR's default model config is `examples/local-openai-compatible.json`, which
+uses `AIR_MODEL_LOCAL_*` variables directly. Use `--model-config` when a command
+should target a different provider.
 
 The profile points to:
 
@@ -35,7 +115,7 @@ The profile points to:
 - `examples/simple-helpdesk/module-store.air-store.yaml`
 - `examples/simple-helpdesk/input.json`
 - `examples/simple-helpdesk/tools.json`
-- `examples/bigmodel-openai-compatible.json`
+- `examples/local-openai-compatible.json`
 
 Profiles are the preferred user-facing entrypoint because they hide repeated flags.
 
@@ -250,7 +330,7 @@ AIR uses OpenAI-compatible model config for real model calls:
       "base_url": "https://example.com/v1",
       "model": "example-model",
       "temperature": 0,
-      "request_timeout_seconds": 120,
+      "request_timeout_seconds": 1800,
       "json_mode": true,
       "native_tool_calls": false,
       "extra_body": {
@@ -265,7 +345,7 @@ AIR uses OpenAI-compatible model config for real model calls:
 }
 ```
 
-`request_timeout_seconds` is optional and defaults to 120 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout as the request deadline. AIR also records elapsed-time violations in the runtime trace.
+`request_timeout_seconds` is optional and defaults to 1800 seconds. AIR action `timeout_seconds` is forwarded to timeout-aware providers, and the OpenAI-compatible provider uses the smaller of the provider request timeout and the AIR action timeout as the request deadline. AIR also records elapsed-time violations in the runtime trace.
 
 OpenAI-compatible providers are not identical. AIR does not hard-code behavior for each model name. The provider uses `async-openai` as the single transport path, with BYOT JSON request bodies so AIR can still pass provider extensions. Use `json_mode` or `response_format` for structured-output support, and use `extra_body` to pass provider-specific request fields such as thinking controls, self-hosted gateway flags, or other vendor extensions. AIR merges `extra_body` into the chat/completions request body without overriding the configured AIR fields. When a provider returns text or a wrapper that does not match the declared AIR output schema, the runtime rejects it with schema feedback so retry attempts can correct the response against the same declared interface.
 
@@ -473,12 +553,12 @@ syntax as HTTP tools. Install the browser runtime once with `npm install` and
       "required_terms": [],
       "exclude_terms": [],
       "page_concurrency": 3,
-      "navigation_timeout_ms": 12000,
-      "overall_timeout_ms": 110000,
+      "navigation_timeout_ms": 60000,
+      "overall_timeout_ms": 600000,
       "search_delay_ms": 500,
       "retry_count": 1,
       "fetch_pages": true,
-      "timeout_seconds": 120
+      "timeout_seconds": 600
     }
   }
 }
@@ -527,7 +607,7 @@ Example coding-agent file, search, edit, and bash tool aliases:
       "kind": "bash",
       "capability": "code.test",
       "cwd": ".",
-      "timeout_seconds": 120,
+      "timeout_seconds": 600,
       "max_bytes": 65536,
       "truncation_direction": "tail"
     }
@@ -588,6 +668,138 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
   --trace-out target/generated/run.trace.jsonl
 ```
 
+Code-agent artifacts can be audited directly:
+
+```bash
+cargo run -p air-cli -- run "refactor a helper and run tests" \
+  --artifact-out target/generated/code-runs/helper
+
+cargo run -p air-cli -- audit run target/generated/code-runs/helper \
+  --report target/generated/code-runs/helper-audit.md
+```
+
+`air audit run` emits `air.audit.v1` JSON and optionally writes a Markdown
+summary. The audit is deterministic and read-only. It checks the code-run
+artifact, referenced trace, workspace diff, `CodeRunVerdict`, verification
+events, tool call counts, context/cost metrics, and reward-hacking indicators
+such as protected eval or trust-state file changes. Missing traces,
+verification failures, forbidden-file changes, and protected eval mutations are
+findings in the report; LLM-generated explanations should be treated as advisory
+only.
+
+For a group of runs, collect audits into a platform review report:
+
+```bash
+cargo run -p air-cli -- audit collect \
+  --from target/generated \
+  --since-unix 1770000000 \
+  --limit 100 \
+  --out-dir .air/audit/latest \
+  --report .air/audit/latest.md
+```
+
+The collection writes `.air/audit/latest/collection.json`, per-run audit JSON
+under `.air/audit/latest/runs/`, and a Markdown report. It summarizes pass/fail
+counts, finding categories, severity counts, skill usage, tool usage, top cost
+runs, high-risk runs, scan-window metadata, and collection errors. Use
+`--since-unix` and `--limit` for periodic reviews so large artifact trees do not
+need to be fully re-scanned every time. This is the periodic self-improve intake:
+platform teams review the report, promote real failures into regressions,
+evaluate candidate fixes, and only promote changes through PRs.
+
+For the same review window, Dream runs audit collection and improve mining
+together and writes a single platform report:
+
+```bash
+cargo run -p air-cli -- dream run \
+  --from target/generated \
+  --limit 100 \
+  --out-dir .air/dream/latest \
+  --write-regressions
+```
+
+Dream's output schema is `air.dream.v1`; the saved cursor schema is
+`air.dream_state.v1` and can be inspected with:
+
+```bash
+cargo run -p air-cli -- dream state
+```
+
+Treat Dream as the night-cycle consolidation layer: current Dream reports turn
+traces into findings and regression candidates; future memory systems can add
+another consolidation stage for durable team/project memories without changing
+the promotion rule. Source changes still go through explicit candidate patches,
+evaluation, compare, and manual PR review.
+
+## 11. Eval Integrity
+
+Use an eval manifest when AIR improvements should be compared against a stable
+corpus:
+
+```bash
+cargo run -p air-cli -- eval manifest \
+  --out .air/evals/manifest.json
+
+cargo run -p air-cli -- eval check \
+  --manifest .air/evals/manifest.json
+```
+
+By default the manifest pins AIR's code-agent benchmark suites, promoted
+regressions, and git-tracked evaluation/scoring code discovered from the current
+repository. The protected path list combines broad eval/trust globs with the
+actual pinned files, so a source-file move is picked up when the manifest is
+regenerated instead of depending on one hard-coded path. You can add company
+suites with repeated `--include` flags:
+
+```bash
+cargo run -p air-cli -- eval manifest \
+  --out .air/evals/manifest.json \
+  --include skills/code-agent/benches \
+  --include .air/company-evals
+```
+
+The check validates pinned file hashes and also inspects the current git diff
+for protected eval paths. `air improve evaluate` runs this check automatically
+when `.air/evals/manifest.json` exists, so candidate patches cannot quietly
+change the eval corpus or trust state to pass.
+
+Prepare candidate slots before trying multiple fixes:
+
+```bash
+cargo run -p air-cli -- self prepare IMP-001 --candidates 3
+cargo run -p air-cli -- self fix IMP-001 --candidates 3 --evaluate
+cargo run -p air-cli -- self fix IMP-001 --skill code-agent --candidates 3 --evaluate
+cargo run -p air-cli -- self capture IMP-001 cand-1
+```
+
+`self fix` runs AIR's own `code-agent` in detached worktrees and writes each
+candidate patch back into `.air/candidates/IMP-001/cand-N/patch.diff`. The
+candidate worktree first receives the caller's current tracked and untracked
+workspace overlay, then AIR captures only the patch generated after that
+bootstrap commit. The candidate task is not a generic "fix this" prompt: AIR
+injects the selected finding category, impact score, priority reason, regression
+fixture hint, benchmark task context, evidence, and previous rejected-candidate
+feedback into `.air/candidates/IMP-001/cand-N/task.md`. Benchmark suites,
+fixtures, regressions, eval manifests, and `skills.lock` are evidence/gates, not
+acceptable candidate fix targets. Use `--skill <skill-id>` for local skill
+improvements such as prompt, profile, tool policy, docs, tests, or regressions.
+AIR does not modify external MCP servers; it can improve the local AIR layer
+that routes, constrains, audits, and benchmarks those MCP tools. Use `self
+capture` when a human or another agent produced the candidate in the current
+workspace. After each candidate is evaluated with `air improve evaluate`,
+save its JSON output as
+`.air/candidates/IMP-001/cand-N/eval.json`, then compare them:
+
+```bash
+cargo run -p air-cli -- self compare IMP-001 \
+  --out .air/candidates/IMP-001.md
+```
+
+The comparison ranks accepted candidates above `needs_review`, then rejected
+candidates, and writes a scorecard with patch path, changed-file count,
+regression, test, guard, blocked, and warning counts. Promotion remains a PR
+step rather than an automatic write to main.
+
 Use raw traces only for trusted local debugging. Raw traces preserve complete model/tool inputs and outputs, which can include prompts, documents, credentials, or user data.
 
 ```bash
@@ -616,7 +828,7 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 
 AIR specializes the resolved topology, validates it, and reuses the static hot path for matching inputs. It does not cache model outputs.
 
-## 11. Verification
+## 12. Verification
 
 Run the workspace checks:
 

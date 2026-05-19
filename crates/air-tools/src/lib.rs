@@ -692,7 +692,7 @@ impl ConfigTools {
 
 impl ToolProvider for ConfigTools {
     fn call_tool(&mut self, name: &str, input: &Value) -> Result<Value, RuntimeError> {
-        self.call_tool_with_timeout(name, input, Duration::from_secs(30))
+        self.call_tool_with_timeout(name, input, Duration::from_secs(300))
     }
 
     fn call_tool_with_timeout(
@@ -1182,7 +1182,7 @@ impl ToolProvider for ConfigTools {
                     input,
                     &resolve_config_path(&self.workspace_dir, &cwd),
                     CommandRunOptions {
-                        timeout_seconds: timeout_seconds.unwrap_or(120),
+                        timeout_seconds: timeout_seconds.unwrap_or(600),
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         truncation_direction: truncation_direction
                             .unwrap_or(TruncationDirection::Tail),
@@ -1217,7 +1217,7 @@ impl ToolProvider for ConfigTools {
                     &commands,
                     &parameters,
                     CommandRunOptions {
-                        timeout_seconds: timeout_seconds.unwrap_or(120),
+                        timeout_seconds: timeout_seconds.unwrap_or(600),
                         max_bytes: max_bytes.unwrap_or(256 * 1024),
                         truncation_direction: truncation_direction
                             .unwrap_or(TruncationDirection::Head),

@@ -37,6 +37,7 @@ pub(crate) struct EntryTaskOptions {
     pub(crate) artifact_out: Option<PathBuf>,
     pub(crate) replay_artifact: Option<PathBuf>,
     pub(crate) replay_from: Option<usize>,
+    pub(crate) verification_command: Option<String>,
     pub(crate) project_file: Option<PathBuf>,
     pub(crate) plan_only: bool,
     pub(crate) execute: bool,
@@ -75,6 +76,7 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
             artifact_out: options.artifact_out,
             replay_artifact: options.replay_artifact,
             replay_from: options.replay_from,
+            verification_command: options.verification_command,
         }),
         EntryExecutor::Project => {
             if options.trace_out.is_some()
@@ -147,6 +149,7 @@ pub(crate) fn run_entry_task(options: EntryTaskOptions) -> Result<()> {
             artifact_out: options.artifact_out,
             replay_artifact: options.replay_artifact,
             replay_from: options.replay_from,
+            verification_command: options.verification_command,
         }),
     }
 }

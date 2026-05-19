@@ -931,6 +931,10 @@ fn run_project_task(
         .with_context(|| format!("enter project task worktree {}", worktree_dir.display()))?;
     let output = run_code_agent(CodeOptions {
         task: task_prompt,
+        verification_command: task
+            .verification
+            .first()
+            .map(|command| command.command.clone()),
         artifact_task: None,
         skill: skill_metadata,
         profile: Some(profile),

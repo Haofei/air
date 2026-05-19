@@ -463,7 +463,7 @@ fn compute_request_timeout(
     timeout_seconds: Option<u64>,
     action_timeout: Option<Duration>,
 ) -> Duration {
-    let configured_timeout = Duration::from_secs(timeout_seconds.unwrap_or(30));
+    let configured_timeout = Duration::from_secs(timeout_seconds.unwrap_or(300));
     action_timeout
         .map(|timeout| timeout.min(configured_timeout))
         .unwrap_or(configured_timeout)

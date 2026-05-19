@@ -64,7 +64,7 @@ so the handoff stays concise without losing auditability.
 
 ```bash
 cargo run -p air-cli -- run "refactor a small helper and run tests" \
-  --model-config examples/bigmodel-openai-compatible.json \
+  --model-config examples/local-openai-compatible.json \
   --tool-config skills/code-agent/tools.json \
   --trace-out target/generated/code-agent.trace.jsonl \
   --log
@@ -92,7 +92,7 @@ agent run:
 
 ```bash
 cargo run -p air-cli -- run "refactor a small helper and run tests" \
-  --model-config examples/bigmodel-openai-compatible.json \
+  --model-config examples/local-openai-compatible.json \
   --tool-config skills/code-agent/tools.json \
   --artifact-out target/generated/code-run-artifacts/manual-run
 ```

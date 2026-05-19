@@ -54,28 +54,28 @@ state:
 tools:
   - name: question
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: grep
     capability: file.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: glob
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: lsp
     capability: code.read
-    timeout_ms: 30000
+    timeout_ms: 1800000
   - name: read_range
     capability: file.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: read_contains
     capability: file.read
-    timeout_ms: 10000
+    timeout_ms: 300000
   - name: webfetch
     capability: code.read
-    timeout_ms: 120000
+    timeout_ms: 1800000
   - name: skill
     capability: code.read
-    timeout_ms: 10000
+    timeout_ms: 300000
 
 workflow:
   kind: state_machine
@@ -104,7 +104,7 @@ workflow:
                   ref: observations
                 max_bytes: 200000
           output: result
-          timeout_seconds: 180
+          timeout_seconds: 1800
           retry:
             max_attempts: 4
         - kind: set
@@ -127,7 +127,7 @@ workflow:
               allowed_tools:
                 literal: [question, grep, glob, lsp, read_contains, read_range, webfetch, skill]
           output: decision
-          timeout_seconds: 180
+          timeout_seconds: 1800
           retry:
             max_attempts: 4
         - kind: set
@@ -142,7 +142,7 @@ workflow:
             path: decision.tool_calls
           output: observation
           max_calls: 16
-          timeout_seconds: 120
+          timeout_seconds: 1800
           on_error: observe
         - kind: append
           target: observations

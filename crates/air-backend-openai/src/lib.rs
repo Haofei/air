@@ -386,7 +386,7 @@ fn effective_request_timeout(
     configured_timeout_seconds: Option<u64>,
     action_timeout: Option<Duration>,
 ) -> Duration {
-    let configured_timeout = Duration::from_secs(configured_timeout_seconds.unwrap_or(120));
+    let configured_timeout = Duration::from_secs(configured_timeout_seconds.unwrap_or(1800));
     action_timeout
         .map(|timeout| timeout.min(configured_timeout))
         .unwrap_or(configured_timeout)
@@ -1073,7 +1073,7 @@ Before executing the command, please follow these steps:
 
 Usage notes:
   - The command argument is required.
-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
+  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 600000ms (10 minutes).
   - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
   - If the output exceeds ${maxLines} lines or ${maxBytes} bytes, it will be truncated and the full output will be written to a file. Use bounded span inspection with offset/limit for specific sections or Grep to search the full content. Because of this, you do NOT need to use `head`, `tail`, or other truncation commands to limit output - just run the command directly.
 
@@ -1780,7 +1780,7 @@ fn native_tool_parameters(original_name: &str, schema: Option<&Value>) -> Value 
                         "type": "string",
                         "enum": ["text", "markdown", "html"]
                     },
-                    "timeout": {"description": "Optional timeout in seconds (max 120)", "type": "number"}
+                    "timeout": {"description": "Optional timeout in seconds (max 1800)", "type": "number"}
                 },
                 "required": ["url", "format"],
                 "additionalProperties": false
@@ -5088,7 +5088,7 @@ data: [DONE]
         );
         assert_eq!(
             effective_request_timeout(None, None),
-            Duration::from_secs(120)
+            Duration::from_secs(1800)
         );
     }
 

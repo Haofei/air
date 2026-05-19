@@ -1,3 +1,4 @@
+use crate::eval_manifest::check_default_eval_manifest_if_present;
 use crate::regression::{run_regression_suite, RegressionRunConfig, RegressionRunReport};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -35,6 +36,7 @@ pub(crate) enum ImproveAction {
     Evaluate {
         finding: String,
         report: Option<PathBuf>,
+        regression_file: Option<PathBuf>,
     },
 }
 
@@ -98,12 +100,21 @@ struct ImproveEvaluateOutput {
     schema: &'static str,
     finding: String,
     decision: String,
+    regression_gate: RegressionGateSummary,
     regression: RegressionRunReport,
     tests: ImproveTestGate,
     guard: ImproveGuardGate,
     score_delta: i32,
     eval_json: String,
     eval_report: String,
+}
+
+#[derive(Debug, Serialize)]
+struct RegressionGateSummary {
+    causal_pass: bool,
+    unresolved_stale: usize,
+    unsupported: usize,
+    statuses: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +187,8 @@ struct ImproveFinding {
     category: String,
     summary: String,
     count: usize,
+    impact_score: i32,
+    priority_reason: String,
     recommended_change_type: String,
     expected_regression: String,
     evidence: Vec<String>,
@@ -329,8 +342,18 @@ pub(crate) fn run_improve(options: ImproveOptions) -> Result<()> {
         ImproveAction::Fix { finding } => {
             return prepare_fix(finding.as_deref(), &findings, &statuses);
         }
-        ImproveAction::Evaluate { finding, report } => {
-            return evaluate_finding(finding, report.as_deref(), &out_dir, &roots);
+        ImproveAction::Evaluate {
+            finding,
+            report,
+            regression_file,
+        } => {
+            return evaluate_finding(
+                finding,
+                report.as_deref(),
+                regression_file.as_deref(),
+                &out_dir,
+                &roots,
+            );
         }
         ImproveAction::Next => {
             let next_action = choose_next_action(&findings, &observations, &statuses);
@@ -714,6 +737,19 @@ fn infer_category_from_text(text: &str) -> String {
 
 fn normalize_category(category: &str, message: &str) -> String {
     let message = message.to_ascii_lowercase();
+    let mut normalized = String::new();
+    for ch in category.chars() {
+        if ch == '-' || ch == ' ' {
+            normalized.push('_');
+        } else if ch.is_ascii_uppercase() {
+            normalized.push('_');
+            normalized.push(ch.to_ascii_lowercase());
+        } else {
+            normalized.push(ch);
+        }
+    }
+    let normalized = normalized.trim_start_matches('_').to_string();
+    let category = normalized.as_str();
     if message.contains("max_model_calls")
         || message.contains("max_tool_calls")
         || message.contains("budget")
@@ -735,12 +771,21 @@ fn mine_findings(observations: &[ImproveObservation]) -> Vec<ImproveFinding> {
     let mut grouped: BTreeMap<String, Vec<&ImproveObservation>> = BTreeMap::new();
     for observation in observations {
         grouped
-            .entry(observation.category.clone())
+            .entry(normalize_category(
+                &observation.category,
+                &observation.message,
+            ))
             .or_default()
             .push(observation);
     }
     let mut groups = grouped.into_iter().collect::<Vec<_>>();
-    groups.sort_by_key(|(category, _)| category_priority(category));
+    groups.sort_by(
+        |(left_category, left_observations), (right_category, right_observations)| {
+            finding_impact_score(right_category, right_observations)
+                .cmp(&finding_impact_score(left_category, left_observations))
+                .then_with(|| left_category.cmp(right_category))
+        },
+    );
     groups
         .into_iter()
         .enumerate()
@@ -764,6 +809,8 @@ fn mine_findings(observations: &[ImproveObservation]) -> Vec<ImproveFinding> {
                 category: category.clone(),
                 summary: finding_summary(&category, count),
                 count,
+                impact_score: finding_impact_score(&category, &observations),
+                priority_reason: priority_reason(&category, count),
                 recommended_change_type: recommended_change_type(&category).to_string(),
                 expected_regression: expected_regression(&category).to_string(),
                 evidence,
@@ -776,19 +823,45 @@ fn mine_findings(observations: &[ImproveObservation]) -> Vec<ImproveFinding> {
         .collect()
 }
 
-fn category_priority(category: &str) -> u8 {
+fn category_priority(category: &str) -> i32 {
     match category {
-        "budget_exceeded" => 10,
-        "configuration_error" => 20,
-        "diff_constraint_failed" => 30,
-        "no_patch_applied" => 40,
-        "verification_failed" => 50,
-        "skill_routing_miss" => 60,
-        "mcp_tool_failure" => 70,
-        "replay_mismatch" => 80,
-        "provider_rate_limited" => 90,
-        _ => 100,
+        "budget_exceeded" => 95,
+        "configuration_error" => 90,
+        "diff_constraint_failed" => 85,
+        "no_patch_applied" => 80,
+        "verification_failed" => 75,
+        "skill_routing_miss" => 70,
+        "mcp_tool_failure" => 65,
+        "replay_mismatch" => 60,
+        "provider_rate_limited" => 50,
+        _ => 40,
     }
+}
+
+fn finding_impact_score(category: &str, observations: &[&ImproveObservation]) -> i32 {
+    let frequency = observations.len() as i32 * 100;
+    let category_weight = category_priority(category);
+    let file_spread = observations
+        .iter()
+        .flat_map(|observation| observation.changed_files.iter())
+        .collect::<BTreeSet<_>>()
+        .len() as i32
+        * 4;
+    let task_spread = observations
+        .iter()
+        .filter_map(|observation| observation.task_id.as_deref())
+        .collect::<BTreeSet<_>>()
+        .len() as i32
+        * 20;
+    frequency + category_weight + file_spread + task_spread
+}
+
+fn priority_reason(category: &str, count: usize) -> String {
+    format!(
+        "frequency={count}, category_weight={}, likely shared failure mode={}",
+        category_priority(category),
+        recommended_change_type(category)
+    )
 }
 
 fn finding_summary(category: &str, count: usize) -> String {
@@ -1191,6 +1264,7 @@ fn prepare_fix(
 fn evaluate_finding(
     finding: &str,
     report: Option<&Path>,
+    regression_file: Option<&Path>,
     out_dir: &Path,
     roots: &[PathBuf],
 ) -> Result<()> {
@@ -1198,20 +1272,27 @@ fn evaluate_finding(
     fs::create_dir_all(&eval_dir).with_context(|| format!("create {}", eval_dir.display()))?;
     let regression = run_regression_suite(RegressionRunConfig {
         finding: Some(finding.to_string()),
-        file: None,
+        file: regression_file.map(Path::to_path_buf),
         all: false,
         from: roots.to_vec(),
         out_dir: eval_dir.join("regression"),
     })?;
     let tests = run_evaluate_tests()?;
     let guard = run_improve_guard()?;
-    let hard_gates_passed = regression.failed == 0 && tests.passed && guard.blocked.is_empty();
+    let regression_gate = summarize_regression_gate(&regression);
+    let hard_gates_passed = regression.failed == 0
+        && regression_gate.causal_pass
+        && tests.passed
+        && guard.blocked.is_empty();
     let decision = if hard_gates_passed {
         "accept_candidate"
-    } else if guard.blocked.is_empty() {
-        "reject_candidate"
-    } else {
+    } else if !guard.blocked.is_empty()
+        || regression_gate.unresolved_stale > 0
+        || regression_gate.unsupported > 0
+    {
         "needs_review"
+    } else {
+        "reject_candidate"
     };
     let score_delta = evaluate_score_delta(&regression, &tests, &guard);
     let eval_json = eval_dir.join("eval.json");
@@ -1222,6 +1303,7 @@ fn evaluate_finding(
         schema: "air.improve_evaluate.v1",
         finding: finding.to_string(),
         decision: decision.to_string(),
+        regression_gate,
         regression,
         tests,
         guard,
@@ -1241,17 +1323,46 @@ fn run_evaluate_tests() -> Result<ImproveTestGate> {
         "test".to_string(),
         "-p".to_string(),
         "air-cli".to_string(),
-        "improve".to_string(),
+        "--no-fail-fast".to_string(),
     ];
     let status = Command::new("cargo")
         .args(&command[1..])
         .status()
-        .context("run cargo test -p air-cli improve")?;
+        .context("run cargo test -p air-cli --no-fail-fast")?;
     Ok(ImproveTestGate {
         command,
         passed: status.success(),
         status: status.code(),
     })
+}
+
+fn summarize_regression_gate(regression: &RegressionRunReport) -> RegressionGateSummary {
+    let statuses = regression
+        .results
+        .iter()
+        .map(|result| result.status.clone())
+        .collect::<Vec<_>>();
+    let unresolved_stale = regression
+        .results
+        .iter()
+        .filter(|result| result.status == "stale")
+        .count();
+    let unsupported = regression
+        .results
+        .iter()
+        .filter(|result| result.status == "unsupported")
+        .count();
+    let causal_pass = regression.total > 0
+        && regression
+            .results
+            .iter()
+            .all(|result| result.passed && matches!(result.status.as_str(), "passed" | "resolved"));
+    RegressionGateSummary {
+        causal_pass,
+        unresolved_stale,
+        unsupported,
+        statuses,
+    }
 }
 
 fn run_improve_guard() -> Result<ImproveGuardGate> {
@@ -1269,8 +1380,8 @@ fn run_improve_guard() -> Result<ImproveGuardGate> {
         if status.starts_with('D') && is_protected_eval_path(path) {
             blocked.push(format!("deleted protected evaluation file: {path}"));
         }
-        if status.starts_with('M') && path.contains("benches/") {
-            warnings.push(format!("modified benchmark file: {path}"));
+        if status.starts_with('M') && is_protected_eval_path(path) {
+            blocked.push(format!("modified protected evaluation file: {path}"));
         }
         if status.starts_with('M') && path.ends_with("skills.lock") {
             blocked.push("modified skills.lock trust state".to_string());
@@ -1296,6 +1407,19 @@ fn run_improve_guard() -> Result<ImproveGuardGate> {
         }
         if exposes_sensitive_capability(trimmed, "secrets.read") {
             warnings.push("changed secrets.read capability text".to_string());
+        }
+    }
+    if let Some(eval_report) = check_default_eval_manifest_if_present()? {
+        if !eval_report.passed {
+            for path in eval_report.missing {
+                blocked.push(format!("eval manifest missing protected file: {path}"));
+            }
+            for path in eval_report.changed {
+                blocked.push(format!("eval manifest hash mismatch: {path}"));
+            }
+            for path in eval_report.protected_changed {
+                blocked.push(format!("modified eval-protected path: {path}"));
+            }
         }
     }
     blocked.sort();
@@ -1519,8 +1643,8 @@ fn write_report(
             out.push_str(&format!("- Run: `{}`\n", next_action.command));
         }
         out.push_str("\n## Findings\n\n");
-        out.push_str("| Finding | Category | Status | Count | Recommended Change | Next | Expected Regression |\n");
-        out.push_str("|---|---|---|---:|---|---|---|\n");
+        out.push_str("| Finding | Category | Status | Count | Impact | Priority Reason | Recommended Change | Next | Expected Regression |\n");
+        out.push_str("|---|---|---|---:|---:|---|---|---|---|\n");
         for finding in findings {
             let status = statuses
                 .get(&finding.id)
@@ -1530,11 +1654,13 @@ fn write_report(
                 .map(|action| action.command)
                 .unwrap_or_else(|| "none".to_string());
             out.push_str(&format!(
-                "| {} | {} | {} | {} | {} | {} | {} |\n",
+                "| {} | {} | {} | {} | {} | {} | {} | {} | {} |\n",
                 finding.id,
                 md_cell(&finding.category),
                 md_cell(status),
                 finding.count,
+                finding.impact_score,
+                md_cell(&finding.priority_reason),
                 md_cell(&finding.recommended_change_type),
                 md_cell(&next),
                 md_cell(&finding.expected_regression),

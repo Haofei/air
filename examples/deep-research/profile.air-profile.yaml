@@ -1,7 +1,7 @@
 plan: deep-research-clarified.air-plan.yaml
 store: module-store.air-store.yaml
 input_file: input.json
-model_config: ../bigmodel-openai-compatible.json
+model_config: ../local-openai-compatible.json
 tool_config: tools.json
 trace_out: ../../target/generated/deep_research_profile.trace.jsonl
 checkpoint_out: ../../target/generated/deep_research_profile.state.json

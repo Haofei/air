@@ -1,0 +1,16 @@
+{
+  "finding_id": "IMP-001",
+  "kind": "code_run_verdict",
+  "category": "diff_constraint_failed",
+  "title": "1 run(s) failed benchmark or project diff constraints",
+  "source_observations": [
+    "OBS-0001"
+  ],
+  "fixture_hint": {
+    "expected": {
+      "category": "diff_constraint_failed",
+      "final_success": false
+    },
+    "notes": "A benchmark fixture fails when changed files or diff content violate constraints."
+  }
+}

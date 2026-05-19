@@ -46,6 +46,7 @@ pub(crate) fn run_review_agent(options: ReviewOptions) -> Result<Value> {
     );
     run_code_agent(CodeOptions {
         task,
+        verification_command: None,
         artifact_task: Some(options.task),
         skill: Some(prepared.metadata.clone()),
         profile: Some(prepared.profile.clone()),
