@@ -40,12 +40,13 @@ use crate::mcp::{
     McpListOptions,
 };
 use crate::memory::{
-    build_memory_pack, build_memory_run_hint, causal_eval_memory, check_policy_candidate,
-    draft_skill_from_memory, evaluate_memory_skill, list_memory, pack_memory_command,
-    promote_memory, retire_memory, search_memory, show_memory_graph, show_memory_scorecard,
-    view_memory, MemoryCausalEvalOptions, MemoryGraphOptions, MemoryHintOptions, MemoryListOptions,
-    MemoryPackOptions, MemoryPolicyCheckOptions, MemoryPromoteOptions, MemoryRetireOptions,
-    MemoryScorecardOptions, MemorySearchOptions, MemorySkillDraftOptions,
+    advance_memory, build_memory_pack, build_memory_run_hint, causal_eval_memory,
+    check_policy_candidate, draft_skill_from_memory, evaluate_memory_skill, list_memory,
+    pack_memory_command, promote_memory, retire_memory, search_memory, show_brain,
+    show_memory_graph, show_memory_scorecard, view_memory, BrainOptions, BrainSection,
+    MemoryAdvanceOptions, MemoryCausalEvalOptions, MemoryGraphOptions, MemoryHintOptions,
+    MemoryListOptions, MemoryPackOptions, MemoryPolicyCheckOptions, MemoryPromoteOptions,
+    MemoryRetireOptions, MemoryScorecardOptions, MemorySearchOptions, MemorySkillDraftOptions,
     MemorySkillEvaluateOptions, MemoryViewOptions,
 };
 use crate::models::ModelProviderChoice;
@@ -206,6 +207,27 @@ enum Command {
         #[command(subcommand)]
         command: MemoryCommand,
     },
+    /// Show the organized agent brain: memory, skill drafts, policies, and findings.
+    Brain {
+        #[command(subcommand)]
+        command: Option<BrainCommand>,
+
+        /// Memory directory.
+        #[arg(long, global = true)]
+        memory_dir: Option<PathBuf>,
+
+        /// Dream directory.
+        #[arg(long, global = true)]
+        dream_dir: Option<PathBuf>,
+
+        /// Maximum items per section.
+        #[arg(long, global = true)]
+        limit: Option<usize>,
+
+        /// Emit machine-readable JSON instead of the human-readable view.
+        #[arg(long, global = true)]
+        json: bool,
+    },
     /// Protect evaluation files with a content manifest.
     Eval {
         #[command(subcommand)]
@@ -310,10 +332,16 @@ enum Command {
         #[arg(long, hide = true)]
         verification_command: Option<String>,
 
-        /// Include promoted Dream memory in the task context. When --artifact-out is omitted,
-        /// AIR also writes an auditable run artifact under target/generated/code-runs/.
+        /// Include promoted Dream memory in the task context. Enabled by default; kept for explicitness.
+        ///
+        /// When memory is enabled and --artifact-out is omitted, AIR also writes an auditable
+        /// run artifact under target/generated/code-runs/.
         #[arg(long)]
         memory: bool,
+
+        /// Disable promoted Dream memory injection for this run.
+        #[arg(long, conflicts_with = "memory")]
+        no_memory: bool,
 
         /// Memory directory for --memory.
         #[arg(long, hide = true)]
@@ -584,6 +612,14 @@ enum DreamCommand {
         #[arg(long, default_value_t = 1, value_parser = parse_dream_candidates)]
         candidates: usize,
 
+        /// Disable the safe memory advancement pass after extraction.
+        #[arg(long)]
+        no_advance: bool,
+
+        /// Maximum memory cards to process during the advancement pass.
+        #[arg(long, default_value_t = 25)]
+        advance_limit: usize,
+
         /// Run only artifacts newer than the previous Dream state. This is the default.
         #[arg(long, conflicts_with_all = ["full", "since_unix"])]
         incremental: bool,
@@ -784,6 +820,24 @@ enum MemoryCommand {
         #[arg(long)]
         limit: Option<usize>,
     },
+    /// Advance evidence-backed memory into promoted memory, validated skill drafts, routing measurements, and guard proposals.
+    Advance {
+        /// Memory directory.
+        #[arg(long)]
+        memory_dir: Option<PathBuf>,
+
+        /// Output directory for advance reports and review artifacts.
+        #[arg(long)]
+        out_dir: Option<PathBuf>,
+
+        /// Also run a small compare-no-skill benchmark for generated skill drafts.
+        #[arg(long)]
+        skill_bench: bool,
+
+        /// Maximum memory cards to process.
+        #[arg(long)]
+        limit: Option<usize>,
+    },
     /// Draft an untrusted skill package from procedure memory.
     SkillDraft {
         /// Procedure memory id.
@@ -822,6 +876,29 @@ enum MemoryCommand {
         /// Memory directory.
         #[arg(long)]
         memory_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum BrainCommand {
+    /// Show organized memory cards by lifecycle status.
+    Memory,
+    /// Show installed skills and Dream-compiled skill drafts.
+    Skills,
+    /// Show policy memory and reviewed runtime guard proposals.
+    Policies,
+    /// Show persistent Dream findings by lifecycle status.
+    Findings,
+    /// View one memory, skill draft, guard proposal, or finding.
+    View {
+        /// Memory id, skill id, guard memory id, or finding id.
+        id: String,
+    },
+    /// Write a Markdown report of the organized agent brain.
+    Report {
+        /// Output Markdown path.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -1545,6 +1622,8 @@ fn main() -> Result<()> {
                 top_findings,
                 budget_seconds,
                 candidates,
+                no_advance,
+                advance_limit,
                 incremental,
                 full,
             } => run_dream(DreamRunOptions {
@@ -1560,6 +1639,8 @@ fn main() -> Result<()> {
                 top_findings,
                 budget_seconds,
                 candidates,
+                advance: !no_advance,
+                advance_limit: Some(advance_limit),
             }),
             DreamCommand::State => show_dream_state(DreamStateOptions),
             DreamCommand::Findings { command } => match command {
@@ -1674,6 +1755,21 @@ fn main() -> Result<()> {
             MemoryCommand::Scorecard { memory_dir, limit } => {
                 show_memory_scorecard(MemoryScorecardOptions { memory_dir, limit })
             }
+            MemoryCommand::Advance {
+                memory_dir,
+                out_dir,
+                skill_bench,
+                limit,
+            } => {
+                let output = advance_memory(MemoryAdvanceOptions {
+                    memory_dir,
+                    out_dir,
+                    skill_bench,
+                    limit,
+                })?;
+                println!("{}", serde_json::to_string_pretty(&output)?);
+                Ok(())
+            }
             MemoryCommand::SkillDraft {
                 id,
                 memory_dir,
@@ -1698,6 +1794,31 @@ fn main() -> Result<()> {
                 check_policy_candidate(MemoryPolicyCheckOptions { memory_dir, id })
             }
         },
+        Command::Brain {
+            command,
+            memory_dir,
+            dream_dir,
+            limit,
+            json,
+        } => {
+            let (section, out) = match command {
+                None => (BrainSection::Summary, None),
+                Some(BrainCommand::Memory) => (BrainSection::Memory, None),
+                Some(BrainCommand::Skills) => (BrainSection::Skills, None),
+                Some(BrainCommand::Policies) => (BrainSection::Policies, None),
+                Some(BrainCommand::Findings) => (BrainSection::Findings, None),
+                Some(BrainCommand::View { id }) => (BrainSection::View(id), None),
+                Some(BrainCommand::Report { out }) => (BrainSection::Report, out),
+            };
+            show_brain(BrainOptions {
+                memory_dir,
+                dream_dir,
+                section,
+                limit,
+                out,
+                json,
+            })
+        }
         Command::Eval { command } => match command {
             EvalCommand::Manifest { out, include } => {
                 write_eval_manifest(EvalManifestOptions { out, include })
@@ -1797,16 +1918,18 @@ fn main() -> Result<()> {
             replay_artifact,
             replay_from,
             verification_command,
-            memory,
+            memory: _,
+            no_memory,
             memory_dir,
             memory_limit,
         } => {
+            let memory_enabled = !no_memory;
             let memory_hint = build_memory_run_hint(MemoryHintOptions {
                 memory_dir: memory_dir.clone(),
                 task: target.clone(),
                 limit: Some(memory_limit),
             })?;
-            let memory_pack = if memory {
+            let memory_pack = if memory_enabled {
                 Some(build_memory_pack(MemoryPackOptions {
                     memory_dir,
                     task: target.clone(),
@@ -3253,6 +3376,8 @@ mod tests {
                     top_findings,
                     budget_seconds,
                     candidates,
+                    no_advance,
+                    advance_limit,
                     incremental,
                     full,
                 },
@@ -3271,6 +3396,8 @@ mod tests {
         assert_eq!(top_findings, 1);
         assert_eq!(budget_seconds, None);
         assert_eq!(candidates, 1);
+        assert!(!no_advance);
+        assert_eq!(advance_limit, 25);
         assert!(!incremental);
         assert!(!full);
     }
@@ -3510,6 +3637,20 @@ mod tests {
         };
         assert_eq!(limit, Some(10));
 
+        let advance =
+            Cli::try_parse_from(["air", "memory", "advance", "--limit", "3", "--skill-bench"])
+                .unwrap();
+        let Command::Memory {
+            command: MemoryCommand::Advance {
+                limit, skill_bench, ..
+            },
+        } = advance.command
+        else {
+            panic!("expected memory advance command");
+        };
+        assert_eq!(limit, Some(3));
+        assert!(skill_bench);
+
         let draft = Cli::try_parse_from([
             "air",
             "memory",
@@ -3575,6 +3716,47 @@ mod tests {
         };
         assert_eq!(id, "mem_failure_abc");
         assert_eq!(reason, Some("stale".to_string()));
+    }
+
+    #[test]
+    fn brain_commands_parse() {
+        let summary = Cli::try_parse_from(["air", "brain", "--limit", "5"]).unwrap();
+        let Command::Brain { command, limit, .. } = summary.command else {
+            panic!("expected brain command");
+        };
+        assert!(command.is_none());
+        assert_eq!(limit, Some(5));
+
+        let skills = Cli::try_parse_from(["air", "brain", "skills"]).unwrap();
+        let Command::Brain {
+            command: Some(BrainCommand::Skills),
+            ..
+        } = skills.command
+        else {
+            panic!("expected brain skills command");
+        };
+
+        let view = Cli::try_parse_from(["air", "brain", "view", "mem_procedure_abc"]).unwrap();
+        let Command::Brain {
+            command: Some(BrainCommand::View { id }),
+            ..
+        } = view.command
+        else {
+            panic!("expected brain view command");
+        };
+        assert_eq!(id, "mem_procedure_abc");
+
+        let report =
+            Cli::try_parse_from(["air", "brain", "report", "--out", ".air/brain/report.md"])
+                .unwrap();
+        let Command::Brain {
+            command: Some(BrainCommand::Report { out }),
+            ..
+        } = report.command
+        else {
+            panic!("expected brain report command");
+        };
+        assert_eq!(out, Some(PathBuf::from(".air/brain/report.md")));
     }
 
     #[test]

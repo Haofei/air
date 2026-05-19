@@ -223,7 +223,8 @@ experience compiler: agents work during the day, then AIR reviews the traces and
 artifacts later. Dream does not trust model self-assessment and does not change
 source code by itself. It runs deterministic audit collection, mines findings
 and suggested regressions, compiles evidence-backed memory candidates, writes a
-Dream report, and gives the platform team reviewable next commands.
+Dream report, advances evidence-gated memory, and gives the platform team
+reviewable next commands.
 
 ```bash
 cargo run -p air-cli -- dream run \
@@ -268,6 +269,8 @@ The Dream directory contains:
 - `improve/`: observations, findings, suggested regressions, and report.
 - `memory/`: Dream memory extraction summary, Dream IR, and synthesis report
   for this window.
+- `memory-advance/`: low-risk memory lifecycle updates, routing scorecards,
+  validated skill-draft gates, and reviewed runtime-guard proposals.
 - `logs/`: captured stdout/stderr from the underlying audit and improve stages.
 - `.air/dream/state.json`: the persistent incremental cursor and last Dream
   summary, including the last window's input fingerprints and per-root cursors.
@@ -288,8 +291,16 @@ impact, lifecycle status, and promotion gates. Dream also writes
 `memory/dream_ir.json`, a deterministic synthesis IR whose concept, hypothesis,
 and runtime-policy candidates are compiled into memory cards and graph edges.
 Candidate memory is not injected into prompts, used for routing, compiled into
-skills, or promoted into runtime policy until later validation and human review
-gates approve it.
+skills, or promoted into runtime policy until later validation gates approve it.
+`dream run` now runs `memory advance` by default: repeated negative scorecard
+evidence can retire memory, confirmed positive evidence can validate memory,
+causal evidence can promote memory into the compact runtime pack, procedure
+memory can be validated as an untrusted skill draft, routing outcomes are
+measured, and policy memory is written as a guard-review proposal. It still
+does not pin memory, import/trust generated skills, edit runtime guard code,
+commit, or open PRs. Pass `--no-advance` for an observation-only Dream run.
+Micro mode skips advance automatically. `--advance-limit` caps how many memory
+cards the pass can touch.
 
 ```bash
 cargo run -p air-cli -- memory list --status candidate
@@ -299,6 +310,7 @@ cargo run -p air-cli -- memory promote mem_procedure_... --status validated
 cargo run -p air-cli -- memory pack "fix a Rust verification failure"
 cargo run -p air-cli -- memory graph --limit 20
 cargo run -p air-cli -- memory scorecard
+cargo run -p air-cli -- memory advance
 cargo run -p air-cli -- memory causal-eval mem_procedure_... \
   --outcome helped \
   --evidence target/generated/compare-no-memory.json
@@ -309,6 +321,26 @@ cargo run -p air-cli -- memory policy-check mem_policy_...
 cargo run -p air-cli -- dream findings list --status open
 cargo run -p air-cli -- dream findings resolve IMP-001 --fixed-by cand-1
 ```
+
+Use `brain` when a platform team needs one organized view of what the agent has
+learned and compiled:
+
+```bash
+cargo run -p air-cli -- brain
+cargo run -p air-cli -- brain memory
+cargo run -p air-cli -- brain skills
+cargo run -p air-cli -- brain policies
+cargo run -p air-cli -- brain findings
+cargo run -p air-cli -- brain view mem_procedure_...
+cargo run -p air-cli -- brain report --out .air/brain/report.md
+```
+
+`brain` is read-only. It aggregates `.air/memory/cards`, memory scorecards,
+Dream findings, validated skill drafts, installed skills, and guard proposals
+into a lifecycle-oriented view, so users can see what is promoted, what is only
+candidate evidence, what has been compiled into a skill draft, and what still
+needs benchmark or human review. The default output is human-readable; add
+`--json` when scripts or dashboards need the structured form.
 
 The safe follow-up is still explicit: promote/review regressions, run
 `air self fix ... --evaluate` only when a finding is worth fixing, compare
@@ -330,22 +362,22 @@ under `logs/`, and a `dream_provenance.json` file with `dream_run_id`,
 `finding_stable_key`, and `window_manifest_sha`. Experiments require a clean git
 workspace and currently run only executable `code_run_verdict` regressions;
 unsupported regression kinds are skipped before model calls. It still does not
-trust, promote, commit, or open a PR. Memory follow-up is similarly explicit:
-review candidate memories, promote only the ones that should guide future runs,
-then use `air run --memory` or `air skill route --memory` to include a compact
-pack of promoted memories. Turn repeated procedures into skill drafts only after
-validation, audit, and benchmark review. `air run --memory` records which
-memories were used in the code-run artifact; if no `--artifact-out` is supplied,
-AIR writes one under `target/generated/code-runs/memory-run-*` so the next Dream
-pass can turn successful runs into `helped_candidate` events and failed runs
-into `hurt_candidate` events, visible through `air memory scorecard`. Repeated
-positive evidence confirms `helped` and auto-validates candidate memory, but it
-does not pin or prompt-inject it. Promotion to `promoted` or `pinned` requires
-causal evidence recorded with `air memory causal-eval`, normally from a
-compare-no-memory, replay, or benchmark artifact. Repeated negative evidence
-confirms `hurt` and auto-retires the memory so it stops being suggested.
-Promote policy memories only as deterministic guards after
-`air memory policy-check` and a normal reviewed patch. If Dream was run without `--write-regressions`, its next
+trust, promote patches, commit, or open a PR. Memory follow-up is default-closed
+loop but human-gated at the dangerous boundary: `air run` includes promoted
+Dream memory by default and accepts `--no-memory` to disable it; Dream records
+which memories were used in the code-run artifact. If no `--artifact-out` is
+supplied, AIR writes one under `target/generated/code-runs/memory-run-*` so the
+next Dream pass can turn successful runs into `helped_candidate` events and
+failed runs into `hurt_candidate` events, visible through `air memory
+scorecard`. Repeated positive evidence confirms `helped` and validates
+candidate memory. Causal evidence recorded with `air memory causal-eval`,
+normally from compare-no-memory, replay, or benchmark output, lets `memory
+advance` promote memory into future packs. Repeated negative evidence confirms
+`hurt` and auto-retires the memory so it stops being suggested. Procedure
+memory can become a validated skill draft, but import/trust still requires
+manual review. Policy memories become deterministic-guard proposals under
+`memory-advance/guards/`; accepted guards are implemented as normal reviewed
+patches. If Dream was run without `--write-regressions`, its next
 commands first promote the selected regression and then point `self fix` at the
 promoted regression file under `skills/code-agent/benches/regressions/`.
 Deterministic gates remain the source of truth for promotion.
@@ -639,8 +671,9 @@ cargo run -p air-cli -- dev run-plan --profile examples/deep-research/profile.ai
 | `audit run/collect` | Audit one code-run artifact or summarize many artifacts |
 | `dream run/state` | Incrementally audit recent runs, mine improvement findings, compile memory candidates, and inspect the Dream cursor |
 | `dream findings` | List, reopen, resolve, or dismiss persistent Dream findings |
+| `brain memory/skills/policies/findings/view/report` | Read-only organized view of agent memory, compiled skill drafts, guard proposals, and findings |
 | `memory list/search/view` | Inspect evidence-backed Dream memory cards |
-| `memory promote/retire/pack` | Manage memory lifecycle and build compact promoted-memory context |
+| `memory promote/retire/pack/advance` | Manage memory lifecycle, build compact promoted-memory context, and run safe lifecycle advancement |
 | `memory graph/scorecard` | Inspect Dream-derived experience graph edges and helped/hurt memory outcomes |
 | `memory skill-draft/skill-evaluate` | Compile a procedure memory into an untrusted skill draft and run validation/audit gates |
 | `memory policy-check` | Turn a policy memory into a reviewed deterministic-guard proposal, without applying it |

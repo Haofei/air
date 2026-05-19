@@ -1,5 +1,5 @@
 use crate::code_artifact::sha256_hex;
-use crate::memory::{extract_memory, MemoryExtractOptions};
+use crate::memory::{advance_memory, extract_memory, MemoryAdvanceOptions, MemoryExtractOptions};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -54,6 +54,8 @@ pub(crate) struct DreamRunOptions {
     pub(crate) top_findings: usize,
     pub(crate) budget_seconds: Option<u64>,
     pub(crate) candidates: usize,
+    pub(crate) advance: bool,
+    pub(crate) advance_limit: Option<usize>,
 }
 
 pub(crate) struct DreamStateOptions;
@@ -101,6 +103,7 @@ struct DreamRunOutput {
     audit: DreamStage,
     improve: DreamStage,
     memory: DreamMemoryStage,
+    memory_advance: DreamMemoryAdvanceStage,
     finding_store: DreamFindingStoreStage,
     experiment: DreamExperimentStage,
     window_inputs: usize,
@@ -136,6 +139,19 @@ struct DreamMemoryStage {
     policy_candidates: usize,
     graph_edges: usize,
     dream_ir_file: String,
+}
+
+#[derive(Debug, Serialize)]
+struct DreamMemoryAdvanceStage {
+    status: String,
+    out_dir: String,
+    promoted_memories: usize,
+    validated_memories: usize,
+    retired_memories: usize,
+    validated_skills: usize,
+    routing_measurements: usize,
+    reviewed_guards: usize,
+    report: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -448,6 +464,59 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
         suggested_regressions_file: Some(improve_dir.join("suggested_regressions.json")),
         mode: options.mode.as_str().to_string(),
     })?;
+    let memory_advance_out_dir = out_dir.join("memory-advance");
+    let memory_advance = if options.advance && options.mode != DreamMode::Micro {
+        advance_memory(MemoryAdvanceOptions {
+            memory_dir: None,
+            out_dir: Some(memory_advance_out_dir.clone()),
+            skill_bench: false,
+            limit: options.advance_limit,
+        })?
+    } else {
+        fs::create_dir_all(&memory_advance_out_dir)
+            .with_context(|| format!("create {}", memory_advance_out_dir.display()))?;
+        let status = if options.mode == DreamMode::Micro {
+            "skipped_micro"
+        } else {
+            "skipped"
+        };
+        let output = crate::memory::MemoryAdvanceOutput {
+            schema: "air.memory_advance.v1",
+            status: status.to_string(),
+            memory_dir: ".air/memory".to_string(),
+            out_dir: memory_advance_out_dir.display().to_string(),
+            promoted_memories: Vec::new(),
+            validated_memories: Vec::new(),
+            retired_memories: Vec::new(),
+            validated_skills: Vec::new(),
+            routing_measurements: Vec::new(),
+            reviewed_guards: Vec::new(),
+            next_commands: Vec::new(),
+        };
+        fs::write(
+            memory_advance_out_dir.join("advance.json"),
+            serde_json::to_vec_pretty(&output)?,
+        )
+        .with_context(|| {
+            format!(
+                "write {}",
+                memory_advance_out_dir.join("advance.json").display()
+            )
+        })?;
+        fs::write(
+            memory_advance_out_dir.join("advance.md"),
+            format!(
+                "# AIR Memory Advance\n\n- status: `{status}`\n\nNo memory advancement was run for this Dream pass.\n"
+            ),
+        )
+        .with_context(|| {
+            format!(
+                "write {}",
+                memory_advance_out_dir.join("advance.md").display()
+            )
+        })?;
+        output
+    };
     let experiment = if options.experiment {
         run_dream_experiments(
             &cwd,
@@ -532,6 +601,20 @@ pub(crate) fn run_dream(options: DreamRunOptions) -> Result<()> {
             policy_candidates: memory.policy_candidates,
             graph_edges: memory.graph_edges,
             dream_ir_file: memory.dream_ir_file,
+        },
+        memory_advance: DreamMemoryAdvanceStage {
+            status: memory_advance.status,
+            out_dir: memory_advance.out_dir,
+            promoted_memories: memory_advance.promoted_memories.len(),
+            validated_memories: memory_advance.validated_memories.len(),
+            retired_memories: memory_advance.retired_memories.len(),
+            validated_skills: memory_advance.validated_skills.len(),
+            routing_measurements: memory_advance.routing_measurements.len(),
+            reviewed_guards: memory_advance.reviewed_guards.len(),
+            report: memory_advance_out_dir
+                .join("advance.md")
+                .display()
+                .to_string(),
         },
         finding_store,
         experiment,
@@ -1894,7 +1977,11 @@ fn write_dream_report(path: &Path, output: &DreamRunOutput) -> Result<()> {
         "- improve report: `{}`\n\n",
         output.improve.report
     ));
-    out.push_str(&format!("- memory report: `{}`\n\n", output.memory.report));
+    out.push_str(&format!("- memory report: `{}`\n", output.memory.report));
+    out.push_str(&format!(
+        "- memory advance report: `{}`\n\n",
+        output.memory_advance.report
+    ));
     if let Some(finding) = &output.top_finding {
         out.push_str("## Top Finding\n\n");
         out.push_str(&format!("- id: `{}`\n", finding.id));
@@ -1914,6 +2001,18 @@ fn write_dream_report(path: &Path, output: &DreamRunOutput) -> Result<()> {
         output.memory.policy_candidates,
         output.memory.graph_edges,
         output.memory.dream_ir_file
+    ));
+    out.push_str("## Memory Advance\n\n");
+    out.push_str(&format!(
+        "- status: `{}`\n- promoted_memories: `{}`\n- validated_memories: `{}`\n- retired_memories: `{}`\n- validated_skills: `{}`\n- routing_measurements: `{}`\n- reviewed_guards: `{}`\n- report: `{}`\n\n",
+        output.memory_advance.status,
+        output.memory_advance.promoted_memories,
+        output.memory_advance.validated_memories,
+        output.memory_advance.retired_memories,
+        output.memory_advance.validated_skills,
+        output.memory_advance.routing_measurements,
+        output.memory_advance.reviewed_guards,
+        output.memory_advance.report
     ));
     out.push_str("## Finding Store\n\n");
     out.push_str(&format!(
@@ -2090,7 +2189,15 @@ fn window_input_key(input: &DreamWindowInput) -> String {
 
 fn clear_dream_out_dir(out_dir: &Path) -> Result<()> {
     ensure_safe_dream_out_dir(out_dir)?;
-    for child in ["audit", "improve", "logs", "memory", "window", "candidates"] {
+    for child in [
+        "audit",
+        "improve",
+        "logs",
+        "memory",
+        "memory-advance",
+        "window",
+        "candidates",
+    ] {
         let path = out_dir.join(child);
         if path.exists() {
             fs::remove_dir_all(&path).with_context(|| format!("remove old {}", path.display()))?;

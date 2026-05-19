@@ -98,12 +98,13 @@ de-duplicates exact inputs already seen in the prior window, and updates the
 state only after the Dream run succeeds. Use `--full` to ignore the saved
 cursor, or `--since-unix` to force a specific window. By default it writes
 `.air/dream/runs/<run-id>/dream.json`, `dream.md`, and `window/window.json`;
-`.air/dream/latest` points at the newest run. Dream is intentionally offline and review-first: it
-audits recent artifacts, mines findings, optionally writes suggested regression
-JSON files, compiles evidence-backed memory candidates, and prints next
-commands. It does not modify source code, open PRs, inject memory into prompts,
-or trust generated patches without the normal regression/test/guard/candidate
-comparison gates.
+`.air/dream/latest` points at the newest run. Dream is intentionally offline and
+review-first: it audits recent artifacts, mines findings, optionally writes
+suggested regression JSON files, compiles evidence-backed memory candidates,
+advances low-risk memory lifecycle state, and prints next commands. It does not
+modify source code, open PRs, pin memory, import generated skills, edit runtime
+guard code, or trust generated patches without the normal
+regression/test/guard/candidate comparison gates.
 
 `micro`, `deep`, and `evolution` have distinct cost/behavior profiles. `micro`
 selects the window and records episode memory only; it skips audit/improve
@@ -154,6 +155,17 @@ promotion gates. Candidate memory can be searched and reviewed, but it cannot
 become prompt memory, skill routing, a skill package, or runtime policy until
 later validation gates promote it.
 
+After extraction, `dream run` invokes the same safe advancement pass exposed as
+`air memory advance`. This pass can validate candidate memory when scorecard
+evidence is confirmed, promote memory into future packs only after causal
+evidence from `air memory causal-eval`, retire confirmed harmful memory, draft
+and validate/audit untrusted skills from validated procedures, write routing
+scorecards, and write deterministic runtime-guard review proposals. It still
+does not pin memory, trust or import skill drafts, edit AIR runtime policy code,
+commit, or open PRs. Pass `--no-advance` for an observation-only Dream run.
+Micro mode skips advance automatically, and `--advance-limit` caps how many
+memory cards can be touched in one pass.
+
 `dream run` also writes `.air/dream/latest/memory/dream_ir.json`. This is the
 first Deep Dream layer: AIR deterministically recombines multiple episodes and
 findings into concept, hypothesis, procedure, and policy candidates. The IR is a
@@ -195,6 +207,7 @@ cargo run -p air-cli -- memory promote mem_procedure_... --status validated
 cargo run -p air-cli -- memory pack "fix a Rust verification failure"
 cargo run -p air-cli -- memory graph --limit 20
 cargo run -p air-cli -- memory scorecard
+cargo run -p air-cli -- memory advance
 cargo run -p air-cli -- memory causal-eval mem_procedure_... \
   --outcome helped \
   --evidence target/generated/compare-no-memory.json
@@ -209,9 +222,31 @@ cargo run -p air-cli -- dream findings resolve IMP-001 --fixed-by cand-1
 cargo run -p air-cli -- dream findings dismiss IMP-002 --reason "duplicate"
 ```
 
-Only promoted or pinned memory enters a pack. Candidate memory from Dream is
-reviewable evidence, not runtime guidance. `air memory retire` marks stale or
-harmful cards as retired so they are ignored by future packs.
+For day-to-day review, use `brain` instead of reading raw files under
+`.air/memory` and `.air/dream`:
+
+```bash
+cargo run -p air-cli -- brain
+cargo run -p air-cli -- brain memory
+cargo run -p air-cli -- brain skills
+cargo run -p air-cli -- brain policies
+cargo run -p air-cli -- brain findings
+cargo run -p air-cli -- brain view mem_procedure_...
+cargo run -p air-cli -- brain report --out .air/brain/report.md
+```
+
+`brain` is a read-only organized index. It groups memories by lifecycle status,
+shows helped/hurt scorecard data, lists installed skills and Dream-compiled
+skill drafts, surfaces reviewed runtime-guard proposals, and shows persistent
+Dream findings. The default output is written for humans; pass `--json` for
+dashboards and automation. `brain view <id>` follows the evidence chain for one
+memory, skill draft, guard proposal, or finding.
+
+Only promoted or pinned memory enters a pack. `air run` enables that safe
+promoted-memory pack by default; pass `--no-memory` when a run must ignore
+long-term guidance. Candidate memory from Dream is reviewable evidence, not
+runtime guidance. `air memory retire` marks stale or harmful cards as retired so
+they are ignored by future packs.
 
 `memory skill-draft` writes an untrusted skill package under
 `.air/memory/drafts/skills/<name>/` with `SKILL.md` and `evidence.json`. It does
@@ -220,18 +255,22 @@ for draft generation plus skill validation and skill audit; pass `--bench` when
 you are ready to spend the benchmark run. The output still recommends a manual
 review/import step instead of auto-promoting the skill.
 
-When `air run --memory` uses promoted memories, AIR stores the selected memory
-pack in the code-run artifact. If the caller did not pass `--artifact-out`, AIR
-writes one under `target/generated/code-runs/memory-run-*` so the next Dream
-pass can read those success/failure episodes and append `helped_candidate` or
+`memory advance --skill-bench` can run the same skill validation/audit path plus
+a small compare-no-skill benchmark. Passing drafts are reported as validated
+skill drafts, not trusted installed skills.
+
+When `air run` uses promoted memories, AIR stores the selected memory pack in
+the code-run artifact. If the caller did not pass `--artifact-out`, AIR writes
+one under `target/generated/code-runs/memory-run-*` so the next Dream pass can
+read those success/failure episodes and append `helped_candidate` or
 `hurt_candidate` outcomes to `.air/memory/usage.jsonl`. Repeated positive
-evidence confirms `helped` and auto-validates candidate memory, but it does not
-pin or prompt-inject it. Promotion to `promoted` or `pinned` requires causal
-evidence recorded with `air memory causal-eval`, normally from a
-compare-no-memory, replay, or benchmark artifact. Repeated negative evidence
-confirms `hurt` and auto-retires the memory so it stops being suggested.
-`air memory scorecard` summarizes which memories are actually useful before the
-team promotes, retires, or edits them.
+evidence confirms `helped` and validates candidate memory. Promotion to
+`promoted` requires causal evidence recorded with `air memory causal-eval`,
+normally from a compare-no-memory, replay, or benchmark artifact; promotion to
+`pinned` remains a manual governance decision. Repeated negative evidence
+confirms `hurt` and auto-retires the memory so it stops being suggested. `air
+memory scorecard` summarizes which memories are actually useful before the team
+promotes, retires, or edits them.
 
 `memory policy-check` reviews a policy memory as a deterministic guard proposal:
 it reports likely affected runtime files, tests that should exist, and whether
